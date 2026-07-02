@@ -1,0 +1,12 @@
+module Pow2:
+
+  part pow2(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 1
+    measure n
+    match n:
+      0 -> yield 1
+      _ -> yield 2 * pow2(n - 1)
+
+  part main() -> Int via IO:
+    yield IO.print(pow2(10))

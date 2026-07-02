@@ -1,0 +1,14 @@
+module HourAdd:
+
+  part hour_add(h: Int, d: Int) -> Int:
+    requires h >= 0
+    requires h <= 23
+    requires d >= 0
+    ensures result >= 0
+    ensures result <= 23
+    let sum = h + d
+    yield sum mod 24
+
+  part main() -> Int via IO:
+    let r = hour_add(22, 5)
+    yield IO.print(r)

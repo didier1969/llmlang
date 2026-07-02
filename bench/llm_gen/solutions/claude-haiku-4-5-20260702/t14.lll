@@ -1,0 +1,15 @@
+module Fact:
+
+  part fact(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 1
+    measure n
+    match n:
+      0 -> yield 1
+      _ ->
+        let prev = fact(n - 1)
+        yield n * prev
+
+  part main() -> Int via IO:
+    let f = fact(10)
+    yield IO.print(f)

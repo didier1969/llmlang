@@ -1,0 +1,16 @@
+module IsEven:
+
+  part is_even(n: Int) -> Bool:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield True
+      _ when n >= 2 ->
+        let sub = n - 2
+        yield is_even(sub)
+      _ -> yield False
+
+  part main() -> Int via IO:
+    match is_even(42):
+      _ when is_even(42) -> yield IO.print(1)
+      _ -> yield IO.print(0)

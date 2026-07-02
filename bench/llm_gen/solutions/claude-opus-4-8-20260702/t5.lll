@@ -1,0 +1,9 @@
+module EchoDouble:
+
+  part echo_double() -> Int via IO:
+    let x = IO.read()
+    let d = 2 * x
+    yield IO.print(d)
+
+  part main() -> Int via IO:
+    yield echo_double()

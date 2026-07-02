@@ -1,0 +1,13 @@
+module Len:
+
+  part len(xs: List[Int]) -> Int:
+    ensures result >= 0
+    match xs:
+      [] -> yield 0
+      h :: t -> 
+        let tlen = len(t)
+        yield 1 + tlen
+
+  part main() -> Int via IO:
+    let l = len([3, 1, 4, 1, 5])
+    yield IO.print(l)

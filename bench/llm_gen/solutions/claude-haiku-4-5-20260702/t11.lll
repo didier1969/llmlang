@@ -1,0 +1,15 @@
+module Last:
+
+  part last(xs: List[Int], d: Int) -> Int:
+    match xs:
+      [] -> yield d
+      h :: t ->
+        match t:
+          [] -> yield h
+          _ ->
+            let tl = last(t, d)
+            yield tl
+
+  part main() -> Int via IO:
+    let l = last([1, 2, 9], 0)
+    yield IO.print(l)

@@ -1,0 +1,11 @@
+module AbsDiff:
+
+  part abs_diff(a: Int, b: Int) -> Int:
+    ensures result >= 0 and (result == a - b or result == b - a)
+    match 0:
+      v when a >= b -> yield a - b
+      _ -> yield b - a
+
+  part main() -> Int via IO:
+    let r = abs_diff(3, 11)
+    yield IO.print(r)

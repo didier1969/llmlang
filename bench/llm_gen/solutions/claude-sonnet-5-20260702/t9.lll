@@ -1,0 +1,12 @@
+module Signum:
+
+  part signum(x: Int) -> Int:
+    ensures (result == 1 or result == 0 or result == 0 - 1) and ((result == 1) == (x > 0)) and ((result == 0 - 1) == (x < 0))
+    match 0:
+      v when x > 0 -> yield 1
+      v when x < 0 -> yield 0 - 1
+      _ -> yield 0
+
+  part main() -> Int via IO:
+    let r = signum(0 - 5)
+    yield IO.print(r)

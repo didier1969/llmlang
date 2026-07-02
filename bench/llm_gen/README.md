@@ -23,11 +23,24 @@ Success rate = verified solutions / tasks. Record: model id, date, pass@1.
 
 | date       | model            | pass@1 (verified) | notes |
 |------------|------------------|-------------------|-------|
-| 2026-07-02 | claude-fable-5   | 5/5               | tasks t1–t5; single-shot, no repair |
-| 2026-07-02 | claude-fable-5   | 15/15             | tasks t1–t15 incl. harder set (guards, nested match, bool-equivalence contracts, requires-driven exhaustiveness) |
+| 2026-07-02 | claude-fable-5   | 15/15             | co-wrote the compiler — familiarity bias, keep as ceiling reference |
+| 2026-07-02 | claude-sonnet-5  | 15/15             | isolated (prompt-only, no repo access) |
+| 2026-07-02 | claude-opus-4-8  | 13/15             | isolated; failures: t1 (pattern-binder scope), t8 (`True` capitalized) |
+| 2026-07-02 | claude-haiku-4-5 | 12/15             | isolated; failures: t5+t10 (`let _ =` discard), t8 (`True` capitalized) |
 
-Caveat: the tested model co-wrote this compiler (familiarity bias) — results
-from third-party models are the real signal; the harness is ready for them.
-The interesting longitudinal signal is the *delta* between "parses" and
-"verifies": syntax is rarely the failure mode (arxiv 2503.01245), contract
-semantics is.
+## Failure analysis (n=45 third-party solutions)
+
+**Zero Z3 failures.** Every one of the 5 failures is a *surface prior* from
+other languages, not a contract-semantics error:
+
+| failure | count | stage | prior |
+|---|---|---|---|
+| `let _ = e` (discard binding) | 2 | parse | Python/Rust idiom |
+| `True`/`False` capitalized | 2 | name resolution | Haskell/Python |
+| pattern binder used outside its arm | 1 | name resolution | scope confusion |
+
+This *inverts* the expected failure mode (contract semantics, per arxiv
+2503.01245) and supports CPT-LLL-009: structural validation + a restricted
+decidable fragment make verified-correct generation the easy path. Product
+lessons filed in SOLL (wave-3 candidates): support `let _ =` discard; add
+did-you-mean hints for `True`→`true` and out-of-scope pattern binders.

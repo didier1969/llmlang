@@ -1,0 +1,14 @@
+module CountPos:
+
+  part count_pos(xs: List[Int]) -> Int:
+    ensures result >= 0
+    match xs:
+      [] -> yield 0
+      h :: t ->
+        match h:
+          v when v > 0 -> yield 1 + count_pos(t)
+          _ -> yield count_pos(t)
+
+  part main() -> Int via IO:
+    let r = count_pos([3, 0 - 1, 7, 0])
+    yield IO.print(r)

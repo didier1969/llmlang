@@ -1,0 +1,13 @@
+module SumProd:
+
+  part sum_prod() -> Int via IO:
+    let a = IO.read()
+    let b = IO.read()
+    let s = a + b
+    let p1 = IO.print(s)
+    let prod = a * b
+    let p2 = IO.print(prod)
+    yield prod
+
+  part main() -> Int via IO:
+    yield sum_prod()

@@ -1,0 +1,11 @@
+module AbsVal:
+
+  part abs_val(x: Int) -> Int:
+    ensures result >= 0 and (result == x or result == 0 - x)
+    match x:
+      v when v < 0 -> yield 0 - v
+      _ -> yield x
+
+  part main() -> Int via IO:
+    let r = abs_val(0 - 42)
+    yield IO.print(r)

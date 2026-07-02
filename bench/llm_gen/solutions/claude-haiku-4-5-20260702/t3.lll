@@ -1,0 +1,15 @@
+module Pow2:
+
+  part pow2(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 1
+    measure n
+    match n:
+      0 -> yield 1
+      _ ->
+        let prev = pow2(n - 1)
+        yield prev + prev
+
+  part main() -> Int via IO:
+    let p = pow2(10)
+    yield IO.print(p)

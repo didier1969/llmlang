@@ -1,0 +1,15 @@
+module Max3:
+
+  part max3(a: Int, b: Int, c: Int) -> Int:
+    ensures result >= a
+    ensures result >= b
+    ensures result >= c
+    ensures result == a or result == b or result == c
+    match a:
+      _ when a >= b and a >= c -> yield a
+      _ when b >= a and b >= c -> yield b
+      _ -> yield c
+
+  part main() -> Int via IO:
+    let r = max3(3, 9, 5)
+    yield IO.print(r)

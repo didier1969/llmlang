@@ -1,0 +1,16 @@
+module SumTo:
+
+  part sum_to(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 0
+    ensures result >= n
+    measure n
+    match n:
+      0 -> yield 0
+      _ ->
+        let prev = sum_to(n - 1)
+        yield n + prev
+
+  part main() -> Int via IO:
+    let s = sum_to(100)
+    yield IO.print(s)

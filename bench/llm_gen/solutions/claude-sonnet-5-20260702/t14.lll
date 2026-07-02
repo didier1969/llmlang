@@ -1,0 +1,13 @@
+module Fact:
+
+  part fact(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 1
+    measure n
+    match n:
+      0 -> yield 1
+      _ -> yield n * fact(n - 1)
+
+  part main() -> Int via IO:
+    let r = fact(10)
+    yield IO.print(r)

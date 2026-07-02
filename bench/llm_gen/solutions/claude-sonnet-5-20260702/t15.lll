@@ -1,0 +1,10 @@
+module Head:
+
+  part head(xs: List[Int]) -> Int:
+    requires not (xs == [])
+    match xs:
+      h :: t -> yield h
+
+  part main() -> Int via IO:
+    let r = head([7, 8])
+    yield IO.print(r)
