@@ -27,7 +27,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub const VCGEN_VERSION: &str = "lll-vcgen-1";
+pub const VCGEN_VERSION: &str = "lll-vcgen-2";
 const Z3_TIMEOUT_MS: u32 = 4000;
 
 #[derive(Debug, Clone)]
@@ -183,7 +183,6 @@ struct Emit<'a> {
     hyps: Vec<String>,
     obls: Vec<Obligation>,
     fresh: usize,
-    uses_list: bool,
 }
 
 pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Obligation>, String> {
@@ -194,13 +193,13 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
         hyps: Vec::new(),
         obls: Vec::new(),
         fresh: 0,
-        uses_list: false,
     };
     // params
     let mut env: HashMap<String, String> = HashMap::new();
     for (n, t) in &part.params {
         let c = format!("p_{n}");
-        em.decls.push(format!("(declare-const {c} {})", smt_ty(*t, &mut em.uses_list)));
+        em.decls
+            .push(format!("(declare-const {c} {})", smt_ty(t)));
         env.insert(n.clone(), c);
     }
     // requires as hypotheses
@@ -212,14 +211,17 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
     Ok(em.obls)
 }
 
-fn smt_ty(t: Ty, uses_list: &mut bool) -> &'static str {
+/// SMT-LIB sort for a type (REQ-LLL-007, DEC-LLL-028). A type variable becomes a
+/// fresh uninterpreted sort `Tv_<name>` (declared once per script); `List[e]`
+/// becomes an instance `(Lst <e>)` of the parametric list datatype (LIST_DECL) —
+/// constructors nil/cons/head/tail are shared across all element sorts, so the
+/// translation of list terms is element-type-agnostic.
+fn smt_ty(t: &Ty) -> String {
     match t {
-        Ty::Int => "Int",
-        Ty::Bool => "Bool",
-        Ty::ListInt => {
-            *uses_list = true;
-            "LstI"
-        }
+        Ty::Int => "Int".to_string(),
+        Ty::Bool => "Bool".to_string(),
+        Ty::Var(a) => format!("Tv_{a}"),
+        Ty::List(e) => format!("(Lst {})", smt_ty(e)),
     }
 }
 
@@ -265,7 +267,7 @@ impl<'a> Emit<'a> {
                     let s_t = self.tr(scrut, &env)?;
                     let mut arm_conds: Vec<String> = Vec::new();
                     for arm in arms {
-                        let (cond, bindings) = pattern_cond(&arm.pattern, &s_t, &mut self.uses_list);
+                        let (cond, bindings) = pattern_cond(&arm.pattern, &s_t);
                         let mut env2 = env.clone();
                         for (n, t) in bindings {
                             env2.insert(n, t);
@@ -319,7 +321,6 @@ impl<'a> Emit<'a> {
                 .cloned()
                 .ok_or_else(|| format!("vcgen: unbound `{n}`"))?,
             Expr::ListLit(items) => {
-                self.uses_list = true;
                 let mut t = "nil".to_string();
                 for i in items.iter().rev() {
                     let it = self.tr(i, env)?;
@@ -328,7 +329,6 @@ impl<'a> Emit<'a> {
                 t
             }
             Expr::Cons(h, t) => {
-                self.uses_list = true;
                 let hh = self.tr(h, env)?;
                 let tt = self.tr(t, env)?;
                 format!("(cons {hh} {tt})")
@@ -426,8 +426,8 @@ impl<'a> Emit<'a> {
                     );
                 }
                 // havoc result + assume callee ensures
-                let rty = smt_ty(callee.ret, &mut self.uses_list);
-                let r = self.fresh(rty);
+                let rty = smt_ty(&callee.ret);
+                let r = self.fresh(&rty);
                 let mut eenv = cenv.clone();
                 eenv.insert("result".into(), r.clone());
                 for ens in callee.ensures.clone() {
@@ -445,11 +445,7 @@ impl<'a> Emit<'a> {
     }
 }
 
-fn pattern_cond(
-    p: &Pattern,
-    scrut: &str,
-    uses_list: &mut bool,
-) -> (String, Vec<(String, String)>) {
+fn pattern_cond(p: &Pattern, scrut: &str) -> (String, Vec<(String, String)>) {
     match p {
         Pattern::IntLit(v) => {
             let lit = if *v < 0 {
@@ -462,37 +458,66 @@ fn pattern_cond(
         Pattern::BoolLit(v) => (format!("(= {scrut} {v})"), vec![]),
         Pattern::Wildcard => ("true".into(), vec![]),
         Pattern::Var(v) => ("true".into(), vec![(v.clone(), scrut.to_string())]),
-        Pattern::Nil => {
-            *uses_list = true;
-            (format!("((_ is nil) {scrut})"), vec![])
-        }
-        Pattern::Cons(h, t) => {
-            *uses_list = true;
-            (
-                format!("((_ is cons) {scrut})"),
-                vec![
-                    (h.clone(), format!("(head {scrut})")),
-                    (t.clone(), format!("(tail {scrut})")),
-                ],
-            )
-        }
+        // nil/cons are the shared constructors of the parametric list datatype
+        Pattern::Nil => (format!("((_ is nil) {scrut})"), vec![]),
+        Pattern::Cons(h, t) => (
+            format!("((_ is cons) {scrut})"),
+            vec![
+                (h.clone(), format!("(head {scrut})")),
+                (t.clone(), format!("(tail {scrut})")),
+            ],
+        ),
     }
 }
 
 // ---------- Z3 driver ----------
 
+// Parametric list datatype (REQ-LLL-007): declared once, instantiated at any
+// element sort — `(Lst Int)`, `(Lst Bool)`, `(Lst Tv_a)`. Constructors nil/cons
+// and selectors head/tail are shared across every instantiation, so list terms
+// translate identically regardless of element type (DEC-LLL-028).
 const LIST_DECL: &str =
-    "(declare-datatypes ((LstI 0)) (((nil) (cons (head Int) (tail LstI)))))";
+    "(declare-datatypes ((Lst 1)) ((par (T) ((nil) (cons (head T) (tail (Lst T)))))))";
+
+/// Collect uninterpreted abstract-sort names (`Tv_<name>`) an SMT fragment
+/// mentions — one `declare-sort` per type variable is emitted per script.
+fn collect_abstract_sorts(text: &str, out: &mut std::collections::BTreeSet<String>) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = text[i..].find("Tv_") {
+        let start = i + pos;
+        let mut end = start + 3;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        out.insert(text[start..end].to_string());
+        i = end;
+    }
+}
 
 fn script_for(obls: &[&Obligation], get_model: bool) -> String {
     let mut s = String::new();
     s.push_str(&format!("(set-option :timeout {Z3_TIMEOUT_MS})\n"));
-    let uses_list = obls.iter().any(|o| {
-        o.decls.iter().any(|d| d.contains("LstI"))
-            || o.hyps.iter().any(|h| h.contains("nil") || h.contains("cons"))
-            || o.goal.contains("nil")
-            || o.goal.contains("cons")
-    });
+    // prelude: abstract sorts first (they can appear inside list instances),
+    // then the parametric list datatype if any list is used.
+    let mut sorts: std::collections::BTreeSet<String> = Default::default();
+    let mut uses_list = false;
+    for o in obls {
+        for text in o
+            .decls
+            .iter()
+            .chain(o.hyps.iter())
+            .chain(std::iter::once(&o.goal))
+        {
+            collect_abstract_sorts(text, &mut sorts);
+            if text.contains("(Lst ") || text.contains("nil") || text.contains("cons") {
+                uses_list = true;
+            }
+        }
+    }
+    for srt in &sorts {
+        s.push_str(&format!("(declare-sort {srt} 0)\n"));
+    }
     if uses_list {
         s.push_str(LIST_DECL);
         s.push('\n');

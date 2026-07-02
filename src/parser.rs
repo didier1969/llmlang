@@ -329,13 +329,16 @@ impl Parser {
             Tok::Ident(s) if s == "Int" => Ok(Ty::Int),
             Tok::Ident(s) if s == "Bool" => Ok(Ty::Bool),
             Tok::Ident(s) if s == "List" => {
+                // generic element type: List[Int], List[a], List[List[Int]]
                 self.eat(Tok::LBracket)?;
-                match self.bump() {
-                    Tok::Ident(i) if i == "Int" => {}
-                    other => return Err(self.err(&format!("v1 supports List[Int] only, found {other:?}"))),
-                }
+                let elem = self.ty()?;
                 self.eat(Tok::RBracket)?;
-                Ok(Ty::ListInt)
+                Ok(Ty::list(elem))
+            }
+            // a lowercase-initial bareword is a parametric type variable
+            // (REQ-LLL-007). Constructors (Int/Bool/List) are capitalized.
+            Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {
+                Ok(Ty::Var(s))
             }
             other => Err(self.err(&format!("expected type, found {other:?}"))),
         }

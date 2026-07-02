@@ -84,7 +84,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 part.name, part.effects
             ));
         }
-        check_body(&mut ctx, &part.body, part.ret, effectful)?;
+        check_body(&mut ctx, &part.body, &part.ret, effectful)?;
         let in_multi = scc_multi.contains(&part.name);
         let rec = if in_multi {
             // mutual recursion: every SCC member must carry a measure
@@ -314,7 +314,7 @@ fn check_contracts(part: &Part) -> Result<(), String> {
     }
     for r in &part.ensures {
         no_calls(r, "ensures")?;
-        let t = type_of_pure(r, &params, Some(part.ret))
+        let t = type_of_pure(r, &params, Some(part.ret.clone()))
             .map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: ensures clause must be Bool", part.name));
@@ -334,7 +334,7 @@ fn check_contracts(part: &Part) -> Result<(), String> {
         let mut bad = None;
         m.walk(&mut |x| {
             if let Expr::Var(v) = x {
-                if params.get(v) == Some(&Ty::ListInt) && bad.is_none() {
+                if matches!(params.get(v), Some(Ty::List(_))) && bad.is_none() {
                     bad = Some(v.clone());
                 }
             }
@@ -360,18 +360,23 @@ fn type_of_pure(
         Expr::IntLit(_) => Ty::Int,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(items) => {
-            for i in items {
-                if type_of_pure(i, vars, result)? != Ty::Int {
-                    return Err("list literals hold Int in v1".into());
+            if items.is_empty() {
+                return Err("empty list literal `[]` is not allowed in contracts (v1)".into());
+            }
+            let elem = type_of_pure(&items[0], vars, result.clone())?;
+            for i in &items[1..] {
+                if type_of_pure(i, vars, result.clone())? != elem {
+                    return Err("list literal elements must share one type".into());
                 }
             }
-            Ty::ListInt
+            Ty::list(elem)
         }
         Expr::Var(n) if n == "result" => {
             result.ok_or_else(|| "`result` only valid in ensures".to_string())?
         }
-        Expr::Var(n) => *vars
+        Expr::Var(n) => vars
             .get(n)
+            .cloned()
             .ok_or_else(|| format!("unknown variable `{n}`"))?,
         Expr::Neg(a) => {
             if type_of_pure(a, vars, result)? != Ty::Int {
@@ -386,17 +391,19 @@ fn type_of_pure(
             Ty::Bool
         }
         Expr::Bin(op, a, b) => {
-            let ta = type_of_pure(a, vars, result)?;
+            let ta = type_of_pure(a, vars, result.clone())?;
             let tb = type_of_pure(b, vars, result)?;
             bin_type(*op, ta, tb)?
         }
         Expr::Cons(h, t) => {
-            if type_of_pure(h, vars, result)? != Ty::Int
-                || type_of_pure(t, vars, result)? != Ty::ListInt
-            {
-                return Err("`::` needs Int on the left and List[Int] on the right".into());
+            let th = type_of_pure(h, vars, result.clone())?;
+            let tt = type_of_pure(t, vars, result)?;
+            if tt != Ty::list(th.clone()) {
+                return Err(format!(
+                    "`::` needs T on the left and List[T] on the right, got {th} :: {tt}"
+                ));
             }
-            Ty::ListInt
+            Ty::list(th)
         }
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
     })
@@ -440,11 +447,43 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
     }
 }
 
+/// Instantiate a callee's type scheme at a call site (REQ-LLL-007, DEC-LLL-028):
+/// bind the callee's type variables so its declared param type `pat` matches the
+/// concrete argument type `arg`. One-directional — only `pat` (callee) variables
+/// are flexible; the argument's own type variables (the caller's) are rigid.
+fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), String> {
+    match (pat, arg) {
+        (Ty::Int, Ty::Int) | (Ty::Bool, Ty::Bool) => Ok(()),
+        (Ty::Var(v), _) => match subst.get(v) {
+            Some(bound) if bound == arg => Ok(()),
+            Some(bound) => Err(format!(
+                "type variable `{v}` would have to be both {bound} and {arg}"
+            )),
+            None => {
+                subst.insert(v.clone(), arg.clone());
+                Ok(())
+            }
+        },
+        (Ty::List(pe), Ty::List(ae)) => unify_arg(pe, ae, subst),
+        _ => Err(format!("expected {pat}, got {arg}")),
+    }
+}
+
+/// Apply a type-variable substitution (used on a callee's return type).
+fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+    match t {
+        Ty::Int => Ty::Int,
+        Ty::Bool => Ty::Bool,
+        Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
+        Ty::List(e) => Ty::list(subst_ty(e, subst)),
+    }
+}
+
 impl<'a> Ctx<'a> {
     fn lookup(&self, n: &str) -> Option<Ty> {
         for scope in self.vars.iter().rev() {
             if let Some(t) = scope.get(n) {
-                return Some(*t);
+                return Some(t.clone());
             }
         }
         None
@@ -459,7 +498,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<(), String> {
+fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result<(), String> {
     let n = body.len();
     for (i, s) in body.iter().enumerate() {
         let last = i + 1 == n;
@@ -471,7 +510,7 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
                         ctx.part.name
                     ));
                 }
-                let t = check_expr(ctx, e, effectful)?;
+                let t = check_expr(ctx, e, effectful, None)?;
                 if name != "_" {
                     ctx.vars.last_mut().unwrap().insert(name.clone(), t);
                 }
@@ -483,8 +522,10 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
                         ctx.part.name
                     ));
                 }
-                let t = check_expr(ctx, e, effectful)?;
-                if t != ret {
+                // the return type is the expected type — lets `yield []` fix the
+                // element type of an empty list in a generic base case (REQ-LLL-007)
+                let t = check_expr(ctx, e, effectful, Some(ret))?;
+                if &t != ret {
                     return Err(format!(
                         "part `{}`: yields {t} but is declared -> {ret}",
                         ctx.part.name
@@ -498,12 +539,17 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
                         ctx.part.name
                     ));
                 }
-                let ts = check_expr(ctx, scrut, effectful)?;
-                // scrutinee root for structural-descent tracking: either a param
-                // of list type, or a var already known smaller-than a param
+                let ts = check_expr(ctx, scrut, effectful, None)?;
+                // scrutinee root for structural-descent tracking: either a list
+                // param, or a var already known smaller-than a param
                 let scrut_root: Option<String> = match scrut {
-                    Expr::Var(v) if ts == Ty::ListInt => {
-                        if ctx.part.params.iter().any(|(p, t)| p == v && *t == Ty::ListInt) {
+                    Expr::Var(v) if matches!(ts, Ty::List(_)) => {
+                        if ctx
+                            .part
+                            .params
+                            .iter()
+                            .any(|(p, t)| p == v && matches!(t, Ty::List(_)))
+                        {
                             Some(v.clone())
                         } else {
                             ctx.smaller_root(v).map(|s| s.to_string())
@@ -514,17 +560,19 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
                 for arm in arms {
                     ctx.vars.push(HashMap::new());
                     ctx.smaller.push(HashMap::new());
-                    match (&arm.pattern, ts) {
+                    match (&arm.pattern, &ts) {
                         (Pattern::IntLit(_), Ty::Int) => {}
                         (Pattern::BoolLit(_), Ty::Bool) => {}
                         (Pattern::Wildcard, _) => {}
                         (Pattern::Var(v), _) => {
-                            ctx.vars.last_mut().unwrap().insert(v.clone(), ts);
+                            ctx.vars.last_mut().unwrap().insert(v.clone(), ts.clone());
                         }
-                        (Pattern::Nil, Ty::ListInt) => {}
-                        (Pattern::Cons(h, t), Ty::ListInt) => {
-                            ctx.vars.last_mut().unwrap().insert(h.clone(), Ty::Int);
-                            ctx.vars.last_mut().unwrap().insert(t.clone(), Ty::ListInt);
+                        (Pattern::Nil, Ty::List(_)) => {}
+                        (Pattern::Cons(h, t), Ty::List(elem)) => {
+                            // the element type is whatever the list is generic over
+                            let et = (**elem).clone();
+                            ctx.vars.last_mut().unwrap().insert(h.clone(), et.clone());
+                            ctx.vars.last_mut().unwrap().insert(t.clone(), Ty::list(et));
                             if let Some(root) = &scrut_root {
                                 ctx.smaller
                                     .last_mut()
@@ -540,7 +588,7 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
                         }
                     }
                     if let Some(g) = &arm.guard {
-                        let tg = check_expr(ctx, g, effectful)?;
+                        let tg = check_expr(ctx, g, effectful, None)?;
                         if tg != Ty::Bool {
                             return Err(format!(
                                 "part `{}`: `when` guard must be Bool",
@@ -558,51 +606,73 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
     Ok(())
 }
 
-fn check_expr(ctx: &mut Ctx, e: &Expr, effectful: bool) -> Result<Ty, String> {
+fn check_expr(
+    ctx: &mut Ctx,
+    e: &Expr,
+    effectful: bool,
+    expected: Option<&Ty>,
+) -> Result<Ty, String> {
     Ok(match e {
         Expr::IntLit(_) => Ty::Int,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(items) => {
-            for i in items {
-                if check_expr(ctx, i, effectful)? != Ty::Int {
-                    return Err(format!(
-                        "part `{}`: list literals hold Int in v1",
-                        ctx.part.name
-                    ));
+            if let Some(first) = items.first() {
+                let elem = check_expr(ctx, first, effectful, None)?;
+                for i in &items[1..] {
+                    let ti = check_expr(ctx, i, effectful, None)?;
+                    if ti != elem {
+                        return Err(format!(
+                            "part `{}`: list literal elements must share one type, got {elem} and {ti}",
+                            ctx.part.name
+                        ));
+                    }
+                }
+                Ty::list(elem)
+            } else {
+                // empty list: element type comes from context (REQ-LLL-007)
+                match expected {
+                    Some(Ty::List(el)) => Ty::list((**el).clone()),
+                    _ => {
+                        return Err(format!(
+                            "part `{}`: cannot infer the element type of the empty list `[]` here \
+                             — it must appear where its type is fixed (e.g. `yield`)",
+                            ctx.part.name
+                        ))
+                    }
                 }
             }
-            Ty::ListInt
         }
         Expr::Var(n) => ctx
             .lookup(n)
             .ok_or_else(|| unknown_var_msg(&ctx.part.name, n, &ctx.all_binders))?,
         Expr::Neg(a) => {
-            if check_expr(ctx, a, effectful)? != Ty::Int {
+            if check_expr(ctx, a, effectful, None)? != Ty::Int {
                 return Err(format!("part `{}`: negation needs Int", ctx.part.name));
             }
             Ty::Int
         }
         Expr::Not(a) => {
-            if check_expr(ctx, a, effectful)? != Ty::Bool {
+            if check_expr(ctx, a, effectful, None)? != Ty::Bool {
                 return Err(format!("part `{}`: `not` needs Bool", ctx.part.name));
             }
             Ty::Bool
         }
         Expr::Bin(op, a, b) => {
-            let ta = check_expr(ctx, a, effectful)?;
-            let tb = check_expr(ctx, b, effectful)?;
+            let ta = check_expr(ctx, a, effectful, None)?;
+            let tb = check_expr(ctx, b, effectful, None)?;
             bin_type(*op, ta, tb).map_err(|e| format!("part `{}`: {e}", ctx.part.name))?
         }
         Expr::Cons(h, t) => {
-            let th = check_expr(ctx, h, effectful)?;
-            let tt = check_expr(ctx, t, effectful)?;
-            if th != Ty::Int || tt != Ty::ListInt {
+            let th = check_expr(ctx, h, effectful, None)?;
+            let want_tail = Ty::list(th.clone());
+            let tt = check_expr(ctx, t, effectful, Some(&want_tail))?;
+            if tt != want_tail {
                 return Err(format!(
-                    "part `{}`: `::` needs Int on the left and List[Int] on the right, got {th} :: {tt}",
+                    "part `{}`: `::` needs T on the left and List[T] on the right, got {th} :: {tt}",
                     ctx.part.name
                 ));
             }
-            Ty::ListInt
+            Ty::list(th)
         }
         Expr::EffCall(name, args) => {
             if !effectful {
@@ -614,7 +684,7 @@ fn check_expr(ctx: &mut Ctx, e: &Expr, effectful: bool) -> Result<Ty, String> {
             }
             match name.as_str() {
                 "IO.print" => {
-                    if args.len() != 1 || check_expr(ctx, &args[0], effectful)? != Ty::Int {
+                    if args.len() != 1 || check_expr(ctx, &args[0], effectful, None)? != Ty::Int {
                         return Err(format!(
                             "part `{}`: IO.print takes one Int argument",
                             ctx.part.name
@@ -645,30 +715,38 @@ fn check_expr(ctx: &mut Ctx, e: &Expr, effectful: bool) -> Result<Ty, String> {
             })?;
             let callee = &ctx.module.parts[idx];
             let callee_effectful = callee.effects.iter().any(|e| e == "IO");
+            // clone the signature so the immutable module borrow is released
+            // before the (mutable) argument checks below
+            let callee_params = callee.params.clone();
+            let callee_ret = callee.ret.clone();
             if callee_effectful && !effectful {
                 return Err(format!(
                     "part `{}` is pure but calls effectful part `{name}` — declare `via IO`",
                     ctx.part.name
                 ));
             }
-            if args.len() != callee.params.len() {
+            if args.len() != callee_params.len() {
                 return Err(format!(
                     "part `{}`: `{name}` expects {} argument(s), got {}",
                     ctx.part.name,
-                    callee.params.len(),
+                    callee_params.len(),
                     args.len()
                 ));
             }
-            for (a, (pn, pt)) in args.iter().zip(&callee.params) {
-                let ta = check_expr(ctx, a, effectful)?;
-                if ta != *pt {
-                    return Err(format!(
-                        "part `{}`: argument `{pn}` of `{name}` expects {pt}, got {ta}",
-                        ctx.part.name
-                    ));
-                }
+            // instantiate the callee's (possibly polymorphic) signature: bind its
+            // type variables so declared param types match the argument types,
+            // then substitute into the return type (REQ-LLL-007, DEC-LLL-028).
+            let mut subst: HashMap<String, Ty> = HashMap::new();
+            for (a, (pn, pt)) in args.iter().zip(&callee_params) {
+                // push the declared param type inward as the expected type, so an
+                // empty list `[]` in argument position takes its element type from
+                // the callee's signature (e.g. `rev_acc(xs, [])`).
+                let ta = check_expr(ctx, a, effectful, Some(pt))?;
+                unify_arg(pt, &ta, &mut subst).map_err(|e| {
+                    format!("part `{}`: argument `{pn}` of `{name}`: {e}", ctx.part.name)
+                })?;
             }
-            // recursion classification: structural iff every ListInt param position
+            // recursion classification: structural iff some list param position
             // receives a var strictly smaller than that same param
             if name == &ctx.part.name {
                 let structural = ctx
@@ -677,12 +755,12 @@ fn check_expr(ctx: &mut Ctx, e: &Expr, effectful: bool) -> Result<Ty, String> {
                     .iter()
                     .enumerate()
                     .any(|(i, (pname, pty))| {
-                        *pty == Ty::ListInt
+                        matches!(pty, Ty::List(_))
                             && matches!(&args[i], Expr::Var(v) if ctx.smaller_root(v) == Some(pname.as_str()))
                     });
                 ctx.rec_calls.push(structural);
             }
-            callee.ret
+            subst_ty(&callee_ret, &subst)
         }
     })
 }

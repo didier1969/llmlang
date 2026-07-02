@@ -32,11 +32,36 @@ pub struct Part {
     pub origin: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Types (REQ-LLL-007, DEC-LLL-028). `Var` is a parametric type variable that
+/// appears in a `part` signature (e.g. `a` in `part id(x: a) -> a`); it is a
+/// rigid, part-local name inside the defining body and gets instantiated at call
+/// sites. `List` is generic over its element type — `List[Int]`, `List[a]`,
+/// `List[List[Int]]`. No longer `Copy` (Box), so types are cloned, not copied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ty {
     Int,
     Bool,
-    ListInt,
+    Var(String),
+    List(Box<Ty>),
+}
+
+impl Ty {
+    /// `List[elem]`.
+    pub fn list(elem: Ty) -> Ty {
+        Ty::List(Box::new(elem))
+    }
+    /// The concrete `List[Int]` — the v1 monomorphic list, now a special case.
+    pub fn list_int() -> Ty {
+        Ty::list(Ty::Int)
+    }
+    /// True when the type mentions no type variable (fully concrete).
+    pub fn is_concrete(&self) -> bool {
+        match self {
+            Ty::Int | Ty::Bool => true,
+            Ty::Var(_) => false,
+            Ty::List(e) => e.is_concrete(),
+        }
+    }
 }
 
 impl std::fmt::Display for Ty {
@@ -44,7 +69,8 @@ impl std::fmt::Display for Ty {
         match self {
             Ty::Int => write!(f, "Int"),
             Ty::Bool => write!(f, "Bool"),
-            Ty::ListInt => write!(f, "List[Int]"),
+            Ty::Var(a) => write!(f, "{a}"),
+            Ty::List(e) => write!(f, "List[{e}]"),
         }
     }
 }

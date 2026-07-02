@@ -183,6 +183,44 @@ fn generated_rust_compiles_and_runs() {
 }
 
 #[test]
+fn generics_prove_once_and_run_at_multiple_instantiations() {
+    // REQ-LLL-007 / DEC-LLL-028: a polymorphic definition is proved ONCE over an
+    // abstract element sort, then reused at Int and Bool with no source
+    // duplication; rustc monomorphizes each instantiation (static dispatch).
+    let src = "module T:\n\n  part id(x: a) -> a:\n    yield x\n\n  part glen(xs: List[a]) -> Int:\n    ensures result >= 0\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + glen(t)\n\n  part main() -> Int via IO:\n    let a = id(7)\n    let b = glen([1, 2, 3])\n    let c = glen([true, false])\n    let d = IO.print(a + b + c)\n    yield d\n";
+    // one VC set per generic definition, discharged over the abstract sort Tv_a
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "generic definitions must verify: {:?}",
+        failures(&report)
+    );
+    // the SAME glen proof serves List[Int] and List[Bool]; codegen emits a Rust
+    // generic that rustc monomorphizes per instantiation.
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("g.rs");
+    let bin = dir.join("g_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "generic Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // 7 (id) + 3 (len[1,2,3]) + 2 (len[true,false]) = 12
+    assert!(stdout.contains("12"), "expected 12, got: {stdout}");
+}
+
+#[test]
 fn euclidean_semantics_match_between_smt_and_rust() {
     // (-7) mod 3 = 2 in both SMT-LIB and i64::rem_euclid — the verified model
     // and the runtime must agree on negative operands.
