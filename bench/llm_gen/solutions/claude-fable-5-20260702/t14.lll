@@ -1,0 +1,13 @@
+module Gen.T14:
+
+  part fact(n: Int) -> Int:
+    requires n >= 0
+    ensures  result >= 1
+    measure n
+    match n:
+      0 -> yield 1
+      _ -> yield n * fact(n - 1)
+
+  part main() -> Int via IO:
+    let f = IO.print(fact(10))
+    yield f

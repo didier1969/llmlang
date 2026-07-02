@@ -1,0 +1,14 @@
+module Gen.T8:
+
+  part is_even(n: Int) -> Bool:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield true
+      1 -> yield false
+      _ -> yield is_even(n - 2)
+
+  part main() -> Int via IO:
+    match is_even(42):
+      true  -> yield IO.print(1)
+      false -> yield IO.print(0)

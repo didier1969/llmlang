@@ -31,7 +31,17 @@ module Demo.Core:
 - **Incremental proofs**: editing a body re-verifies that part only; editing a
   contract re-verifies the part and its direct callers only.
 - **Rust backend**: contracts erased, Euclidean `div`/`mod` matching the SMT
-  model exactly; ≤5% overhead vs hand-written Rust on the recursion benchmark.
+  model exactly. Benchmarks (see `bench/`): ≤5% overhead vs hand-written Rust
+  on call-heavy fib(40); **10x faster than gcc -O2 C** on the LCG arithmetic
+  kernel (100M iters, 0.02s vs 0.21s — Euclidean `mod 2^n` lets LLVM emit
+  AND + SIMD where C's truncated `%` needs sign fixups). Same performance
+  class as C in both directions; the deltas are backend artifacts, not
+  pipeline overhead.
+- **Fail-stop overflow**: the verifier reasons over mathematical `Int`, the
+  runtime over `i64`. Default builds trap on overflow (`-C overflow-checks=on`,
+  free on vectorized kernels, ~+80% on call-heavy fib) so a proven contract
+  is **never silently violated by wrap-around**; `lll build --unchecked`
+  opts out for measured hot paths.
 - **Explicability channel**: per-hash rationale sidecars that auto-detach when
   a body changes; effect traces with verified deterministic replay; a
   read-only `lll audit` REPL.
@@ -46,7 +56,12 @@ lll hash   <f.lll>              def/contract hashes
 lll rename <f.lll> <old> <new>  structural rename (hash-preserving, validated)
 lll rationale add|show <f.lll> <part> [text…]
 lll audit  <f.lll>              read-only audit REPL
+lll mcp    <f.lll>              read-only MCP server (stdio) over the audit surface
 ```
+
+`lll mcp` speaks JSON-RPC/MCP on stdio (tools: `lll_defs`, `lll_part`,
+`lll_check`) — plug it into Claude Code or any MCP client:
+`claude mcp add lll-audit -- lll mcp path/to/module.lll`
 
 ## Setup
 
@@ -62,7 +77,8 @@ cargo build && cargo test
 ## v1 restrictions (documented, not hidden)
 
 Int/Bool/List[Int]; direct recursion only; `measure` over Int params only;
-no calls inside contracts; `Int` is mathematical in the verifier but `i64` at
-runtime (overflow is not yet modeled); no proof hints yet (a failed obligation
-means rewrite, not annotate). See `bench/llm_gen/` for the LLM
-generation-success harness (CPT-LLL-011).
+no calls inside contracts; no list-construction expressions yet (literals and
+pattern-deconstruction only); overflow is fail-stop at runtime, not statically
+excluded; no proof hints yet (a failed obligation means rewrite, not
+annotate). See `bench/llm_gen/` for the LLM generation-success harness
+(CPT-LLL-011): claude-fable-5 scores 15/15 pass@1-verified on the current set.

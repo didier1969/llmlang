@@ -11,6 +11,7 @@ pub mod codegen;
 pub mod explain;
 pub mod hash;
 pub mod lexer;
+pub mod mcp;
 pub mod parser;
 pub mod types;
 pub mod vc;

@@ -1,0 +1,16 @@
+module Demo.Bench2:
+
+  # arithmetic kernel: LCG iterated tail-recursively (loop-shaped after
+  # rustc/gcc tail-call optimization) — the fair "C speed" comparison for
+  # Perceus-friendly code (DEC-LLL-018 nuance).
+  part lcg(seed: Int, n: Int) -> Int:
+    requires seed >= 0, n >= 0
+    ensures  result >= 0
+    measure n
+    match n:
+      0 -> yield seed
+      _ -> yield lcg((seed * 1103515245 + 12345) mod 2147483648, n - 1)
+
+  part main() -> Int via IO:
+    let r = IO.print(lcg(42, 100000000))
+    yield r

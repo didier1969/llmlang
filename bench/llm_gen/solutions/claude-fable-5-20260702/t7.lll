@@ -1,0 +1,13 @@
+module Gen.T7:
+
+  part sum_to(n: Int) -> Int:
+    requires n >= 0
+    ensures  result >= 0, result >= n
+    measure n
+    match n:
+      0 -> yield 0
+      _ -> yield n + sum_to(n - 1)
+
+  part main() -> Int via IO:
+    let s = IO.print(sum_to(100))
+    yield s

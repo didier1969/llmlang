@@ -199,3 +199,31 @@ fn failures(r: &vc::VerifyReport) -> Vec<vc::FailedObligation> {
         .flatten()
         .collect()
 }
+
+#[test]
+fn overflow_traps_instead_of_silently_breaking_contracts() {
+    // pow-style blowup: 2^63 overflows i64. The verifier reasons over
+    // mathematical Int (documented v1 gap); the DEFAULT build closes the
+    // soundness hole by trapping (fail-stop) instead of wrapping.
+    let src = "module T:\n\n  part blow(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 1\n      _ -> yield 2 * blow(n - 1)\n\n  part main() -> Int via IO:\n    let x = IO.print(blow(63))\n    yield x\n";
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("ovf.rs");
+    let bin = dir.join("ovf_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-C", "opt-level=3", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "2^63 must trap under the default fail-stop build, not wrap"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("overflow"), "expected overflow panic, got: {err}");
+}

@@ -23,9 +23,11 @@ Success rate = verified solutions / tasks. Record: model id, date, pass@1.
 
 | date       | model            | pass@1 (verified) | notes |
 |------------|------------------|-------------------|-------|
-| 2026-07-02 | claude-fable-5   | 5/5               | first sample, tasks t1–t5; single-shot, no repair |
+| 2026-07-02 | claude-fable-5   | 5/5               | tasks t1–t5; single-shot, no repair |
+| 2026-07-02 | claude-fable-5   | 15/15             | tasks t1–t15 incl. harder set (guards, nested match, bool-equivalence contracts, requires-driven exhaustiveness) |
 
-Sample size is small (n=5) — grow the task set before drawing conclusions.
+Caveat: the tested model co-wrote this compiler (familiarity bias) — results
+from third-party models are the real signal; the harness is ready for them.
 The interesting longitudinal signal is the *delta* between "parses" and
 "verifies": syntax is rarely the failure mode (arxiv 2503.01245), contract
 semantics is.

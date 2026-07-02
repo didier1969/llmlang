@@ -1,0 +1,10 @@
+module Gen.T13:
+
+  part hour_add(h: Int, d: Int) -> Int:
+    requires 0 <= h <= 23, d >= 0
+    ensures  0 <= result <= 23
+    yield (h + d) mod 24
+
+  part main() -> Int via IO:
+    let r = IO.print(hour_add(22, 5))
+    yield r

@@ -17,7 +17,7 @@ fn main() {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build <file.lll>            check, then emit Rust + compile (build/<module>)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -52,7 +52,17 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 Err("verification failed — undischarged obligations are compile errors (DEC-LLL-015)".into())
             }
         }
-        ["build", file] => {
+        ["build", rest @ ..] => {
+            // Overflow policy: the verifier reasons over mathematical Int; the
+            // runtime uses i64. DEFAULT = fail-stop (-C overflow-checks=on): a
+            // proven contract either holds or the program traps — it is never
+            // silently violated by wrap-around (DEC-LLL-015: no silent
+            // downgrade). `--unchecked` opts out for measured hot kernels.
+            let (unchecked, file) = match rest {
+                ["--unchecked", f] => (true, *f),
+                [f] => (false, *f),
+                _ => return Err(usage()),
+            };
             let (_, cm, hm) = load(file)?;
             let report = vc::verify(&cm, &hm, &cache_dir(), true)?;
             print_report(&report);
@@ -65,8 +75,16 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             let rs = out_dir.join(format!("{}.rs", cm.module.name.replace('.', "_")));
             std::fs::write(&rs, rust).map_err(|e| e.to_string())?;
             let bin = out_dir.join(cm.module.name.replace('.', "_"));
+            let overflow = if unchecked {
+                "overflow-checks=off"
+            } else {
+                "overflow-checks=on"
+            };
             let st = Command::new("rustc")
-                .args(["-C", "opt-level=3", "-C", "codegen-units=1", "--edition", "2021", "-o"])
+                .args([
+                    "-C", "opt-level=3", "-C", "codegen-units=1", "-C", overflow,
+                    "--edition", "2021", "-o",
+                ])
                 .arg(&bin)
                 .arg(&rs)
                 .status()
@@ -158,6 +176,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             print!("{}", explain::rationale_show(Path::new("."), &hm, part)?);
             Ok(())
         }
+        ["mcp", file] => mcp::serve(file),
         ["audit", file] => {
             let (src, cm, hm) = load(file)?;
             let cache: std::collections::HashMap<String, vc::CacheEntry> =

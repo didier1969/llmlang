@@ -1,0 +1,14 @@
+module Gen.T9:
+
+  part signum(x: Int) -> Int:
+    ensures result >= 0 - 1, result <= 1
+    ensures (result == 1) == (x > 0)
+    ensures (result == 0 - 1) == (x < 0)
+    match x:
+      v when v > 0 -> yield 1
+      v when v < 0 -> yield 0 - 1
+      _            -> yield 0
+
+  part main() -> Int via IO:
+    let s = IO.print(signum(0 - 5))
+    yield s

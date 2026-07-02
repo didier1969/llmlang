@@ -1,0 +1,11 @@
+module Gen.T10:
+
+  part sum_prod() -> Int via IO:
+    let a = IO.read()
+    let b = IO.read()
+    let s = IO.print(a + b)
+    let p = IO.print(a * b)
+    yield p
+
+  part main() -> Int via IO:
+    yield sum_prod()

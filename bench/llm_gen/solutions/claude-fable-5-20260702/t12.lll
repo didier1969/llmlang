@@ -1,0 +1,11 @@
+module Gen.T12:
+
+  part abs_diff(a: Int, b: Int) -> Int:
+    ensures result >= 0, result == a - b or result == b - a
+    match a - b:
+      v when v < 0 -> yield b - a
+      _            -> yield a - b
+
+  part main() -> Int via IO:
+    let x = IO.print(abs_diff(3, 11))
+    yield x
