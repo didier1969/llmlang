@@ -19,14 +19,12 @@ use std::path::{Path, PathBuf};
 
 pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let root = PathBuf::from(path);
-    let root_canon = canon(&root)?;
     let mut in_stack: Vec<PathBuf> = Vec::new();
     let mut merged_names: HashMap<String, String> = HashMap::new(); // name -> blind form
     let mut parts: Vec<Part> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let (src, name) = load_rec(
         &root,
-        &root_canon,
         true,
         &mut in_stack,
         &mut visited,
@@ -51,7 +49,6 @@ fn canon(p: &Path) -> Result<PathBuf, String> {
 #[allow(clippy::too_many_arguments)]
 fn load_rec(
     path: &Path,
-    root_canon: &Path,
     is_root: bool,
     in_stack: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
@@ -79,7 +76,6 @@ fn load_rec(
         let child = base.join(imp);
         load_rec(
             &child,
-            root_canon,
             false,
             in_stack,
             visited,

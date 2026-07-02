@@ -13,6 +13,7 @@ pub mod hash;
 pub mod lexer;
 pub mod loader;
 pub mod mcp;
+pub mod opsem;
 pub mod parser;
 pub mod types;
 pub mod vc;

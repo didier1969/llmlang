@@ -338,31 +338,16 @@ impl<'a> Emit<'a> {
             Expr::Bin(op, a, b) => {
                 let ta = self.tr(a, env)?;
                 let tb = self.tr(b, env)?;
-                use BinOp::*;
-                match op {
-                    Add => format!("(+ {ta} {tb})"),
-                    Sub => format!("(- {ta} {tb})"),
-                    Mul => format!("(* {ta} {tb})"),
-                    Div | Mod => {
-                        self.oblige(
-                            format!("divisor is non-zero in `{}`", if *op == Div { "div" } else { "mod" }),
-                            format!("(not (= {tb} 0))"),
-                        );
-                        if *op == Div {
-                            format!("(div {ta} {tb})")
-                        } else {
-                            format!("(mod {ta} {tb})")
-                        }
-                    }
-                    Lt => format!("(< {ta} {tb})"),
-                    Le => format!("(<= {ta} {tb})"),
-                    Gt => format!("(> {ta} {tb})"),
-                    Ge => format!("(>= {ta} {tb})"),
-                    Eq => format!("(= {ta} {tb})"),
-                    Ne => format!("(not (= {ta} {tb}))"),
-                    And => format!("(and {ta} {tb})"),
-                    Or => format!("(or {ta} {tb})"),
+                let f = crate::opsem::form(*op);
+                if f.nonzero_divisor {
+                    // only div/mod set this flag (opsem is the single source)
+                    let kw = if *op == BinOp::Div { "div" } else { "mod" };
+                    self.oblige(
+                        format!("divisor is non-zero in `{kw}`"),
+                        format!("(not (= {tb} 0))"),
+                    );
                 }
+                f.smt(&ta, &tb)
             }
             Expr::EffCall(name, args) => match name.as_str() {
                 // IO.print returns its argument (deterministic value semantics)

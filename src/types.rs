@@ -403,32 +403,34 @@ fn type_of_pure(
 }
 
 pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
-    use BinOp::*;
-    match op {
-        Add | Sub | Mul | Div | Mod => {
+    // Typing discipline comes from the single operator-semantics source
+    // (opsem.rs) — the same place vc.rs and codegen.rs read their forms.
+    use crate::opsem::OpClass;
+    match crate::opsem::form(op).class {
+        OpClass::IntArith => {
             if ta == Ty::Int && tb == Ty::Int {
                 Ok(Ty::Int)
             } else {
                 Err(format!("arithmetic needs Int operands, got {ta} and {tb}"))
             }
         }
-        Lt | Le | Gt | Ge => {
+        OpClass::IntCmp => {
             if ta == Ty::Int && tb == Ty::Int {
                 Ok(Ty::Bool)
             } else {
                 Err(format!("comparison needs Int operands, got {ta} and {tb}"))
             }
         }
-        Eq | Ne => {
-            if ta == tb && ta != Ty::ListInt {
+        OpClass::Equality => {
+            // same-type equality; list equality is allowed in code and excluded
+            // from contracts by the contract typer.
+            if ta == tb {
                 Ok(Ty::Bool)
-            } else if ta == tb {
-                Ok(Ty::Bool) // list equality allowed in code; excluded from contracts by typing there
             } else {
                 Err(format!("equality needs same-type operands, got {ta} and {tb}"))
             }
         }
-        And | Or => {
+        OpClass::BoolLogic => {
             if ta == Ty::Bool && tb == Ty::Bool {
                 Ok(Ty::Bool)
             } else {

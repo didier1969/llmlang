@@ -107,7 +107,7 @@ fn emit_match(out: &mut String, scrut: &Expr, arms: &[Arm], depth: usize) -> Res
             Pattern::IntLit(v) => format!("{v}"),
             Pattern::BoolLit(v) => format!("{v}"),
             Pattern::Wildcard => "_".into(),
-            Pattern::Var(v) => format!("{v}"),
+            Pattern::Var(v) => v.clone(),
             Pattern::Nil => "LstI::Nil".into(),
             Pattern::Cons(h, t) => format!("LstI::Cons({h}, {t})"),
         };
@@ -167,26 +167,12 @@ fn expr(e: &Expr) -> Result<String, String> {
         Expr::Neg(a) => format!("(-{})", expr(a)?),
         Expr::Not(a) => format!("(!{})", expr(a)?),
         Expr::Bin(op, a, b) => {
+            // Rust rendering comes from the single operator-semantics source
+            // (opsem.rs) — same place the vc fork reads its SMT form, so the
+            // euclidean div/mod pairing can never silently drift (DEC-LLL-026).
             let ta = expr(a)?;
             let tb = expr(b)?;
-            use BinOp::*;
-            match op {
-                Add => format!("({ta} + {tb})"),
-                Sub => format!("({ta} - {tb})"),
-                Mul => format!("({ta} * {tb})"),
-                // Euclidean semantics — exactly matches SMT-LIB Int div/mod,
-                // so the verified model and the runtime agree.
-                Div => format!("i64::div_euclid({ta}, {tb})"),
-                Mod => format!("i64::rem_euclid({ta}, {tb})"),
-                Lt => format!("({ta} < {tb})"),
-                Le => format!("({ta} <= {tb})"),
-                Gt => format!("({ta} > {tb})"),
-                Ge => format!("({ta} >= {tb})"),
-                Eq => format!("({ta} == {tb})"),
-                Ne => format!("({ta} != {tb})"),
-                And => format!("({ta} && {tb})"),
-                Or => format!("({ta} || {tb})"),
-            }
+            crate::opsem::form(*op).rust(&ta, &tb)
         }
         Expr::EffCall(name, args) => match name.as_str() {
             "IO.print" => format!("__lll_io_print({})", expr(&args[0])?),
