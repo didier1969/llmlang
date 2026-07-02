@@ -1,0 +1,102 @@
+module Std.List:
+
+  # ---- stdlib v1, written IN llmlang and verified by the real Z3 pipeline ----
+  # (REQ-LLL-003, step 1 of the staged self-hosting plan DEC-LLL-024)
+
+  part len(xs: List[Int]) -> Int:
+    ensures result >= 0
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + len(t)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part append(xs: List[Int], ys: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield ys
+      h :: t -> yield h :: append(t, ys)
+
+  part rev_acc(xs: List[Int], acc: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield rev_acc(t, h :: acc)
+
+  part reverse(xs: List[Int]) -> List[Int]:
+    yield rev_acc(xs, [])
+
+  part contains(xs: List[Int], v: Int) -> Bool:
+    match xs:
+      []     -> yield false
+      h :: t ->
+        match h:
+          w when w == v -> yield true
+          _             -> yield contains(t, v)
+
+  part take(xs: List[Int], n: Int) -> List[Int]:
+    match xs:
+      []     -> yield []
+      h :: t ->
+        match n:
+          m when m <= 0 -> yield []
+          _             -> yield h :: take(t, n - 1)
+
+  part drop(xs: List[Int], n: Int) -> List[Int]:
+    match xs:
+      []     -> yield xs
+      h :: t ->
+        match n:
+          m when m <= 0 -> yield xs
+          _             -> yield drop(t, n - 1)
+
+  part nth(xs: List[Int], i: Int, d: Int) -> Int:
+    match xs:
+      []     -> yield d
+      h :: t ->
+        match i:
+          0 -> yield h
+          _ -> yield nth(t, i - 1, d)
+
+  part max2(a: Int, b: Int) -> Int:
+    ensures result >= a, result >= b, result == a or result == b
+    match a:
+      v when v >= b -> yield a
+      _             -> yield b
+
+  part min2(a: Int, b: Int) -> Int:
+    ensures result <= a, result <= b, result == a or result == b
+    match a:
+      v when v <= b -> yield a
+      _             -> yield b
+
+  part maximum(xs: List[Int], d: Int) -> Int:
+    ensures result >= d
+    match xs:
+      []     -> yield d
+      h :: t ->
+        let m = maximum(t, d)
+        yield max2(h, m)
+
+  part minimum(xs: List[Int], d: Int) -> Int:
+    ensures result <= d
+    match xs:
+      []     -> yield d
+      h :: t ->
+        let m = minimum(t, d)
+        yield min2(h, m)
+
+  # executable demo — verified end to end, checked by the integration suite
+  part main() -> Int via IO:
+    let base  = [3, 1, 4, 1, 5]
+    let l  = IO.print(len(base))                      # 5
+    let s  = IO.print(sum(append(base, [9, 2])))      # 14 + 11 = 25
+    let r  = IO.print(nth(reverse(base), 0, 0 - 1))   # first of reversed = 5
+    let mx = IO.print(maximum(base, 0))               # 5
+    let mn = IO.print(minimum(base, 99))              # 1
+    let tk = IO.print(sum(take(base, 2)))             # 3 + 1 = 4
+    let dr = IO.print(sum(drop(base, 3)))             # 1 + 5 = 6
+    match contains(base, 4):
+      true  -> yield IO.print(1)                      # 1
+      false -> yield IO.print(0)

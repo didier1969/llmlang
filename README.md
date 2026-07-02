@@ -74,11 +74,20 @@ cargo build && cargo test
 ./target/debug/lll check examples/demo.lll
 ```
 
+## Standard library (written in llmlang)
+
+`std/list.lll` — 13 first-order list functions (len, sum, append, reverse,
+contains, take, drop, nth, max2/min2, maximum/minimum), every one verified by
+the real Z3 pipeline, exercised end-to-end by the integration suite. This is
+step 1 of the staged self-hosting plan (DEC-LLL-024). List construction uses
+the cons expression `h :: t` (DEC-LLL-027) — the exact mirror of the pattern,
+and `[1, 2]` hashes identically to `1 :: 2 :: []`.
+
 ## v1 restrictions (documented, not hidden)
 
-Int/Bool/List[Int]; direct recursion only; `measure` over Int params only;
-no calls inside contracts; no list-construction expressions yet (literals and
-pattern-deconstruction only); overflow is fail-stop at runtime, not statically
-excluded; no proof hints yet (a failed obligation means rewrite, not
-annotate). See `bench/llm_gen/` for the LLM generation-success harness
-(CPT-LLL-011): claude-fable-5 scores 15/15 pass@1-verified on the current set.
+Int/Bool/List[Int]; direct recursion only (mutual recursion + imports tracked
+as REQ-LLL-005); `measure` over Int params only; no calls inside contracts;
+no higher-order functions yet; overflow is fail-stop at runtime, not
+statically excluded; no proof hints yet (a failed obligation means rewrite,
+not annotate). See `bench/llm_gen/` for the LLM generation-success harness
+(CPT-LLL-011).

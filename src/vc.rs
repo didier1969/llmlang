@@ -325,6 +325,12 @@ impl<'a> Emit<'a> {
                 }
                 t
             }
+            Expr::Cons(h, t) => {
+                self.uses_list = true;
+                let hh = self.tr(h, env)?;
+                let tt = self.tr(t, env)?;
+                format!("(cons {hh} {tt})")
+            }
             Expr::Neg(a) => format!("(- {})", self.tr(a, env)?),
             Expr::Not(a) => format!("(not {})", self.tr(a, env)?),
             Expr::Bin(op, a, b) => {

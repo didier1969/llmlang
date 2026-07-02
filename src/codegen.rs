@@ -163,6 +163,7 @@ fn expr(e: &Expr) -> Result<String, String> {
             }
             t
         }
+        Expr::Cons(h, t) => format!("Lst::new(LstI::Cons({}, {}))", expr(h)?, expr(t)?),
         Expr::Neg(a) => format!("(-{})", expr(a)?),
         Expr::Not(a) => format!("(!{})", expr(a)?),
         Expr::Bin(op, a, b) => {

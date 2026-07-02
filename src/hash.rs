@@ -214,8 +214,19 @@ impl<'a> Norm<'a> {
                 None => format!("!free:{n}"), // unreachable post-typecheck; kept total
             },
             Expr::ListLit(items) => {
-                let xs: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
-                format!("(list {})", xs.join(" "))
+                // normalized as a cons-chain so `[1,2]` and `1 :: 2 :: []`
+                // are the SAME definition (same hash) — DEC-LLL-027
+                let mut t = "nil".to_string();
+                for i in items.iter().rev() {
+                    let e = self.expr(i);
+                    t = format!("(cons {e} {t})");
+                }
+                t
+            }
+            Expr::Cons(h, t) => {
+                let hh = self.expr(h);
+                let tt = self.expr(t);
+                format!("(cons {hh} {tt})")
             }
             Expr::Neg(a) => format!("(neg {})", self.expr(a)),
             Expr::Not(a) => format!("(not {})", self.expr(a)),

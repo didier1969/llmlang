@@ -227,3 +227,62 @@ fn overflow_traps_instead_of_silently_breaking_contracts() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("overflow"), "expected overflow panic, got: {err}");
 }
+
+// ---- wave 2: cons-expression (DEC-LLL-027) + stdlib (REQ-LLL-003) ----
+
+#[test]
+fn cons_expression_and_literal_share_hash() {
+    // `[1, 2]` and `1 :: 2 :: []` are the same definition — same identity
+    let a = "module T:\n\n  part f() -> List[Int]:\n    yield [1, 2]\n";
+    let b = "module T:\n\n  part f() -> List[Int]:\n    yield 1 :: 2 :: []\n";
+    let (_, h1) = full(a);
+    let (_, h2) = full(b);
+    assert_eq!(h1.def_hash["f"], h2.def_hash["f"]);
+}
+
+#[test]
+fn cons_expression_verifies_and_types() {
+    let src = "module T:\n\n  part push_front(x: Int, xs: List[Int]) -> List[Int]:\n    yield x :: xs\n";
+    assert!(verify_src(src).ok());
+    let bad = "module T:\n\n  part f(xs: List[Int]) -> List[Int]:\n    yield xs :: xs\n";
+    let m = parser::parse_module(bad).unwrap();
+    assert!(types::check_module(m).is_err(), "List :: List must be rejected");
+}
+
+#[test]
+fn stdlib_fully_verifies() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/list.lll"),
+    )
+    .expect("std/list.lll");
+    let r = verify_src(&src);
+    assert!(r.ok(), "stdlib must verify: {:?}", failures(&r));
+}
+
+#[test]
+fn stdlib_demo_runs_correctly() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/list.lll"),
+    )
+    .unwrap();
+    let (cm, _) = full(&src);
+    let rust = codegen::emit_rust(&cm).unwrap();
+    let dir = tempdir();
+    let rs = dir.join("std.rs");
+    let bin = dir.join("std_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let got: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    assert_eq!(
+        got,
+        vec!["5", "25", "5", "5", "1", "4", "6", "1", "=> 1"],
+        "stdlib demo output mismatch"
+    );
+}

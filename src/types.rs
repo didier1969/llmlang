@@ -287,6 +287,14 @@ fn type_of_pure(
             let tb = type_of_pure(b, vars, result)?;
             bin_type(*op, ta, tb)?
         }
+        Expr::Cons(h, t) => {
+            if type_of_pure(h, vars, result)? != Ty::Int
+                || type_of_pure(t, vars, result)? != Ty::ListInt
+            {
+                return Err("`::` needs Int on the left and List[Int] on the right".into());
+            }
+            Ty::ListInt
+        }
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
     })
 }
@@ -477,6 +485,17 @@ fn check_expr(ctx: &mut Ctx, e: &Expr, effectful: bool) -> Result<Ty, String> {
             let ta = check_expr(ctx, a, effectful)?;
             let tb = check_expr(ctx, b, effectful)?;
             bin_type(*op, ta, tb).map_err(|e| format!("part `{}`: {e}", ctx.part.name))?
+        }
+        Expr::Cons(h, t) => {
+            let th = check_expr(ctx, h, effectful)?;
+            let tt = check_expr(ctx, t, effectful)?;
+            if th != Ty::Int || tt != Ty::ListInt {
+                return Err(format!(
+                    "part `{}`: `::` needs Int on the left and List[Int] on the right, got {th} :: {tt}",
+                    ctx.part.name
+                ));
+            }
+            Ty::ListInt
         }
         Expr::EffCall(name, args) => {
             if !effectful {

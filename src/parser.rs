@@ -362,7 +362,7 @@ impl Parser {
         self.cmp_expr()
     }
     fn cmp_expr(&mut self) -> Result<Expr, String> {
-        let e = self.add_expr()?;
+        let e = self.cons_expr()?;
         let op = match self.peek() {
             Tok::Lt => BinOp::Lt,
             Tok::Le => BinOp::Le,
@@ -373,7 +373,7 @@ impl Parser {
             _ => return Ok(e),
         };
         self.pos += 1;
-        let r = self.add_expr()?;
+        let r = self.cons_expr()?;
         // support chained comparisons `0 <= pct <= 1` as conjunction
         let first = Expr::Bin(op, Box::new(e), Box::new(r.clone()));
         let op2 = match self.peek() {
@@ -385,11 +385,22 @@ impl Parser {
         };
         if let Some(op2) = op2 {
             self.pos += 1;
-            let r2 = self.add_expr()?;
+            let r2 = self.cons_expr()?;
             let second = Expr::Bin(op2, Box::new(r), Box::new(r2));
             return Ok(Expr::Bin(BinOp::And, Box::new(first), Box::new(second)));
         }
         Ok(first)
+    }
+    /// `h :: t` — right-associative, binds looser than +/- and tighter than
+    /// comparisons (DEC-LLL-027; same lexeme as the Cons pattern).
+    fn cons_expr(&mut self) -> Result<Expr, String> {
+        let h = self.add_expr()?;
+        if self.peek() == &Tok::ColonColon {
+            self.pos += 1;
+            let t = self.cons_expr()?;
+            return Ok(Expr::Cons(Box::new(h), Box::new(t)));
+        }
+        Ok(h)
     }
     fn add_expr(&mut self) -> Result<Expr, String> {
         let mut e = self.mul_expr()?;

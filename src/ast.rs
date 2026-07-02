@@ -95,6 +95,8 @@ pub enum Expr {
     Bin(BinOp, Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     Neg(Box<Expr>),
+    /// List construction `h :: t` (mirror of the Cons pattern, DEC-LLL-027).
+    Cons(Box<Expr>, Box<Expr>),
     /// Call to another part in the module.
     Call(String, Vec<Expr>),
     /// Effect call, e.g. `IO.print(x)`, `IO.read()`.
@@ -106,7 +108,7 @@ impl Expr {
     pub fn walk<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
         f(self);
         match self {
-            Expr::Bin(_, a, b) => {
+            Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
                 a.walk(f);
                 b.walk(f);
             }
