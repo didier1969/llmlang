@@ -5,7 +5,9 @@
 //! - contracts (requires/ensures/measure) are pure Int/Bool arithmetic over
 //!   parameters (+ `result` in ensures) — no calls (restricted Z3 fragment, DEC-LLL-017);
 //! - recursion is structural (list tail descent) or carries a `measure` (DEC-LLL-016);
-//! - mutual recursion is rejected in v1 (direct recursion only).
+//! - mutual recursion (wave 3, REQ-LLL-005): call-graph SCCs are computed; every
+//!   member of a multi-node SCC must carry a `measure`, and the vc fork proves
+//!   cross-decrease at every intra-SCC call site.
 
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +19,19 @@ pub struct CheckedModule {
     pub index: HashMap<String, usize>,
     /// per part: is recursion structural (true) or measure-based (false)? None = not recursive.
     pub recursion: HashMap<String, Recursion>,
+    /// name -> SCC id of the call graph (Tarjan); parts sharing an id with
+    /// at least one other part form a mutual-recursion component.
+    pub scc_id: HashMap<String, usize>,
+    /// names that live in a multi-node SCC (mutual recursion)
+    pub scc_multi: std::collections::HashSet<String>,
+}
+
+impl CheckedModule {
+    /// true when `a` and `b` are distinct parts of the same mutual-recursion SCC
+    pub fn same_multi_scc(&self, a: &str, b: &str) -> bool {
+        a != b && self.scc_multi.contains(a) && self.scc_multi.contains(b)
+            && self.scc_id.get(a) == self.scc_id.get(b)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,6 +45,8 @@ struct Ctx<'a> {
     module: &'a Module,
     index: &'a HashMap<String, usize>,
     part: &'a Part,
+    /// every pattern-binder name of the whole part (for scope hints)
+    all_binders: std::collections::HashSet<String>,
     vars: Vec<HashMap<String, Ty>>,
     /// variables known to be strictly smaller than a given ListInt parameter
     smaller: Vec<HashMap<String, String>>, // var -> root param
@@ -44,8 +61,8 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate part `{}`", p.name));
         }
     }
-    // reject mutual recursion (v1): any cycle in the call graph other than self-loops
-    reject_mutual_recursion(&module, &index)?;
+    // call-graph SCCs (wave 3): mutual recursion is allowed, measured
+    let (scc_id, scc_multi) = compute_sccs(&module, &index);
 
     let mut recursion = HashMap::new();
     for part in &module.parts {
@@ -55,6 +72,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             module: &module,
             index: &index,
             part,
+            all_binders: collect_binders(&part.body),
             vars: vec![part.params.iter().cloned().collect()],
             smaller: vec![HashMap::new()],
             rec_calls: Vec::new(),
@@ -67,7 +85,19 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             ));
         }
         check_body(&mut ctx, &part.body, part.ret, effectful)?;
-        let rec = if ctx.rec_calls.is_empty() {
+        let in_multi = scc_multi.contains(&part.name);
+        let rec = if in_multi {
+            // mutual recursion: every SCC member must carry a measure
+            if part.measure.is_none() {
+                return Err(format!(
+                    "part `{}` is mutually recursive (call-graph cycle) — every member of the \
+                     cycle needs a `measure <Int expr>` so cross-decrease can be proved \
+                     (DEC-LLL-016, wave 3)",
+                    part.name
+                ));
+            }
+            Recursion::Measured
+        } else if ctx.rec_calls.is_empty() {
             Recursion::None
         } else if ctx.rec_calls.iter().all(|s| *s) {
             Recursion::Structural
@@ -80,9 +110,6 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 part.name
             ));
         };
-        if rec == Recursion::Structural && part.measure.is_some() {
-            // measure allowed but redundant; still verified (harmless)
-        }
         if rec == Recursion::None && part.measure.is_some() {
             return Err(format!(
                 "part `{}`: `measure` clause on a non-recursive part",
@@ -95,52 +122,128 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         module,
         index,
         recursion,
+        scc_id,
+        scc_multi,
     })
 }
 
-fn reject_mutual_recursion(module: &Module, index: &HashMap<String, usize>) -> Result<(), String> {
-    // DFS cycle detection over calls, ignoring self-loops
-    let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+fn compute_sccs(
+    module: &Module,
+    index: &HashMap<String, usize>,
+) -> (HashMap<String, usize>, std::collections::HashSet<String>) {
+    // Kosaraju: forward post-order, then reverse-graph DFS in reverse post-order
+    let names: Vec<String> = module.parts.iter().map(|p| p.name.clone()).collect();
+    let mut fwd: HashMap<String, Vec<String>> = HashMap::new();
+    let mut rev: HashMap<String, Vec<String>> = HashMap::new();
     for p in &module.parts {
-        let mut callees: HashSet<String> = HashSet::new();
+        let mut callees = Vec::new();
         collect_calls(&p.body, &mut |name| {
-            if name != p.name && index.contains_key(name) {
-                callees.insert(name.to_string());
+            if index.contains_key(name) {
+                callees.push(name.to_string());
             }
         });
-        edges.insert(p.name.clone(), callees);
+        callees.sort();
+        callees.dedup();
+        for c in &callees {
+            rev.entry(c.clone()).or_default().push(p.name.clone());
+        }
+        fwd.insert(p.name.clone(), callees);
     }
-    let mut state: HashMap<String, u8> = HashMap::new(); // 0 unvisited, 1 in-stack, 2 done
-    fn dfs(
-        n: &str,
-        edges: &HashMap<String, HashSet<String>>,
-        state: &mut HashMap<String, u8>,
-    ) -> Result<(), String> {
-        state.insert(n.to_string(), 1);
-        if let Some(next) = edges.get(n) {
-            for m in next {
-                match state.get(m.as_str()).copied().unwrap_or(0) {
-                    1 => {
-                        return Err(format!(
-                            "mutual recursion involving `{m}` is not supported in v1 \
-                             (direct recursion only; see DEC-LLL-022 perimeter)"
-                        ))
-                    }
-                    0 => dfs(m, edges, state)?,
-                    _ => {}
+    // iterative post-order on fwd
+    let mut visited: std::collections::HashSet<String> = Default::default();
+    let mut post: Vec<String> = Vec::new();
+    for start in &names {
+        if visited.contains(start) {
+            continue;
+        }
+        let mut stack: Vec<(String, usize)> = vec![(start.clone(), 0)];
+        visited.insert(start.clone());
+        while let Some((node, mut i)) = stack.pop() {
+            let next = fwd.get(&node).cloned().unwrap_or_default();
+            let mut descended = false;
+            while i < next.len() {
+                let m = &next[i];
+                i += 1;
+                if !visited.contains(m) {
+                    visited.insert(m.clone());
+                    stack.push((node.clone(), i));
+                    stack.push((m.clone(), 0));
+                    descended = true;
+                    break;
+                }
+            }
+            if !descended {
+                post.push(node);
+            }
+        }
+    }
+    // reverse-graph DFS in reverse post-order
+    let mut scc_id: HashMap<String, usize> = HashMap::new();
+    let mut sizes: HashMap<usize, usize> = HashMap::new();
+    let mut next_id = 0usize;
+    for start in post.iter().rev() {
+        if scc_id.contains_key(start) {
+            continue;
+        }
+        let id = next_id;
+        next_id += 1;
+        let mut stack = vec![start.clone()];
+        scc_id.insert(start.clone(), id);
+        while let Some(node) = stack.pop() {
+            *sizes.entry(id).or_insert(0) += 1;
+            for m in rev.get(&node).cloned().unwrap_or_default() {
+                if !scc_id.contains_key(&m) {
+                    scc_id.insert(m.clone(), id);
+                    stack.push(m);
                 }
             }
         }
-        state.insert(n.to_string(), 2);
-        Ok(())
     }
-    let names: Vec<String> = module.parts.iter().map(|p| p.name.clone()).collect();
-    for n in names {
-        if state.get(&n).copied().unwrap_or(0) == 0 {
-            dfs(&n, &edges, &mut state)?;
+    let scc_multi: std::collections::HashSet<String> = names
+        .iter()
+        .filter(|n| sizes.get(&scc_id[n.as_str()]).copied().unwrap_or(1) > 1)
+        .cloned()
+        .collect();
+    (scc_id, scc_multi)
+}
+
+/// LLM-repair hints for unknown-variable errors (wave-3 bench lessons):
+/// capitalized booleans and out-of-scope pattern binders were the top
+/// third-party failure modes (REQ-LLL-004 analysis).
+fn unknown_var_msg(part: &str, n: &str, binders: &std::collections::HashSet<String>) -> String {
+    let hint = match n {
+        "True" | "False" => " — booleans are lowercase in llmlang: `true` / `false`",
+        _ if binders.contains(n) => {
+            " — this name is a pattern binder, only in scope inside the arm whose pattern binds it"
+        }
+        _ => "",
+    };
+    format!("part `{part}`: unknown variable `{n}`{hint}")
+}
+
+fn collect_binders(body: &[Stmt]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    fn walk(body: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        for s in body {
+            if let Stmt::Match(_, arms) = s {
+                for a in arms {
+                    match &a.pattern {
+                        Pattern::Var(v) => {
+                            out.insert(v.clone());
+                        }
+                        Pattern::Cons(h, t) => {
+                            out.insert(h.clone());
+                            out.insert(t.clone());
+                        }
+                        _ => {}
+                    }
+                    walk(&a.body, out);
+                }
+            }
         }
     }
-    Ok(())
+    walk(body, &mut out);
+    out
 }
 
 fn collect_calls(body: &[Stmt], f: &mut dyn FnMut(&str)) {
@@ -367,7 +470,9 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: Ty, effectful: bool) -> Result<
                     ));
                 }
                 let t = check_expr(ctx, e, effectful)?;
-                ctx.vars.last_mut().unwrap().insert(name.clone(), t);
+                if name != "_" {
+                    ctx.vars.last_mut().unwrap().insert(name.clone(), t);
+                }
             }
             Stmt::Yield(e) => {
                 if !last {
@@ -466,9 +571,9 @@ fn check_expr(ctx: &mut Ctx, e: &Expr, effectful: bool) -> Result<Ty, String> {
             }
             Ty::ListInt
         }
-        Expr::Var(n) => ctx.lookup(n).ok_or_else(|| {
-            format!("part `{}`: unknown variable `{n}`", ctx.part.name)
-        })?,
+        Expr::Var(n) => ctx
+            .lookup(n)
+            .ok_or_else(|| unknown_var_msg(&ctx.part.name, n, &ctx.all_binders))?,
         Expr::Neg(a) => {
             if check_expr(ctx, a, effectful)? != Ty::Int {
                 return Err(format!("part `{}`: negation needs Int", ctx.part.name));

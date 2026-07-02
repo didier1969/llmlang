@@ -83,11 +83,25 @@ step 1 of the staged self-hosting plan (DEC-LLL-024). List construction uses
 the cons expression `h :: t` (DEC-LLL-027) — the exact mirror of the pattern,
 and `[1, 2]` hashes identically to `1 :: 2 :: []`.
 
+## Imports & mutual recursion (wave 3)
+
+`import "relative/path.lll"` merges the imported file's parts into one flat
+namespace — modules are a naming overlay with zero semantic weight
+(DEC-LLL-019): a definition has the same hash whether local or imported, and
+an α-equivalent duplicate across files is silently deduplicated (a conflicting
+one is an error). File cycles are rejected.
+
+Mutual recursion is verified: call-graph SCCs are computed, every member of a
+cycle must carry a `measure`, and Z3 proves cross-decrease at each intra-SCC
+call. A component is hashed canonically (rename-invariant), and the proof
+cache marks mutual calls so dissolving a cycle re-verifies the survivors.
+
 ## v1 restrictions (documented, not hidden)
 
-Int/Bool/List[Int]; direct recursion only (mutual recursion + imports tracked
-as REQ-LLL-005); `measure` over Int params only; no calls inside contracts;
-no higher-order functions yet; overflow is fail-stop at runtime, not
+Int/Bool/List[Int]; `measure` over Int params only (mutual recursion:
+Int-measure cross-decrease, no lexicographic tuples yet); no calls inside
+contracts; no higher-order functions yet; cross-file rename lands with
+workspace resolution (wave 4); overflow is fail-stop at runtime, not
 statically excluded; no proof hints yet (a failed obligation means rewrite,
 not annotate). See `bench/llm_gen/` for the LLM generation-success harness
 (CPT-LLL-011).

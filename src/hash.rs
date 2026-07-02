@@ -9,6 +9,13 @@
 //! Consequences (tested): rename → same hash; move between modules → same hash;
 //! two α-equivalent definitions → same hash (automatic dedup detection).
 //!
+//! Mutual recursion (wave 3): a multi-node SCC is hashed as a CANONICAL
+//! COMPONENT — members are ordered by their peer-blinded normal forms, then
+//! each member's identity is blake3(component-blob ‖ its canonical index).
+//! Rename-invariant like everything else. In the proof hash, an intra-SCC
+//! call is marked `mut:<peer-contract-hash>` so dissolving the cycle
+//! re-verifies the survivors.
+//!
 //! The text is the single source of truth; hashes and the name index are
 //! derived artifacts, reconstructible from the text alone (DEC-LLL-020).
 
@@ -33,23 +40,78 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
     // pass 1: contract hashes (contracts contain no calls — no dependencies)
     let mut contract_hash = HashMap::new();
     for part in &cm.module.parts {
-        let c = normalize_part(part, &HashMap::new(), false);
+        let c = normalize_part(part, &HashMap::new(), false, &HashMap::new());
         contract_hash.insert(
             part.name.clone(),
             blake3::hash(c.as_bytes()).to_hex().to_string(),
         );
     }
-    // pass 2: identity hashes in dependency order (no mutual recursion —
-    // enforced by the checker), and proof hashes (order-free)
-    let order = topo_order(&cm.module, &cm.index)?;
-    let mut def_hash = HashMap::new();
-    let mut proof_hash = HashMap::new();
-    for name in order {
-        let part = &cm.module.parts[cm.index[&name]];
-        let d = normalize_part(part, &def_hash, true);
-        let p = normalize_part(part, &contract_hash, true);
-        def_hash.insert(name.clone(), blake3::hash(d.as_bytes()).to_hex().to_string());
-        proof_hash.insert(name, blake3::hash(p.as_bytes()).to_hex().to_string());
+    // pass 2: identity + proof hashes, SCC components as topological units
+    let comps = condensed_order(cm);
+    let mut def_hash: HashMap<String, String> = HashMap::new();
+    let mut proof_hash: HashMap<String, String> = HashMap::new();
+    for comp in comps {
+        if comp.len() == 1 {
+            let name = &comp[0];
+            let part = &cm.module.parts[cm.index[name]];
+            let d = normalize_part(part, &def_hash, true, &HashMap::new());
+            let mut proof_peers = HashMap::new();
+            // self-loops need no special proof marker: $self covers them
+            let _ = &mut proof_peers;
+            let p = normalize_part(part, &contract_hash, true, &proof_peers);
+            def_hash.insert(name.clone(), blake3::hash(d.as_bytes()).to_hex().to_string());
+            proof_hash.insert(name.clone(), blake3::hash(p.as_bytes()).to_hex().to_string());
+        } else {
+            // canonical component hashing
+            // step 1: peer-blinded preliminary forms
+            let blind: HashMap<String, String> = comp
+                .iter()
+                .map(|m| (m.clone(), "$peer".to_string()))
+                .collect();
+            let mut prelims: Vec<(String, String)> = comp
+                .iter()
+                .map(|m| {
+                    let part = &cm.module.parts[cm.index[m]];
+                    (
+                        normalize_part(part, &def_hash, true, &blind),
+                        m.clone(),
+                    )
+                })
+                .collect();
+            prelims.sort();
+            let canon_index: HashMap<String, usize> = prelims
+                .iter()
+                .enumerate()
+                .map(|(i, (_, m))| (m.clone(), i))
+                .collect();
+            // step 2: final forms with canonical indices
+            let idx_peers: HashMap<String, String> = comp
+                .iter()
+                .map(|m| (m.clone(), format!("$scc:{}", canon_index[m])))
+                .collect();
+            let mut finals: Vec<String> = prelims
+                .iter()
+                .map(|(_, m)| {
+                    let part = &cm.module.parts[cm.index[m]];
+                    normalize_part(part, &def_hash, true, &idx_peers)
+                })
+                .collect();
+            let blob = finals.join("\n");
+            finals.clear();
+            for m in &comp {
+                let d = format!("{blob}|member:{}", canon_index[m]);
+                def_hash.insert(m.clone(), blake3::hash(d.as_bytes()).to_hex().to_string());
+                // proof form: intra-SCC calls marked with the peer's contract hash
+                let mut_peers: HashMap<String, String> = comp
+                    .iter()
+                    .filter(|x| *x != m)
+                    .map(|x| (x.clone(), format!("mut:{}", contract_hash[x])))
+                    .collect();
+                let part = &cm.module.parts[cm.index[m]];
+                let pf = normalize_part(part, &contract_hash, true, &mut_peers);
+                proof_hash.insert(m.clone(), blake3::hash(pf.as_bytes()).to_hex().to_string());
+            }
+        }
     }
     Ok(HashedModule {
         def_hash,
@@ -58,35 +120,60 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
     })
 }
 
-fn topo_order(module: &Module, index: &HashMap<String, usize>) -> Result<Vec<String>, String> {
-    let mut order = Vec::new();
-    let mut state: HashMap<String, u8> = HashMap::new();
+/// Topological order over the condensed call graph (SCCs as units),
+/// each component returned as its member list.
+fn condensed_order(cm: &CheckedModule) -> Vec<Vec<String>> {
+    let mut members: HashMap<usize, Vec<String>> = HashMap::new();
+    for p in &cm.module.parts {
+        members
+            .entry(cm.scc_id[&p.name])
+            .or_default()
+            .push(p.name.clone());
+    }
+    for v in members.values_mut() {
+        v.sort();
+    }
+    // DFS over components following dependencies
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut state: HashMap<usize, u8> = HashMap::new();
     fn visit(
-        n: &str,
-        module: &Module,
-        index: &HashMap<String, usize>,
-        state: &mut HashMap<String, u8>,
-        order: &mut Vec<String>,
+        cid: usize,
+        cm: &CheckedModule,
+        members: &HashMap<usize, Vec<String>>,
+        state: &mut HashMap<usize, u8>,
+        out: &mut Vec<Vec<String>>,
     ) {
-        if state.get(n).copied().unwrap_or(0) != 0 {
+        if state.get(&cid).copied().unwrap_or(0) != 0 {
             return;
         }
-        state.insert(n.to_string(), 1);
-        let part = &module.parts[index[n]];
-        let mut deps = Vec::new();
-        collect_dep_names(&part.body, &mut deps);
-        for d in deps {
-            if d != n && index.contains_key(&d) {
-                visit(&d, module, index, state, order);
+        state.insert(cid, 1);
+        let mut dep_comps: Vec<usize> = Vec::new();
+        for m in &members[&cid] {
+            let part = &cm.module.parts[cm.index[m]];
+            let mut deps = Vec::new();
+            collect_dep_names(&part.body, &mut deps);
+            for d in deps {
+                if let Some(did) = cm.scc_id.get(&d) {
+                    if *did != cid {
+                        dep_comps.push(*did);
+                    }
+                }
             }
         }
-        state.insert(n.to_string(), 2);
-        order.push(n.to_string());
+        dep_comps.sort();
+        dep_comps.dedup();
+        for d in dep_comps {
+            visit(d, cm, members, state, out);
+        }
+        state.insert(cid, 2);
+        out.push(members[&cid].clone());
     }
-    for p in &module.parts {
-        visit(&p.name, module, index, &mut state, &mut order);
+    let mut cids: Vec<usize> = members.keys().copied().collect();
+    cids.sort();
+    for cid in cids {
+        visit(cid, cm, &members, &mut state, &mut out);
     }
-    Ok(order)
+    out
 }
 
 fn collect_dep_names(body: &[Stmt], out: &mut Vec<String>) {
@@ -113,6 +200,13 @@ fn collect_dep_expr(e: &Expr, out: &mut Vec<String>) {
     });
 }
 
+/// Fully name-blind normal form (no dependency resolution): used by the
+/// loader for cross-file α-equivalence dedup. Conservative: equal forms
+/// calling equal NAMES are the same definition.
+pub fn blind_normal_form(part: &crate::ast::Part) -> String {
+    normalize_part(part, &HashMap::new(), true, &HashMap::new())
+}
+
 // ---- normalization: emit a canonical S-expression string ----
 
 struct Norm<'a> {
@@ -120,13 +214,21 @@ struct Norm<'a> {
     env: Vec<String>,
     self_name: &'a str,
     dep_hashes: &'a HashMap<String, String>,
+    /// intra-SCC peer replacements (empty outside mutual recursion)
+    peers: &'a HashMap<String, String>,
 }
 
-fn normalize_part(part: &Part, dep_hashes: &HashMap<String, String>, with_body: bool) -> String {
+fn normalize_part(
+    part: &Part,
+    dep_hashes: &HashMap<String, String>,
+    with_body: bool,
+    peers: &HashMap<String, String>,
+) -> String {
     let mut n = Norm {
         env: part.params.iter().map(|(p, _)| p.clone()).collect(),
         self_name: &part.name,
         dep_hashes,
+        peers,
     };
     let params: Vec<String> = part.params.iter().map(|(_, t)| format!("{t}")).collect();
     let effects = {
@@ -165,9 +267,14 @@ impl<'a> Norm<'a> {
             match s {
                 Stmt::Let(name, e) => {
                     let ne = self.expr(e);
-                    self.env.push(name.clone());
-                    pushed += 1;
-                    parts.push(format!("(let {ne})"));
+                    if name == "_" {
+                        // discard: no de Bruijn slot
+                        parts.push(format!("(letdrop {ne})"));
+                    } else {
+                        self.env.push(name.clone());
+                        pushed += 1;
+                        parts.push(format!("(let {ne})"));
+                    }
                 }
                 Stmt::Yield(e) => parts.push(format!("(yield {})", self.expr(e))),
                 Stmt::Match(e, arms) => {
@@ -239,6 +346,8 @@ impl<'a> Norm<'a> {
                 let xs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
                 let target = if n == self.self_name {
                     "$self".to_string()
+                } else if let Some(tok) = self.peers.get(n) {
+                    tok.clone()
                 } else {
                     self.dep_hashes
                         .get(n)

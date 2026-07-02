@@ -245,7 +245,9 @@ impl<'a> Emit<'a> {
             match s {
                 Stmt::Let(name, e) => {
                     let t = self.tr(e, &env)?;
-                    env.insert(name.clone(), t);
+                    if name != "_" {
+                        env.insert(name.clone(), t);
+                    }
                 }
                 Stmt::Yield(e) => {
                     let t = self.tr(e, &env)?;
@@ -405,6 +407,36 @@ impl<'a> Emit<'a> {
                     );
                     self.oblige(
                         "measure strictly decreases at recursive call".into(),
+                        format!("(< {m_args} {m_cur})"),
+                    );
+                }
+                // MUTUAL recursion (wave 3): at an intra-SCC call, prove the
+                // callee's measure (over the ARGUMENTS) is bounded below and
+                // strictly below the caller's measure (over current params) —
+                // a shared well-founded order on ℕ licenses assuming the
+                // peer's contract (DEC-LLL-016 extended to components).
+                if self.cm.same_multi_scc(&self.part.name, name) {
+                    let callee_m = callee
+                        .measure
+                        .clone()
+                        .expect("checker guarantees measures inside multi-SCCs");
+                    let caller_m = self
+                        .part
+                        .measure
+                        .clone()
+                        .expect("checker guarantees measures inside multi-SCCs");
+                    let m_args = self.tr_contract(&callee_m, &cenv)?;
+                    let mut penv = HashMap::new();
+                    for (pn, _) in &self.part.params {
+                        penv.insert(pn.clone(), format!("p_{pn}"));
+                    }
+                    let m_cur = self.tr_contract(&caller_m, &penv)?;
+                    self.oblige(
+                        format!("mutual measure of `{name}` is bounded below (>= 0) at call"),
+                        format!("(>= {m_args} 0)"),
+                    );
+                    self.oblige(
+                        format!("mutual measure strictly decreases calling `{name}`"),
                         format!("(< {m_args} {m_cur})"),
                     );
                 }

@@ -134,10 +134,11 @@ fn structural_list_recursion_needs_no_measure() {
 }
 
 #[test]
-fn mutual_recursion_rejected_in_v1() {
+fn mutual_recursion_requires_measures_on_every_member() {
+    // wave 3: mutual recursion is SUPPORTED, but each SCC member needs a measure
     let src = "module T:\n\n  part f(n: Int) -> Int:\n    yield g(n)\n\n  part g(n: Int) -> Int:\n    yield f(n)\n";
     let m = parser::parse_module(src).unwrap();
-    assert!(types::check_module(m).unwrap_err().contains("mutual recursion"));
+    assert!(types::check_module(m).unwrap_err().contains("mutually recursive"));
 }
 
 #[test]
@@ -261,11 +262,11 @@ fn stdlib_fully_verifies() {
 
 #[test]
 fn stdlib_demo_runs_correctly() {
-    let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/list.lll"),
-    )
-    .unwrap();
-    let (cm, _) = full(&src);
+    // loads examples/std_demo.lll which IMPORTS the stdlib — this test covers
+    // the multi-file loader, cross-file verification, and codegen together
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/std_demo.lll");
+    let (_, module) = loader::load_program(path.to_str().unwrap()).expect("load");
+    let cm = types::check_module(module).expect("check");
     let rust = codegen::emit_rust(&cm).unwrap();
     let dir = tempdir();
     let rs = dir.join("std.rs");
@@ -285,4 +286,126 @@ fn stdlib_demo_runs_correctly() {
         vec!["5", "25", "5", "5", "1", "4", "6", "1", "=> 1"],
         "stdlib demo output mismatch"
     );
+}
+
+// ---- wave 3 (REQ-LLL-005): mutual recursion, imports, discard, hints ----
+
+const MUTUAL: &str = "module T:\n\n  part is_even(n: Int) -> Bool:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield true\n      _ -> yield is_odd(n - 1)\n\n  part is_odd(n: Int) -> Bool:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield false\n      _ -> yield is_even(n - 1)\n";
+
+#[test]
+fn mutual_recursion_verifies_with_measures() {
+    let r = verify_src(MUTUAL);
+    assert!(r.ok(), "mutual is_even/is_odd must verify: {:?}", failures(&r));
+}
+
+#[test]
+fn mutual_recursion_without_measure_rejected() {
+    let src = MUTUAL.replace("    measure n\n    match n:\n      0 -> yield false", "    match n:\n      0 -> yield false");
+    let m = parser::parse_module(&src).unwrap();
+    let e = types::check_module(m).unwrap_err();
+    assert!(e.contains("mutually recursive"), "got: {e}");
+}
+
+#[test]
+fn mutual_non_decreasing_call_fails_z3() {
+    let src = "module T:\n\n  part ping(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 0\n      _ -> yield pong(n)\n\n  part pong(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 0\n      _ -> yield ping(n - 1)\n";
+    assert!(!verify_src(src).ok(), "ping->pong(n) must fail cross-decrease");
+}
+
+#[test]
+fn mutual_scc_hash_is_rename_invariant() {
+    let renamed = hash::rename_part_in_source(MUTUAL, "is_odd", "odd_p").unwrap();
+    let (_, h1) = full(MUTUAL);
+    let (_, h2) = full(&renamed);
+    assert_eq!(h1.def_hash["is_even"], h2.def_hash["is_even"]);
+    assert_eq!(h1.def_hash["is_odd"], h2.def_hash["odd_p"]);
+}
+
+#[test]
+fn scc_dissolution_changes_proof_hash() {
+    // The precise scenario motivating the `mut:` proof marker: ping's BODY and
+    // pong's CONTRACT are identical in both versions — only pong's body
+    // changes (calls ping back vs. self-recurses). Without the marker,
+    // ping's proof key would be unchanged while its proof obligations differ
+    // (mutual cross-decrease present vs. absent).
+    let ping = "  part ping(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 0\n      _ -> yield ping(n - 1) + pong(n - 1)\n\n";
+    let pong_cyclic = "  part pong(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 0\n      _ -> yield ping(n - 1)\n";
+    let pong_solo = "  part pong(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 0\n      _ -> yield pong(n - 1)\n";
+    let cyclic = format!("module T:\n\n{ping}{pong_cyclic}");
+    let dissolved = format!("module T:\n\n{ping}{pong_solo}");
+    let (_, h1) = full(&cyclic);
+    let (_, h2) = full(&dissolved);
+    // pong's contract is identical across versions…
+    assert_eq!(h1.contract_hash["pong"], h2.contract_hash["pong"]);
+    // …yet ping must be re-keyed because its call became/stopped being mutual
+    assert_ne!(h1.proof_hash["ping"], h2.proof_hash["ping"], "mut: marker must re-key the caller");
+    // and both versions actually verify
+    assert!(verify_src(&cyclic).ok());
+    assert!(verify_src(&dissolved).ok());
+}
+
+#[test]
+fn let_discard_evaluates_without_binding() {
+    let src = "module T:\n\n  part f() -> Int via IO:\n    let _ = IO.print(7)\n    yield 1\n";
+    assert!(verify_src(src).ok());
+    // and `_` must not be referenceable
+    let bad = "module T:\n\n  part f() -> Int via IO:\n    let _ = IO.print(7)\n    yield _\n";
+    assert!(parser::parse_module(bad).is_err());
+}
+
+#[test]
+fn hints_for_capitalized_bool_and_binder_scope() {
+    let m = parser::parse_module("module T:\n\n  part f(n: Int) -> Bool:\n    yield True\n").unwrap();
+    let e = types::check_module(m).unwrap_err();
+    assert!(e.contains("lowercase"), "got: {e}");
+    let m2 = parser::parse_module(
+        "module T:\n\n  part f(x: Int) -> Int:\n    match x:\n      v when v > 0 -> yield v\n      _ -> yield v\n",
+    )
+    .unwrap();
+    let e2 = types::check_module(m2).unwrap_err();
+    assert!(e2.contains("pattern binder"), "got: {e2}");
+}
+
+#[test]
+fn imports_merge_dedup_and_reject_conflicts() {
+    let dir = tempdir().join("imp");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.lll"), "module L:\n\n  part twice(v: Int) -> Int:\n    yield v + v\n").unwrap();
+    // α-equivalent duplicate -> dedup, program verifies
+    std::fs::write(
+        dir.join("ok.lll"),
+        "import \"lib.lll\"\n\nmodule M:\n\n  part twice(x: Int) -> Int:\n    yield x + x\n\n  part main() -> Int via IO:\n    yield IO.print(twice(21))\n",
+    )
+    .unwrap();
+    let (_, module) = loader::load_program(dir.join("ok.lll").to_str().unwrap()).unwrap();
+    assert_eq!(module.parts.iter().filter(|p| p.name == "twice").count(), 1);
+    // conflicting definition -> error
+    std::fs::write(
+        dir.join("bad.lll"),
+        "import \"lib.lll\"\n\nmodule M:\n\n  part twice(x: Int) -> Int:\n    yield x * 3\n",
+    )
+    .unwrap();
+    assert!(loader::load_program(dir.join("bad.lll").to_str().unwrap()).is_err());
+    // cycle -> error
+    std::fs::write(dir.join("x.lll"), "import \"y.lll\"\n\nmodule X:\n\n  part fx(a: Int) -> Int:\n    yield a\n").unwrap();
+    std::fs::write(dir.join("y.lll"), "import \"x.lll\"\n\nmodule Y:\n\n  part fy(a: Int) -> Int:\n    yield a\n").unwrap();
+    assert!(loader::load_program(dir.join("x.lll").to_str().unwrap()).is_err());
+}
+
+#[test]
+fn imported_defs_keep_their_identity() {
+    // a definition has the same hash whether local or imported (DEC-LLL-019)
+    let dir = tempdir().join("ident");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib2.lll"), "module L:\n\n  part inc(v: Int) -> Int:\n    yield v + 1\n").unwrap();
+    std::fs::write(
+        dir.join("use.lll"),
+        "import \"lib2.lll\"\n\nmodule M:\n\n  part main() -> Int via IO:\n    yield IO.print(inc(41))\n",
+    )
+    .unwrap();
+    let (_, imported) = loader::load_program(dir.join("use.lll").to_str().unwrap()).unwrap();
+    let cm_i = types::check_module(imported).unwrap();
+    let hm_i = hash::hash_module(&cm_i).unwrap();
+    let (_, h_local) = full("module M:\n\n  part inc(v: Int) -> Int:\n    yield v + 1\n");
+    assert_eq!(hm_i.def_hash["inc"], h_local.def_hash["inc"]);
 }

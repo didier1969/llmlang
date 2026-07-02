@@ -6,7 +6,6 @@
 
 use crate::explain;
 use crate::hash::{self, HashedModule};
-use crate::parser;
 use crate::types::{self, CheckedModule};
 use crate::vc;
 use serde_json::{json, Value};
@@ -113,8 +112,7 @@ fn tools_list() -> Value {
 }
 
 fn load(file: &str) -> Result<(String, CheckedModule, HashedModule), String> {
-    let src = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
-    let m = parser::parse_module(&src)?;
+    let (src, m) = crate::loader::load_program(file)?;
     let cm = types::check_module(m)?;
     let hm = hash::hash_module(&cm)?;
     Ok((src, cm, hm))

@@ -179,6 +179,9 @@ fn verdict_str(ctx: &AuditCtx, part: &str) -> String {
 
 fn part_span(src: &str, cm: &CheckedModule, name: &str) -> Option<String> {
     let p = find_part(cm, name)?;
+    if let Some(origin) = &p.origin {
+        return Some(format!("(defined in imported file {origin})"));
+    }
     let start = p.line;
     // end = line before next part, or EOF
     let end = cm

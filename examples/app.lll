@@ -1,0 +1,19 @@
+import "../std/list.lll"
+
+module Demo.App:
+
+  # uses the imported stdlib — definitions keep their identity across files
+  part range_sum(n: Int) -> Int:
+    requires n >= 0
+    ensures  result >= 0
+    measure n
+    match n:
+      0 -> yield 0
+      _ -> yield n + range_sum(n - 1)
+
+  part main() -> Int via IO:
+    let xs = 10 :: 20 :: 30 :: []
+    let a = IO.print(sum(xs))            # 60
+    let b = IO.print(len(reverse(xs)))   # 3
+    let c = IO.print(maximum(xs, 0))     # 30
+    yield IO.print(range_sum(4) + nth(xs, 1, 0 - 1))  # 10 + 20 = 30

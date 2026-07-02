@@ -1,0 +1,16 @@
+import "../std/list.lll"
+
+module Std.Demo:
+
+  part main() -> Int via IO:
+    let base  = [3, 1, 4, 1, 5]
+    let l  = IO.print(len(base))                      # 5
+    let s  = IO.print(sum(append(base, [9, 2])))      # 14 + 11 = 25
+    let r  = IO.print(nth(reverse(base), 0, 0 - 1))   # first of reversed = 5
+    let mx = IO.print(maximum(base, 0))               # 5
+    let mn = IO.print(minimum(base, 99))              # 1
+    let tk = IO.print(sum(take(base, 2)))             # 3 + 1 = 4
+    let dr = IO.print(sum(drop(base, 3)))             # 1 + 5 = 6
+    match contains(base, 4):
+      true  -> yield IO.print(1)                      # 1
+      false -> yield IO.print(0)

@@ -61,6 +61,20 @@ impl Parser {
 
     fn module(&mut self) -> Result<Module, String> {
         self.skip_newlines();
+        let mut imports = Vec::new();
+        while self.peek() == &Tok::Import {
+            self.pos += 1;
+            match self.bump() {
+                Tok::Str(path) => imports.push(path),
+                other => {
+                    return Err(self.err(&format!(
+                        "expected a quoted path after `import`, found {other:?}"
+                    )))
+                }
+            }
+            self.eat(Tok::Newline)?;
+            self.skip_newlines();
+        }
         self.eat(Tok::Module)?;
         let name = match self.bump() {
             Tok::Ident(s) | Tok::Dotted(s) => s,
@@ -82,7 +96,11 @@ impl Parser {
                 other => return Err(self.err(&format!("expected `part`, found {other:?}"))),
             }
         }
-        Ok(Module { name, parts })
+        Ok(Module {
+            name,
+            imports,
+            parts,
+        })
     }
 
     fn part(&mut self) -> Result<Part, String> {
@@ -165,6 +183,7 @@ impl Parser {
             measure,
             body,
             line,
+            origin: None,
         })
     }
 
@@ -176,7 +195,14 @@ impl Parser {
             match self.peek() {
                 Tok::Let => {
                     self.pos += 1;
-                    let n = self.ident()?;
+                    // `let _ = e` — discard binding: evaluate (effects included),
+                    // bind nothing (wave-3 lesson from the model bench, REQ-LLL-005)
+                    let n = if self.peek() == &Tok::Underscore {
+                        self.pos += 1;
+                        "_".to_string()
+                    } else {
+                        self.ident()?
+                    };
                     self.eat(Tok::Assign)?;
                     let e = self.expr()?;
                     self.eat(Tok::Newline)?;

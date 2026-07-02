@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     pub name: String,
+    /// `import "relative/path.lll"` clauses (resolved by the loader)
+    #[serde(default)]
+    pub imports: Vec<String>,
     pub parts: Vec<Part>,
 }
 
@@ -23,6 +26,10 @@ pub struct Part {
     pub body: Vec<Stmt>,
     /// 1-based source line of the `part` keyword (diagnostics only, erased from hash).
     pub line: usize,
+    /// file this part was imported from (None = main file). Diagnostics only,
+    /// erased from hash like `line`.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

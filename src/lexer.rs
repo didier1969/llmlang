@@ -9,11 +9,14 @@ pub enum Tok {
     Dedent,
     // literals & names
     Int(i64),
+    /// double-quoted string (imports only in v1.2; no escapes)
+    Str(String),
     Ident(String),
     /// Dotted name, e.g. `IO.print`, `Pricing.Quote`.
     Dotted(String),
     // keywords
     Module,
+    Import,
     Part,
     Requires,
     Ensures,
@@ -190,6 +193,18 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                     i += 1;
                 }
             }
+            '"' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && b[j] != b'"' {
+                    j += 1;
+                }
+                if j >= b.len() {
+                    return Err(format!("line {line}: unterminated string"));
+                }
+                push(out, Tok::Str(s[start..j].to_string()));
+                i = j + 1;
+            }
             '0'..='9' => {
                 let start = i;
                 while i < b.len() && b[i].is_ascii_digit() {
@@ -236,6 +251,7 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
     let w = &s[start..i];
     let tok = match w {
         "module" => Tok::Module,
+        "import" => Tok::Import,
         "part" => Tok::Part,
         "requires" => Tok::Requires,
         "ensures" => Tok::Ensures,

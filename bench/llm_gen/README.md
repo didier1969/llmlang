@@ -41,6 +41,10 @@ other languages, not a contract-semantics error:
 
 This *inverts* the expected failure mode (contract semantics, per arxiv
 2503.01245) and supports CPT-LLL-009: structural validation + a restricted
-decidable fragment make verified-correct generation the easy path. Product
-lessons filed in SOLL (wave-3 candidates): support `let _ =` discard; add
-did-you-mean hints for `True`→`true` and out-of-scope pattern binders.
+decidable fragment make verified-correct generation the easy path.
+
+**Measure→product loop closed (wave 3):** `let _ =` discard is now legal and
+both hint messages ship in the checker. Re-scoring the UNCHANGED solutions
+under language v1.3: claude-haiku-4-5 12/15 → **14/15** (t5/t10 now valid);
+remaining failures (t8 `True`, opus t1 binder scope) now fail with a
+did-you-mean hint, feeding the repair loop.

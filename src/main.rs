@@ -22,8 +22,7 @@ fn usage() -> String {
 }
 
 fn load(path: &str) -> Result<(String, types::CheckedModule, hash::HashedModule), String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let module = parser::parse_module(&src)?;
+    let (src, module) = loader::load_program(path)?;
     let cm = types::check_module(module)?;
     let hm = hash::hash_module(&cm)?;
     Ok((src, cm, hm))
@@ -132,6 +131,11 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             let (src, cm, hm) = load(file)?;
             if !cm.index.contains_key(*old) {
                 return Err(format!("unknown part `{old}`"));
+            }
+            if let Some(origin) = &cm.module.parts[cm.index[*old]].origin {
+                return Err(format!(
+                    "`{old}` is defined in imported file {origin} — run the rename there                      (cross-file rename lands with workspace resolution, wave 4)"
+                ));
             }
             if cm.index.contains_key(*new) {
                 return Err(format!("a part named `{new}` already exists"));
