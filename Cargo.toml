@@ -1,0 +1,19 @@
+[package]
+name = "lllc"
+version = "0.1.0"
+edition = "2021"
+description = "llmlang compiler — LLM-first language: hash-identity, algebraic effects, Z3-verified contracts, Rust backend"
+license = "MIT"
+
+[[bin]]
+name = "lll"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true

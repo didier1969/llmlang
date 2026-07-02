@@ -1,0 +1,5 @@
+/target
+/vendor/z3
+*.zip
+/.lll-cache
+/build

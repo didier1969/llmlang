@@ -1,0 +1,15 @@
+module Gen.T4:
+
+  part max3(a: Int, b: Int, c: Int) -> Int:
+    ensures result >= a, result >= b, result >= c
+    ensures result == a or result == b or result == c
+    match a:
+      v when v >= b and v >= c -> yield a
+      _ ->
+        match b:
+          w when w >= c -> yield b
+          _             -> yield c
+
+  part main() -> Int via IO:
+    let m = IO.print(max3(3, 9, 5))
+    yield m

@@ -1,0 +1,39 @@
+module Demo.Core:
+
+  # arithmetic with a verified contract
+  part add_pos(a: Int, b: Int) -> Int:
+    requires a >= 0, b >= 0
+    ensures  result >= a, result >= b
+    yield a + b
+
+  # measured recursion (Euclid) — termination discharged by Z3 (DEC-LLL-016)
+  part gcd(a: Int, b: Int) -> Int:
+    requires a >= 0, b >= 0
+    ensures  result >= 0
+    measure b
+    match b:
+      0 -> yield a
+      _ -> yield gcd(b, a mod b)
+
+  # structural recursion on a list — no solver needed for termination
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  # guards + first-match semantics, fully verified
+  part clamp(x: Int, lo: Int, hi: Int) -> Int:
+    requires lo <= hi
+    ensures  lo <= result, result <= hi
+    match x:
+      v when v < lo -> yield lo
+      v when v > hi -> yield hi
+      _             -> yield x
+
+  # effects at the edges (DEC-LLL-003): reads traced, replayable
+  part main() -> Int via IO:
+    let n = IO.read()
+    let d = IO.print(add_pos(clamp(n, 0, 100), 8))
+    let s = IO.print(sum([1, 2, 3, 4]))
+    let g = IO.print(gcd(126, 84))
+    yield g

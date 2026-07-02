@@ -1,0 +1,15 @@
+module Demo.Bench:
+
+  # naive doubly-recursive fib: the CPU benchmark kernel (target 2, DEC-LLL-022)
+  part fib(n: Int) -> Int:
+    requires n >= 0
+    ensures  result >= 0
+    measure n
+    match n:
+      0 -> yield 0
+      1 -> yield 1
+      _ -> yield fib(n - 1) + fib(n - 2)
+
+  part main() -> Int via IO:
+    let r = IO.print(fib(40))
+    yield r

@@ -1,0 +1,9 @@
+module Gen.T5:
+
+  part echo_double() -> Int via IO:
+    let n = IO.read()
+    let d = IO.print(n * 2)
+    yield d
+
+  part main() -> Int via IO:
+    yield echo_double()
