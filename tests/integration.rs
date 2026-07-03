@@ -1610,3 +1610,104 @@ fn effect_generic_part_has_stable_rename_identity() {
     let (_, h2) = full(&renamed);
     assert_eq!(h1.def_hash["apply"], h2.def_hash["run"], "effect-generic rename changed identity");
 }
+
+// ===================================================================
+// Coverage completion — every distinct code path exercised during the
+// adversarial edge-case audit, promoted to a permanent regression guard
+// (feature × command combinations Z3 does not check).
+// ===================================================================
+
+#[test]
+fn effect_generic_multi_effect_row_instantiation() {
+    // a HOF instantiated at a MULTI-effect row (State AND Reader): the
+    // specialization threads BOTH evidence params, in the fixed order.
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part both(n: Int) -> Int via State, Reader:\n    let o = State.get()\n    let env = Reader.ask()\n    let _ = State.put(o + 1)\n    yield n + o + env\n\n  part run() -> Int via State, Reader:\n    yield apply(both, 5)\n\n  part inner() -> Int via Reader:\n    handle run() with State from 10:\n      return r -> yield r\n\n  part main() -> Int:\n    handle inner() with Reader from 1000:\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "multi-effect-row HOF must verify");
+    assert!(build_run(src).contains("=> 1015"), "multi-effect row instantiation wrong");
+}
+
+#[test]
+fn tuple_flows_through_user_effect_op() {
+    // cross-feature: a tuple as a user tail-resumptive op's parameter AND return
+    // type (capability `fn((i64,i64)) -> (i64,i64)`), destructured in the clause.
+    let src = "module T:\n\n  effect Pair:\n    swap((Int, Int)) -> (Int, Int)\n\n  part work() -> Int via Pair:\n    let p = Pair.swap((3, 7))\n    match p:\n      (a, b) -> yield a * 10 + b\n\n  part main() -> Int:\n    handle work() with Pair:\n      swap(q) ->\n        match q:\n          (a, b) -> yield (b, a)\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "tuple-in-user-effect-op must verify");
+    assert!(build_run(src).contains("=> 73"), "tuple through user effect op wrong");
+}
+
+#[test]
+fn effect_generic_hof_over_tuple_function() {
+    // cross-feature: an effect-generic HOF whose function takes a tuple, at a State row.
+    let src = "module T:\n\n  part apply(f: ((Int, Int)) -> Int, p: (Int, Int)) -> Int via e:\n    yield f(p)\n\n  part addpair(q: (Int, Int)) -> Int via State:\n    let o = State.get()\n    let _ = State.put(o + 1)\n    match q:\n      (a, b) -> yield a + b + o\n\n  part run() -> Int via State:\n    yield apply(addpair, (4, 6))\n\n  part main() -> Int:\n    handle run() with State from 100:\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "tuple-fn HOF must verify");
+    assert!(build_run(src).contains("=> 110"), "effect-generic HOF over tuple fn wrong");
+}
+
+#[test]
+fn effect_generic_two_instantiations_coexist() {
+    // the SAME HOF specialized at two different rows (pure + State) in one program.
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part dbl(n: Int) -> Int:\n    yield n * 2\n\n  part bump(n: Int) -> Int via State:\n    let o = State.get()\n    let _ = State.put(o + 1)\n    yield n + o\n\n  part run() -> Int via State:\n    let a = apply(dbl, 10)\n    let b = apply(bump, 100)\n    yield a + b\n\n  part main() -> Int:\n    handle run() with State from 5:\n      return r -> yield r\n";
+    assert!(build_run(src).contains("=> 125"), "two coexisting instantiations wrong");
+}
+
+#[test]
+fn effect_generic_let_bound_application() {
+    // the row function applied in a non-tail `let` position (evidence still threaded).
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    let y = f(x)\n    yield y + y\n\n  part bump(n: Int) -> Int via State:\n    let o = State.get()\n    let _ = State.put(o + 1)\n    yield n + o\n\n  part run() -> Int via State:\n    yield apply(bump, 10)\n\n  part main() -> Int:\n    handle run() with State from 3:\n      return r -> yield r\n";
+    assert!(build_run(src).contains("=> 26"), "let-bound application wrong");
+}
+
+#[test]
+fn effect_generic_pure_lambda_argument() {
+    // a pure lambda as the function argument → the pure specialization.
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part main() -> Int:\n    yield apply(\\(n: Int) -> n + 100, 5)\n";
+    assert!(build_run(src).contains("=> 105"), "pure lambda argument wrong");
+}
+
+#[test]
+fn user_effect_multi_op_handler_runs() {
+    // a user tail-resumptive effect with TWO ops, both interpreted by the handler.
+    let src = "module T:\n\n  effect Two:\n    one(Int) -> Int\n    two(Int) -> Int\n\n  part w() -> Int via Two:\n    yield Two.one(3) + Two.two(4)\n\n  part main() -> Int:\n    handle w() with Two:\n      one(n) -> yield n + 1\n      two(n) -> yield n * 10\n      return r -> yield r\n";
+    assert!(build_run(src).contains("=> 44"), "multi-op user handler wrong");
+}
+
+#[test]
+fn nested_tuple_projection_is_sound() {
+    // soundness through NESTING: `((a, b), c)` — a correct deep projection proves,
+    // a wrong one must not (and runs faithfully).
+    let ok = "module T:\n\n  part deep(a: Int, b: Int, c: Int) -> Int:\n    ensures result == a\n    match ((a, b), c):\n      (inner, z) ->\n        match inner:\n          (x, y) -> yield x\n\n  part main() -> Int:\n    yield deep(9, 8, 7)\n";
+    assert!(verify_src(ok).ok(), "nested tuple projection must prove");
+    assert!(build_run(ok).contains("=> 9"), "nested tuple runtime wrong");
+    let bad = ok.replace("result == a", "result == b");
+    assert!(!verify_src(&bad).ok(), "wrong nested projection MUST NOT prove (soundness)");
+}
+
+#[test]
+fn tuple_in_measure_is_rejected() {
+    // a `measure` component must be an Int expression — a tuple measure is rejected.
+    let src = "module T:\n\n  part f(p: (Int, Int)) -> Int:\n    measure p\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("tuple measure must be rejected");
+    assert!(err.contains("measure component must be an Int"), "unexpected error: {err}");
+}
+
+#[test]
+fn rationale_add_show_round_trips() {
+    // the `rationale` command: attach an explanation to a part and read it back.
+    let dir = tempdir().join("rationale");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("m.lll");
+    std::fs::write(&lll, "module M:\n\n  part inc(n: Int) -> Int:\n    yield n + 1\n").unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let add = std::process::Command::new(bin)
+        .args(["rationale", "add", lll.to_str().unwrap(), "inc", "adds one to n"])
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "rationale add failed: {}", String::from_utf8_lossy(&add.stderr));
+    let show = std::process::Command::new(bin)
+        .args(["rationale", "show", lll.to_str().unwrap(), "inc"])
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "rationale show failed: {}", String::from_utf8_lossy(&show.stderr));
+    assert!(String::from_utf8_lossy(&show.stdout).contains("adds one to n"), "rationale not round-tripped");
+}
