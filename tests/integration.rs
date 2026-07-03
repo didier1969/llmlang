@@ -1269,6 +1269,21 @@ fn build_run(src: &str) -> String {
 }
 
 #[test]
+fn borrow_model_traverses_shared_list_and_adt_read_only() {
+    // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
+    // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
+    // traversal then costs NO per-node refcount (the listsum 4x→0.9x C win). This
+    // guards the borrow paths end to end: an owned local borrowed at a call site,
+    // a borrowed param re-borrowed in a recursive call, a borrowed ADT param, and a
+    // temp-borrow of a freshly constructed value. Correctness is the invariant here
+    // (the perf itself lives in bench/cspeed/RESULTS.md).
+    let src = "module Borrow:\n\n  type Tree = Leaf(Int) | Br(Tree, Tree)\n\n  part build(n: Int) -> List[Int]:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield []\n      _ -> yield n :: build(n - 1)\n\n  part sum(xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield 0\n      h :: t -> yield h + sum(t)\n\n  part twice(xs: List[Int]) -> Int:\n    yield sum(xs) + sum(xs)\n\n  part leaves(tr: Tree) -> Int:\n    match tr:\n      Leaf(v)  -> yield v\n      Br(l, r) -> yield leaves(l) + leaves(r)\n\n  part main() -> Int via IO:\n    let xs = build(100)\n    let a = twice(xs)\n    let b = leaves(Br(Br(Leaf(3), Leaf(4)), Leaf(5)))\n    yield IO.print(a + b)\n";
+    // twice(build(100)) = 2 * (1+…+100) = 10100 ; leaves = 3+4+5 = 12 → 10112
+    let out = build_run(src);
+    assert!(out.contains("10112"), "expected 10112, got: {out}");
+}
+
+#[test]
 fn tuple_projection_is_proven_faithful() {
     // the vc must PROVE `result == a` where result is proj0 of (a, b)
     let src = "module T:\n\n  part fst(a: Int, b: Int) -> Int:\n    ensures result == a\n    match (a, b):\n      (x, y) -> yield x\n";

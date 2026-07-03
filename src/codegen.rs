@@ -121,9 +121,29 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         row.dedup();
         part_row.insert(part.name.clone(), row);
     }
+    // borrow model (DEC-LLL-031 voie B): a part NEVER used as a first-class value
+    // borrows its List/ADT parameters (`&Rc<…>`) so a read-only traversal costs no
+    // per-node refcount; a part used as a value keeps them owned (stable fn-pointer
+    // type). `borrow_mask[part][i]` = the i-th parameter is a borrow site.
+    let mut used_as_value: Names = std::collections::HashSet::new();
+    for part in &cm.module.parts {
+        collect_value_names(&part.body, &parts, &mut used_as_value);
+    }
+    let borrows: Names = parts.difference(&used_as_value).cloned().collect();
+    let mut borrow_mask: std::collections::HashMap<String, Vec<bool>> =
+        std::collections::HashMap::new();
+    for part in &cm.module.parts {
+        let b = borrows.contains(&part.name);
+        borrow_mask.insert(
+            part.name.clone(),
+            part.params.iter().map(|(_, t)| b && is_heap(t)).collect(),
+        );
+    }
     let g = Globals {
         ctors: &ctors,
         parts: &parts,
+        borrows: &borrows,
+        borrow_mask: &borrow_mask,
         abort: &abort,
         stateful: &stateful,
         readerful: &readerful,
@@ -229,6 +249,54 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
 
 fn mangle(name: &str) -> String {
     format!("lll_{name}")
+}
+
+/// A value whose Rust representation is `Rc`-backed (reference-counted): lists and
+/// user ADTs (DEC-LLL-018). Passing such a value by reference lets a read-only
+/// traversal skip the per-node refcount inc/dec (DEC-LLL-031 voie B) — every other
+/// type (Int/Bool/Unit/Fun/Tuple/type-var) is Copy or moved, with no refcount.
+fn is_heap(t: &Ty) -> bool {
+    matches!(t, Ty::List(_) | Ty::User(_))
+}
+
+/// Collect the names of parts USED AS A FIRST-CLASS VALUE — a bare `Expr::Var`
+/// naming a part (passed to a HOF, coerced to a fn pointer). Such a part must keep
+/// OWNED heap parameters so its fn-pointer type `fn(Lst<…>) -> …` is stable; every
+/// other part borrows its List/ADT params (DEC-LLL-031). A direct call `f(x)` is
+/// `Expr::Call` (the name is a field, not a `Var`), so it never marks `f` here.
+fn collect_value_names(body: &[Stmt], parts: &Names, out: &mut Names) {
+    fn on_expr(e: &Expr, parts: &Names, out: &mut Names) {
+        e.walk(&mut |x| {
+            if let Expr::Var(n) = x {
+                if parts.contains(n) {
+                    out.insert(n.clone());
+                }
+            }
+        });
+    }
+    for s in body {
+        match s {
+            Stmt::Let(_, e) | Stmt::Yield(e) => on_expr(e, parts, out),
+            Stmt::Match(scr, arms) => {
+                on_expr(scr, parts, out);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        on_expr(g, parts, out);
+                    }
+                    collect_value_names(&a.body, parts, out);
+                }
+            }
+            Stmt::Handle(h) => {
+                on_expr(&h.call, parts, out);
+                if let Some(f) = &h.from {
+                    on_expr(f, parts, out);
+                }
+                for c in &h.clauses {
+                    collect_value_names(&c.body, parts, out);
+                }
+            }
+        }
+    }
 }
 
 /// The in-scope Rust variable name for a user tail-resumptive capability, keyed
@@ -360,10 +428,22 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
             .collect();
         format!("<{}>", bounds.join(", "))
     };
+    // borrow model (DEC-LLL-031): if this part is not used as a first-class value,
+    // its List/ADT parameters are taken by reference (`&Rc<…>`) — a read-only
+    // traversal then costs no per-node refcount. Those names are the seed `refs`.
+    let this_borrows = g.borrows.contains(&part.name);
+    let mut refs: Names = std::collections::HashSet::new();
     let mut params: Vec<String> = part
         .params
         .iter()
-        .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
+        .map(|(n, t)| {
+            if this_borrows && is_heap(t) {
+                refs.insert(n.clone());
+                format!("{}: &{}", local(n), rs_ty(t))
+            } else {
+                format!("{}: {}", local(n), rs_ty(t))
+            }
+        })
         .collect();
     // a part whose row carries an abort effect returns `Result<Ret, i64>` — the
     // abort payload is the raised Int; a raise compiles to an early `Err`, and
@@ -420,6 +500,9 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         fns: &fns,
         ctors: g.ctors,
         parts: g.parts,
+        borrows: g.borrows,
+        borrow_mask: g.borrow_mask,
+        refs,
         abort: g.abort,
         extern_ops: g.extern_ops,
         abort_ops: g.abort_ops,
@@ -481,6 +564,11 @@ fn emit_specialized_part(
         .find(|(_, t)| matches!(t, Ty::Fun(..)))
         .map(|(n, _)| n.clone())
         .expect("effect-generic part has a function param");
+    // borrow model (DEC-LLL-031): an effect-generic part is never used as a value,
+    // so it borrows its List/ADT non-function parameters (`&Rc<…>`) like a plain
+    // part; the row-carrying function parameter is unaffected (it is a fn pointer).
+    let this_borrows = g.borrows.contains(&part.name);
+    let mut refs: Names = std::collections::HashSet::new();
     let mut params: Vec<String> = Vec::new();
     for (n, t) in &part.params {
         match t {
@@ -495,6 +583,10 @@ fn emit_specialized_part(
                     rs_ty(ret0)
                 };
                 params.push(format!("{}: fn({}) -> {}", local(n), ats.join(", "), r));
+            }
+            _ if this_borrows && is_heap(t) => {
+                refs.insert(n.clone());
+                params.push(format!("{}: &{}", local(n), rs_ty(t)));
             }
             _ => params.push(format!("{}: {}", local(n), rs_ty(t))),
         }
@@ -539,6 +631,9 @@ fn emit_specialized_part(
         fns: &fns,
         ctors: g.ctors,
         parts: g.parts,
+        borrows: g.borrows,
+        borrow_mask: g.borrow_mask,
+        refs,
         abort: g.abort,
         extern_ops: g.extern_ops,
         abort_ops: g.abort_ops,
@@ -584,6 +679,10 @@ type PartCaps = std::collections::HashMap<String, Vec<CapSig>>;
 struct Globals<'a> {
     ctors: &'a Names,
     parts: &'a Names,
+    /// parts that BORROW their List/ADT parameters (not used as a value) — DEC-LLL-031
+    borrows: &'a Names,
+    /// part name → per-parameter borrow mask (position i is a `&Rc<…>` borrow site)
+    borrow_mask: &'a std::collections::HashMap<String, Vec<bool>>,
     abort: &'a Names,
     stateful: &'a Names,
     readerful: &'a Names,
@@ -607,10 +706,19 @@ struct Globals<'a> {
     part_row: &'a std::collections::HashMap<String, Vec<String>>,
 }
 
+#[derive(Clone)]
 struct Cx<'a> {
     fns: &'a Names,
     ctors: &'a Names,
     parts: &'a Names,
+    /// parts that borrow their List/ADT parameters (DEC-LLL-031)
+    borrows: &'a Names,
+    /// part name → per-parameter borrow mask (for borrowing heap args at call sites)
+    borrow_mask: &'a std::collections::HashMap<String, Vec<bool>>,
+    /// value names currently bound to a `&Rc<…>` REFERENCE (borrowed heap params +
+    /// list/ADT pattern binders) — a borrow-mode use emits the name bare, an owned
+    /// use `.clone()`s it (deref-clone → owned `Rc`). DEC-LLL-031 voie B.
+    refs: Names,
     abort: &'a Names,
     /// dotted op name → bound Rust function path (FFI, REQ-LLL-022)
     extern_ops: &'a std::collections::HashMap<String, String>,
@@ -730,6 +838,9 @@ fn emit_body(
                     fns: cx.fns,
                     ctors: cx.ctors,
                     parts: cx.parts,
+                    borrows: cx.borrows,
+                    borrow_mask: cx.borrow_mask,
+                    refs: cx.refs.clone(),
                     abort: cx.abort,
                     extern_ops: cx.extern_ops,
                     abort_ops: cx.abort_ops,
@@ -796,11 +907,15 @@ fn emit_body(
                         rs_ty(&sig.ret),
                         ps.join(", ")
                     ));
-                    // capture-free context: no evidence, no in-scope caps
+                    // capture-free context: no evidence, no in-scope caps, no
+                    // borrowed enclosing locals (a capability is a non-capturing fn)
                     let clause_cx = Cx {
                         fns: cx.fns,
                         ctors: cx.ctors,
                         parts: cx.parts,
+                        borrows: cx.borrows,
+                        borrow_mask: cx.borrow_mask,
+                        refs: Names::new(),
                         abort: cx.abort,
                         extern_ops: cx.extern_ops,
                         abort_ops: cx.abort_ops,
@@ -829,6 +944,9 @@ fn emit_body(
                     fns: cx.fns,
                     ctors: cx.ctors,
                     parts: cx.parts,
+                    borrows: cx.borrows,
+                    borrow_mask: cx.borrow_mask,
+                    refs: cx.refs.clone(),
                     abort: cx.abort,
                     extern_ops: cx.extern_ops,
                     abort_ops: cx.abort_ops,
@@ -901,10 +1019,17 @@ fn emit_match(
     let is_boxed = arms
         .iter()
         .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..) | Pattern::Ctor(..)));
-    let s = expr(scrut, cx, res)?;
+    // a boxed (list/ADT) scrutinee is BORROWED and matched through `&**` — a
+    // read-only view of the enum with NO refcount bump (DEC-LLL-031 voie B);
+    // scalars/tuples keep the owned by-value match.
+    let s = if is_boxed {
+        borrowed(scrut, cx, res)?
+    } else {
+        expr(scrut, cx, res)?
+    };
     if is_boxed {
         out.push_str(&format!(
-            "{}let __s = {s};\n{}match &*__s {{\n",
+            "{}let __s = {s};\n{}match &**__s {{\n",
             indent(depth),
             indent(depth)
         ));
@@ -913,6 +1038,25 @@ fn emit_match(
     }
     let d = depth + 1;
     for arm in arms {
+        // list/ADT binders are references into the borrowed scrutinee (`&Field`).
+        // Record them so a borrow-mode use emits them bare and an owned use
+        // `.clone()`s them (deref-clone → owned `Rc`). We no longer eagerly clone
+        // every binder — that eager clone WAS the per-node refcount cost.
+        let mut arm_cx = cx.clone();
+        if is_boxed {
+            match &arm.pattern {
+                Pattern::Cons(h, t) => {
+                    arm_cx.refs.insert(h.clone());
+                    arm_cx.refs.insert(t.clone());
+                }
+                Pattern::Ctor(_, binders) => {
+                    for b in binders {
+                        arm_cx.refs.insert(b.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
         let pat = match &arm.pattern {
             Pattern::IntLit(v) => format!("{v}"),
             Pattern::BoolLit(v) => format!("{v}"),
@@ -937,27 +1081,11 @@ fn emit_match(
             }
         };
         let guard = match &arm.guard {
-            Some(g) => format!(" if {}", expr(g, cx, res)?),
+            Some(g) => format!(" if {}", expr(g, &arm_cx, res)?),
             None => String::new(),
         };
         out.push_str(&format!("{}{pat}{guard} => {{\n", indent(d)));
-        // rebind list pattern names to owned values (clone: the element type
-        // may be a generic T that is Clone but not Copy — REQ-LLL-007)
-        match &arm.pattern {
-            Pattern::Cons(h, t) => {
-                let (hh, tt) = (local(h), local(t));
-                out.push_str(&format!("{ind}let {hh} = {hh}.clone();\n", ind = indent(d + 1)));
-                out.push_str(&format!("{ind}let {tt} = {tt}.clone();\n", ind = indent(d + 1)));
-            }
-            Pattern::Ctor(_, binders) => {
-                for b in binders {
-                    let bb = local(b);
-                    out.push_str(&format!("{ind}let {bb} = {bb}.clone();\n", ind = indent(d + 1)));
-                }
-            }
-            _ => {}
-        }
-        emit_body(out, &arm.body, d + 1, cx, res)?;
+        emit_body(out, &arm.body, d + 1, &arm_cx, res)?;
         out.push_str(&format!("{}}}\n", indent(d)));
     }
     // exhaustiveness was PROVED by the vc fork; rustc can't see that proof,
@@ -986,6 +1114,43 @@ fn emit_match(
     }
     out.push_str(&format!("{}}}\n", indent(depth)));
     Ok(())
+}
+
+/// Emit a heap (List/ADT) expression in BORROW mode — yield a `&Rc<…>` reference
+/// with no refcount bump (DEC-LLL-031 voie B). A ref-bound name is already
+/// `&Rc<…>` (emit it bare); any other owned heap value is borrowed in place with
+/// `&`; a compound heap expression is materialised once and borrowed as a temp.
+fn borrowed(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
+    Ok(match e {
+        Expr::Var(n) if cx.refs.contains(n) => local(n),
+        Expr::Var(n) if !cx.ctors.contains(n) && !cx.parts.contains(n) => {
+            format!("&{}", local(n))
+        }
+        _ => format!("&({})", expr(e, cx, res)?),
+    })
+}
+
+/// Emit the arguments of a call to part `callee`, taking each heap argument in
+/// BORROW mode when the callee borrows that parameter (its `borrow_mask` bit is
+/// set) and OWNED otherwise (DEC-LLL-031). Evidence/`?` threading is orthogonal
+/// and handled by the caller.
+fn part_call_args(
+    callee: &str,
+    args: &[Expr],
+    cx: &Cx,
+    res: bool,
+) -> Result<Vec<String>, String> {
+    let mask = cx.borrow_mask.get(callee);
+    let mut xs = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        let borrow = mask.map(|m| m.get(i).copied().unwrap_or(false)).unwrap_or(false);
+        xs.push(if borrow {
+            borrowed(a, cx, res)?
+        } else {
+            expr(a, cx, res)?
+        });
+    }
+    Ok(xs)
 }
 
 fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
@@ -1076,10 +1241,10 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             }
         },
         Expr::Call(name, args) => {
-            let mut xs: Vec<String> = Vec::new();
-            for a in args {
-                xs.push(expr(a, cx, res)?);
-            }
+            // heap arguments are BORROWED at the positions the callee borrows
+            // (DEC-LLL-031); a constructor / fn-valued-param name has no mask, so
+            // every argument stays owned (retention into `Rc::new` / a fn pointer).
+            let mut xs: Vec<String> = part_call_args(name, args, cx, res)?;
             if cx.ctors.contains(name) {
                 // ADT constructor application → Rc-wrapped variant (REQ-LLL-011)
                 format!("Rc::new({name}({}))", xs.join(", "))
