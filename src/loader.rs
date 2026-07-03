@@ -11,7 +11,7 @@
 //! definition and the duplicate is silently dropped (cross-file dedup,
 //! DEC-LLL-019 made visible).
 
-use crate::ast::{Module, Part};
+use crate::ast::{Module, Part, TypeDecl};
 use crate::hash::blind_normal_form;
 use crate::parser;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +22,7 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let mut in_stack: Vec<PathBuf> = Vec::new();
     let mut merged_names: HashMap<String, String> = HashMap::new(); // name -> blind form
     let mut parts: Vec<Part> = Vec::new();
+    let mut types: Vec<TypeDecl> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let (src, name) = load_rec(
         &root,
@@ -30,12 +31,14 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
         &mut visited,
         &mut merged_names,
         &mut parts,
+        &mut types,
     )?;
     Ok((
         src,
         Module {
             name,
             imports: Vec::new(), // resolved
+            types,
             parts,
         },
     ))
@@ -84,6 +87,7 @@ fn load_rec(
     visited: &mut HashSet<PathBuf>,
     merged_names: &mut HashMap<String, String>,
     parts: &mut Vec<Part>,
+    types: &mut Vec<TypeDecl>,
 ) -> Result<(String, String), String> {
     let canon_path = canon(path)?;
     if in_stack.contains(&canon_path) {
@@ -111,8 +115,11 @@ fn load_rec(
             visited,
             merged_names,
             parts,
+            types,
         )?;
     }
+    // merge this file's user types (each file is visited once)
+    types.extend(module.types.iter().cloned());
     // merge this file's parts
     let origin = if is_root {
         None

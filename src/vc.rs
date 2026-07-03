@@ -81,6 +81,9 @@ pub fn verify(
     use_cache: bool,
 ) -> Result<VerifyReport, String> {
     let z3 = find_z3()?;
+    // user-ADT datatype declarations (REQ-LLL-011) — module-global, prepended to
+    // every script that references a user sort
+    let dt_decls = user_datatype_decls(&cm.module.types);
     let cache_path = cache_dir.join("proofs.json");
     let mut cache: HashMap<String, CacheEntry> = if use_cache {
         std::fs::read_to_string(&cache_path)
@@ -105,7 +108,7 @@ pub fn verify(
         let obligations = gen_part_obligations(cm, part)?;
         let n = obligations.len();
         let t0 = std::time::Instant::now();
-        let failures = discharge(&z3, &obligations)?;
+        let failures = discharge(&z3, &obligations, &dt_decls)?;
         let time_ms = t0.elapsed().as_millis();
         if failures.is_empty() {
             cache.insert(
@@ -236,6 +239,8 @@ fn smt_ty(t: &Ty) -> String {
         // functions are declared as uninterpreted functions (declare-fun), never
         // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
+        // a user ADT is a Z3 datatype of the same name (REQ-LLL-011)
+        Ty::User(n) => n.clone(),
     }
 }
 
@@ -339,10 +344,12 @@ impl<'a> Emit<'a> {
                 }
             }
             Expr::BoolLit(v) => format!("{v}"),
-            Expr::Var(n) => env
-                .get(n)
-                .cloned()
-                .ok_or_else(|| format!("vcgen: unbound `{n}`"))?,
+            Expr::Var(n) => match env.get(n) {
+                Some(t) => t.clone(),
+                // a nullary constructor is its own name in SMT (REQ-LLL-011)
+                None if self.cm.ctors.contains_key(n) => n.clone(),
+                None => return Err(format!("vcgen: unbound `{n}`")),
+            },
             Expr::ListLit(items) => {
                 let mut t = "nil".to_string();
                 for i in items.iter().rev() {
@@ -388,6 +395,14 @@ impl<'a> Emit<'a> {
                         ts.push(self.tr(a, env)?);
                     }
                     return Ok(format!("({fsym} {})", ts.join(" ")));
+                }
+                // ADT constructor application `(Ctor arg …)` (REQ-LLL-011)
+                if self.cm.ctors.contains_key(name) {
+                    let mut ts = Vec::new();
+                    for a in args {
+                        ts.push(self.tr(a, env)?);
+                    }
+                    return Ok(format!("({name} {})", ts.join(" ")));
                 }
                 let callee = &self.cm.module.parts[self.cm.index[name]];
                 let callee_params = callee.params.clone();
@@ -540,6 +555,15 @@ fn pattern_cond(p: &Pattern, scrut: &str) -> (String, Vec<(String, String)>) {
                 (t.clone(), format!("(tail {scrut})")),
             ],
         ),
+        // user ADT constructor: `(_ is Ctor)` tester + `(Ctor_i s)` field selectors
+        Pattern::Ctor(cn, binders) => {
+            let bindings = binders
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.clone(), format!("({cn}_{i} {scrut})")))
+                .collect();
+            (format!("((_ is {cn}) {scrut})"), bindings)
+        }
     }
 }
 
@@ -568,7 +592,38 @@ fn collect_abstract_sorts(text: &str, out: &mut std::collections::BTreeSet<Strin
     }
 }
 
-fn script_for(obls: &[&Obligation], get_model: bool) -> String {
+/// SMT-LIB `declare-datatypes` blocks for the module's user ADTs (REQ-LLL-011).
+/// One independent block per type; a `List[..]` field becomes `(Lst ..)`.
+fn user_datatype_decls(types: &[TypeDecl]) -> Vec<String> {
+    types
+        .iter()
+        .map(|td| {
+            let ctors: Vec<String> = td
+                .ctors
+                .iter()
+                .map(|(cn, fields)| {
+                    if fields.is_empty() {
+                        format!("({cn})")
+                    } else {
+                        let fs: Vec<String> = fields
+                            .iter()
+                            .enumerate()
+                            .map(|(i, ft)| format!("({cn}_{i} {})", smt_ty(ft)))
+                            .collect();
+                        format!("({cn} {})", fs.join(" "))
+                    }
+                })
+                .collect();
+            format!(
+                "(declare-datatypes (({} 0)) (({})))",
+                td.name,
+                ctors.join(" ")
+            )
+        })
+        .collect()
+}
+
+fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> String {
     let mut s = String::new();
     s.push_str(&format!("(set-option :timeout {Z3_TIMEOUT_MS})\n"));
     // prelude: abstract sorts first (they can appear inside list instances),
@@ -591,8 +646,14 @@ fn script_for(obls: &[&Obligation], get_model: bool) -> String {
     for srt in &sorts {
         s.push_str(&format!("(declare-sort {srt} 0)\n"));
     }
-    if uses_list {
+    // the parametric list must precede any user datatype that has a List field
+    if uses_list || dt_decls.iter().any(|d| d.contains("(Lst")) {
         s.push_str(LIST_DECL);
+        s.push('\n');
+    }
+    // user ADT datatypes (REQ-LLL-011)
+    for d in dt_decls {
+        s.push_str(d);
         s.push('\n');
     }
     for o in obls {
@@ -633,12 +694,16 @@ fn run_z3(z3: &Path, script: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-fn discharge(z3: &Path, obligations: &[Obligation]) -> Result<Vec<FailedObligation>, String> {
+fn discharge(
+    z3: &Path,
+    obligations: &[Obligation],
+    dt_decls: &[String],
+) -> Result<Vec<FailedObligation>, String> {
     if obligations.is_empty() {
         return Ok(Vec::new());
     }
     let refs: Vec<&Obligation> = obligations.iter().collect();
-    let out = run_z3(z3, &script_for(&refs, false))?;
+    let out = run_z3(z3, &script_for(&refs, false, dt_decls))?;
     let verdicts: Vec<&str> = out
         .lines()
         .filter(|l| matches!(l.trim(), "sat" | "unsat" | "unknown" | "timeout"))
@@ -655,7 +720,7 @@ fn discharge(z3: &Path, obligations: &[Obligation]) -> Result<Vec<FailedObligati
         if v.trim() != "unsat" {
             // re-run individually to fetch a counter-model (repair-loop food)
             let single = [o];
-            let mout = run_z3(z3, &script_for(&single, true)).unwrap_or_default();
+            let mout = run_z3(z3, &script_for(&single, true, dt_decls)).unwrap_or_default();
             let model = mout
                 .split_once('\n')
                 .map(|(_, rest)| rest.trim().to_string())

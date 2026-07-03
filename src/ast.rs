@@ -10,7 +10,20 @@ pub struct Module {
     /// `import "relative/path.lll"` clauses (resolved by the loader)
     #[serde(default)]
     pub imports: Vec<String>,
+    /// user-defined algebraic data types (REQ-LLL-011)
+    #[serde(default)]
+    pub types: Vec<TypeDecl>,
     pub parts: Vec<Part>,
+}
+
+/// A user algebraic data type `type Name = C1(T…) | C2 | …` (REQ-LLL-011).
+/// A single-constructor type is a record (product); many constructors form a
+/// sum. A field of the type's own name makes it recursive (e.g. a tree).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeDecl {
+    pub name: String,
+    /// each constructor: its name + positional field types
+    pub ctors: Vec<(String, Vec<Ty>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +62,8 @@ pub enum Ty {
     /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
     /// v1: parameter and result types are concrete (monomorphic HOF).
     Fun(Vec<Ty>, Box<Ty>),
+    /// A user-declared algebraic data type, by name (REQ-LLL-011).
+    User(String),
 }
 
 impl Ty {
@@ -63,7 +78,7 @@ impl Ty {
     /// True when the type mentions no type variable (fully concrete).
     pub fn is_concrete(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool => true,
+            Ty::Int | Ty::Bool | Ty::User(_) => true,
             Ty::Var(_) => false,
             Ty::List(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
@@ -82,6 +97,7 @@ impl std::fmt::Display for Ty {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
                 write!(f, "({}) -> {r}", ps.join(", "))
             }
+            Ty::User(name) => write!(f, "{name}"),
         }
     }
 }
@@ -111,6 +127,9 @@ pub enum Pattern {
     Nil,
     /// `h :: t`
     Cons(String, String),
+    /// user ADT constructor pattern `Ctor(x, y, …)` — binds the field names
+    /// (REQ-LLL-011). A nullary constructor `Ctor` has an empty field list.
+    Ctor(String, Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

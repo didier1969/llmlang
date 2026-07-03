@@ -20,8 +20,14 @@ use crate::types::CheckedModule;
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
+    // user ADTs → Rust enums (REQ-LLL-011); constructor names are globally unique
+    // so `use Name::*` lets variants be referenced bare (as in the .lll source).
+    let ctors: std::collections::HashSet<String> = cm.ctors.keys().cloned().collect();
+    for td in &cm.module.types {
+        emit_enum(&mut out, td);
+    }
     for part in &cm.module.parts {
-        emit_part(&mut out, part)?;
+        emit_part(&mut out, part, &ctors)?;
     }
     // entry point
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
@@ -51,6 +57,8 @@ fn rs_ty(t: &Ty) -> String {
             let a: Vec<String> = ps.iter().map(rs_ty).collect();
             format!("fn({}) -> {}", a.join(", "), rs_ty(r))
         }
+        // a user ADT is a Rust enum of the same name (REQ-LLL-011)
+        Ty::User(n) => n.clone(),
     }
 }
 
@@ -74,7 +82,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             }
             collect_tvars(r, acc);
         }
-        Ty::Int | Ty::Bool => {}
+        Ty::Int | Ty::Bool | Ty::User(_) => {}
     }
 }
 
@@ -82,7 +90,28 @@ fn mangle(name: &str) -> String {
     format!("lll_{name}")
 }
 
-fn emit_part(out: &mut String, part: &Part) -> Result<(), String> {
+fn emit_enum(out: &mut String, td: &TypeDecl) {
+    out.push_str(&format!(
+        "\n#[derive(Debug, Clone, PartialEq)]\npub enum {} {{\n",
+        td.name
+    ));
+    for (cn, fields) in &td.ctors {
+        if fields.is_empty() {
+            out.push_str(&format!("    {cn},\n"));
+        } else {
+            let fs: Vec<String> = fields.iter().map(rs_ty).collect();
+            out.push_str(&format!("    {cn}({}),\n", fs.join(", ")));
+        }
+    }
+    out.push_str("}\n");
+    out.push_str(&format!("pub use {}::*;\n", td.name));
+}
+
+fn emit_part(
+    out: &mut String,
+    part: &Part,
+    ctors: &std::collections::HashSet<String>,
+) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
     // on an abstract value (thread/store/duplicate + structural equality).
@@ -119,7 +148,7 @@ fn emit_part(out: &mut String, part: &Part) -> Result<(), String> {
         .filter(|(_, t)| matches!(t, Ty::Fun(..)))
         .map(|(n, _)| n.clone())
         .collect();
-    emit_body(out, &part.body, 1, &fns)?;
+    emit_body(out, &part.body, 1, &fns, ctors)?;
     out.push_str("}\n");
     Ok(())
 }
@@ -128,22 +157,33 @@ fn indent(n: usize) -> String {
     "    ".repeat(n)
 }
 
+type Names = std::collections::HashSet<String>;
+
 fn emit_body(
     out: &mut String,
     body: &[Stmt],
     depth: usize,
-    fns: &std::collections::HashSet<String>,
+    fns: &Names,
+    ctors: &Names,
 ) -> Result<(), String> {
     for s in body {
         match s {
             Stmt::Let(name, e) => {
-                out.push_str(&format!("{}let {name} = {};\n", indent(depth), expr(e, fns)?));
+                out.push_str(&format!(
+                    "{}let {name} = {};\n",
+                    indent(depth),
+                    expr(e, fns, ctors)?
+                ));
             }
             Stmt::Yield(e) => {
-                out.push_str(&format!("{}return {};\n", indent(depth), expr(e, fns)?));
+                out.push_str(&format!(
+                    "{}return {};\n",
+                    indent(depth),
+                    expr(e, fns, ctors)?
+                ));
             }
             Stmt::Match(scrut, arms) => {
-                emit_match(out, scrut, arms, depth, fns)?;
+                emit_match(out, scrut, arms, depth, fns, ctors)?;
             }
         }
     }
@@ -155,12 +195,13 @@ fn emit_match(
     scrut: &Expr,
     arms: &[Arm],
     depth: usize,
-    fns: &std::collections::HashSet<String>,
+    fns: &Names,
+    ctors: &Names,
 ) -> Result<(), String> {
     let is_list = arms
         .iter()
         .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..)));
-    let s = expr(scrut, fns)?;
+    let s = expr(scrut, fns, ctors)?;
     if is_list {
         out.push_str(&format!(
             "{}let __s = {s};\n{}match &*__s {{\n",
@@ -179,9 +220,17 @@ fn emit_match(
             Pattern::Var(v) => v.clone(),
             Pattern::Nil => "LstI::Nil".into(),
             Pattern::Cons(h, t) => format!("LstI::Cons({h}, {t})"),
+            // user ADT constructor: variant is bare-nameable via `use Name::*`
+            Pattern::Ctor(cn, binders) => {
+                if binders.is_empty() {
+                    cn.clone()
+                } else {
+                    format!("{cn}({})", binders.join(", "))
+                }
+            }
         };
         let guard = match &arm.guard {
-            Some(g) => format!(" if {}", expr(g, fns)?),
+            Some(g) => format!(" if {}", expr(g, fns, ctors)?),
             None => String::new(),
         };
         out.push_str(&format!("{}{pat}{guard} => {{\n", indent(d)));
@@ -191,14 +240,18 @@ fn emit_match(
             out.push_str(&format!("{}let {h} = {h}.clone();\n", indent(d + 1)));
             out.push_str(&format!("{}let {t} = {t}.clone();\n", indent(d + 1)));
         }
-        emit_body(out, &arm.body, d + 1, fns)?;
+        emit_body(out, &arm.body, d + 1, fns, ctors)?;
         out.push_str(&format!("{}}}\n", indent(d)));
     }
     // exhaustiveness was PROVED by the vc fork; rustc can't see that proof,
     // so close with an unreachable catch-all when patterns aren't rustc-exhaustive
-    let rustc_exhaustive = arms
+    let has_ctor = arms
         .iter()
-        .any(|a| matches!(a.pattern, Pattern::Wildcard | Pattern::Var(_)) && a.guard.is_none())
+        .any(|a| matches!(a.pattern, Pattern::Ctor(..)) && a.guard.is_none());
+    let rustc_exhaustive = has_ctor // vc proved all ADT constructors are covered
+        || arms
+            .iter()
+            .any(|a| matches!(a.pattern, Pattern::Wildcard | Pattern::Var(_)) && a.guard.is_none())
         || (arms.iter().any(|a| matches!(a.pattern, Pattern::Nil) && a.guard.is_none())
             && arms.iter().any(|a| matches!(a.pattern, Pattern::Cons(..)) && a.guard.is_none()))
         || (arms.iter().any(|a| matches!(a.pattern, Pattern::BoolLit(true)) && a.guard.is_none())
@@ -213,40 +266,52 @@ fn emit_match(
     Ok(())
 }
 
-fn expr(e: &Expr, fns: &std::collections::HashSet<String>) -> Result<String, String> {
+fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
     Ok(match e {
         Expr::IntLit(v) => format!("{v}i64"),
         Expr::BoolLit(v) => format!("{v}"),
-        // `.clone()` is uniform: no-op-cheap for Copy (i64/bool), needed for Rc lists.
-        Expr::Var(n) => format!("{n}.clone()"),
+        Expr::Var(n) => {
+            if ctors.contains(n) {
+                // nullary ADT constructor used as a value (REQ-LLL-011)
+                n.clone()
+            } else {
+                // `.clone()` is uniform: cheap for Copy (i64/bool), needed for Rc lists
+                format!("{n}.clone()")
+            }
+        }
         Expr::ListLit(items) => {
             let mut t = "Rc::new(LstI::Nil)".to_string();
             for i in items.iter().rev() {
-                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, fns)?);
+                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, fns, ctors)?);
             }
             t
         }
-        Expr::Cons(h, t) => format!("Rc::new(LstI::Cons({}, {}))", expr(h, fns)?, expr(t, fns)?),
-        Expr::Neg(a) => format!("(-{})", expr(a, fns)?),
-        Expr::Not(a) => format!("(!{})", expr(a, fns)?),
+        Expr::Cons(h, t) => format!(
+            "Rc::new(LstI::Cons({}, {}))",
+            expr(h, fns, ctors)?,
+            expr(t, fns, ctors)?
+        ),
+        Expr::Neg(a) => format!("(-{})", expr(a, fns, ctors)?),
+        Expr::Not(a) => format!("(!{})", expr(a, fns, ctors)?),
         Expr::Bin(op, a, b) => {
             // Rust rendering comes from the single operator-semantics source
             // (opsem.rs) — same place the vc fork reads its SMT form, so the
             // euclidean div/mod pairing can never silently drift (DEC-LLL-026).
-            let ta = expr(a, fns)?;
-            let tb = expr(b, fns)?;
+            let ta = expr(a, fns, ctors)?;
+            let tb = expr(b, fns, ctors)?;
             crate::opsem::form(*op).rust(&ta, &tb)
         }
         Expr::EffCall(name, args) => match name.as_str() {
-            "IO.print" => format!("__lll_io_print({})", expr(&args[0], fns)?),
+            "IO.print" => format!("__lll_io_print({})", expr(&args[0], fns, ctors)?),
             "IO.read" => "__lll_io_read()".to_string(),
             other => return Err(format!("codegen: unknown effect `{other}`")),
         },
         Expr::Call(name, args) => {
-            let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, fns)).collect();
+            let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, fns, ctors)).collect();
             let xs = xs?.join(", ");
-            if fns.contains(name) {
-                // applying a function-valued parameter (REQ-LLL-009)
+            if ctors.contains(name) || fns.contains(name) {
+                // ADT constructor application (bare variant) OR function-value
+                // application (REQ-LLL-011 / REQ-LLL-009) — both call by bare name
                 format!("{name}({xs})")
             } else {
                 format!("{}({xs})", mangle(name))
@@ -258,7 +323,7 @@ fn expr(e: &Expr, fns: &std::collections::HashSet<String>) -> Result<String, Str
                 .iter()
                 .map(|(n, t)| format!("{n}: {}", rs_ty(t)))
                 .collect();
-            format!("(|{}| {})", ps.join(", "), expr(body, fns)?)
+            format!("(|{}| {})", ps.join(", "), expr(body, fns, ctors)?)
         }
     })
 }

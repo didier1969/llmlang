@@ -17,6 +17,7 @@ pub enum Tok {
     // keywords
     Module,
     Import,
+    Type,
     Part,
     Requires,
     Ensures,
@@ -54,6 +55,7 @@ pub enum Tok {
     Star,
     Underscore,
     Backslash, // lambda: \(x: T) -> expr
+    Pipe,      // sum-type alternative: C1 | C2
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +145,10 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
             }
             '\\' => {
                 push(out, Tok::Backslash);
+                i += 1;
+            }
+            '|' => {
+                push(out, Tok::Pipe);
                 i += 1;
             }
             '-' => {
@@ -257,6 +263,7 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
     let tok = match w {
         "module" => Tok::Module,
         "import" => Tok::Import,
+        "type" => Tok::Type,
         "part" => Tok::Part,
         "requires" => Tok::Requires,
         "ensures" => Tok::Ensures,

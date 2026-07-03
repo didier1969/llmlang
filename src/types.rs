@@ -24,6 +24,9 @@ pub struct CheckedModule {
     pub scc_id: HashMap<String, usize>,
     /// names that live in a multi-node SCC (mutual recursion)
     pub scc_multi: std::collections::HashSet<String>,
+    /// user-ADT constructor registry: ctor name -> (owning type, field types)
+    /// (REQ-LLL-011)
+    pub ctors: HashMap<String, (String, Vec<Ty>)>,
 }
 
 impl CheckedModule {
@@ -44,6 +47,7 @@ pub enum Recursion {
 struct Ctx<'a> {
     module: &'a Module,
     index: &'a HashMap<String, usize>,
+    ctors: &'a HashMap<String, (String, Vec<Ty>)>,
     part: &'a Part,
     /// every pattern-binder name of the whole part (for scope hints)
     all_binders: std::collections::HashSet<String>,
@@ -61,6 +65,48 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate part `{}`", p.name));
         }
     }
+    // user ADTs (REQ-LLL-011): register types + constructors, then validate
+    let mut type_names: HashSet<String> = HashSet::new();
+    for td in &module.types {
+        if !type_names.insert(td.name.clone()) {
+            return Err(format!("duplicate type `{}`", td.name));
+        }
+    }
+    let mut ctors: HashMap<String, (String, Vec<Ty>)> = HashMap::new();
+    for td in &module.types {
+        if td.ctors.is_empty() {
+            return Err(format!("type `{}` has no constructors", td.name));
+        }
+        for (cname, fields) in &td.ctors {
+            for ft in fields {
+                if !valid_field_ty(ft) {
+                    return Err(format!(
+                        "type `{}` constructor `{cname}`: field type {ft} is unsupported \
+                         (v1: Int, Bool, List[…], or the type itself)",
+                        td.name
+                    ));
+                }
+            }
+            if index.contains_key(cname) {
+                return Err(format!(
+                    "constructor `{cname}` clashes with a part of the same name"
+                ));
+            }
+            if ctors
+                .insert(cname.clone(), (td.name.clone(), fields.clone()))
+                .is_some()
+            {
+                return Err(format!("duplicate constructor `{cname}`"));
+            }
+        }
+    }
+    // every `User` type mentioned in a signature must be declared
+    for p in &module.parts {
+        for (_, t) in &p.params {
+            check_user_ty_declared(t, &type_names)?;
+        }
+        check_user_ty_declared(&p.ret, &type_names)?;
+    }
     // call-graph SCCs (wave 3): mutual recursion is allowed, measured
     let (scc_id, scc_multi) = compute_sccs(&module, &index);
 
@@ -71,6 +117,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         let mut ctx = Ctx {
             module: &module,
             index: &index,
+            ctors: &ctors,
             part,
             all_binders: collect_binders(&part.body),
             vars: vec![part.params.iter().cloned().collect()],
@@ -124,7 +171,34 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         recursion,
         scc_id,
         scc_multi,
+        ctors,
     })
+}
+
+/// v1 field types for a user ADT constructor: Int, Bool, or List of a valid
+/// field type. Recursive/nested ADT fields, cross-type references, type
+/// variables and functions are out of scope (REQ-LLL-011 follow-up).
+fn valid_field_ty(t: &Ty) -> bool {
+    match t {
+        Ty::Int | Ty::Bool => true,
+        Ty::List(e) => valid_field_ty(e),
+        _ => false,
+    }
+}
+
+/// Reject a signature that names an undeclared user type.
+fn check_user_ty_declared(t: &Ty, types: &HashSet<String>) -> Result<(), String> {
+    match t {
+        Ty::User(n) if !types.contains(n) => Err(format!("unknown type `{n}`")),
+        Ty::List(e) => check_user_ty_declared(e, types),
+        Ty::Fun(ps, r) => {
+            for p in ps {
+                check_user_ty_declared(p, types)?;
+            }
+            check_user_ty_declared(r, types)
+        }
+        _ => Ok(()),
+    }
 }
 
 fn compute_sccs(
@@ -234,6 +308,11 @@ fn collect_binders(body: &[Stmt]) -> std::collections::HashSet<String> {
                         Pattern::Cons(h, t) => {
                             out.insert(h.clone());
                             out.insert(t.clone());
+                        }
+                        Pattern::Ctor(_, binders) => {
+                            for b in binders {
+                                out.insert(b.clone());
+                            }
                         }
                         _ => {}
                     }
@@ -482,6 +561,7 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
             }
         },
         (Ty::List(pe), Ty::List(ae)) => unify_arg(pe, ae, subst),
+        (Ty::User(pn), Ty::User(an)) if pn == an => Ok(()),
         (Ty::Fun(pp, pr), Ty::Fun(ap, ar)) if pp.len() == ap.len() => {
             for (p, a) in pp.iter().zip(ap) {
                 unify_arg(p, a, subst)?;
@@ -498,6 +578,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Int => Ty::Int,
         Ty::Bool => Ty::Bool,
         Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
+        Ty::User(n) => Ty::User(n.clone()),
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| subst_ty(p, subst)).collect(),
@@ -577,12 +658,12 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                 // scrutinee root for structural-descent tracking: either a list
                 // param, or a var already known smaller-than a param
                 let scrut_root: Option<String> = match scrut {
-                    Expr::Var(v) if matches!(ts, Ty::List(_)) => {
+                    Expr::Var(v) if matches!(ts, Ty::List(_) | Ty::User(_)) => {
                         if ctx
                             .part
                             .params
                             .iter()
-                            .any(|(p, t)| p == v && matches!(t, Ty::List(_)))
+                            .any(|(p, t)| p == v && matches!(t, Ty::List(_) | Ty::User(_)))
                         {
                             Some(v.clone())
                         } else {
@@ -612,6 +693,45 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                                     .last_mut()
                                     .unwrap()
                                     .insert(t.clone(), root.clone());
+                            }
+                        }
+                        (Pattern::Ctor(cname, binders), Ty::User(tyname)) => {
+                            let (owner, fields) = ctx
+                                .ctors
+                                .get(cname)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "part `{}`: unknown constructor `{cname}`",
+                                        ctx.part.name
+                                    )
+                                })?
+                                .clone();
+                            if &owner != tyname {
+                                return Err(format!(
+                                    "part `{}`: constructor `{cname}` belongs to {owner}, not {tyname}",
+                                    ctx.part.name
+                                ));
+                            }
+                            if binders.len() != fields.len() {
+                                return Err(format!(
+                                    "part `{}`: constructor `{cname}` binds {} field(s), pattern gives {}",
+                                    ctx.part.name,
+                                    fields.len(),
+                                    binders.len()
+                                ));
+                            }
+                            for (b, ft) in binders.iter().zip(&fields) {
+                                ctx.vars.last_mut().unwrap().insert(b.clone(), ft.clone());
+                                // a field of the same type is structurally smaller →
+                                // terminating recursion over the ADT (e.g. trees)
+                                if *ft == Ty::User(tyname.clone()) {
+                                    if let Some(root) = &scrut_root {
+                                        ctx.smaller
+                                            .last_mut()
+                                            .unwrap()
+                                            .insert(b.clone(), root.clone());
+                                    }
+                                }
                             }
                         }
                         (p, t) => {
@@ -679,15 +799,26 @@ fn check_expr(
         Expr::Var(n) => match ctx.lookup(n) {
             Some(t) => t,
             None => {
-                if ctx.index.contains_key(n) {
+                if let Some((tyname, fields)) = ctx.ctors.get(n) {
+                    // nullary constructor used as a value (REQ-LLL-011)
+                    if !fields.is_empty() {
+                        return Err(format!(
+                            "part `{}`: constructor `{n}` needs {} field(s) — write `{n}(…)`",
+                            ctx.part.name,
+                            fields.len()
+                        ));
+                    }
+                    Ty::User(tyname.clone())
+                } else if ctx.index.contains_key(n) {
                     // functions become first-class through lambdas in v1
                     return Err(format!(
                         "part `{}`: `{n}` is a part — to pass it as a value, wrap it in a lambda \
                          `\\(x: T) -> {n}(x)` (REQ-LLL-009)",
                         ctx.part.name
                     ));
+                } else {
+                    return Err(unknown_var_msg(&ctx.part.name, n, &ctx.all_binders));
                 }
-                return Err(unknown_var_msg(&ctx.part.name, n, &ctx.all_binders));
             }
         },
         Expr::Neg(a) => {
@@ -753,6 +884,28 @@ fn check_expr(
                     ))
                 }
             }
+        }
+        Expr::Call(name, args) if ctx.ctors.contains_key(name) => {
+            // ADT constructor application `Ctor(f1, …)` (REQ-LLL-011)
+            let (tyname, fields) = ctx.ctors.get(name).unwrap().clone();
+            if args.len() != fields.len() {
+                return Err(format!(
+                    "part `{}`: constructor `{name}` takes {} field(s), got {}",
+                    ctx.part.name,
+                    fields.len(),
+                    args.len()
+                ));
+            }
+            for (a, ft) in args.iter().zip(&fields) {
+                let ta = check_expr(ctx, a, effectful, Some(ft))?;
+                if ta != *ft {
+                    return Err(format!(
+                        "part `{}`: constructor `{name}` field expects {ft}, got {ta}",
+                        ctx.part.name
+                    ));
+                }
+            }
+            Ty::User(tyname)
         }
         Expr::Call(name, args) if ctx.lookup(name).is_some() => {
             // application of a function-valued local variable (REQ-LLL-009)
@@ -830,7 +983,7 @@ fn check_expr(
                     .iter()
                     .enumerate()
                     .any(|(i, (pname, pty))| {
-                        matches!(pty, Ty::List(_))
+                        matches!(pty, Ty::List(_) | Ty::User(_))
                             && matches!(&args[i], Expr::Var(v) if ctx.smaller_root(v) == Some(pname.as_str()))
                     });
                 ctx.rec_calls.push(structural);

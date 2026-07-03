@@ -369,6 +369,50 @@ fn higher_order_functions_verify_and_run_with_lambdas() {
 }
 
 #[test]
+fn user_adts_verify_exhaustively_and_run() {
+    // REQ-LLL-011 / DEC-LLL-028: user sum types + record + constructor patterns.
+    // Match exhaustiveness is PROVED by Z3 over the datatype's constructors; the
+    // vc reuses the same native-datatype machinery as lists.
+    let src = "module T:\n\n  type Color = Red | Green | Blue\n  type Point = Pt(Int, Int)\n\n  part code(c: Color) -> Int:\n    ensures result >= 0\n    match c:\n      Red   -> yield 0\n      Green -> yield 1\n      Blue  -> yield 2\n\n  part sumc(p: Point) -> Int:\n    match p:\n      Pt(x, y) -> yield x + y\n\n  part main() -> Int via IO:\n    let a = code(Blue)\n    let b = sumc(Pt(10, 30))\n    let r = IO.print(a + b)\n    yield r\n";
+    // proof: exhaustiveness of `match c` over Red|Green|Blue + `ensures >= 0`
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "user-ADT match must verify exhaustively: {:?}",
+        failures(&report)
+    );
+    // run: code(Blue)=2, sumc(Pt(10,30))=40 → 42
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("adt.rs");
+    let bin = dir.join("adt_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "ADT Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("42"), "expected 42, got: {stdout}");
+}
+
+#[test]
+fn non_exhaustive_user_match_is_rejected() {
+    // dropping a constructor must fail the exhaustiveness proof (REQ-LLL-011)
+    let src = "module T:\n\n  type Color = Red | Green | Blue\n\n  part code(c: Color) -> Int:\n    match c:\n      Red   -> yield 0\n      Green -> yield 1\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "a non-exhaustive ADT match must be rejected");
+}
+
+#[test]
 fn euclidean_semantics_match_between_smt_and_rust() {
     // (-7) mod 3 = 2 in both SMT-LIB and i64::rem_euclid — the verified model
     // and the runtime must agree on negative operands.

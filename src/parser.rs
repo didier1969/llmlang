@@ -84,23 +84,59 @@ impl Parser {
         self.eat(Tok::Newline)?;
         self.eat(Tok::Indent)?;
         let mut parts = Vec::new();
+        let mut types = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek() {
+                Tok::Type => types.push(self.type_decl()?),
                 Tok::Part => parts.push(self.part()?),
                 Tok::Dedent => {
                     self.pos += 1;
                     break;
                 }
                 _ if self.at_end() => break,
-                other => return Err(self.err(&format!("expected `part`, found {other:?}"))),
+                other => {
+                    return Err(self.err(&format!("expected `type` or `part`, found {other:?}")))
+                }
             }
         }
         Ok(Module {
             name,
             imports,
+            types,
             parts,
         })
+    }
+
+    /// `type Name = C1(T…) | C2 | …` — a user ADT (REQ-LLL-011).
+    fn type_decl(&mut self) -> Result<TypeDecl, String> {
+        self.eat(Tok::Type)?;
+        let name = self.ident()?;
+        self.eat(Tok::Assign)?;
+        let mut ctors = Vec::new();
+        loop {
+            let cname = self.ident()?;
+            let mut fields = Vec::new();
+            if self.peek() == &Tok::LParen {
+                self.pos += 1;
+                if self.peek() != &Tok::RParen {
+                    fields.push(self.ty()?);
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        fields.push(self.ty()?);
+                    }
+                }
+                self.eat(Tok::RParen)?;
+            }
+            ctors.push((cname, fields));
+            if self.peek() == &Tok::Pipe {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        self.eat(Tok::Newline)?;
+        Ok(TypeDecl { name, ctors })
     }
 
     fn part(&mut self) -> Result<Part, String> {
@@ -317,6 +353,22 @@ impl Parser {
                     self.pos += 1;
                     let t = self.ident()?;
                     Ok(Pattern::Cons(h, t))
+                } else if self.peek() == &Tok::LParen {
+                    // constructor pattern `Ctor(x, y, …)` (REQ-LLL-011)
+                    self.pos += 1;
+                    let mut binders = Vec::new();
+                    if self.peek() != &Tok::RParen {
+                        binders.push(self.ident()?);
+                        while self.peek() == &Tok::Comma {
+                            self.pos += 1;
+                            binders.push(self.ident()?);
+                        }
+                    }
+                    self.eat(Tok::RParen)?;
+                    Ok(Pattern::Ctor(h, binders))
+                } else if h.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    // a capitalized bareword is a nullary constructor
+                    Ok(Pattern::Ctor(h, vec![]))
                 } else {
                     Ok(Pattern::Var(h))
                 }
@@ -341,6 +393,8 @@ impl Parser {
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {
                 Ok(Ty::Var(s))
             }
+            // any other capitalized bareword names a user ADT (REQ-LLL-011)
+            Tok::Ident(s) => Ok(Ty::User(s)),
             // function type `(T1, T2, ...) -> R` (REQ-LLL-009)
             Tok::LParen => {
                 let mut params = Vec::new();

@@ -295,6 +295,9 @@ impl<'a> Norm<'a> {
                             Pattern::Var(v) => ("(bind)".into(), vec![v.clone()]),
                             Pattern::Nil => ("(nil)".into(), vec![]),
                             Pattern::Cons(h, t) => ("(cons)".into(), vec![h.clone(), t.clone()]),
+                            Pattern::Ctor(cn, bs) => {
+                                (format!("(ctor {cn} {})", bs.len()), bs.clone())
+                            }
                         };
                         for b in &binders {
                             self.env.push(b.clone());
