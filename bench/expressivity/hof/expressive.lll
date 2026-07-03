@@ -1,0 +1,17 @@
+module T2Hof:
+
+  part map(f: (Int) -> Int, xs: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield []
+      h :: t -> yield f(h) :: map(f, t)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part main() -> Int via IO:
+    let a = sum(map(\(x: Int) -> x + 1, [1, 2, 3]))
+    let b = sum(map(\(x: Int) -> x * 2, [1, 2, 3]))
+    let c = sum(map(\(x: Int) -> 0 - x, [1, 2, 3]))
+    yield IO.print(a + b + c)

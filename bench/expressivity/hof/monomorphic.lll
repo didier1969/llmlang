@@ -1,0 +1,27 @@
+module T2Mono:
+
+  part inc_all(xs: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield []
+      h :: t -> yield (h + 1) :: inc_all(t)
+
+  part double_all(xs: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield []
+      h :: t -> yield (h * 2) :: double_all(t)
+
+  part neg_all(xs: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield []
+      h :: t -> yield (0 - h) :: neg_all(t)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part main() -> Int via IO:
+    let a = sum(inc_all([1, 2, 3]))
+    let b = sum(double_all([1, 2, 3]))
+    let c = sum(neg_all([1, 2, 3]))
+    yield IO.print(a + b + c)

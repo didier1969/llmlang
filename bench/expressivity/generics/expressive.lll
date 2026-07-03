@@ -1,0 +1,12 @@
+module T1Gen:
+
+  part len(xs: List[a]) -> Int:
+    ensures result >= 0
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + len(t)
+
+  part main() -> Int via IO:
+    let a = len([1, 2, 3])
+    let b = len([true, false])
+    yield IO.print(a + b)

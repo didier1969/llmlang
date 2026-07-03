@@ -1,0 +1,18 @@
+module T1Mono:
+
+  part len_int(xs: List[Int]) -> Int:
+    ensures result >= 0
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + len_int(t)
+
+  part len_bool(xs: List[Bool]) -> Int:
+    ensures result >= 0
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + len_bool(t)
+
+  part main() -> Int via IO:
+    let a = len_int([1, 2, 3])
+    let b = len_bool([true, false])
+    yield IO.print(a + b)
