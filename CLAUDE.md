@@ -13,6 +13,8 @@ DEC-LLL-001..027, session pointer `CPT-LLL-012`) — ne jamais dupliquer ici.
 | vérifier un module | `./target/debug/lll check <f.lll>` (`--no-cache` pour forcer) |
 | compiler/exécuter | `lll build [--unchecked] <f>` · `lll run <f> [--trace t\|--replay t]` |
 | identité / refactor | `lll hash <f>` · `lll rename <f> <old> <new>` |
+| édition structurelle (par content-hash) | `lll dedup <f> [--merge]` · `lll move <f> <part> <dest>` |
+| pont Axon / FFI | `lll export-ist <f>` (IST → Axon) · `lll ffi-import <f.rs> <Eff> <prefix>` (bindings extern auto-gen) |
 | explicabilité | `lll rationale add\|show <f> <part>` · `lll audit <f>` · `lll mcp <f>` |
 | banc LLM | `./bench/llm_gen/run.sh bench/llm_gen/solutions/<model>` |
 
