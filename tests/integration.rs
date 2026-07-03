@@ -66,6 +66,39 @@ fn callers_hash_is_rename_invariant_but_proof_tracks_contracts() {
 }
 
 #[test]
+fn extern_binding_is_folded_into_identity_but_not_proof() {
+    // REQ-LLL-027: two modules TEXT-IDENTICAL except the Rust fn an effect op is
+    // bound to. The extern binding is behaviourally significant, so it MUST be part
+    // of content identity — otherwise `lll dedup --merge` could silently merge two
+    // behaviourally-different parts (max vs min). Asymmetry (DEC-LLL-025): the
+    // binding is havoc'd in the vc fork, so it must NOT touch the proof hash.
+    let a = "module M:\n\n  effect Cmp:\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part chooser(x: Int, y: Int) -> Int via Cmp:\n    yield Cmp.pick(x, y)\n";
+    let b = "module M:\n\n  effect Cmp:\n    pick(Int, Int) -> Int = extern \"std::cmp::min\"\n\n  part chooser(x: Int, y: Int) -> Int via Cmp:\n    yield Cmp.pick(x, y)\n";
+    let (_, ha) = full(a);
+    let (_, hb) = full(b);
+    // BEFORE the fix these were equal — the false-merge gap. They MUST now differ.
+    assert_ne!(
+        ha.def_hash["chooser"], hb.def_hash["chooser"],
+        "extern-different parts must have different def_hash (REQ-LLL-027)"
+    );
+    // the extern result is havoc'd → same obligations → proof cache must survive.
+    assert_eq!(
+        ha.proof_hash["chooser"], hb.proof_hash["chooser"],
+        "a pure rebind changes no VC → proof hash must be stable (DEC-LLL-025)"
+    );
+    // non-regression: rebinding an op the part does NOT perform leaves identity
+    // intact (only ops actually performed are folded — no over-invalidation).
+    let c = "module M:\n\n  effect Cmp:\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n    other(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part chooser(x: Int, y: Int) -> Int via Cmp:\n    yield Cmp.pick(x, y)\n";
+    let d = "module M:\n\n  effect Cmp:\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n    other(Int, Int) -> Int = extern \"std::cmp::min\"\n\n  part chooser(x: Int, y: Int) -> Int via Cmp:\n    yield Cmp.pick(x, y)\n";
+    let (_, hc) = full(c);
+    let (_, hd) = full(d);
+    assert_eq!(
+        hc.def_hash["chooser"], hd.def_hash["chooser"],
+        "rebinding an un-performed op must not change identity (no over-folding)"
+    );
+}
+
+#[test]
 fn alpha_equivalent_defs_share_hash() {
     let a = "module T:\n\n  part f(x: Int) -> Int:\n    yield x + 1\n";
     let b = "module U:\n\n  part g(zebra: Int) -> Int:\n    yield zebra + 1\n";

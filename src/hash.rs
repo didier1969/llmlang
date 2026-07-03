@@ -37,10 +37,17 @@ pub struct HashedModule {
 }
 
 pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
+    // per-op identity tokens (REQ-LLL-027): an effect op is a dependency of the
+    // parts performing it. `op_def` folds the `extern` binding (behaviourally
+    // significant) into the DEF hash; `op_proof` folds only the signature into the
+    // PROOF hash (the extern result is havoc'd → it changes no VC, so binding it
+    // would over-invalidate the proof cache — DEC-LLL-025 asymmetry).
+    let (op_def, op_proof) = build_op_tokens(&cm.module.effects);
+    let no_tok: HashMap<String, String> = HashMap::new();
     // pass 1: contract hashes (contracts contain no calls — no dependencies)
     let mut contract_hash = HashMap::new();
     for part in &cm.module.parts {
-        let c = normalize_part(part, &HashMap::new(), false, &HashMap::new());
+        let c = normalize_part(part, &HashMap::new(), false, &HashMap::new(), &no_tok);
         contract_hash.insert(
             part.name.clone(),
             blake3::hash(c.as_bytes()).to_hex().to_string(),
@@ -54,11 +61,11 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
         if comp.len() == 1 {
             let name = &comp[0];
             let part = &cm.module.parts[cm.index[name]];
-            let d = normalize_part(part, &def_hash, true, &HashMap::new());
+            let d = normalize_part(part, &def_hash, true, &HashMap::new(), &op_def);
             let mut proof_peers = HashMap::new();
             // self-loops need no special proof marker: $self covers them
             let _ = &mut proof_peers;
-            let p = normalize_part(part, &contract_hash, true, &proof_peers);
+            let p = normalize_part(part, &contract_hash, true, &proof_peers, &op_proof);
             def_hash.insert(name.clone(), blake3::hash(d.as_bytes()).to_hex().to_string());
             proof_hash.insert(name.clone(), blake3::hash(p.as_bytes()).to_hex().to_string());
         } else {
@@ -73,7 +80,7 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
                 .map(|m| {
                     let part = &cm.module.parts[cm.index[m]];
                     (
-                        normalize_part(part, &def_hash, true, &blind),
+                        normalize_part(part, &def_hash, true, &blind, &op_def),
                         m.clone(),
                     )
                 })
@@ -93,7 +100,7 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
                 .iter()
                 .map(|(_, m)| {
                     let part = &cm.module.parts[cm.index[m]];
-                    normalize_part(part, &def_hash, true, &idx_peers)
+                    normalize_part(part, &def_hash, true, &idx_peers, &op_def)
                 })
                 .collect();
             let blob = finals.join("\n");
@@ -108,7 +115,7 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
                     .map(|x| (x.clone(), format!("mut:{}", contract_hash[x])))
                     .collect();
                 let part = &cm.module.parts[cm.index[m]];
-                let pf = normalize_part(part, &contract_hash, true, &mut_peers);
+                let pf = normalize_part(part, &contract_hash, true, &mut_peers, &op_proof);
                 proof_hash.insert(m.clone(), blake3::hash(pf.as_bytes()).to_hex().to_string());
             }
         }
@@ -213,7 +220,40 @@ fn collect_dep_expr(e: &Expr, out: &mut Vec<String>) {
 /// loader for cross-file α-equivalence dedup. Conservative: equal forms
 /// calling equal NAMES are the same definition.
 pub fn blind_normal_form(part: &crate::ast::Part) -> String {
-    normalize_part(part, &HashMap::new(), true, &HashMap::new())
+    // no module context here → no op tokens (name-based, conservative as documented).
+    normalize_part(part, &HashMap::new(), true, &HashMap::new(), &HashMap::new())
+}
+
+/// Per-op identity tokens for effect operations (REQ-LLL-027). An effect op is a
+/// DEPENDENCY of the parts that perform it, so its identity must propagate into
+/// their hashes exactly like a called part's def-hash (DEC-LLL-025). Returns
+/// `(op_def, op_proof)` keyed by the dotted op name `Effect.op`:
+/// - `op_def` folds the op signature AND its `= extern` binding — a different Rust
+///   fn is a different behaviour, so it must be a different identity (fixes the
+///   `lll dedup` false-merge gap).
+/// - `op_proof` folds ONLY the signature: the extern result is havoc'd in the vc
+///   fork (DEC-LLL-017), so the binding changes no proof obligation — folding it
+///   would needlessly invalidate the proof cache on a pure rebind (DEC-LLL-025).
+///
+/// Builtin ops (IO/State/Reader) are not user-declared here, so they get no token
+/// and every existing hash that performs one is preserved byte-for-byte.
+fn build_op_tokens(
+    effects: &[EffectDecl],
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let empty: HashMap<String, String> = HashMap::new();
+    let mut op_def = HashMap::new();
+    let mut op_proof = HashMap::new();
+    for ed in effects {
+        for op in &ed.ops {
+            let key = format!("{}.{}", ed.name, op.name);
+            let params: Vec<String> = op.params.iter().map(|t| canon_ty(t, &empty)).collect();
+            let sig = format!("{key}({})->{}", params.join(","), canon_ty(&op.ret, &empty));
+            op_proof.insert(key.clone(), blake3::hash(sig.as_bytes()).to_hex().to_string());
+            let with_bind = format!("{sig}|{}", op.extern_path.as_deref().unwrap_or(""));
+            op_def.insert(key, blake3::hash(with_bind.as_bytes()).to_hex().to_string());
+        }
+    }
+    (op_def, op_proof)
 }
 
 // ---- normalization: emit a canonical S-expression string ----
@@ -225,6 +265,11 @@ struct Norm<'a> {
     dep_hashes: &'a HashMap<String, String>,
     /// intra-SCC peer replacements (empty outside mutual recursion)
     peers: &'a HashMap<String, String>,
+    /// per-op identity token folded into a perform (REQ-LLL-027): an effect op is
+    /// a dependency, so its identity propagates like a called part's def-hash. The
+    /// caller selects the map — the extern-aware one for the DEF hash, the
+    /// signature-only one for the PROOF hash (asymmetry, see `build_op_tokens`).
+    op_tokens: &'a HashMap<String, String>,
 }
 
 fn normalize_part(
@@ -232,12 +277,14 @@ fn normalize_part(
     dep_hashes: &HashMap<String, String>,
     with_body: bool,
     peers: &HashMap<String, String>,
+    op_tokens: &HashMap<String, String>,
 ) -> String {
     let mut n = Norm {
         env: part.params.iter().map(|(p, _)| p.clone()).collect(),
         self_name: &part.name,
         dep_hashes,
         peers,
+        op_tokens,
     };
     // canonicalize type-variable NAMES to positional indices so two
     // α-equivalent generic definitions share one identity (REQ-LLL-007)
@@ -421,7 +468,13 @@ impl<'a> Norm<'a> {
             Expr::Bin(op, a, b) => format!("({op:?} {} {})", self.expr(a), self.expr(b)),
             Expr::EffCall(n, args) => {
                 let xs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
-                format!("(eff {n} {})", xs.join(" "))
+                // fold the op's identity token when it is a user-declared op
+                // (REQ-LLL-027). A builtin (IO/State/Reader) has no token → the
+                // form is byte-identical to before, so existing hashes are unchanged.
+                match self.op_tokens.get(n) {
+                    Some(tok) => format!("(eff {n} {tok} {})", xs.join(" ")),
+                    None => format!("(eff {n} {})", xs.join(" ")),
+                }
             }
             Expr::Call(n, args) => {
                 let xs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
