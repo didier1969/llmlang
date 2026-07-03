@@ -637,10 +637,15 @@ fn collect_abstract_sorts(text: &str, out: &mut std::collections::BTreeSet<Strin
     }
 }
 
-/// SMT-LIB `declare-datatypes` blocks for the module's user ADTs (REQ-LLL-011).
-/// One independent block per type; a `List[..]` field becomes `(Lst ..)`.
+/// SMT-LIB `declare-datatypes` for the module's user ADTs (REQ-LLL-011). All
+/// types go in ONE block so they may reference each other (mutually recursive
+/// datatypes); a `List[..]` field becomes `(Lst ..)`.
 fn user_datatype_decls(types: &[TypeDecl]) -> Vec<String> {
-    types
+    if types.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = types.iter().map(|td| format!("({} 0)", td.name)).collect();
+    let bodies: Vec<String> = types
         .iter()
         .map(|td| {
             let ctors: Vec<String> = td
@@ -659,13 +664,14 @@ fn user_datatype_decls(types: &[TypeDecl]) -> Vec<String> {
                     }
                 })
                 .collect();
-            format!(
-                "(declare-datatypes (({} 0)) (({})))",
-                td.name,
-                ctors.join(" ")
-            )
+            format!("({})", ctors.join(" "))
         })
-        .collect()
+        .collect();
+    vec![format!(
+        "(declare-datatypes ({}) ({}))",
+        names.join(" "),
+        bodies.join(" ")
+    )]
 }
 
 fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> String {

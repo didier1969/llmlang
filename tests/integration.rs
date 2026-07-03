@@ -470,6 +470,34 @@ fn recursive_adt_tree_verifies_and_runs() {
 }
 
 #[test]
+fn cross_type_adt_composition_verifies_and_runs() {
+    // REQ-LLL-011 follow-up: one ADT field is another user type (a record of
+    // records). All user types share one declare-datatypes block.
+    let src = "module T:\n\n  type Point = Pt(Int, Int)\n  type Seg = Ln(Point, Point)\n\n  part dx(s: Seg) -> Int:\n    match s:\n      Ln(a, b) ->\n        match a:\n          Pt(x1, y1) ->\n            match b:\n              Pt(x2, y2) -> yield x2 - x1\n\n  part main() -> Int via IO:\n    let s = Ln(Pt(2, 0), Pt(9, 0))\n    let r = IO.print(dx(s))\n    yield r\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "cross-type ADT must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("xt.rs");
+    let bin = dir.join("xt_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "cross-type ADT Rust failed:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains('7'), "dx must be 7");
+}
+
+#[test]
 fn non_exhaustive_user_match_is_rejected() {
     // dropping a constructor must fail the exhaustiveness proof (REQ-LLL-011)
     let src = "module T:\n\n  type Color = Red | Green | Blue\n\n  part code(c: Color) -> Int:\n    match c:\n      Red   -> yield 0\n      Green -> yield 1\n";
