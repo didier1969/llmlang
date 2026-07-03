@@ -567,6 +567,50 @@ fn dedup_merge_removes_duplicate_and_preserves_identity() {
 }
 
 #[test]
+fn move_relocates_definition_preserving_identity() {
+    // REQ-LLL-024: `lll move` relocates a definition between files without
+    // touching its text — identity is a content-hash, not a file path, so the
+    // move regenerates nothing and call sites keep resolving by name.
+    let dir = std::env::temp_dir().join(format!("lll-move-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("lib.lll");
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &lib,
+        "module Lib:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n\n  part dec(x: Int) -> Int:\n    yield x - 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &root,
+        "import \"lib.lll\"\n\nmodule Main:\n\n  part twice(x: Int) -> Int:\n    yield inc(inc(x))\n",
+    )
+    .unwrap();
+    let root_s = root.to_str().unwrap();
+
+    // identity of `inc` before the move
+    let (_, m0) = loader::load_program(root_s).unwrap();
+    let inc_hash = hash::hash_module(&types::check_module(m0).unwrap()).unwrap().def_hash["inc"].clone();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["move", root_s, "inc", root_s])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "move failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // reload: `inc` resolves with the SAME hash, `dec` stays behind in lib,
+    // and the workspace still type-checks (twice still calls inc by name).
+    let (_, m1) = loader::load_program(root_s).unwrap();
+    let cm1 = types::check_module(m1).expect("moved workspace must type-check");
+    let hm1 = hash::hash_module(&cm1).unwrap();
+    assert_eq!(hm1.def_hash["inc"], inc_hash, "move changed identity");
+    assert!(cm1.index.contains_key("twice"), "caller lost");
+    // `inc` now lives in main.lll, `dec` still in lib.lll
+    assert!(std::fs::read_to_string(&root).unwrap().contains("part inc("), "inc not in dest");
+    assert!(!std::fs::read_to_string(&lib).unwrap().contains("part inc("), "inc still in origin");
+    assert!(std::fs::read_to_string(&lib).unwrap().contains("part dec("), "dec must stay in origin");
+}
+
+#[test]
 fn export_ist_emits_axon_extraction_result() {
     // REQ-LLL-021: `lll export-ist` emits Axon's ExtractionResult JSON straight
     // from the real parser — a function Symbol per part (carrying content-hash +

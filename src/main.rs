@@ -36,6 +36,7 @@ fn export_ist(file: &str) -> Result<String, String> {
             "tested": false,
             "is_nif": false,
             "is_unsafe": false,
+            "embedding": serde_json::Value::Null,
             "properties": {
                 "content_hash": hm.def_hash[&p.name],
                 "purity": if effectful { "effectful" } else { "pure" },
@@ -71,6 +72,7 @@ fn export_ist(file: &str) -> Result<String, String> {
             "tested": false,
             "is_nif": false,
             "is_unsafe": false,
+            "embedding": serde_json::Value::Null,
             "properties": { "constructors": ctors.join(",") },
         }));
     }
@@ -83,7 +85,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -366,6 +368,84 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 "✔ renamed `{old}` -> `{new}` across {} file(s); def-hash unchanged ({}…) — \
                  identity preserved, call sites re-pointed by name (DEC-LLL-019)",
                 rewrites.len(),
+                &old_hash[..16]
+            );
+            Ok(())
+        }
+        ["move", file, part, dest] => {
+            // structural maintenance command (REQ-LLL-024): relocate a definition
+            // between files WITHOUT touching its text — identity is a content-hash,
+            // not a file path, so a move regenerates nothing (CPT-LLL-013). The LLM
+            // issues a command; call sites resolve by name across the workspace.
+            let (_, cm, hm) = load(file)?;
+            if !cm.index.contains_key(*part) {
+                return Err(format!("unknown part `{part}`"));
+            }
+            let old_hash = hm.def_hash[*part].clone();
+            let origin = cm.module.parts[cm.index[*part]]
+                .origin
+                .clone()
+                .unwrap_or_else(|| file.to_string());
+            let dest_path = std::path::PathBuf::from(dest);
+            if !dest_path.exists() {
+                return Err(format!("destination file `{dest}` does not exist"));
+            }
+            if std::fs::canonicalize(&origin).ok() == std::fs::canonicalize(&dest_path).ok() {
+                return Err(format!("`{part}` already lives in `{dest}`"));
+            }
+            // snapshot both files for fail-safe rollback
+            let origin_src = std::fs::read_to_string(&origin).map_err(|e| e.to_string())?;
+            let dest_src = std::fs::read_to_string(&dest_path).map_err(|e| e.to_string())?;
+            let (block, stripped) = match hash::extract_part_block(&origin_src, part) {
+                Some(x) => x,
+                None => return Err(format!("could not locate the source block of `{part}`")),
+            };
+            // refuse to leave the origin an empty module (unparseable dead shell):
+            // the operator moves the remaining defs too, or deletes the file.
+            let origin_has_defs = stripped.lines().any(|l| {
+                let t = l.trim_start();
+                (l.len() - t.len()) == 2 && (t.starts_with("part ") || t.starts_with("type "))
+            });
+            if !origin_has_defs {
+                return Err(format!(
+                    "moving `{part}` would leave `{origin}` an empty module — move the \
+                     remaining definitions too, or delete the file."
+                ));
+            }
+            let restore = || {
+                let _ = std::fs::write(&origin, &origin_src);
+                let _ = std::fs::write(&dest_path, &dest_src);
+            };
+            // remove from origin, append verbatim into dest's module body
+            std::fs::write(&origin, &stripped).map_err(|e| e.to_string())?;
+            let mut new_dest = dest_src.trim_end().to_string();
+            new_dest.push_str("\n\n");
+            new_dest.push_str(&block);
+            new_dest.push('\n');
+            std::fs::write(&dest_path, &new_dest).map_err(|e| e.to_string())?;
+            // validate: workspace still type-checks AND identity is preserved
+            let validated = load(file).and_then(|(_, cm2, hm2)| {
+                if cm2.module.parts[cm2.index[*part]].origin.as_deref()
+                    == Some(origin.as_str())
+                {
+                    return Err(format!("move validation failed: `{part}` still in origin"));
+                }
+                match hm2.def_hash.get(*part) {
+                    Some(h) if *h == old_hash => Ok(()),
+                    Some(_) => Err(format!(
+                        "move would CHANGE the definition hash of `{part}` — refused; files restored."
+                    )),
+                    None => Err(format!("move validation failed: `{part}` no longer resolves")),
+                }
+            });
+            if let Err(e) = validated {
+                restore();
+                return Err(e);
+            }
+            println!(
+                "✔ moved `{part}` {} -> {dest}; def-hash unchanged ({}…) — identity preserved, \
+                 call sites resolve by name (DEC-LLL-019). ~0 output tokens.",
+                origin,
                 &old_hash[..16]
             );
             Ok(())

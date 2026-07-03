@@ -478,7 +478,11 @@ pub fn rename_part_in_source(src: &str, old: &str, new: &str) -> Result<String, 
 /// Remove a part's whole text block from a module source (REQ-LLL-024 dedup
 /// merge). A part is a 2-space-indented `part <name>…` line plus its
 /// deeper-indented body, ending at the next module-body item or a dedent/EOF.
-pub fn delete_part_block(src: &str, name: &str) -> Option<String> {
+/// Locate the source block of `part name` and return `(block, stripped)`:
+/// `block` = the verbatim lines of that definition (trailing blank lines
+/// trimmed), `stripped` = the source with that block removed. Purely textual
+/// so identity (content-hash) is preserved when the block is re-homed verbatim.
+pub fn extract_part_block(src: &str, name: &str) -> Option<(String, String)> {
     let lines: Vec<&str> = src.lines().collect();
     let matches_name = |l: &str| -> bool {
         let t = l.trim_start();
@@ -503,11 +507,21 @@ pub fn delete_part_block(src: &str, name: &str) -> Option<String> {
         }
         end += 1;
     }
+    // block = [start, end) with trailing blank lines trimmed off
+    let mut block_end = end;
+    while block_end > start + 1 && lines[block_end - 1].trim().is_empty() {
+        block_end -= 1;
+    }
+    let block = lines[start..block_end].join("\n");
     let mut kept: Vec<&str> = lines[..start].to_vec();
     kept.extend_from_slice(&lines[end..]);
-    let mut s = kept.join("\n");
+    let mut stripped = kept.join("\n");
     if src.ends_with('\n') {
-        s.push('\n');
+        stripped.push('\n');
     }
-    Some(s)
+    Some((block, stripped))
+}
+
+pub fn delete_part_block(src: &str, name: &str) -> Option<String> {
+    extract_part_block(src, name).map(|(_, stripped)| stripped)
 }
