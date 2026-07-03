@@ -99,10 +99,11 @@ fn local(name: &str) -> String {
 }
 
 fn emit_enum(out: &mut String, td: &TypeDecl) {
-    out.push_str(&format!(
-        "\n#[derive(Debug, Clone, PartialEq)]\npub enum {} {{\n",
-        td.name
-    ));
+    // Rc-wrapped like lists: `type T = Rc<TI>`, so a self-referential field
+    // (rs_ty renders it as `T` = the Rc alias) gives recursion for free
+    // (REQ-LLL-011). Values are shared via reference counting.
+    let ei = format!("{}I", td.name);
+    out.push_str(&format!("\n#[derive(Debug, Clone, PartialEq)]\npub enum {ei} {{\n"));
     for (cn, fields) in &td.ctors {
         if fields.is_empty() {
             out.push_str(&format!("    {cn},\n"));
@@ -112,7 +113,8 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
         }
     }
     out.push_str("}\n");
-    out.push_str(&format!("pub use {}::*;\n", td.name));
+    out.push_str(&format!("pub type {} = Rc<{ei}>;\n", td.name));
+    out.push_str(&format!("pub use {ei}::*;\n"));
 }
 
 fn emit_part(
@@ -207,11 +209,12 @@ fn emit_match(
     fns: &Names,
     ctors: &Names,
 ) -> Result<(), String> {
-    let is_list = arms
+    // list AND user-ADT values are Rc-wrapped → match on the dereferenced enum
+    let is_boxed = arms
         .iter()
-        .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..)));
+        .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..) | Pattern::Ctor(..)));
     let s = expr(scrut, fns, ctors)?;
-    if is_list {
+    if is_boxed {
         out.push_str(&format!(
             "{}let __s = {s};\n{}match &*__s {{\n",
             indent(depth),
@@ -246,10 +249,19 @@ fn emit_match(
         out.push_str(&format!("{}{pat}{guard} => {{\n", indent(d)));
         // rebind list pattern names to owned values (clone: the element type
         // may be a generic T that is Clone but not Copy — REQ-LLL-007)
-        if let Pattern::Cons(h, t) = &arm.pattern {
-            let (hh, tt) = (local(h), local(t));
-            out.push_str(&format!("{ind}let {hh} = {hh}.clone();\n", ind = indent(d + 1)));
-            out.push_str(&format!("{ind}let {tt} = {tt}.clone();\n", ind = indent(d + 1)));
+        match &arm.pattern {
+            Pattern::Cons(h, t) => {
+                let (hh, tt) = (local(h), local(t));
+                out.push_str(&format!("{ind}let {hh} = {hh}.clone();\n", ind = indent(d + 1)));
+                out.push_str(&format!("{ind}let {tt} = {tt}.clone();\n", ind = indent(d + 1)));
+            }
+            Pattern::Ctor(_, binders) => {
+                for b in binders {
+                    let bb = local(b);
+                    out.push_str(&format!("{ind}let {bb} = {bb}.clone();\n", ind = indent(d + 1)));
+                }
+            }
+            _ => {}
         }
         emit_body(out, &arm.body, d + 1, fns, ctors)?;
         out.push_str(&format!("{}}}\n", indent(d)));
@@ -283,8 +295,8 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
         Expr::BoolLit(v) => format!("{v}"),
         Expr::Var(n) => {
             if ctors.contains(n) {
-                // nullary ADT constructor used as a value (REQ-LLL-011)
-                n.clone()
+                // nullary ADT constructor value → Rc-wrapped (REQ-LLL-011)
+                format!("Rc::new({n})")
             } else {
                 // `.clone()` is uniform: cheap for Copy (i64/bool), needed for Rc lists
                 format!("{}.clone()", local(n))
@@ -321,8 +333,8 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
             let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, fns, ctors)).collect();
             let xs = xs?.join(", ");
             if ctors.contains(name) {
-                // ADT constructor application → bare variant (REQ-LLL-011)
-                format!("{name}({xs})")
+                // ADT constructor application → Rc-wrapped variant (REQ-LLL-011)
+                format!("Rc::new({name}({xs}))")
             } else if fns.contains(name) {
                 // application of a function-valued parameter (REQ-LLL-009)
                 format!("{}({xs})", local(name))

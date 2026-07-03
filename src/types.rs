@@ -79,7 +79,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         for (cname, fields) in &td.ctors {
             for ft in fields {
-                if !valid_field_ty(ft) {
+                if !valid_field_ty(ft, &td.name) {
                     return Err(format!(
                         "type `{}` constructor `{cname}`: field type {ft} is unsupported \
                          (v1: Int, Bool, List[…], or the type itself)",
@@ -175,13 +175,14 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     })
 }
 
-/// v1 field types for a user ADT constructor: Int, Bool, or List of a valid
-/// field type. Recursive/nested ADT fields, cross-type references, type
-/// variables and functions are out of scope (REQ-LLL-011 follow-up).
-fn valid_field_ty(t: &Ty) -> bool {
+/// v1 field types for a user ADT constructor: Int, Bool, List of a valid field
+/// type, or the declaring type itself (self-recursion → e.g. trees). Cross-type
+/// references, type variables and functions are out of scope (REQ-LLL-011).
+fn valid_field_ty(t: &Ty, self_name: &str) -> bool {
     match t {
         Ty::Int | Ty::Bool => true,
-        Ty::List(e) => valid_field_ty(e),
+        Ty::List(e) => valid_field_ty(e, self_name),
+        Ty::User(n) => n == self_name,
         _ => false,
     }
 }

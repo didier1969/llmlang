@@ -405,6 +405,39 @@ fn user_adts_verify_exhaustively_and_run() {
 }
 
 #[test]
+fn recursive_adt_tree_verifies_and_runs() {
+    // REQ-LLL-011 follow-up: a self-referential ADT (binary tree). Recursion over
+    // the Node children is structural (a same-type field is smaller), so `size`
+    // terminates and verifies; the Rc-wrapped codegen runs it.
+    let src = "module T:\n\n  type Tree = Leaf | Node(Tree, Int, Tree)\n\n  part size(t: Tree) -> Int:\n    ensures result >= 0\n    match t:\n      Leaf          -> yield 0\n      Node(l, v, r) -> yield 1 + size(l) + size(r)\n\n  part sumt(t: Tree) -> Int:\n    match t:\n      Leaf          -> yield 0\n      Node(l, v, r) -> yield v + sumt(l) + sumt(r)\n\n  part main() -> Int via IO:\n    let t = Node(Node(Leaf, 3, Leaf), 5, Node(Leaf, 7, Leaf))\n    let r = IO.print(size(t) + sumt(t))\n    yield r\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "recursive tree must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("tree.rs");
+    let bin = dir.join("tree_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "tree Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    // size = 3 nodes, sumt = 3+5+7 = 15 → 18
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("18"),
+        "tree must print 18"
+    );
+}
+
+#[test]
 fn non_exhaustive_user_match_is_rejected() {
     // dropping a constructor must fail the exhaustiveness proof (REQ-LLL-011)
     let src = "module T:\n\n  type Color = Red | Green | Blue\n\n  part code(c: Color) -> Int:\n    match c:\n      Red   -> yield 0\n      Green -> yield 1\n";
