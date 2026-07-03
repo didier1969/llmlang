@@ -119,6 +119,51 @@ fn leaf(v: i64) -> String {
     }
 }
 
+/// A random well-typed program that reduces to a KNOWN i64, drawn from a richer
+/// fragment than arithmetic — tuple destructuring, match-conditionals, and a pure
+/// effect-generic HOF — so the differential covers the features where the audit
+/// found bugs, not just integer math. Returns the full module text + expected
+/// value, or `None` on overflow.
+fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
+    match rng.below(4) {
+        0 => {
+            let (e, v) = gen_expr(rng, 2)?;
+            Some((format!("module T:\n\n  part main() -> Int:\n    yield {e}\n"), v))
+        }
+        1 => {
+            // tuple build + projection via a destructuring match
+            let (e1, v1) = gen_expr(rng, 1)?;
+            let (e2, v2) = gen_expr(rng, 1)?;
+            let (proj, val) = if rng.below(2) == 0 { ("a", v1) } else { ("b", v2) };
+            Some((
+                format!("module T:\n\n  part main() -> Int:\n    match ({e1}, {e2}):\n      (a, b) -> yield {proj}\n"),
+                val,
+            ))
+        }
+        2 => {
+            // conditional via a match on a boolean comparison
+            let (e1, v1) = gen_expr(rng, 1)?;
+            let (e2, v2) = gen_expr(rng, 1)?;
+            let (e3, v3) = gen_expr(rng, 1)?;
+            let (e4, v4) = gen_expr(rng, 1)?;
+            let val = if v1 < v2 { v3 } else { v4 };
+            Some((
+                format!("module T:\n\n  part main() -> Int:\n    match ({e1} < {e2}):\n      true -> yield {e3}\n      false -> yield {e4}\n"),
+                val,
+            ))
+        }
+        _ => {
+            // a pure effect-generic HOF: apply(dbl, e) == 2*e
+            let (e, v) = gen_expr(rng, 1)?;
+            let val = v.checked_add(v)?;
+            Some((
+                format!("module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part dbl(n: Int) -> Int:\n    yield n + n\n\n  part main() -> Int:\n    yield apply(dbl, {e})\n"),
+                val,
+            ))
+        }
+    }
+}
+
 #[test]
 fn hash_is_deterministic_and_rename_invariant() {
     let mut rng = Rng(0x1234_5678);
@@ -149,18 +194,19 @@ fn full_hash(src: &str) -> String {
 // ---------- property 3: differential — verified model == binary ----------
 
 #[test]
-fn verified_arithmetic_agrees_with_the_binary() {
+fn verified_programs_agree_with_the_binary() {
     // rustc per case is costly → a smaller sample, but each case proves the
-    // DEC-LLL-026 invariant end to end: Z3 verifies the program, then the compiled
-    // binary must print exactly the euclidean value the model computes.
+    // DEC-LLL-026 invariant end to end over a RICHER fragment (arithmetic, tuples,
+    // conditionals, a pure effect-generic HOF): Z3 verifies the program, the binary
+    // runs WITHOUT TRAPPING, and prints exactly the value the model computes.
     let mut rng = Rng(0xBEEF_CAFE);
     let dir = std::env::temp_dir().join(format!("lll-prop-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut checked = 0;
     let mut attempts = 0;
-    while checked < 24 && attempts < 400 {
+    while checked < 32 && attempts < 600 {
         attempts += 1;
-        let Some((body, expected)) = gen_program(&mut rng, "main") else { continue };
+        let Some((body, expected)) = gen_body(&mut rng) else { continue };
         let m = parser::parse_module(&body).expect("parse");
         let cm = types::check_module(m).expect("check");
         let hm = hash::hash_module(&cm).expect("hash");
@@ -180,6 +226,12 @@ fn verified_arithmetic_agrees_with_the_binary() {
             .expect("rustc");
         assert!(st.status.success(), "rustc failed:\n{body}\n{}", String::from_utf8_lossy(&st.stderr));
         let out = std::process::Command::new(&bin).output().unwrap();
+        // a VERIFIED program must never trap (it is overflow-free by construction)
+        assert!(
+            out.status.success(),
+            "verified program TRAPPED at runtime:\n{body}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             stdout.contains(&format!("=> {expected}")),
@@ -187,5 +239,5 @@ fn verified_arithmetic_agrees_with_the_binary() {
         );
         checked += 1;
     }
-    assert!(checked >= 24, "differential produced too few cases ({checked})");
+    assert!(checked >= 32, "differential produced too few cases ({checked})");
 }
