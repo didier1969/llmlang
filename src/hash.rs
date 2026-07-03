@@ -369,6 +369,7 @@ impl<'a> Norm<'a> {
     }
     fn expr(&mut self, e: &Expr) -> String {
         match e {
+            Expr::Unit => "(unit)".to_string(),
             Expr::IntLit(v) => format!("{v}"),
             Expr::BoolLit(v) => format!("{v}"),
             Expr::Var(n) => match self.db(n) {
@@ -443,7 +444,7 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
             }
             collect_tyvars(r, acc);
         }
-        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never => {}
+        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -465,6 +466,7 @@ fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
         ),
         Ty::User(n) => n.clone(),
         Ty::Never => "Never".to_string(),
+        Ty::Unit => "Unit".to_string(),
     }
 }
 

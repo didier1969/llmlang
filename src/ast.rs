@@ -90,6 +90,9 @@ pub enum Ty {
     /// A `Never`-typed expression diverges (aborts the handled block), so it
     /// coerces to any expected type and code after it is dead.
     Never,
+    /// The unit type `()` — a single value, carrying no information. The honest
+    /// return type of a procedure whose purpose is an effect (REQ-LLL-025 slice 3b).
+    Unit,
 }
 
 impl Ty {
@@ -104,7 +107,7 @@ impl Ty {
     /// True when the type mentions no type variable (fully concrete).
     pub fn is_concrete(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never => true,
+            Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => true,
             Ty::Var(_) => false,
             Ty::List(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
@@ -125,6 +128,7 @@ impl std::fmt::Display for Ty {
             }
             Ty::User(name) => write!(f, "{name}"),
             Ty::Never => write!(f, "Never"),
+            Ty::Unit => write!(f, "Unit"),
         }
     }
 }
@@ -219,6 +223,8 @@ pub enum Expr {
     /// Anonymous function `\(x: T) -> expr` (REQ-LLL-009). v1: typed params,
     /// single-expression body, no captures of enclosing locals.
     Lambda(Vec<(String, Ty)>, Box<Expr>),
+    /// The unit value `()` — the sole inhabitant of `Unit` (REQ-LLL-025 slice 3b).
+    Unit,
 }
 
 impl Expr {

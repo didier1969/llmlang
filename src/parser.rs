@@ -506,6 +506,7 @@ impl Parser {
             Tok::Ident(s) if s == "Int" => Ok(Ty::Int),
             Tok::Ident(s) if s == "Bool" => Ok(Ty::Bool),
             Tok::Ident(s) if s == "Never" => Ok(Ty::Never),
+            Tok::Ident(s) if s == "Unit" => Ok(Ty::Unit),
             Tok::Ident(s) if s == "List" => {
                 // generic element type: List[Int], List[a], List[List[Int]]
                 self.eat(Tok::LBracket)?;
@@ -520,7 +521,7 @@ impl Parser {
             }
             // any other capitalized bareword names a user ADT (REQ-LLL-011)
             Tok::Ident(s) => Ok(Ty::User(s)),
-            // function type `(T1, T2, ...) -> R` (REQ-LLL-009)
+            // `()` is the unit type; `(T1, …) -> R` is a function type (REQ-LLL-009)
             Tok::LParen => {
                 let mut params = Vec::new();
                 if self.peek() != &Tok::RParen {
@@ -531,6 +532,10 @@ impl Parser {
                     }
                 }
                 self.eat(Tok::RParen)?;
+                if params.is_empty() && self.peek() != &Tok::Arrow {
+                    // `()` with no following arrow — the unit type (REQ-LLL-025)
+                    return Ok(Ty::Unit);
+                }
                 self.eat(Tok::Arrow)?;
                 let ret = self.ty()?;
                 Ok(Ty::Fun(params, Box::new(ret)))
@@ -699,6 +704,11 @@ impl Parser {
                 Ok(Expr::Lambda(params, Box::new(body)))
             }
             Tok::LParen => {
+                if self.peek() == &Tok::RParen {
+                    // `()` — the unit value (REQ-LLL-025 slice 3b)
+                    self.pos += 1;
+                    return Ok(Expr::Unit);
+                }
                 let e = self.expr()?;
                 self.eat(Tok::RParen)?;
                 Ok(e)

@@ -601,6 +601,7 @@ fn type_of_pure(
     result: Option<Ty>,
 ) -> Result<Ty, String> {
     Ok(match e {
+        Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(items) => {
@@ -734,6 +735,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
             Box::new(subst_ty(r, subst)),
         ),
         Ty::Never => Ty::Never,
+        Ty::Unit => Ty::Unit,
     }
 }
 
@@ -1032,6 +1034,7 @@ fn check_expr(
     expected: Option<&Ty>,
 ) -> Result<Ty, String> {
     Ok(match e {
+        Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(items) => {

@@ -178,6 +178,30 @@ fn state_handle_requires_initial_cell() {
 }
 
 #[test]
+fn unit_type_verifies_and_runs() {
+    // REQ-LLL-025 slice 3b: the unit type `()` — the honest return of a procedure
+    // whose purpose is an effect. Verifies + compiles + runs.
+    let src = "module T:\n\n  part noop(x: Int) -> Unit:\n    yield ()\n\n  part logIt(x: Int) -> Unit via IO:\n    let _ = IO.print(x)\n    yield ()\n\n  part main() -> Int via IO:\n    let _ = noop(5)\n    let _ = logIt(7)\n    yield IO.print(42)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "unit program must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("u.rs");
+    let bin = dir.join("u_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "unit codegen failed:\n{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("42"));
+}
+
+#[test]
 fn unknown_effect_in_via_is_rejected() {
     // an effect named in `via` must be declared with `effect …:` (REQ-LLL-018).
     let src = "module B:\n\n  part f(n: Int) -> Int via Ghost:\n    yield n\n";

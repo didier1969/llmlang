@@ -253,6 +253,8 @@ fn smt_ty(t: &Ty) -> String {
         // `Never` is the return type of an abort op; an abort path is proven dead
         // (assume false), so its result is never translated to a value sort.
         Ty::Never => unreachable!("Never has no value sort — abort paths are proven unreachable"),
+        // the unit type is a Z3 datatype with a single value (REQ-LLL-025)
+        Ty::Unit => "Unit".to_string(),
     }
 }
 
@@ -414,6 +416,7 @@ impl<'a> Emit<'a> {
     /// assumptions (callee ensures) along the way.
     fn tr(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
         Ok(match e {
+            Expr::Unit => "unit".to_string(),
             Expr::IntLit(v) => {
                 if *v < 0 {
                     format!("(- {})", -v)
@@ -776,6 +779,8 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     for srt in &sorts {
         s.push_str(&format!("(declare-sort {srt} 0)\n"));
     }
+    // the unit type: a datatype with a single value (REQ-LLL-025 slice 3b)
+    s.push_str("(declare-datatypes () ((Unit unit)))\n");
     // the parametric list must precede any user datatype that has a List field
     if uses_list || dt_decls.iter().any(|d| d.contains("(Lst")) {
         s.push_str(LIST_DECL);

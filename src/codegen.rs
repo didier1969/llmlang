@@ -97,6 +97,8 @@ fn rs_ty(t: &Ty) -> String {
         // value type — an abort op compiles to an early `return Err`, so its
         // "result" has Rust's never type.
         Ty::Never => "!".to_string(),
+        // the unit type is Rust's unit `()` (REQ-LLL-025 slice 3b)
+        Ty::Unit => "()".to_string(),
     }
 }
 
@@ -120,7 +122,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             }
             collect_tvars(r, acc);
         }
-        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never => {}
+        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -480,6 +482,7 @@ fn emit_match(
 
 fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
     Ok(match e {
+        Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => format!("{v}i64"),
         Expr::BoolLit(v) => format!("{v}"),
         Expr::Var(n) => {
