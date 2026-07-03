@@ -205,6 +205,37 @@ fn ffi_extern_effect_verifies_and_runs() {
 }
 
 #[test]
+fn ffi_import_derives_extern_block_from_rust_signatures() {
+    // REQ-LLL-022 tranche 2 (DEC-LLL-033): the LLM-efficient layer — `lll ffi-import`
+    // MECHANICALLY derives the `effect … = extern` block from Rust signatures, so
+    // the LLM never hand-writes bindings (only the boundary contracts). i64→Int,
+    // bool→Bool; richer signatures are skipped.
+    let dir = tempdir();
+    let rs = dir.join("sigs.rs");
+    std::fs::write(
+        &rs,
+        "pub fn max(a: i64, b: i64) -> i64 { a }\npub fn is_even(n: i64) -> bool { true }\npub fn name(s: &str) -> String { s.to_string() }\nfn priv_fn(a: i64) -> i64 { a }\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["ffi-import", rs.to_str().unwrap(), "Cmp", "std::cmp"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffi-import failed: {}", String::from_utf8_lossy(&out.stderr));
+    let block = String::from_utf8_lossy(&out.stdout);
+    // the mappable pub fns are bound; the block is indented for a module body
+    assert!(block.contains("  effect Cmp:"), "effect at module-body indent");
+    assert!(block.contains("max(Int, Int) -> Int = extern \"std::cmp::max\""), "max mapped: {block}");
+    assert!(block.contains("is_even(Int) -> Bool = extern \"std::cmp::is_even\""), "bool ret mapped: {block}");
+    // non-mappable (&str/String) is skipped, private fn ignored
+    assert!(block.contains("skipped") && block.contains("name"), "name skipped: {block}");
+    assert!(!block.contains("priv_fn"), "private fn must be ignored");
+    // and the derived block, pasted into a module, is valid llmlang source
+    let src = format!("module T:\n\n{}\n  part hi(x: Int) -> Int via Cmp:\n    yield Cmp.max(x, 0)\n", block);
+    parser::parse_module(&src).expect("derived block parses inside a module");
+}
+
+#[test]
 fn value_effect_op_without_extern_is_rejected() {
     // REQ-LLL-022: a value-returning user op with neither `= extern` nor `Never`
     // has no implementation (user-authored resumptive handlers = REQ-026) → reject.
