@@ -524,6 +524,36 @@ fn generic_definitions_are_alpha_equivalent_in_type_vars() {
 }
 
 #[test]
+fn std_str_algorithms_verify_and_run_on_literals() {
+    // REQ-LLL-010 follow-up: Std.Str provides real verified string algorithms
+    // (starts_with, str_eq) over string literals (= codepoint lists).
+    let (_, m) = loader::load_program("examples/str_demo.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "Std.Str demo must verify: {:?}", failures(&report));
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("sd.rs");
+    let bin = dir.join("sd_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "Std.Str Rust failed:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    // starts_with("hello world","hello")=true, (…,"bye")=false → str_len = 11
+    assert!(String::from_utf8_lossy(&out.stdout).contains("11"), "must print 11");
+}
+
+#[test]
 fn generic_stdlib_reused_across_element_types() {
     // REQ-LLL-007 follow-up: the stdlib combinators (reverse, len) are generic —
     // one proof serves List[Int] AND List[Bool], no per-type duplication.

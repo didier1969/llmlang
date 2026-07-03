@@ -1,0 +1,45 @@
+import "list.lll"
+
+module Std.Str:
+
+  # String = List[Int] of Unicode scalar codepoints (DEC-LLL-030). A string
+  # literal "abc" desugars to such a list, so these operations are verified by
+  # the same decidable list fragment. `str_*` names avoid clashing with the
+  # flat Std.List namespace (DEC-LLL-019).
+
+  part str_len(s: List[Int]) -> Int:
+    ensures result >= 0
+    yield len(s)
+
+  part str_concat(s: List[Int], t: List[Int]) -> List[Int]:
+    yield append(s, t)
+
+  part str_at(s: List[Int], i: Int, d: Int) -> Int:
+    yield nth(s, i, d)
+
+  # structural, real algorithms (not aliases):
+
+  part str_eq(s: List[Int], t: List[Int]) -> Bool:
+    match s:
+      [] ->
+        match t:
+          []     -> yield true
+          x :: y -> yield false
+      sh :: st ->
+        match t:
+          []       -> yield false
+          th :: tt ->
+            match sh == th:
+              true  -> yield str_eq(st, tt)
+              false -> yield false
+
+  part starts_with(s: List[Int], p: List[Int]) -> Bool:
+    match p:
+      [] -> yield true
+      ph :: pt ->
+        match s:
+          []       -> yield false
+          sh :: st ->
+            match sh == ph:
+              true  -> yield starts_with(st, pt)
+              false -> yield false

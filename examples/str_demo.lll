@@ -1,0 +1,15 @@
+import "../std/str.lll"
+
+module StrDemo:
+
+  # Real verified string algorithms on string literals (REQ-LLL-010 follow-up):
+  # `starts_with` and `str_len` over "hello world".
+
+  part main() -> Int via IO:
+    let hello = "hello world"
+    match starts_with(hello, "hello"):
+      true ->
+        match starts_with(hello, "bye"):
+          false -> yield IO.print(str_len(hello))  # 11
+          true  -> yield IO.print(0 - 1)
+      false -> yield IO.print(0 - 2)
