@@ -1,0 +1,41 @@
+module ActorReactive:
+
+  # Preuve du modèle de concurrence "voie 2a" (concurrence à la frontière) AVEC LE
+  # LANGAGE ACTUEL — rien de nouveau n'est requis pour le COMPORTEMENT d'un acteur.
+  #
+  # Un message = un ADT somme (REQ-LLL-011). Le `receive` d'Elixir devient un match
+  # EXHAUSTIF que Z3 prouve total : tout message est traité, par construction.
+  type Msg = Add(Int) | Reset
+
+  # Garde de positivité, vérifiée (result >= 0 sans condition d'entrée).
+  part max0(x: Int) -> Int:
+    ensures result >= 0
+    match x >= 0:
+      true  -> yield x
+      false -> yield 0
+
+  # Le COMPORTEMENT de l'acteur : une step-function TOTALE et VÉRIFIÉE
+  # `step(state, msg) -> state'`. Aucune boucle ici — la boucle non-terminante
+  # d'un acteur vit dans le runtime (voie 2a), ce qui préserve DEC-LLL-016
+  # (terminaison toujours prouvée). L'invariant métier "l'état reste >= 0" est
+  # PROUVÉ par Z3 pour TOUT message — ce que la BEAM ne peut pas faire.
+  part step(state: Int, m: Msg) -> Int:
+    requires state >= 0
+    ensures result >= 0
+    match m:
+      Add(k) -> yield max0(state + k)
+      Reset  -> yield 0
+
+  # Le DRIVER : le runtime itère `step` sur le flux de messages. Ici on le montre
+  # borné (fold structural total) ; en 2a le vrai flux non-borné est piloté par le
+  # runtime Rust via un effet extern. La récursion est structurale sur l'inbox.
+  part run(state: Int, inbox: List[Msg]) -> Int:
+    requires state >= 0
+    ensures result >= 0
+    match inbox:
+      []     -> yield state
+      m :: t -> yield run(step(state, m), t)
+
+  part main() -> Int via IO:
+    let inbox = Add(5) :: Add(3) :: Reset :: Add(7) :: []
+    yield IO.print(run(0, inbox))   # 0+5=5, +3=8, Reset=0, +7=7 -> 7
