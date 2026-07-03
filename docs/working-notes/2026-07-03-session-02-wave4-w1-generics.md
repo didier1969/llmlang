@@ -40,6 +40,14 @@ puis exécution W1.
   testé, hors périmètre v1. À traiter si l'identité de définitions génériques devient critique.
 - 2 commits (008, 007) NON POUSSÉS à la clôture.
 
-## Reste vague 4 (designs tranchés, prêts)
-REQ-009 (HOF, DEC-029) · REQ-011 (ADT, réutilise le générateur datatype de 007) ·
-REQ-010 (String=List[Char], DEC-030) · REQ-012 (rename + measures lexico).
+## Suite de session (même journée) — W2/W3 livrés
+Après W1 (007+008), enchaînement de 4 REQ supplémentaires, tous verts/poussés :
+- **REQ-010** (0f69ebb) : littéral `"..."` → liste de codepoints vérifiée (réutilise `List`).
+- **REQ-012** (bba75e0 + 87323f1) : measures lexicographiques (`measure m, n` → décroissance
+  lex ; test Ackermann) + rename cross-fichiers (`loader::workspace_files`, rollback fail-safe).
+- **REQ-009** (6f9ee44) : HOF + lambdas. `Ty::Fun`, `Expr::Lambda`, param fonction = UF
+  (declare-fun) + application `(p_f x)`, codegen fn-pointer + closure. Test apply/map/fold → 22.
+
+Bilan session : **6/7 REQ vague 4 livrés** (007, 008, 009, 010, 012 + design pass DEC-028/029/030),
+39 tests, 0 warning. **RESTANT = REQ-011 (ADT)** — plan d'implémentation détaillé dans le
+session_pointer CPT-LLL-012. Suivis documentés par REQ (Char raffiné, HOF générique, records, α-équiv hash).
