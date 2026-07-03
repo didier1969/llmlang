@@ -1374,6 +1374,18 @@ fn verified_array_set_is_a_functional_update() {
 }
 
 #[test]
+fn verified_array_push_and_contains() {
+    // REQ-LLL-037: `push(a, v)` appends (Z3 seq.++, length grows); `contains(a, v)`
+    // is a Bool membership test admitted as a spec term in contracts (seq.contains) —
+    // here `requires contains(a, 20)` is discharged at the call site on a literal.
+    let src = "module PushTest:\n\n  part has(a: Array[Int], v: Int) -> Int:\n    match contains(a, v):\n      true  -> yield 1\n      false -> yield 0\n\n  part needs20(a: Array[Int]) -> Int:\n    requires contains(a, 20)\n    yield length(a)\n\n  part main() -> Int via IO:\n    let a = array(10, 20)\n    let b = push(a, 30)\n    let x = IO.print(length(b))\n    let y = IO.print(get(b, 2))\n    let z = IO.print(has(b, 20))\n    let w = IO.print(has(b, 99))\n    yield IO.print(needs20(a))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "push/contains must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("3\n30\n1\n0\n2"), "expected 3,30,1,0,2; got: {out}");
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`

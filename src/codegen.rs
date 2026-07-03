@@ -1278,7 +1278,17 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                         "{{ let mut __aset = {a}; Rc::make_mut(&mut __aset)[({i}) as usize] = {v}; __aset }}"
                     )
                 }
-                _ => unreachable!("is_array_builtin covers exactly array/length/get/set"),
+                "push" => {
+                    let a = expr(&args[0], cx, res)?;
+                    let v = expr(&args[1], cx, res)?;
+                    format!("{{ let mut __apush = {a}; Rc::make_mut(&mut __apush).push({v}); __apush }}")
+                }
+                "contains" => {
+                    let a = borrowed(&args[0], cx, res)?;
+                    let v = expr(&args[1], cx, res)?;
+                    format!("(**{a}).contains(&({v}))")
+                }
+                _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
             }
         }
         Expr::Call(name, args) => {

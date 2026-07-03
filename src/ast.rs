@@ -241,7 +241,7 @@ pub enum BinOp {
 /// admitted as spec terms in contracts (DEC-LLL-017 amendment); `array` is a
 /// value-literal constructor. A user part/constructor may not take these names.
 pub fn is_array_builtin(name: &str) -> bool {
-    matches!(name, "array" | "length" | "get" | "set")
+    matches!(name, "array" | "length" | "get" | "set" | "push" | "contains")
 }
 
 /// The subset of array builtins admitted as SPEC TERMS inside contracts
@@ -249,7 +249,7 @@ pub fn is_array_builtin(name: &str) -> bool {
 /// value-producing operation (a code op), NOT a spec term — a contract that
 /// mentions it is a disallowed call, like any other.
 pub fn is_array_spec_term(name: &str) -> bool {
-    matches!(name, "array" | "length" | "get")
+    matches!(name, "array" | "length" | "get" | "contains")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

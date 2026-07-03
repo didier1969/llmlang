@@ -578,7 +578,17 @@ impl<'a> Emit<'a> {
                              (seq.extract {a} (+ {i} 1) (- (seq.len {a}) (+ {i} 1)))))"
                         )
                     }
-                    _ => unreachable!("is_array_builtin covers exactly array/length/get/set"),
+                    "push" => {
+                        let a = self.tr(&args[0], env)?;
+                        let v = self.tr(&args[1], env)?;
+                        format!("(seq.++ {a} (seq.unit {v}))")
+                    }
+                    "contains" => {
+                        let a = self.tr(&args[0], env)?;
+                        let v = self.tr(&args[1], env)?;
+                        format!("(seq.contains {a} (seq.unit {v}))")
+                    }
+                    _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
                 }
             }
             Expr::Call(name, args) => {

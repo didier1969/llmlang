@@ -1105,6 +1105,19 @@ fn type_of_pure(
                     return Err("empty `array()` is not allowed in contracts (v1)".into());
                 }
             }
+            "contains" => {
+                if args.len() != 2 {
+                    return Err("`contains` takes 2 arguments (array, value)".into());
+                }
+                let elem = match type_of_pure(&args[0], vars, result.clone())? {
+                    Ty::Array(e) => *e,
+                    _ => return Err("`contains` needs an Array".into()),
+                };
+                if type_of_pure(&args[1], vars, result)? != elem {
+                    return Err("`contains` value type mismatch".into());
+                }
+                Ty::Bool
+            }
             _ => unreachable!(),
         },
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
@@ -1795,7 +1808,51 @@ fn check_expr(
                     }
                     Ty::array(elem)
                 }
-                _ => unreachable!("is_array_builtin covers exactly array/length/get/set"),
+                "push" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `push` takes 2 arguments (array, value)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = match check_expr(ctx, &args[0], None)? {
+                        Ty::Array(e) => *e,
+                        other => {
+                            return Err(format!("part `{}`: `push` needs an Array, got {other}", ctx.part.name))
+                        }
+                    };
+                    let tv = check_expr(ctx, &args[1], Some(&elem))?;
+                    if tv != elem {
+                        return Err(format!("part `{}`: `push` value must be {elem}, got {tv}", ctx.part.name));
+                    }
+                    Ty::array(elem)
+                }
+                "contains" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `contains` takes 2 arguments (array, value)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = match check_expr(ctx, &args[0], None)? {
+                        Ty::Array(e) => *e,
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `contains` needs an Array, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    let tv = check_expr(ctx, &args[1], Some(&elem))?;
+                    if tv != elem {
+                        return Err(format!(
+                            "part `{}`: `contains` value must be {elem}, got {tv}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::Bool
+                }
+                _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
             }
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {
