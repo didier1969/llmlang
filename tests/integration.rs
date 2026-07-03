@@ -1426,3 +1426,85 @@ fn user_effect_mixed_with_abort_is_rejected() {
     let err = types::check_module(m).expect_err("must reject mixed effect");
     assert!(err.contains("ONLY value-returning"), "unexpected error: {err}");
 }
+
+// ===================================================================
+// REQ-LLL-026 slice 3c item 3 — effect-generic HOFs (row variables),
+// compiled by whole-program effect-monomorphization, DEC-LLL-038. A part
+// `via e` (lowercase = row variable) stays row-polymorphic; each concrete
+// row it is instantiated at (pure / State / Reader / user-tail / abort)
+// gets its own specialized Rust fn with the row's evidence threaded. The
+// generic part is verified ONCE (its function param is uninterpreted), so
+// soundness holds for every instantiation.
+// ===================================================================
+
+#[test]
+fn effect_generic_hof_pure_instantiation() {
+    let src = "module H:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part double(n: Int) -> Int:\n    yield n * 2\n\n  part main() -> Int:\n    yield apply(double, 21)\n";
+    assert!(verify_src(src).ok(), "generic HOF must verify");
+    assert!(build_run(src).contains("=> 42"), "pure instantiation wrong");
+}
+
+#[test]
+fn effect_generic_hof_state_instantiation() {
+    // the SAME `apply` instantiated at a State-effectful function; the row's cell
+    // evidence is threaded through the specialization.
+    let src = "module H:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part bump(n: Int) -> Int via State:\n    let old = State.get()\n    let _ = State.put(old + n)\n    yield old\n\n  part run() -> Int via State:\n    yield apply(bump, 10)\n\n  part main() -> Int:\n    handle run() with State from 100:\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "State-instantiated HOF must verify");
+    assert!(build_run(src).contains("=> 100"), "State instantiation wrong");
+}
+
+#[test]
+fn effect_generic_hof_abort_instantiation() {
+    // an abort-effectful function argument → the specialization is Result-typed and
+    // propagates with `?`; the outer handle discharges it.
+    let ok = "module H:\n\n  effect Fail:\n    bail() -> Never\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part checked(n: Int) -> Int via Fail:\n    match n:\n      0 -> yield Fail.bail()\n      _ -> yield n * 3\n\n  part main() -> Int:\n    handle apply(checked, 7) with Fail:\n      return r -> yield r\n      bail() -> yield -1\n";
+    assert!(build_run(ok).contains("=> 21"), "abort ok-path wrong");
+    let bail = ok.replace("apply(checked, 7)", "apply(checked, 0)");
+    assert!(build_run(&bail).contains("=> -1"), "abort bail-path wrong");
+}
+
+#[test]
+fn effect_generic_recursive_map_over_stateful_fn() {
+    // a RECURSIVE effect-generic HOF (map) whose element function is State-effectful:
+    // the self-call reuses the same specialization, threading the cell each step.
+    let src = "module H:\n\n  part map(f: (Int) -> Int, xs: List[Int]) -> List[Int] via e:\n    match xs:\n      [] -> yield []\n      h :: t -> yield f(h) :: map(f, t)\n\n  part bump(n: Int) -> Int via State:\n    let old = State.get()\n    let _ = State.put(old + 1)\n    yield n + old\n\n  part run() -> Int via State:\n    let ys = map(bump, 1 :: 2 :: 3 :: [])\n    match ys:\n      [] -> yield 0\n      a :: rest -> yield a\n\n  part main() -> Int:\n    handle run() with State from 10:\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "recursive generic map must verify");
+    assert!(build_run(src).contains("=> 11"), "recursive map over stateful fn wrong");
+}
+
+#[test]
+fn effect_generic_cannot_assume_function_result() {
+    // SOUNDNESS: an effect-generic part is proved with its function parameter
+    // UNINTERPRETED, so it cannot assume anything about the result — `ensures
+    // result == x` over `f(x)` must NOT be provable (f could return anything).
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    ensures result == x\n    yield f(x)\n";
+    assert!(!verify_src(src).ok(), "a generic HOF must not assume its function's result (soundness)");
+}
+
+#[test]
+fn effect_generic_effectful_lambda_is_rejected() {
+    // v1 (DEC-LLL-038): an effectful function argument must be a named part — an
+    // effectful lambda would need captured evidence, not a fn pointer.
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part main() -> Int via State:\n    yield apply(\\(n: Int) -> State.get(), 5)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject effectful lambda arg");
+    assert!(err.contains("effectful lambda"), "unexpected error: {err}");
+}
+
+#[test]
+fn effect_generic_uncovered_row_is_rejected() {
+    // the caller must cover the row the function argument forces on it (DEC-LLL-038)
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part bump(n: Int) -> Int via State:\n    let old = State.get()\n    let _ = State.put(old + n)\n    yield old\n\n  part main() -> Int:\n    yield apply(bump, 5)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject uncovered row");
+    assert!(err.contains("not in its row"), "unexpected error: {err}");
+}
+
+#[test]
+fn effect_generic_needs_one_function_param() {
+    // a row variable requires exactly one function-typed parameter (DEC-LLL-038)
+    let src = "module T:\n\n  part bad(x: Int) -> Int via e:\n    yield x\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject row var without fn param");
+    assert!(err.contains("function-typed parameter"), "unexpected error: {err}");
+}
