@@ -255,6 +255,14 @@ fn smt_ty(t: &Ty) -> String {
         Ty::Never => unreachable!("Never has no value sort — abort paths are proven unreachable"),
         // the unit type is a Z3 datatype with a single value (REQ-LLL-025)
         Ty::Unit => "Unit".to_string(),
+        // a tuple is an instance of the parametric product datatype for its
+        // arity — `(Tup2 Int Bool)`, `(Tup3 …)` (REQ-LLL-026, DEC-LLL-036). The
+        // constructor `tupN` and selectors `projN_i` are shared across element
+        // sorts, exactly like the parametric list (TUPLE_DECL).
+        Ty::Tuple(cs) => {
+            let inner: Vec<String> = cs.iter().map(smt_ty).collect();
+            format!("(Tup{} {})", cs.len(), inner.join(" "))
+        }
     }
 }
 
@@ -320,11 +328,15 @@ impl<'a> Emit<'a> {
                 Stmt::Match(scrut, arms) => {
                     let s_t = self.tr(scrut, &env)?;
                     // element sort of a list scrutinee (to disambiguate `nil`)
-                    let list_elem: Option<String> = self
-                        .sorts
-                        .get(&s_t)
+                    let scrut_sort: Option<String> = self.sorts.get(&s_t).cloned();
+                    let list_elem: Option<String> = scrut_sort
+                        .as_deref()
                         .and_then(|srt| srt.strip_prefix("(Lst ").and_then(|r| r.strip_suffix(')')))
                         .map(|e| e.to_string());
+                    // component sorts of a tuple scrutinee, to type the projections
+                    // bound by a tuple pattern (nested list/tuple matches).
+                    let tuple_sorts: Option<Vec<String>> =
+                        scrut_sort.as_deref().and_then(tuple_component_sorts);
                     let mut arm_conds: Vec<String> = Vec::new();
                     for arm in arms {
                         let (cond, bindings) =
@@ -336,6 +348,15 @@ impl<'a> Emit<'a> {
                                     self.sorts.insert(term.clone(), e.clone());
                                 } else if term.starts_with("(tail ") {
                                     self.sorts.insert(term.clone(), format!("(Lst {e})"));
+                                }
+                            }
+                        }
+                        // record sorts of tuple projections bound here (DEC-LLL-036):
+                        // a full tuple pattern's bindings are in component order.
+                        if let (Some(cs), Pattern::Tuple(_)) = (&tuple_sorts, &arm.pattern) {
+                            for (i, (_, term)) in bindings.iter().enumerate() {
+                                if let Some(sort) = cs.get(i) {
+                                    self.sorts.insert(term.clone(), sort.clone());
                                 }
                             }
                         }
@@ -443,6 +464,14 @@ impl<'a> Emit<'a> {
                 let hh = self.tr(h, env)?;
                 let tt = self.tr(t, env)?;
                 format!("(cons {hh} {tt})")
+            }
+            Expr::Tuple(items) => {
+                // `(tupN e0 … e{n-1})` — the free product constructor (DEC-LLL-036)
+                let mut ts = Vec::with_capacity(items.len());
+                for it in items {
+                    ts.push(self.tr(it, env)?);
+                }
+                format!("(tup{} {})", items.len(), ts.join(" "))
             }
             Expr::Neg(a) => format!("(- {})", self.tr(a, env)?),
             Expr::Not(a) => format!("(not {})", self.tr(a, env)?),
@@ -691,6 +720,17 @@ fn pattern_cond(
                 .collect();
             (format!("((_ is {cn}) {scrut})"), bindings)
         }
+        // tuple: a single free constructor → irrefutable (cond `true`); each
+        // binder is the corresponding projection `(projN_i s)` (DEC-LLL-036).
+        Pattern::Tuple(binders) => {
+            let n = binders.len();
+            let bindings = binders
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.clone(), format!("(proj{n}_{i} {scrut})")))
+                .collect();
+            ("true".into(), bindings)
+        }
     }
 }
 
@@ -717,6 +757,82 @@ fn collect_abstract_sorts(text: &str, out: &mut std::collections::BTreeSet<Strin
         out.insert(text[start..end].to_string());
         i = end;
     }
+}
+
+/// Split the component sorts of a tuple sort string `(TupN s0 s1 …)` into their
+/// top-level parts, respecting nested parentheses; None for a non-tuple sort
+/// (REQ-LLL-026, DEC-LLL-036).
+fn tuple_component_sorts(sort: &str) -> Option<Vec<String>> {
+    let inner = sort.strip_prefix("(Tup")?;
+    let rest = inner.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix(' ')?;
+    let body = rest.strip_suffix(')')?;
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in body.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ' ' if depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Collect the tuple arities an SMT fragment mentions — via a sort `(TupN …)`, a
+/// constructor `(tupN …)`, or a selector `(projN_i …)`. One parametric
+/// `declare-datatypes` per arity is emitted per script (REQ-LLL-026).
+fn collect_tuple_arities(text: &str, out: &mut std::collections::BTreeSet<usize>) {
+    for marker in ["(Tup", "(tup", "(proj"] {
+        let mut i = 0;
+        while let Some(pos) = text[i..].find(marker) {
+            let start = i + pos + marker.len();
+            let digits: String = text[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = digits.parse::<usize>() {
+                if n >= 2 {
+                    out.insert(n);
+                }
+            }
+            i = start + digits.len().max(1);
+        }
+    }
+}
+
+/// The parametric product datatype for arity `n` (REQ-LLL-026, DEC-LLL-036):
+/// a single free constructor `tupN` with selectors `projN_0 … projN_{n-1}` over
+/// fresh type parameters `T0 … T{n-1}`. Free ⇒ injective, no-confusion,
+/// no-junk — the faithful, decidable image of a Rust tuple (soundness by
+/// construction). Mirrors LIST_DECL.
+fn tuple_decl(n: usize) -> String {
+    let tparams: Vec<String> = (0..n).map(|i| format!("T{i}")).collect();
+    let fields: Vec<String> = (0..n).map(|i| format!("(proj{n}_{i} T{i})")).collect();
+    format!(
+        "(declare-datatypes ((Tup{n} {n})) ((par ({}) ((tup{n} {})))))",
+        tparams.join(" "),
+        fields.join(" ")
+    )
 }
 
 /// SMT-LIB `declare-datatypes` for the module's user ADTs (REQ-LLL-011). All
@@ -784,6 +900,24 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     // the parametric list must precede any user datatype that has a List field
     if uses_list || dt_decls.iter().any(|d| d.contains("(Lst")) {
         s.push_str(LIST_DECL);
+        s.push('\n');
+    }
+    // tuple product datatypes (REQ-LLL-026): one parametric declaration per arity
+    // used. Self-contained (references only its own T params), so ordering vs user
+    // datatypes is free — a tuple never appears as a user ADT field (v1, DEC-036).
+    let mut tuple_arities: std::collections::BTreeSet<usize> = Default::default();
+    for o in obls {
+        for text in o
+            .decls
+            .iter()
+            .chain(o.hyps.iter())
+            .chain(std::iter::once(&o.goal))
+        {
+            collect_tuple_arities(text, &mut tuple_arities);
+        }
+    }
+    for n in &tuple_arities {
+        s.push_str(&tuple_decl(*n));
         s.push('\n');
     }
     // user ADT datatypes (REQ-LLL-011)

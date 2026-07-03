@@ -295,7 +295,34 @@ fn check_user_ty_declared(t: &Ty, types: &HashSet<String>) -> Result<(), String>
             }
             check_user_ty_declared(r, types)
         }
+        Ty::Tuple(cs) => {
+            for c in cs {
+                check_user_ty_declared(c, types)?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
+    }
+}
+
+/// True when a function type appears as a (possibly nested) component of a
+/// tuple. v1 restriction (DEC-LLL-036): tuple components must be first-order —
+/// a function has no SMT value sort (it is UF-declared, DEC-LLL-029) and no
+/// faithful tuple-in-datatype encoding yet.
+fn tuple_has_fun_component(t: &Ty) -> bool {
+    fn has_fun(t: &Ty) -> bool {
+        match t {
+            Ty::Fun(..) => true,
+            Ty::List(e) => has_fun(e),
+            Ty::Tuple(cs) => cs.iter().any(has_fun),
+            _ => false,
+        }
+    }
+    match t {
+        Ty::Tuple(cs) => cs.iter().any(has_fun) || cs.iter().any(tuple_has_fun_component),
+        Ty::List(e) => tuple_has_fun_component(e),
+        Ty::Fun(ps, r) => ps.iter().any(tuple_has_fun_component) || tuple_has_fun_component(r),
+        _ => false,
     }
 }
 
@@ -424,6 +451,7 @@ fn collect_locals(body: &[Stmt], out: &mut Vec<String>) {
                             out.push(t.clone());
                         }
                         Pattern::Ctor(_, bs) => out.extend(bs.iter().cloned()),
+                        Pattern::Tuple(bs) => out.extend(bs.iter().cloned()),
                         _ => {}
                     }
                     if let Some(g) = &a.guard {
@@ -462,6 +490,11 @@ fn collect_binders(body: &[Stmt]) -> std::collections::HashSet<String> {
                                 out.insert(t.clone());
                             }
                             Pattern::Ctor(_, binders) => {
+                                for b in binders {
+                                    out.insert(b.clone());
+                                }
+                            }
+                            Pattern::Tuple(binders) => {
                                 for b in binders {
                                     out.insert(b.clone());
                                 }
@@ -536,6 +569,24 @@ fn check_signature(part: &Part) -> Result<(), String> {
                 ));
             }
         }
+    }
+    // v1 (DEC-LLL-036): a tuple's components must be first-order — a function
+    // inside a tuple has no SMT value sort (UF-declared, DEC-LLL-029).
+    for (n, t) in &part.params {
+        if tuple_has_fun_component(t) {
+            return Err(format!(
+                "part `{}`: parameter `{n}` has a function type inside a tuple — tuple \
+                 components must be first-order in v1 (DEC-LLL-036)",
+                part.name
+            ));
+        }
+    }
+    if tuple_has_fun_component(&part.ret) {
+        return Err(format!(
+            "part `{}`: return type has a function type inside a tuple — tuple components \
+             must be first-order in v1 (DEC-LLL-036)",
+            part.name
+        ));
     }
     let mut seen = HashSet::new();
     for (n, _) in &part.params {
@@ -626,6 +677,15 @@ fn type_of_pure(
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::BoolLit(_) => Ty::Bool,
+        Expr::Tuple(items) => {
+            // a tuple in a contract: component-wise (enables tuple equality in
+            // requires/ensures — SMT datatype equality, DEC-LLL-036)
+            let mut cs = Vec::with_capacity(items.len());
+            for it in items {
+                cs.push(type_of_pure(it, vars, result.clone())?);
+            }
+            Ty::Tuple(cs)
+        }
         Expr::ListLit(items) => {
             if items.is_empty() {
                 return Err("empty list literal `[]` is not allowed in contracts (v1)".into());
@@ -740,6 +800,12 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
             }
             unify_arg(pr, ar, subst)
         }
+        (Ty::Tuple(pc), Ty::Tuple(ac)) if pc.len() == ac.len() => {
+            for (p, a) in pc.iter().zip(ac) {
+                unify_arg(p, a, subst)?;
+            }
+            Ok(())
+        }
         _ => Err(format!("expected {pat}, got {arg}")),
     }
 }
@@ -758,6 +824,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         ),
         Ty::Never => Ty::Never,
         Ty::Unit => Ty::Unit,
+        Ty::Tuple(cs) => Ty::Tuple(cs.iter().map(|c| subst_ty(c, subst)).collect()),
     }
 }
 
@@ -910,6 +977,23 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                 }
                             }
                         }
+                        (Pattern::Tuple(binders), Ty::Tuple(tys)) => {
+                            // tuple destructuring (REQ-LLL-026): arity must match;
+                            // bind each component. Irrefutable — no smaller-tracking
+                            // (a tuple is not a recursive descent).
+                            if binders.len() != tys.len() {
+                                return Err(format!(
+                                    "part `{}`: tuple pattern binds {} name(s) but the scrutinee \
+                                     tuple has {} component(s)",
+                                    ctx.part.name,
+                                    binders.len(),
+                                    tys.len()
+                                ));
+                            }
+                            for (b, ct) in binders.iter().zip(tys) {
+                                ctx.vars.last_mut().unwrap().insert(b.clone(), ct.clone());
+                            }
+                        }
                         (p, t) => {
                             return Err(format!(
                                 "part `{}`: pattern {p:?} does not match scrutinee type {t}",
@@ -1059,6 +1143,20 @@ fn check_expr(
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::BoolLit(_) => Ty::Bool,
+        Expr::Tuple(items) => {
+            // propagate an expected tuple type component-wise so an empty list
+            // `[]` inside a component takes its element type from context (DEC-036)
+            let expected_cs = match expected {
+                Some(Ty::Tuple(cs)) if cs.len() == items.len() => Some(cs),
+                _ => None,
+            };
+            let mut tys = Vec::with_capacity(items.len());
+            for (i, it) in items.iter().enumerate() {
+                let exp = expected_cs.map(|cs| &cs[i]);
+                tys.push(check_expr(ctx, it, exp)?);
+            }
+            Ty::Tuple(tys)
+        }
         Expr::ListLit(items) => {
             if let Some(first) = items.first() {
                 let elem = check_expr(ctx, first, None)?;

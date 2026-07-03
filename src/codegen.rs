@@ -128,6 +128,12 @@ fn rs_ty(t: &Ty) -> String {
         Ty::Never => "!".to_string(),
         // the unit type is Rust's unit `()` (REQ-LLL-025 slice 3b)
         Ty::Unit => "()".to_string(),
+        // a tuple is Rust's native product `(T0, T1, …)` (REQ-LLL-026); rustc
+        // monomorphizes and lays it out flat — same shape as the proof datatype.
+        Ty::Tuple(cs) => {
+            let inner: Vec<String> = cs.iter().map(rs_ty).collect();
+            format!("({})", inner.join(", "))
+        }
     }
 }
 
@@ -150,6 +156,11 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tvars(p, acc);
             }
             collect_tvars(r, acc);
+        }
+        Ty::Tuple(cs) => {
+            for c in cs {
+                collect_tvars(c, acc);
+            }
         }
         Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
@@ -467,6 +478,12 @@ fn emit_match(
                     format!("{cn}({})", bs.join(", "))
                 }
             }
+            // tuple destructuring: an owned native tuple, binders moved out
+            // (not Rc-boxed, so no reference/clone dance) — REQ-LLL-026.
+            Pattern::Tuple(binders) => {
+                let bs: Vec<String> = binders.iter().map(|b| local(b)).collect();
+                format!("({})", bs.join(", "))
+            }
         };
         let guard = match &arm.guard {
             Some(g) => format!(" if {}", expr(g, cx, res)?),
@@ -497,7 +514,12 @@ fn emit_match(
     let has_ctor = arms
         .iter()
         .any(|a| matches!(a.pattern, Pattern::Ctor(..)) && a.guard.is_none());
+    // a guard-free tuple pattern is irrefutable → rustc sees the match exhaustive
+    let has_tuple = arms
+        .iter()
+        .any(|a| matches!(a.pattern, Pattern::Tuple(_)) && a.guard.is_none());
     let rustc_exhaustive = has_ctor // vc proved all ADT constructors are covered
+        || has_tuple
         || arms
             .iter()
             .any(|a| matches!(a.pattern, Pattern::Wildcard | Pattern::Var(_)) && a.guard.is_none())
@@ -545,6 +567,11 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             expr(h, cx, res)?,
             expr(t, cx, res)?
         ),
+        Expr::Tuple(items) => {
+            // native Rust tuple `(e0, e1, …)` (REQ-LLL-026) — value, not Rc-boxed
+            let xs: Result<Vec<String>, String> = items.iter().map(|i| expr(i, cx, res)).collect();
+            format!("({})", xs?.join(", "))
+        }
         Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),
         Expr::Not(a) => format!("(!{})", expr(a, cx, res)?),
         Expr::Bin(op, a, b) => {

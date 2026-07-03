@@ -491,6 +491,20 @@ impl Parser {
                 self.eat(Tok::RBracket)?;
                 Ok(Pattern::Nil)
             }
+            // tuple destructuring pattern `(x, y, …)` (REQ-LLL-026, DEC-LLL-036)
+            Tok::LParen => {
+                self.pos += 1;
+                let mut binders = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    binders.push(self.ident()?);
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        binders.push(self.ident()?);
+                    }
+                }
+                self.eat(Tok::RParen)?;
+                Ok(Pattern::Tuple(binders))
+            }
             Tok::Ident(h) => {
                 self.pos += 1;
                 if self.peek() == &Tok::ColonColon {
@@ -541,7 +555,8 @@ impl Parser {
             }
             // any other capitalized bareword names a user ADT (REQ-LLL-011)
             Tok::Ident(s) => Ok(Ty::User(s)),
-            // `()` is the unit type; `(T1, …) -> R` is a function type (REQ-LLL-009)
+            // `()` = unit; `(T)` = grouping; `(T1, …)` = tuple (REQ-LLL-026); and
+            // any of these followed by `->` is a function type (REQ-LLL-009).
             Tok::LParen => {
                 let mut params = Vec::new();
                 if self.peek() != &Tok::RParen {
@@ -552,13 +567,19 @@ impl Parser {
                     }
                 }
                 self.eat(Tok::RParen)?;
-                if params.is_empty() && self.peek() != &Tok::Arrow {
-                    // `()` with no following arrow — the unit type (REQ-LLL-025)
-                    return Ok(Ty::Unit);
+                if self.peek() == &Tok::Arrow {
+                    self.pos += 1;
+                    let ret = self.ty()?;
+                    return Ok(Ty::Fun(params, Box::new(ret)));
                 }
-                self.eat(Tok::Arrow)?;
-                let ret = self.ty()?;
-                Ok(Ty::Fun(params, Box::new(ret)))
+                match params.len() {
+                    // `()` with no following arrow — the unit type (REQ-LLL-025)
+                    0 => Ok(Ty::Unit),
+                    // `(T)` is grouping, not a 1-tuple
+                    1 => Ok(params.pop().unwrap()),
+                    // `(T1, …, Tn)` — a product type of arity ≥ 2 (DEC-LLL-036)
+                    _ => Ok(Ty::Tuple(params)),
+                }
             }
             other => Err(self.err(&format!("expected type, found {other:?}"))),
         }
@@ -730,6 +751,17 @@ impl Parser {
                     return Ok(Expr::Unit);
                 }
                 let e = self.expr()?;
+                if self.peek() == &Tok::Comma {
+                    // `(e1, e2, …)` — a tuple value of arity ≥ 2 (REQ-LLL-026)
+                    let mut items = vec![e];
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        items.push(self.expr()?);
+                    }
+                    self.eat(Tok::RParen)?;
+                    return Ok(Expr::Tuple(items));
+                }
+                // `(e)` — grouping
                 self.eat(Tok::RParen)?;
                 Ok(e)
             }

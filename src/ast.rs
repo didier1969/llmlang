@@ -100,6 +100,11 @@ pub enum Ty {
     /// The unit type `()` — a single value, carrying no information. The honest
     /// return type of a procedure whose purpose is an effect (REQ-LLL-025 slice 3b).
     Unit,
+    /// A product type `(T1, …, Tn)` with arity ≥ 2 (REQ-LLL-026, DEC-LLL-036).
+    /// `(T)` is grouping (= T) and `()` is `Unit` (the 0-tuple), so a `Tuple`
+    /// always has two or more components. Encoded to a parametric Z3 datatype
+    /// per arity in the proof fork and to a native Rust tuple in codegen.
+    Tuple(Vec<Ty>),
 }
 
 impl Ty {
@@ -118,6 +123,7 @@ impl Ty {
             Ty::Var(_) => false,
             Ty::List(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
+            Ty::Tuple(cs) => cs.iter().all(|c| c.is_concrete()),
         }
     }
 }
@@ -136,6 +142,10 @@ impl std::fmt::Display for Ty {
             Ty::User(name) => write!(f, "{name}"),
             Ty::Never => write!(f, "Never"),
             Ty::Unit => write!(f, "Unit"),
+            Ty::Tuple(cs) => {
+                let cs: Vec<String> = cs.iter().map(|c| c.to_string()).collect();
+                write!(f, "({})", cs.join(", "))
+            }
         }
     }
 }
@@ -192,6 +202,10 @@ pub enum Pattern {
     /// user ADT constructor pattern `Ctor(x, y, …)` — binds the field names
     /// (REQ-LLL-011). A nullary constructor `Ctor` has an empty field list.
     Ctor(String, Vec<String>),
+    /// tuple destructuring pattern `(x, y, …)` — binds each component to a name
+    /// (REQ-LLL-026, DEC-LLL-036). Irrefutable (a tuple has a single shape), so a
+    /// `match` with one tuple arm is exhaustive. Arity ≥ 2.
+    Tuple(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +246,8 @@ pub enum Expr {
     Lambda(Vec<(String, Ty)>, Box<Expr>),
     /// The unit value `()` — the sole inhabitant of `Unit` (REQ-LLL-025 slice 3b).
     Unit,
+    /// A tuple value `(e1, …, en)` with arity ≥ 2 (REQ-LLL-026, DEC-LLL-036).
+    Tuple(Vec<Expr>),
 }
 
 impl Expr {
@@ -244,7 +260,7 @@ impl Expr {
                 b.walk(f);
             }
             Expr::Not(a) | Expr::Neg(a) => a.walk(f),
-            Expr::Call(_, args) | Expr::EffCall(_, args) | Expr::ListLit(args) => {
+            Expr::Call(_, args) | Expr::EffCall(_, args) | Expr::ListLit(args) | Expr::Tuple(args) => {
                 for a in args {
                     a.walk(f);
                 }

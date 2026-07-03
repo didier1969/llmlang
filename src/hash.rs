@@ -323,6 +323,9 @@ impl<'a> Norm<'a> {
                             Pattern::Ctor(cn, bs) => {
                                 (format!("(ctor {cn} {})", bs.len()), bs.clone())
                             }
+                            Pattern::Tuple(bs) => {
+                                (format!("(tuplepat {})", bs.len()), bs.clone())
+                            }
                         };
                         for b in &binders {
                             self.env.push(b.clone());
@@ -391,6 +394,10 @@ impl<'a> Norm<'a> {
                 let tt = self.expr(t);
                 format!("(cons {hh} {tt})")
             }
+            Expr::Tuple(items) => {
+                let xs: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
+                format!("(tuple {})", xs.join(" "))
+            }
             Expr::Neg(a) => format!("(neg {})", self.expr(a)),
             Expr::Not(a) => format!("(not {})", self.expr(a)),
             Expr::Bin(op, a, b) => format!("({op:?} {} {})", self.expr(a), self.expr(b)),
@@ -444,6 +451,11 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
             }
             collect_tyvars(r, acc);
         }
+        Ty::Tuple(cs) => {
+            for c in cs {
+                collect_tyvars(c, acc);
+            }
+        }
         Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
 }
@@ -467,6 +479,14 @@ fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
         Ty::User(n) => n.clone(),
         Ty::Never => "Never".to_string(),
         Ty::Unit => "Unit".to_string(),
+        // `Tup(...)` — distinct from the function form `(...) -> R` and grouping
+        Ty::Tuple(cs) => format!(
+            "Tup({})",
+            cs.iter()
+                .map(|c| canon_ty(c, rename))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

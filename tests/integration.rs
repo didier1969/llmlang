@@ -1232,3 +1232,119 @@ fn imported_defs_keep_their_identity() {
     let (_, h_local) = full("module M:\n\n  part inc(v: Int) -> Int:\n    yield v + 1\n");
     assert_eq!(hm_i.def_hash["inc"], h_local.def_hash["inc"]);
 }
+
+// ===================================================================
+// REQ-LLL-026 slice 3c — tuples (product types), DEC-LLL-036.
+// Soundness is the crux: the Z3 parametric datatype MUST be a faithful
+// image of the Rust tuple. Positive proofs, NEGATIVE proofs (a false
+// projection must NOT be provable), and E2E build+run all guard it.
+// ===================================================================
+
+static BUILD_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Full pipeline through rustc: emit Rust, compile, run, return stdout. Each
+/// call gets a private build dir (tests run in parallel threads).
+fn build_run(src: &str) -> String {
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let n = BUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = tempdir().join(format!("tup-{n}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rs = dir.join("t.rs");
+    let bin = dir.join("t_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "rustc failed:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn tuple_projection_is_proven_faithful() {
+    // the vc must PROVE `result == a` where result is proj0 of (a, b)
+    let src = "module T:\n\n  part fst(a: Int, b: Int) -> Int:\n    ensures result == a\n    match (a, b):\n      (x, y) -> yield x\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "tuple projection proof must hold: {:?}", failures(&report));
+}
+
+#[test]
+fn tuple_wrong_projection_is_not_provable() {
+    // SOUNDNESS: proj0 of (a, b) is a, never b — `ensures result == b` must FAIL
+    // (a counter-model a != b exists). If this ever "proves", the datatype
+    // encoding is unsound and the whole language guarantee is void.
+    let src = "module T:\n\n  part fst(a: Int, b: Int) -> Int:\n    ensures result == b\n    match (a, b):\n      (x, y) -> yield x\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "a false projection MUST NOT be provable (soundness)");
+}
+
+#[test]
+fn tuple_injectivity_is_proven() {
+    // (a, b) == (c, d)  ⟹  a == c  — Z3 free-datatype injectivity
+    let src = "module T:\n\n  part pick(a: Int, b: Int, c: Int, d: Int) -> Int:\n    requires (a, b) == (c, d)\n    ensures result == c\n    yield a\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "tuple injectivity must be provable: {:?}", failures(&report));
+}
+
+#[test]
+fn tuple_injectivity_is_not_over_strong() {
+    // SOUNDNESS: (a, b) == (c, d) does NOT entail a == d — must fail
+    let src = "module T:\n\n  part pick(a: Int, b: Int, c: Int, d: Int) -> Int:\n    requires (a, b) == (c, d)\n    ensures result == d\n    yield a\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "injectivity must not prove an unrelated component equal");
+}
+
+#[test]
+fn tuple_projection_runs_faithfully() {
+    // runtime must agree with the proof model: proj0=3, proj1=7
+    let src = "module T:\n\n  part main() -> Int:\n    match (3, 7):\n      (x, y) -> yield x * 100 + y\n";
+    let out = build_run(src);
+    assert!(out.contains("=> 307"), "tuple projection wrong at runtime: {out}");
+}
+
+#[test]
+fn tuple_generic_projection_monomorphizes() {
+    // a polymorphic tuple projection `(a, b) -> a` over MIXED element types,
+    // monomorphized by rustc (REQ-LLL-007 machinery reused)
+    let src = "module T:\n\n  part fst(p: (a, b)) -> a:\n    match p:\n      (x, y) -> yield x\n\n  part main() -> Int:\n    let m = fst((42, true))\n    yield m\n";
+    let out = build_run(src);
+    assert!(out.contains("=> 42"), "generic tuple fst wrong: {out}");
+}
+
+#[test]
+fn tuple_with_list_component_verifies_and_runs() {
+    // a tuple carrying a list component: the projection sort must be recorded so
+    // the nested `nil` match disambiguates (two datatype instances coexist).
+    let src = "module T:\n\n  part headsum(p: (List[Int], Int)) -> Int:\n    match p:\n      (xs, k) ->\n        match xs:\n          [] -> yield k\n          h :: t -> yield h + k\n\n  part main() -> Int:\n    yield headsum((5 :: 9 :: [], 100))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "tuple-with-list must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 105"), "tuple-with-list runtime wrong: {out}");
+}
+
+#[test]
+fn tuple_definitions_have_rename_invariant_identity() {
+    // content-hash story holds for tuples: rename preserves identity (DEC-LLL-019)
+    let base = "module T:\n\n  part fst(p: (a, b)) -> a:\n    match p:\n      (x, y) -> yield x\n";
+    let renamed = hash::rename_part_in_source(base, "fst", "first").unwrap();
+    let (_, h1) = full(base);
+    let (_, h2) = full(&renamed);
+    assert_eq!(h1.def_hash["fst"], h2.def_hash["first"], "tuple part rename changed identity");
+}
+
+#[test]
+fn tuple_components_first_order_is_rejected() {
+    // v1 (DEC-LLL-036): a function inside a tuple has no SMT value sort → reject
+    let src = "module T:\n\n  part bad(p: (Int, (Int) -> Int)) -> Int:\n    match p:\n      (x, f) -> yield x\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject function-in-tuple");
+    assert!(err.contains("first-order"), "unexpected error: {err}");
+}
