@@ -1,0 +1,5 @@
+module SumOfSquares:
+  part sum_of_squares(xs: List[Int]) -> Int:
+    match xs:
+      [] -> yield 0
+      h :: t -> yield h * h + sum_of_squares(t)

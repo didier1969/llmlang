@@ -1,0 +1,8 @@
+module SumMod:
+  part sum_mod(xs: List[Int], m: Int) -> Int:
+    requires m > 0
+    ensures 0 <= result
+    ensures result < m
+    match xs:
+      [] -> yield 0
+      h :: t -> yield (h + sum_mod(t, m)) mod m

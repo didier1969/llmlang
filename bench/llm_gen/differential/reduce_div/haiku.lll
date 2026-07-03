@@ -1,0 +1,6 @@
+module ReduceDiv:
+  part reduce_div(v: Int, xs: List[Int]) -> Int:
+    match xs:
+      [] -> yield v
+      h :: t when h != 0 -> yield reduce_div(v div h, t)
+      h :: t -> yield reduce_div(v, t)

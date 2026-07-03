@@ -91,3 +91,48 @@ lesson generalises: when the bench shows a model reaching for a weaker construct
 fix is usually a line in the authoring primer, re-measured — not a language change.
 (It also confirmed block-form match arms `_ ->` with a nested `let`+`match` parse and
 verify.)
+
+## Compositional trap-dense probe — the latent-bug escape rate
+
+The question "does an LLM err less on a big project with our language, and by how
+much?" cannot be answered by single-function tasks (models get those right in both
+languages). The credit-efficient proxy: a few MULTI-PART tasks each concentrating one
+trap class where a mainstream language has NO static/semantic defense, judged for
+**latent-bug escapes** — a solution that compiles and looks right but returns a WRONG
+value on a trap input (the bug that survives casual review, i.e. the one that hurts at
+scale). Generation is one-shot isolated (haiku, sonnet); the judge is free (`lll check`
++ Z3 for llmlang; `rustc` + a hidden trap battery vs an i128 reference for Rust).
+
+Solutions verbatim in `reduce_div/`, `sum_mod/`, `sum_of_squares/`.
+
+| task | trap class | Rust escapes | llmlang escapes |
+|---|---|---|---|
+| `reduce_div` | reachable division-by-zero + Euclidean `div` on negatives | 0/2 | 0/2 (verified; safe by construction) |
+| `sum_mod` | Euclidean remainder of a negative sum (canonical `0≤r<m`) | 0/2 | 0/2 (`0≤result<m` **proved** by Z3) |
+| `sum_of_squares` | i64 overflow | **2/2 — silent wrong value** | 0/2 (**fail-stop**, never a wrong value) |
+| **aggregate** | | **2/6 = 33%** | **0/6 = 0%** |
+
+The escape both Rust solutions made: `sum_of_squares([4_000_000_000])` returns
+`-2446744073709551616` (wrapped) instead of `1.6e19` — compiles, passes review, wrong.
+llmlang's `h*h + …` fail-stops at that input ("attempt to multiply with overflow"):
+it never returns wrong data (DEC-LLL-026). On the other two traps both strong models
+were correct in Rust too — so the differential here is driven by the ONE class Rust
+leaves entirely to the author's diligence (overflow), while llmlang closes each class
+by a DIFFERENT mechanism: **proof** (T2 canonical), **construction** (T1 Euclidean
+`div` + the divisor-nonzero obligation forcing the zero-skip), and **fail-stop** (T3).
+
+### Honest reading of the 33% vs 0%
+- It is a REAL measured number, but on a small, trap-SELECTED sample (2 models × 3
+  tasks). It is a proxy for project-scale, not a project-scale proof.
+- All escapes are the overflow class; on div-by-zero and Euclidean-mod the strong
+  models were correct in Rust. So read it as: *of the trap classes a big project hits,
+  llmlang removes each one — by proof, by construction, or by fail-stop — and the one a
+  mainstream typed language cannot defend statically (overflow) escaped 100% of the
+  time (2/2).*
+- llmlang's 0% means "never returns a wrong answer", which for T3 means *refusing*
+  (fail-stop), not *answering* — the language's correctness stance (DEC-LLL-015/026).
+- A statistically strong, cross-model (GPT/Gemini) number still needs REQ-LLL-013
+  (external APIs, blocked). This is the Claude-family signal.
+
+The corpus is frozen and verbatim, so every future language version re-scores it at
+zero LLM cost (`lll check` the `.lll`; `rustc` + the batteries in this file the `.rs`).
