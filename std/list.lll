@@ -1,33 +1,30 @@
 module Std.List:
 
-  # ---- stdlib v1, written IN llmlang and verified by the real Z3 pipeline ----
-  # (REQ-LLL-003, step 1 of the staged self-hosting plan DEC-LLL-024)
+  # ---- stdlib, written IN llmlang and verified by the real Z3 pipeline ----
+  # (REQ-LLL-003 ; made generic over the element type in wave 4, REQ-LLL-007).
+  # Structural combinators are `List[a]` — ONE proof serves every element type.
+  # Functions that are inherently about Int (arithmetic/order) stay `List[Int]`.
 
-  part len(xs: List[Int]) -> Int:
+  part len(xs: List[a]) -> Int:
     ensures result >= 0
     match xs:
       []     -> yield 0
       h :: t -> yield 1 + len(t)
 
-  part sum(xs: List[Int]) -> Int:
-    match xs:
-      []     -> yield 0
-      h :: t -> yield h + sum(t)
-
-  part append(xs: List[Int], ys: List[Int]) -> List[Int]:
+  part append(xs: List[a], ys: List[a]) -> List[a]:
     match xs:
       []     -> yield ys
       h :: t -> yield h :: append(t, ys)
 
-  part rev_acc(xs: List[Int], acc: List[Int]) -> List[Int]:
+  part rev_acc(xs: List[a], acc: List[a]) -> List[a]:
     match xs:
       []     -> yield acc
       h :: t -> yield rev_acc(t, h :: acc)
 
-  part reverse(xs: List[Int]) -> List[Int]:
+  part reverse(xs: List[a]) -> List[a]:
     yield rev_acc(xs, [])
 
-  part contains(xs: List[Int], v: Int) -> Bool:
+  part contains(xs: List[a], v: a) -> Bool:
     match xs:
       []     -> yield false
       h :: t ->
@@ -35,7 +32,7 @@ module Std.List:
           w when w == v -> yield true
           _             -> yield contains(t, v)
 
-  part take(xs: List[Int], n: Int) -> List[Int]:
+  part take(xs: List[a], n: Int) -> List[a]:
     match xs:
       []     -> yield []
       h :: t ->
@@ -43,7 +40,7 @@ module Std.List:
           m when m <= 0 -> yield []
           _             -> yield h :: take(t, n - 1)
 
-  part drop(xs: List[Int], n: Int) -> List[Int]:
+  part drop(xs: List[a], n: Int) -> List[a]:
     match xs:
       []     -> yield xs
       h :: t ->
@@ -51,13 +48,20 @@ module Std.List:
           m when m <= 0 -> yield xs
           _             -> yield drop(t, n - 1)
 
-  part nth(xs: List[Int], i: Int, d: Int) -> Int:
+  part nth(xs: List[a], i: Int, d: a) -> a:
     match xs:
       []     -> yield d
       h :: t ->
         match i:
           0 -> yield h
           _ -> yield nth(t, i - 1, d)
+
+  # ---- Int-specific: arithmetic / order ----
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
 
   part max2(a: Int, b: Int) -> Int:
     ensures result >= a, result >= b, result == a or result == b

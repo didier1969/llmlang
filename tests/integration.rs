@@ -413,6 +413,39 @@ fn non_exhaustive_user_match_is_rejected() {
 }
 
 #[test]
+fn generic_stdlib_reused_across_element_types() {
+    // REQ-LLL-007 follow-up: the stdlib combinators (reverse, len) are generic —
+    // one proof serves List[Int] AND List[Bool], no per-type duplication.
+    let (_, m) = loader::load_program("examples/stdlib_generic_demo.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "generic stdlib demo must verify: {:?}", failures(&report));
+
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("gs.rs");
+    let bin = dir.join("gs_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "generic stdlib Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains('5'),
+        "generic stdlib demo must print 5"
+    );
+}
+
+#[test]
 fn witness_project_verifies_and_runs() {
     // REQ-LLL-006 (criterion #2 of VIS-LLL-001): a non-trivial multi-module
     // program combining generics (length reused at List[Int] AND List[Bool]),

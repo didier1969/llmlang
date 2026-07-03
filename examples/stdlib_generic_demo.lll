@@ -1,0 +1,12 @@
+import "../std/list.lll"
+
+module StdlibGenericDemo:
+
+  # The generic stdlib combinators are proved ONCE (in std/list.lll) and reused
+  # here at two different element types — no per-type copy (REQ-LLL-007).
+
+  part main() -> Int via IO:
+    let a = reverse([1, 2, 3])        # reverse @ List[Int]
+    let b = reverse([true, false])    # reverse @ List[Bool] — same proof
+    let r = IO.print(len(a) + len(b)) # len @ List[Int] + len @ List[Bool] = 5
+    yield r
