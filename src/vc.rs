@@ -186,6 +186,11 @@ struct Emit<'a> {
     hyps: Vec<String>,
     obls: Vec<Obligation>,
     fresh: usize,
+    /// SMT term → its sort string (e.g. `p_xs` → `(Lst Tv_a)`). Lets a list
+    /// pattern be tested by `(= s (as nil (Lst E)))` instead of the bare
+    /// `(_ is nil)` tester, which is ambiguous once two `(Lst _)` instantiations
+    /// coexist — the generic type-changing `map` case (REQ-LLL-007).
+    sorts: HashMap<String, String>,
 }
 
 pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Obligation>, String> {
@@ -196,6 +201,7 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
         hyps: Vec::new(),
         obls: Vec::new(),
         fresh: 0,
+        sorts: HashMap::new(),
     };
     // params
     let mut env: HashMap<String, String> = HashMap::new();
@@ -212,7 +218,10 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
                     smt_ty(ret)
                 ));
             }
-            _ => em.decls.push(format!("(declare-const {c} {})", smt_ty(t))),
+            _ => {
+                em.decls.push(format!("(declare-const {c} {})", smt_ty(t)));
+                em.sorts.insert(c.clone(), smt_ty(t));
+            }
         }
         env.insert(n.clone(), c);
     }
@@ -249,6 +258,7 @@ impl<'a> Emit<'a> {
         self.fresh += 1;
         let n = format!("v{}", self.fresh);
         self.decls.push(format!("(declare-const {n} {ty})"));
+        self.sorts.insert(n.clone(), ty.to_string());
         n
     }
     /// A fresh uninterpreted function symbol — an opaque stand-in for a function
@@ -293,9 +303,26 @@ impl<'a> Emit<'a> {
                 }
                 Stmt::Match(scrut, arms) => {
                     let s_t = self.tr(scrut, &env)?;
+                    // element sort of a list scrutinee (to disambiguate `nil`)
+                    let list_elem: Option<String> = self
+                        .sorts
+                        .get(&s_t)
+                        .and_then(|srt| srt.strip_prefix("(Lst ").and_then(|r| r.strip_suffix(')')))
+                        .map(|e| e.to_string());
                     let mut arm_conds: Vec<String> = Vec::new();
                     for arm in arms {
-                        let (cond, bindings) = pattern_cond(&arm.pattern, &s_t);
+                        let (cond, bindings) =
+                            pattern_cond(&arm.pattern, &s_t, list_elem.as_deref());
+                        // record sorts of list sub-terms bound here (nested matches)
+                        if let Some(e) = &list_elem {
+                            for (_, term) in &bindings {
+                                if term.starts_with("(head ") {
+                                    self.sorts.insert(term.clone(), e.clone());
+                                } else if term.starts_with("(tail ") {
+                                    self.sorts.insert(term.clone(), format!("(Lst {e})"));
+                                }
+                            }
+                        }
                         let mut env2 = env.clone();
                         for (n, t) in bindings {
                             env2.insert(n, t);
@@ -533,7 +560,11 @@ fn lex_less(next: &[String], cur: &[String]) -> String {
     acc
 }
 
-fn pattern_cond(p: &Pattern, scrut: &str) -> (String, Vec<(String, String)>) {
+fn pattern_cond(
+    p: &Pattern,
+    scrut: &str,
+    list_elem: Option<&str>,
+) -> (String, Vec<(String, String)>) {
     match p {
         Pattern::IntLit(v) => {
             let lit = if *v < 0 {
@@ -546,15 +577,29 @@ fn pattern_cond(p: &Pattern, scrut: &str) -> (String, Vec<(String, String)>) {
         Pattern::BoolLit(v) => (format!("(= {scrut} {v})"), vec![]),
         Pattern::Wildcard => ("true".into(), vec![]),
         Pattern::Var(v) => ("true".into(), vec![(v.clone(), scrut.to_string())]),
-        // nil/cons are the shared constructors of the parametric list datatype
-        Pattern::Nil => (format!("((_ is nil) {scrut})"), vec![]),
-        Pattern::Cons(h, t) => (
-            format!("((_ is cons) {scrut})"),
-            vec![
-                (h.clone(), format!("(head {scrut})")),
-                (t.clone(), format!("(tail {scrut})")),
-            ],
-        ),
+        // nil-ness via equality to a sort-annotated `nil` when the element sort
+        // is known (disambiguates the parametric datatype); bare tester otherwise
+        Pattern::Nil => {
+            let c = match list_elem {
+                Some(e) => format!("(= {scrut} (as nil (Lst {e})))"),
+                None => format!("((_ is nil) {scrut})"),
+            };
+            (c, vec![])
+        }
+        Pattern::Cons(h, t) => {
+            // Lst has exactly nil/cons, so "not nil" ⟺ "is cons"
+            let c = match list_elem {
+                Some(e) => format!("(not (= {scrut} (as nil (Lst {e}))))"),
+                None => format!("((_ is cons) {scrut})"),
+            };
+            (
+                c,
+                vec![
+                    (h.clone(), format!("(head {scrut})")),
+                    (t.clone(), format!("(tail {scrut})")),
+                ],
+            )
+        }
         // user ADT constructor: `(_ is Ctor)` tester + `(Ctor_i s)` field selectors
         Pattern::Ctor(cn, binders) => {
             let bindings = binders

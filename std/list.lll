@@ -56,6 +56,12 @@ module Std.List:
           0 -> yield h
           _ -> yield nth(t, i - 1, d)
 
+  # higher-order, type-changing: one proof over abstract element sorts (a, b)
+  part map(f: (a) -> b, xs: List[a]) -> List[b]:
+    match xs:
+      []     -> yield []
+      h :: t -> yield f(h) :: map(f, t)
+
   # ---- Int-specific: arithmetic / order ----
 
   part sum(xs: List[Int]) -> Int:

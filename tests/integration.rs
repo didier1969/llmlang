@@ -332,6 +332,38 @@ fn ackermann_terminates_by_lexicographic_measure() {
 }
 
 #[test]
+fn generic_type_changing_map_verifies_and_runs() {
+    // REQ-LLL-007+009: a type-CHANGING generic `map(f: (a) -> b, …)` — two list
+    // instantiations (Lst a, Lst b) coexist; the vc disambiguates the parametric
+    // `nil` by sort so the exhaustiveness proof goes through.
+    let src = "module T:\n\n  part map(f: (a) -> b, xs: List[a]) -> List[b]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield f(h) :: map(f, t)\n\n  part len(xs: List[a]) -> Int:\n    ensures result >= 0\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + len(t)\n\n  part main() -> Int via IO:\n    let doubled = map(\\(x: Int) -> x * 2, [1, 2, 3])\n    let flags   = map(\\(x: Int) -> x > 1, [1, 2, 3])\n    let r = IO.print(len(doubled) + len(flags))\n    yield r\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "type-changing map must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("gm.rs");
+    let bin = dir.join("gm_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "type-changing map Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains('6'),
+        "type-changing map must print 6"
+    );
+}
+
+#[test]
 fn higher_order_functions_verify_and_run_with_lambdas() {
     // REQ-LLL-009 / DEC-LLL-029: function-valued parameters are opaque uninterpreted
     // functions in the proof; the HOF is proved once, generic in `f`. Lambdas are
