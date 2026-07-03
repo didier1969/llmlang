@@ -184,6 +184,12 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             if op.ret != Ty::Never {
                 check_user_ty_declared(&op.ret, &type_names)?;
             }
+            // FFI resolution guard (REQ-LLL-027 gap 2): reject an `= extern` path that
+            // cannot link in v1's single-file rustc build, here, instead of letting it
+            // pass `check` and fail with a cryptic rustc error at `build`.
+            if let Some(path) = &op.extern_path {
+                validate_extern_path(&ed.name, &op.name, path)?;
+            }
             // op kinds (REQ-LLL-022 + REQ-LLL-026 item 2): an ABORT op (`-> Never`,
             // no binding), an EXTERN op (`= extern "path"`, value return), or a
             // USER TAIL-RESUMPTIVE op (value return, no binding — DEC-LLL-037).
@@ -368,6 +374,43 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
         Ty::User(n) => types.contains(n),
         _ => false,
     }
+}
+
+/// v1 FFI resolution guard (REQ-LLL-027 gap 2). `lll build` compiles the generated
+/// Rust as a SINGLE file with `rustc` (no Cargo), so an `= extern "path"` resolves
+/// only if its root is std/core/alloc or a primitive type (`i64::pow`, `str::len`).
+/// Any other root is an external crate that cannot link in v1 — caught here with a
+/// clear message rather than a cryptic rustc failure at build. Signature/arity
+/// compatibility stays a build-time concern until Cargo linking (future REQ-LLL-022).
+fn validate_extern_path(effect: &str, op: &str, path: &str) -> Result<(), String> {
+    // primitive-type roots whose associated fns resolve without any crate
+    const RESOLVABLE_ROOTS: &[&str] = &[
+        "std", "core", "alloc", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
+        "u64", "u128", "usize", "f32", "f64", "bool", "char", "str",
+    ];
+    let p = path.strip_prefix("::").unwrap_or(path);
+    let segs: Vec<&str> = p.split("::").collect();
+    let ident_ok = |s: &str| {
+        !s.is_empty()
+            && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if segs.len() < 2 || !segs.iter().all(|s| ident_ok(s)) {
+        return Err(format!(
+            "effect `{effect}` op `{op}`: extern path \"{path}\" is not a valid Rust function \
+             path — expected `root::…::fn` (e.g. `std::cmp::max` or `i64::pow`)"
+        ));
+    }
+    let root = segs[0];
+    if !RESOLVABLE_ROOTS.contains(&root) {
+        return Err(format!(
+            "effect `{effect}` op `{op}`: extern path \"{path}\" targets external crate `{root}`, \
+             which cannot link in v1 — `lll build` compiles a single file with rustc, so only \
+             std/core/alloc and primitive-type paths resolve. External-crate FFI needs Cargo \
+             linking (future REQ-LLL-022); bind a std equivalent or remove the operation"
+        ));
+    }
+    Ok(())
 }
 
 /// Reject a signature that names an undeclared user type.

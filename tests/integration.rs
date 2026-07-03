@@ -269,6 +269,34 @@ fn ffi_import_derives_extern_block_from_rust_signatures() {
 }
 
 #[test]
+fn extern_path_resolution_guard_rejects_unlinkable_crates() {
+    // REQ-LLL-027 gap 2: an extern path that cannot link in v1's single-file rustc
+    // build is caught at CHECK with a clear message, instead of silently passing
+    // check and failing later with a cryptic rustc error at build.
+    let ext = "module M:\n\n  effect E:\n    f(Int) -> Int = extern \"rayon::foo\"\n\n  part g(x: Int) -> Int via E:\n    yield E.f(x)\n";
+    let m = parser::parse_module(ext).unwrap();
+    let err = types::check_module(m).unwrap_err();
+    assert!(
+        err.contains("external crate") && err.contains("rayon"),
+        "must flag the unlinkable external crate: {err}"
+    );
+    // a primitive-type associated fn resolves in single-file rustc → accepted
+    let prim = "module M:\n\n  effect E:\n    a(Int) -> Int = extern \"i64::abs\"\n\n  part g(x: Int) -> Int via E:\n    yield E.a(x)\n";
+    let mp = parser::parse_module(prim).unwrap();
+    assert!(
+        types::check_module(mp).is_ok(),
+        "a primitive-type extern path must be accepted"
+    );
+    // a malformed (single-segment) path is rejected too
+    let bad = "module M:\n\n  effect E:\n    f(Int) -> Int = extern \"nofn\"\n\n  part g(x: Int) -> Int via E:\n    yield E.f(x)\n";
+    let mb = parser::parse_module(bad).unwrap();
+    assert!(
+        types::check_module(mb).unwrap_err().contains("valid Rust function path"),
+        "a malformed extern path must be rejected"
+    );
+}
+
+#[test]
 fn value_effect_op_without_extern_is_a_user_tail_effect() {
     // REQ-LLL-026 item 2 (DEC-LLL-037) LIFTED the old restriction: a value-returning
     // user op with neither `= extern` nor `Never` is now a user tail-resumptive
