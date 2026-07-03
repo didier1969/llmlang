@@ -1,0 +1,12 @@
+module Bench.Fib:
+
+  part fib(n: Int) -> Int:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield 0
+      1 -> yield 1
+      _ -> yield fib(n - 1) + fib(n - 2)
+
+  part main() -> Int via IO:
+    yield IO.print(fib(40))
