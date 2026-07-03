@@ -534,6 +534,23 @@ fn non_exhaustive_user_match_is_rejected() {
 }
 
 #[test]
+fn dedup_detects_alpha_equivalent_definitions_by_hash() {
+    // REQ-LLL-024: the `lll dedup` command clusters definitions by content-hash;
+    // two α-equivalent parts (same computation, different names) share a def-hash
+    // → the compiler finds duplication, the LLM neither reads nor rewrites source.
+    let src = "module T:\n\n  part foo(x: Int) -> Int:\n    yield x + 1\n\n  part bar(y: Int) -> Int:\n    yield y + 1\n\n  part triple(n: Int) -> Int:\n    yield n + n + n\n";
+    let (_, hm) = full(src);
+    assert_eq!(
+        hm.def_hash["foo"], hm.def_hash["bar"],
+        "α-equivalent definitions must share a content-hash (duplication signal)"
+    );
+    assert_ne!(
+        hm.def_hash["foo"], hm.def_hash["triple"],
+        "distinct definitions must have distinct hashes"
+    );
+}
+
+#[test]
 fn generic_definitions_are_alpha_equivalent_in_type_vars() {
     // REQ-LLL-007 follow-up: two generic definitions that differ only in the
     // NAME of their type variable are the same definition (same identity).

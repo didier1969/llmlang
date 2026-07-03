@@ -17,7 +17,7 @@ fn main() {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -123,6 +123,47 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                     p.name,
                     &hm.def_hash[&p.name][..32],
                     &hm.contract_hash[&p.name][..32]
+                );
+            }
+            Ok(())
+        }
+        ["dedup", file] => {
+            // structural maintenance command (REQ-LLL-024): the COMPILER finds
+            // α-equivalent duplicate definitions by content-hash — the LLM neither
+            // reads the codebase to find them nor regenerates text (CPT-LLL-013).
+            let (_, cm, hm) = load(file)?;
+            let mut by_hash: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for p in &cm.module.parts {
+                by_hash
+                    .entry(hm.def_hash[&p.name].as_str())
+                    .or_default()
+                    .push(p.name.as_str());
+            }
+            let mut dups: Vec<(&str, Vec<&str>)> = by_hash
+                .into_iter()
+                .filter(|(_, names)| names.len() > 1)
+                .collect();
+            for (_, names) in dups.iter_mut() {
+                names.sort();
+            }
+            dups.sort_by(|a, b| a.1[0].cmp(b.1[0]));
+            if dups.is_empty() {
+                println!(
+                    "✔ no duplication: every definition is canonical ({} parts, 0 α-equivalent clusters)",
+                    cm.module.parts.len()
+                );
+            } else {
+                let redundant: usize = dups.iter().map(|(_, v)| v.len() - 1).sum();
+                println!(
+                    "⚠ {redundant} redundant definition(s) in {} canonical cluster(s) — same content-hash, same computation:",
+                    dups.len()
+                );
+                for (h, names) in &dups {
+                    println!("  {}…  {}", &h[..16], names.join(" ≡ "));
+                }
+                println!(
+                    "\nMerge each cluster to one canonical name to enforce criterion #2 (zero duplication).\nThe compiler found this by hash — no source was read or rewritten."
                 );
             }
             Ok(())
