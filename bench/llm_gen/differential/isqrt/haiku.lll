@@ -1,0 +1,14 @@
+module Isqrt:
+
+  part isqrt(n: Int) -> Int:
+    requires n >= 0
+    ensures result * result <= n and n < (result + 1) * (result + 1)
+    yield isqrt_iter(n, 0)
+
+  part isqrt_iter(n: Int, r: Int) -> Int:
+    requires n >= 0 and r >= 0 and r * r <= n
+    ensures result * result <= n and n < (result + 1) * (result + 1)
+    measure n - r * r
+    match 1:
+      _ when (r + 1) * (r + 1) <= n -> yield isqrt_iter(n, r + 1)
+      _ -> yield r
