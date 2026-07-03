@@ -8,9 +8,11 @@
 //!   2. content-identity invariants — hash determinism + rename α-equivalence
 //!      (this class of property would have caught the identity bugs the
 //!      adversarial audit found);
-//!   3. the DIFFERENTIAL invariant (DEC-LLL-026) — for a Z3-VERIFIED arithmetic
-//!      program, the compiled binary agrees with the model semantics (euclidean
-//!      div/mod included).
+//!   3. the DIFFERENTIAL invariant (DEC-LLL-026) — for a Z3-VERIFIED program drawn
+//!      from a rich fragment (arithmetic, tuples, conditionals, State/abort
+//!      effects, structural recursion, user ADTs incl. trees, and an
+//!      effect-monomorphized HOF), the compiled binary runs without trapping and
+//!      agrees with the model semantics (euclidean div/mod included).
 
 use lllc::*;
 
