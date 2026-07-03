@@ -474,3 +474,40 @@ pub fn rename_part_in_source(src: &str, old: &str, new: &str) -> Result<String, 
     }
     String::from_utf8(out).map_err(|e| format!("rename produced invalid UTF-8: {e}"))
 }
+
+/// Remove a part's whole text block from a module source (REQ-LLL-024 dedup
+/// merge). A part is a 2-space-indented `part <name>…` line plus its
+/// deeper-indented body, ending at the next module-body item or a dedent/EOF.
+pub fn delete_part_block(src: &str, name: &str) -> Option<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let matches_name = |l: &str| -> bool {
+        let t = l.trim_start();
+        let indent = l.len() - t.len();
+        indent == 2 && t.starts_with("part ") && {
+            let after = t["part ".len()..].trim_start();
+            after == name
+                || after.starts_with(&format!("{name}("))
+                || after.starts_with(&format!("{name} "))
+                || after.starts_with(&format!("{name}:"))
+        }
+    };
+    let start = lines.iter().position(|l| matches_name(l))?;
+    let mut end = start + 1;
+    while end < lines.len() {
+        let l = lines[end];
+        let t = l.trim_start();
+        let indent = l.len() - t.len();
+        let body_item = indent == 2 && (t.starts_with("part ") || t.starts_with("type "));
+        if body_item || (!t.is_empty() && indent < 2) {
+            break;
+        }
+        end += 1;
+    }
+    let mut kept: Vec<&str> = lines[..start].to_vec();
+    kept.extend_from_slice(&lines[end..]);
+    let mut s = kept.join("\n");
+    if src.ends_with('\n') {
+        s.push('\n');
+    }
+    Some(s)
+}

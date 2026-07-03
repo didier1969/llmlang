@@ -551,6 +551,22 @@ fn dedup_detects_alpha_equivalent_definitions_by_hash() {
 }
 
 #[test]
+fn dedup_merge_removes_duplicate_and_preserves_identity() {
+    // REQ-LLL-024: merging a cluster = delete the duplicate's block + redirect
+    // its references — mechanical (the LLM issues a command, regenerates nothing).
+    let src = "module T:\n\n  part foo(x: Int) -> Int:\n    yield x + 1\n\n  part bar(y: Int) -> Int:\n    yield y + 1\n\n  part main() -> Int via IO:\n    yield IO.print(foo(1) + bar(2))\n";
+    let (_, hm0) = full(src);
+    let bar_hash = hm0.def_hash["bar"].clone();
+    // keep `bar`, drop `foo`: delete foo's block, then redirect foo -> bar
+    let stripped = hash::delete_part_block(src, "foo").expect("foo block located");
+    let merged = hash::rename_part_in_source(&stripped, "foo", "bar").unwrap();
+    let (cm, hm) = full(&merged);
+    assert!(!cm.index.contains_key("foo"), "duplicate `foo` must be gone");
+    assert_eq!(hm.def_hash["bar"], bar_hash, "canonical identity must be preserved");
+    assert!(verify_src(&merged).ok(), "merged workspace must still verify");
+}
+
+#[test]
 fn generic_definitions_are_alpha_equivalent_in_type_vars() {
     // REQ-LLL-007 follow-up: two generic definitions that differ only in the
     // NAME of their type variable are the same definition (same identity).

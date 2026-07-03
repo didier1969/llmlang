@@ -127,34 +127,38 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
-        ["dedup", file] => {
+        ["dedup", file] | ["dedup", file, "--merge"] => {
             // structural maintenance command (REQ-LLL-024): the COMPILER finds
             // α-equivalent duplicate definitions by content-hash — the LLM neither
             // reads the codebase to find them nor regenerates text (CPT-LLL-013).
+            let merge = matches!(a.as_slice(), ["dedup", _, "--merge"]);
             let (_, cm, hm) = load(file)?;
-            let mut by_hash: std::collections::HashMap<&str, Vec<&str>> =
+            // canonical clusters: name -> def-hash, grouped
+            let mut by_hash: std::collections::HashMap<String, Vec<String>> =
                 std::collections::HashMap::new();
             for p in &cm.module.parts {
                 by_hash
-                    .entry(hm.def_hash[&p.name].as_str())
+                    .entry(hm.def_hash[&p.name].clone())
                     .or_default()
-                    .push(p.name.as_str());
+                    .push(p.name.clone());
             }
-            let mut dups: Vec<(&str, Vec<&str>)> = by_hash
+            let mut dups: Vec<(String, Vec<String>)> = by_hash
                 .into_iter()
                 .filter(|(_, names)| names.len() > 1)
                 .collect();
             for (_, names) in dups.iter_mut() {
                 names.sort();
             }
-            dups.sort_by(|a, b| a.1[0].cmp(b.1[0]));
+            dups.sort_by(|a, b| a.1[0].cmp(&b.1[0]));
             if dups.is_empty() {
                 println!(
                     "✔ no duplication: every definition is canonical ({} parts, 0 α-equivalent clusters)",
                     cm.module.parts.len()
                 );
-            } else {
-                let redundant: usize = dups.iter().map(|(_, v)| v.len() - 1).sum();
+                return Ok(());
+            }
+            let redundant: usize = dups.iter().map(|(_, v)| v.len() - 1).sum();
+            if !merge {
                 println!(
                     "⚠ {redundant} redundant definition(s) in {} canonical cluster(s) — same content-hash, same computation:",
                     dups.len()
@@ -163,9 +167,77 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                     println!("  {}…  {}", &h[..16], names.join(" ≡ "));
                 }
                 println!(
-                    "\nMerge each cluster to one canonical name to enforce criterion #2 (zero duplication).\nThe compiler found this by hash — no source was read or rewritten."
+                    "\nRun `lll dedup {file} --merge` to collapse each cluster to one canonical\nname (references redirected, duplicates removed) — a command, not a rewrite."
                 );
+                return Ok(());
             }
+            // --- merge: for each cluster keep names[0], remove the rest ---
+            // map part name -> owning file (origin, or the root)
+            let origin_of = |name: &str| -> String {
+                cm.module.parts[cm.index[name]]
+                    .origin
+                    .clone()
+                    .unwrap_or_else(|| file.to_string())
+            };
+            let files = loader::workspace_files(file)?;
+            let originals: Vec<(std::path::PathBuf, String)> = files
+                .iter()
+                .map(|f| (f.clone(), std::fs::read_to_string(f).unwrap_or_default()))
+                .collect();
+            let restore = || {
+                for (f, orig) in &originals {
+                    let _ = std::fs::write(f, orig);
+                }
+            };
+            let mut removed = 0usize;
+            for (_, names) in &dups {
+                let canonical = &names[0];
+                for dup in &names[1..] {
+                    // 1) delete the duplicate's definition block from its file
+                    let dupfile = origin_of(dup);
+                    let src = std::fs::read_to_string(&dupfile).map_err(|e| e.to_string())?;
+                    let stripped = match hash::delete_part_block(&src, dup) {
+                        Some(s) => s,
+                        None => {
+                            restore();
+                            return Err(format!("dedup: could not locate `{dup}` to remove"));
+                        }
+                    };
+                    std::fs::write(&dupfile, &stripped).map_err(|e| e.to_string())?;
+                    // 2) redirect remaining references dup -> canonical across all files
+                    for f in &files {
+                        let s = std::fs::read_to_string(f).map_err(|e| e.to_string())?;
+                        let r = hash::rename_part_in_source(&s, dup, canonical)?;
+                        if r != s {
+                            std::fs::write(f, &r).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    removed += 1;
+                }
+            }
+            // validate: reload, re-check, canonical hashes unchanged
+            let validated = load(file).and_then(|(_, _, hm2)| {
+                for (_, names) in &dups {
+                    let c = &names[0];
+                    match hm2.def_hash.get(c) {
+                        Some(h) if *h == hm.def_hash[c] => {}
+                        _ => {
+                            return Err(format!(
+                                "dedup validation failed: `{c}` identity changed"
+                            ))
+                        }
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = validated {
+                restore();
+                return Err(e);
+            }
+            println!(
+                "✔ merged {removed} duplicate(s) into {} canonical definition(s); references redirected, identity preserved (DEC-LLL-019). ~0 output tokens.",
+                dups.len()
+            );
             Ok(())
         }
         ["rename", file, old, new] => {
