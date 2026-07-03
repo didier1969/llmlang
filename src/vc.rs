@@ -464,6 +464,13 @@ impl<'a> Emit<'a> {
                 } else if name == "IO.read" {
                     // IO.read: arbitrary Int from the world — havoc
                     self.fresh("Int")
+                } else if name == "State.get" || name == "State.put" {
+                    // builtin State (REQ-LLL-025): opaque at the boundary — the cell's
+                    // value is invisible to the pure-core proof, so havoc the result.
+                    for a in args {
+                        self.tr(a, env)?;
+                    }
+                    self.fresh("Int")
                 } else if let Some(op) = self.find_op(name) {
                     // effect operations are opaque at the boundary (REQ-LLL-018):
                     // the pure-core proof never depends on a handler's choice.

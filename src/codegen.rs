@@ -41,11 +41,20 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         .filter(|p| p.effects.iter().any(|e| abort_effects.contains(e)))
         .map(|p| p.name.clone())
         .collect();
+    // parts whose row carries the builtin `State` effect → they take a `&mut i64`
+    // cell evidence parameter (REQ-LLL-025).
+    let stateful: std::collections::HashSet<String> = cm
+        .module
+        .parts
+        .iter()
+        .filter(|p| p.effects.iter().any(|e| e == "State"))
+        .map(|p| p.name.clone())
+        .collect();
     for td in &cm.module.types {
         emit_enum(&mut out, td);
     }
     for part in &cm.module.parts {
-        emit_part(&mut out, part, &ctors, &parts, &abort)?;
+        emit_part(&mut out, part, &ctors, &parts, &abort, &stateful)?;
     }
     // entry point
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
@@ -145,6 +154,7 @@ fn emit_part(
     ctors: &std::collections::HashSet<String>,
     parts: &std::collections::HashSet<String>,
     abort: &std::collections::HashSet<String>,
+    stateful: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
@@ -163,7 +173,7 @@ fn emit_part(
             .collect();
         format!("<{}>", bounds.join(", "))
     };
-    let params: Vec<String> = part
+    let mut params: Vec<String> = part
         .params
         .iter()
         .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
@@ -172,6 +182,18 @@ fn emit_part(
     // abort payload is the raised Int; a raise compiles to an early `Err`, and
     // callers propagate with `?` or discharge the effect with a `handle` match.
     let res = abort.contains(&part.name);
+    // a `via State` part takes a `&mut i64` cell evidence parameter (REQ-LLL-025).
+    let is_state = stateful.contains(&part.name);
+    if is_state && res {
+        return Err(format!(
+            "codegen: part `{}` combines a stateful effect with an abort effect — \
+             not supported yet (REQ-LLL-025 slice 3)",
+            part.name
+        ));
+    }
+    if is_state {
+        params.push("__st: &mut i64".to_string());
+    }
     let ret_ty = if res {
         format!("Result<{}, i64>", rs_ty(&part.ret))
     } else {
@@ -191,7 +213,14 @@ fn emit_part(
         .filter(|(_, t)| matches!(t, Ty::Fun(..)))
         .map(|(n, _)| n.clone())
         .collect();
-    let cx = Cx { fns: &fns, ctors, parts, abort };
+    let cx = Cx {
+        fns: &fns,
+        ctors,
+        parts,
+        abort,
+        stateful,
+        state_ev: if is_state { Some("__st".to_string()) } else { None },
+    };
     emit_body(out, &part.body, 1, &cx, res)?;
     out.push_str("}\n");
     Ok(())
@@ -211,6 +240,12 @@ struct Cx<'a> {
     ctors: &'a Names,
     parts: &'a Names,
     abort: &'a Names,
+    /// parts whose row carries `State` — they take a `&mut i64` cell evidence
+    /// parameter, and a call to one must forward the current evidence (REQ-LLL-025).
+    stateful: &'a Names,
+    /// the in-scope State evidence (`&mut i64`) to read/write/forward: the part's
+    /// `__st` param inside a `via State` body, or `__st_<d>` inside a State handle.
+    state_ev: Option<String>,
 }
 
 fn emit_body(
@@ -256,6 +291,37 @@ fn emit_body(
             }
             Stmt::Match(scrut, arms) => {
                 emit_match(out, scrut, arms, depth, cx, res)?;
+            }
+            Stmt::Handle(h) if h.effect == "State" => {
+                // canonical State cell handler (REQ-LLL-025): install the cell from
+                // `from`, thread `&mut` into the handled call, bind the result, then
+                // run the `return` clause. get/put read/write the cell inline — no
+                // continuation, the "rest of the computation" is just the code after.
+                let init = expr(h.from.as_ref().expect("State handle requires `from`"), cx, res)?;
+                let cell = format!("__cell_{depth}");
+                let stv = format!("__st_{depth}");
+                out.push_str(&format!("{}let mut {cell}: i64 = {init};\n", indent(depth)));
+                out.push_str(&format!("{}let {stv} = &mut {cell};\n", indent(depth)));
+                let cx2 = Cx {
+                    fns: cx.fns,
+                    ctors: cx.ctors,
+                    parts: cx.parts,
+                    abort: cx.abort,
+                    stateful: cx.stateful,
+                    state_ev: Some(stv),
+                };
+                let ret_clause = h
+                    .clauses
+                    .iter()
+                    .find(|c| c.op == "return")
+                    .expect("State handle has a return clause");
+                let call = expr(&h.call, &cx2, false)?;
+                out.push_str(&format!(
+                    "{}let {} = {call};\n",
+                    indent(depth),
+                    local(&ret_clause.params[0])
+                ));
+                emit_body(out, &ret_clause.body, depth, cx, res)?;
             }
             Stmt::Handle(h) => {
                 // discharge an abort effect: `match <call> { Ok(r) => …, Err(m) => … }`.
@@ -420,6 +486,15 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         Expr::EffCall(name, args) => match name.as_str() {
             "IO.print" => format!("__lll_io_print({})", expr(&args[0], cx, res)?),
             "IO.read" => "__lll_io_read()".to_string(),
+            // builtin State (REQ-LLL-025): read/write the `&mut i64` cell evidence.
+            "State.get" => {
+                let ev = cx.state_ev.clone().unwrap_or_else(|| "__st".to_string());
+                format!("(*{ev})")
+            }
+            "State.put" => {
+                let ev = cx.state_ev.clone().unwrap_or_else(|| "__st".to_string());
+                format!("{{ let __pv = {}; *{ev} = __pv; __pv }}", expr(&args[0], cx, res)?)
+            }
             // a user effect op (slice 1: abort only) → early `Err` with the raised
             // value; valid because the performing part is Result-typed (REQ-LLL-018).
             _ => {
@@ -431,21 +506,29 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             }
         },
         Expr::Call(name, args) => {
-            let xs: Result<Vec<String>, String> =
-                args.iter().map(|a| expr(a, cx, res)).collect();
-            let xs = xs?.join(", ");
+            let mut xs: Vec<String> = Vec::new();
+            for a in args {
+                xs.push(expr(a, cx, res)?);
+            }
             if cx.ctors.contains(name) {
                 // ADT constructor application → Rc-wrapped variant (REQ-LLL-011)
-                format!("Rc::new({name}({xs}))")
+                format!("Rc::new({name}({}))", xs.join(", "))
             } else if cx.fns.contains(name) {
                 // application of a function-valued parameter (REQ-LLL-009)
-                format!("{}({xs})", local(name))
-            } else if res && cx.abort.contains(name) {
-                // calling an abort-row part from a Result-returning part: propagate
-                // the abort with `?` (zero-cost, no unwinding) — REQ-LLL-018.
-                format!("{}({xs})?", mangle(name))
+                format!("{}({})", local(name), xs.join(", "))
             } else {
-                format!("{}({xs})", mangle(name))
+                // forward the State cell evidence to a stateful callee (implicit
+                // reborrow keeps the caller's `&mut` usable afterwards) — REQ-LLL-025.
+                if cx.stateful.contains(name) {
+                    xs.push(cx.state_ev.clone().unwrap_or_else(|| "__st".to_string()));
+                }
+                let call = format!("{}({})", mangle(name), xs.join(", "));
+                if res && cx.abort.contains(name) {
+                    // abort-row callee from a Result-returning part: propagate with `?`.
+                    format!("{call}?")
+                } else {
+                    call
+                }
             }
         }
         Expr::Lambda(params, body) => {

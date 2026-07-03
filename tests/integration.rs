@@ -160,6 +160,24 @@ fn abort_effect_purity_is_enforced() {
 }
 
 #[test]
+fn state_effect_purity_is_enforced() {
+    // REQ-LLL-025: the builtin State effect is row-checked like any other — a part
+    // that performs `State.get` without `via State` (or a handle) is rejected.
+    let src = "module B:\n\n  part oops(n: Int) -> Int:\n    yield State.get()\n";
+    let m = parser::parse_module(src).unwrap();
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("State") && err.contains("pure"), "must reject undeclared State: {err}");
+}
+
+#[test]
+fn state_handle_requires_initial_cell() {
+    // REQ-LLL-025: State's canonical handler needs an initial value (`from <Int>`).
+    let src = "module B:\n\n  part g() -> Int via State:\n    yield State.get()\n\n  part run() -> Int:\n    handle g() with State:\n      return r -> yield r\n";
+    let m = parser::parse_module(src).unwrap();
+    assert!(types::check_module(m).unwrap_err().contains("initial cell value"));
+}
+
+#[test]
 fn unknown_effect_in_via_is_rejected() {
     // an effect named in `via` must be declared with `effect …:` (REQ-LLL-018).
     let src = "module B:\n\n  part f(n: Int) -> Int via Ghost:\n    yield n\n";
@@ -703,6 +721,39 @@ fn export_ist_emits_axon_extraction_result() {
         rels.iter().any(|r| r["from"] == "twice" && r["to"] == "inc" && r["rel_type"] == "calls"),
         "twice→inc call edge must be present"
     );
+}
+
+#[test]
+fn algebraic_effect_state_verifies_and_runs() {
+    // REQ-LLL-025: the tail-resumptive archetype (State). `bump` threads a cell
+    // (get/put); `total` composes three bumps sharing the cell; `handle … with
+    // State from 0` installs the canonical `&mut i64` handler. Codegen is
+    // evidence-passing — no continuations, no allocation.
+    let (_, m) = loader::load_program("examples/effect_state.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "State program must verify: {:?}", failures(&report));
+    // compiles + runs: 0 →+10→ 10 →+20→ 30 →+12→ 42.
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("st.rs");
+    let bin = dir.join("st_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "State codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("42"), "State counter must print 42, got: {stdout}");
 }
 
 #[test]

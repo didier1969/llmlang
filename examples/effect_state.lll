@@ -1,0 +1,30 @@
+module StateDemo:
+
+  # Typed algebraic effect — the TAIL-RESUMPTIVE archetype (REQ-LLL-025).
+  # `State` is a builtin effect: `get`/`put` read and write a mutable cell.
+  # An operation with a non-`Never` return type resumes implicitly (its handler
+  # value IS the reply), so there is no `resume` keyword — the "rest of the
+  # computation" is simply the code that follows the perform site.
+
+  # A `via State` part threads the cell; `get`/`put` read/write it. It composes:
+  # `total` calls `bump` three times, all sharing the same cell.
+  part bump(by: Int) -> Int via State:
+    let cur = State.get()
+    let nu  = cur + by
+    let _   = State.put(nu)
+    yield nu
+
+  part total() -> Int via State:
+    let _ = bump(10)
+    let _ = bump(20)
+    yield bump(12)
+
+  # `handle … with State from <init>` installs the canonical cell handler: the
+  # compiler threads a `&mut i64` into the computation (evidence-passing) — no
+  # continuations, no allocation. `run` is PURE again (State discharged).
+  part run() -> Int:
+    handle total() with State from 0:
+      return r -> yield r
+
+  part main() -> Int via IO:
+    yield IO.print(run())   # 0 -> 10 -> 30 -> 42
