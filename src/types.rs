@@ -151,6 +151,28 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             if op.ret != Ty::Never {
                 check_user_ty_declared(&op.ret, &type_names)?;
             }
+            // FFI/handler consistency (REQ-LLL-022): a user operation is either an
+            // ABORT op (`-> Never`, no binding) or an EXTERN op (`= extern "path"`,
+            // value return). A value-returning op WITHOUT an extern binding would
+            // need a user-authored resumptive handler (REQ-LLL-026, not yet).
+            match (op.ret == Ty::Never, op.extern_path.is_some()) {
+                (true, true) => {
+                    return Err(format!(
+                        "effect `{}`: abort operation `{}` (-> Never) cannot have an `= extern` \
+                         binding — it never returns a value",
+                        ed.name, op.name
+                    ))
+                }
+                (false, false) => {
+                    return Err(format!(
+                        "effect `{}`: operation `{}` returns {} but has no `= extern \"rust::path\"` \
+                         binding — bind it to Rust (FFI, REQ-LLL-022), or make it an abort op \
+                         (`-> Never`); user-authored resumptive handlers are not yet supported",
+                        ed.name, op.name, op.ret
+                    ))
+                }
+                _ => {}
+            }
             let key = format!("{}.{}", ed.name, op.name);
             if effect_ops
                 .insert(key.clone(), (ed.name.clone(), op.params.clone(), op.ret.clone()))

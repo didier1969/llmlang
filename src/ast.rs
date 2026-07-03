@@ -36,6 +36,13 @@ pub struct OpSig {
     pub name: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// FFI façade (REQ-LLL-022): a Rust function path this operation is bound to
+    /// via `= extern "rust::path"`. The op is then an ambient effect at the
+    /// effect boundary (DEC-LLL-017) — a perform lowers to a call of that Rust
+    /// function, reusing the Cargo/std ecosystem without reimplementation. `None`
+    /// = an abort op (return type `Never`) or a builtin-interpreted op.
+    #[serde(default)]
+    pub extern_path: Option<String>,
 }
 
 /// A user algebraic data type `type Name = C1(T…) | C2 | …` (REQ-LLL-011).

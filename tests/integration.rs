@@ -178,6 +178,43 @@ fn state_handle_requires_initial_cell() {
 }
 
 #[test]
+fn ffi_extern_effect_verifies_and_runs() {
+    // REQ-LLL-022: an effect op bound `= extern "rust::path"` reuses Cargo/std at
+    // the effect boundary. `Cmp.max/min` → std::cmp — verified (foreign result
+    // havoc'd), compiled, run.
+    let (_, m) = loader::load_program("examples/ffi_demo.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "ffi program must verify: {:?}", failures(&report));
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    assert!(rust.contains("std :: cmp :: max") || rust.contains("std::cmp::max"), "extern path must be emitted");
+    let rs = dir.join("f.rs");
+    let bin = dir.join("f_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "ffi codegen failed:\n{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("100"));
+}
+
+#[test]
+fn value_effect_op_without_extern_is_rejected() {
+    // REQ-LLL-022: a value-returning user op with neither `= extern` nor `Never`
+    // has no implementation (user-authored resumptive handlers = REQ-026) → reject.
+    let src = "module B:\n\n  effect E:\n    thing() -> Int\n\n  part f() -> Int via E:\n    yield E.thing()\n";
+    let m = parser::parse_module(src).unwrap();
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("extern"), "must require an extern binding: {err}");
+}
+
+#[test]
 fn unit_type_verifies_and_runs() {
     // REQ-LLL-025 slice 3b: the unit type `()` — the honest return of a procedure
     // whose purpose is an effect. Verifies + compiles + runs.

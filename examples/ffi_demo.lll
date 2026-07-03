@@ -1,0 +1,23 @@
+module FfiDemo:
+
+  # FFI façade — reuse the Cargo/std ecosystem at the effect boundary (REQ-LLL-022,
+  # DEC-LLL-033). An effect operation bound with `= extern "rust::path"` lowers a
+  # perform to a call of that Rust function. The verified pure core calls it via a
+  # typed effect (the imperative shell, DEC-LLL-017); the proof treats the foreign
+  # result as opaque (havoc'd), so Z3 never reasons about Rust internals.
+  #
+  # NOTE (LLM-efficiency): a hand-written `= extern` binding is the compiler's
+  # low-level TARGET, not the authoring surface — the LLM-efficient path is to
+  # AUTO-GENERATE these from Rust signatures (`lll ffi-import`) and write only the
+  # boundary contracts. This file shows the mechanism.
+  effect Cmp:
+    max(Int, Int) -> Int = extern "std::cmp::max"
+    min(Int, Int) -> Int = extern "std::cmp::min"
+
+  part clamp(x: Int, lo: Int, hi: Int) -> Int via Cmp:
+    yield Cmp.min(Cmp.max(x, lo), hi)
+
+  part main() -> Int via IO, Cmp:
+    let a = clamp(0 - 5, 0, 100)   # max(-5,0)=0,  min(0,100)=0
+    let b = clamp(250, 0, 100)     # max(250,0)=250, min(250,100)=100
+    yield IO.print(a + b)          # 0 + 100 = 100

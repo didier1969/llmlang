@@ -57,11 +57,40 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         .filter(|p| p.effects.iter().any(|e| e == "Reader"))
         .map(|p| p.name.clone())
         .collect();
+    // FFI façade (REQ-LLL-022): a user effect op `Eff.op = extern "rust::path"`
+    // lowers a perform to a call of that Rust function; the abort ops (`-> Never`)
+    // lower to an early `Err`. Both are keyed by the dotted op name.
+    let mut extern_ops: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut abort_ops: Names = std::collections::HashSet::new();
+    for ed in &cm.module.effects {
+        for op in &ed.ops {
+            let key = format!("{}.{}", ed.name, op.name);
+            match &op.extern_path {
+                Some(path) => {
+                    extern_ops.insert(key, path.clone());
+                }
+                None if op.ret == Ty::Never => {
+                    abort_ops.insert(key);
+                }
+                None => {}
+            }
+        }
+    }
+    let g = Globals {
+        ctors: &ctors,
+        parts: &parts,
+        abort: &abort,
+        stateful: &stateful,
+        readerful: &readerful,
+        extern_ops: &extern_ops,
+        abort_ops: &abort_ops,
+    };
     for td in &cm.module.types {
         emit_enum(&mut out, td);
     }
     for part in &cm.module.parts {
-        emit_part(&mut out, part, &ctors, &parts, &abort, &stateful, &readerful)?;
+        emit_part(&mut out, part, &g)?;
     }
     // entry point
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
@@ -157,15 +186,7 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
     out.push_str(&format!("pub use {ei}::*;\n"));
 }
 
-fn emit_part(
-    out: &mut String,
-    part: &Part,
-    ctors: &std::collections::HashSet<String>,
-    parts: &std::collections::HashSet<String>,
-    abort: &std::collections::HashSet<String>,
-    stateful: &std::collections::HashSet<String>,
-    readerful: &std::collections::HashSet<String>,
-) -> Result<(), String> {
+fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
     // on an abstract value (thread/store/duplicate + structural equality).
@@ -191,12 +212,12 @@ fn emit_part(
     // a part whose row carries an abort effect returns `Result<Ret, i64>` — the
     // abort payload is the raised Int; a raise compiles to an early `Err`, and
     // callers propagate with `?` or discharge the effect with a `handle` match.
-    let res = abort.contains(&part.name);
+    let res = g.abort.contains(&part.name);
     // evidence parameters, in a fixed order so call sites match: `&mut i64` cell
     // for State, then `&i64` env for Reader (REQ-LLL-025). These compose freely
     // with the abort `Result` return (orthogonal threading).
-    let is_state = stateful.contains(&part.name);
-    let is_reader = readerful.contains(&part.name);
+    let is_state = g.stateful.contains(&part.name);
+    let is_reader = g.readerful.contains(&part.name);
     if is_state {
         params.push("__st: &mut i64".to_string());
     }
@@ -224,11 +245,13 @@ fn emit_part(
         .collect();
     let cx = Cx {
         fns: &fns,
-        ctors,
-        parts,
-        abort,
-        stateful,
-        readerful,
+        ctors: g.ctors,
+        parts: g.parts,
+        abort: g.abort,
+        extern_ops: g.extern_ops,
+        abort_ops: g.abort_ops,
+        stateful: g.stateful,
+        readerful: g.readerful,
         state_ev: if is_state { Some("__st".to_string()) } else { None },
         reader_ev: if is_reader { Some("__env".to_string()) } else { None },
     };
@@ -246,11 +269,29 @@ type Names = std::collections::HashSet<String>;
 /// Shared codegen context: the name-sets that classify an identifier at a call
 /// site — constructors, function-valued params, part names, and abort-row parts
 /// (whose calls propagate with `?`). Bundled so emit helpers take few arguments.
+/// Module-global name classifications (everything but the per-part `fns`),
+/// bundled so `emit_part` takes a single reference instead of many arguments.
+struct Globals<'a> {
+    ctors: &'a Names,
+    parts: &'a Names,
+    abort: &'a Names,
+    stateful: &'a Names,
+    readerful: &'a Names,
+    /// dotted op name → bound Rust function path (FFI, REQ-LLL-022)
+    extern_ops: &'a std::collections::HashMap<String, String>,
+    /// dotted op names that are abort ops (`-> Never`)
+    abort_ops: &'a Names,
+}
+
 struct Cx<'a> {
     fns: &'a Names,
     ctors: &'a Names,
     parts: &'a Names,
     abort: &'a Names,
+    /// dotted op name → bound Rust function path (FFI, REQ-LLL-022)
+    extern_ops: &'a std::collections::HashMap<String, String>,
+    /// dotted op names that are abort ops (`-> Never`)
+    abort_ops: &'a Names,
     /// parts whose row carries `State` — they take a `&mut i64` cell evidence
     /// parameter, and a call to one must forward the current evidence (REQ-LLL-025).
     stateful: &'a Names,
@@ -282,7 +323,7 @@ fn emit_body(
                 ));
             }
             Stmt::Yield(e) => {
-                if is_abort_effcall(e) {
+                if matches!(e, Expr::EffCall(n, _) if cx.abort_ops.contains(n)) {
                     // `yield E.raise(x)` — the raise already IS `return Err(x)`;
                     // emit it as the diverging statement (REQ-LLL-018).
                     out.push_str(&format!(
@@ -337,6 +378,8 @@ fn emit_body(
                     ctors: cx.ctors,
                     parts: cx.parts,
                     abort: cx.abort,
+                    extern_ops: cx.extern_ops,
+                    abort_ops: cx.abort_ops,
                     stateful: cx.stateful,
                     readerful: cx.readerful,
                     state_ev: ev_state,
@@ -382,14 +425,6 @@ fn emit_body(
         }
     }
     Ok(())
-}
-
-/// A `yield`ed abort operation (a user effect op — always an abort op in the
-/// current slices), which lowers to an early `return Err(..)` (REQ-LLL-018). The
-/// builtin effects (IO, State, Reader) are tail-resumptive, never abort.
-fn is_abort_effcall(e: &Expr) -> bool {
-    const BUILTIN: [&str; 5] = ["IO.print", "IO.read", "State.get", "State.put", "Reader.ask"];
-    matches!(e, Expr::EffCall(n, _) if !BUILTIN.contains(&n.as_str()))
 }
 
 fn emit_match(
@@ -537,14 +572,23 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 let ev = cx.reader_ev.clone().unwrap_or_else(|| "__env".to_string());
                 format!("(*{ev})")
             }
-            // a user effect op (slice 1: abort only) → early `Err` with the raised
-            // value; valid because the performing part is Result-typed (REQ-LLL-018).
+            // a user effect op: an FFI-bound op (`= extern "rust::path"`) lowers to
+            // a call of that Rust function — reusing Cargo/std at the effect
+            // boundary (REQ-LLL-022) ; an abort op lowers to an early `Err` with the
+            // raised value (valid because the performing part is Result-typed,
+            // REQ-LLL-018).
             _ => {
-                let payload = match args.first() {
-                    Some(a) => expr(a, cx, res)?,
-                    None => "0".to_string(),
-                };
-                format!("return Err({payload})")
+                if let Some(path) = cx.extern_ops.get(name) {
+                    let a: Result<Vec<String>, String> =
+                        args.iter().map(|x| expr(x, cx, res)).collect();
+                    format!("{path}({})", a?.join(", "))
+                } else {
+                    let payload = match args.first() {
+                        Some(a) => expr(a, cx, res)?,
+                        None => "0".to_string(),
+                    };
+                    format!("return Err({payload})")
+                }
             }
         },
         Expr::Call(name, args) => {

@@ -171,8 +171,28 @@ impl Parser {
             self.eat(Tok::RParen)?;
             self.eat(Tok::Arrow)?;
             let ret = self.ty()?;
+            // FFI binding `= extern "rust::path"` (REQ-LLL-022)
+            let extern_path = if self.peek() == &Tok::Assign {
+                self.pos += 1;
+                match self.bump() {
+                    Tok::Ident(k) if k == "extern" => {}
+                    other => {
+                        return Err(self.err(&format!("expected `extern` after `=`, found {other:?}")))
+                    }
+                }
+                match self.bump() {
+                    Tok::Str(p) => Some(p),
+                    other => {
+                        return Err(self.err(&format!(
+                            "expected a quoted Rust path after `extern`, found {other:?}"
+                        )))
+                    }
+                }
+            } else {
+                None
+            };
             self.eat(Tok::Newline)?;
-            ops.push(OpSig { name: opname, params, ret });
+            ops.push(OpSig { name: opname, params, ret, extern_path });
         }
         if ops.is_empty() {
             return Err(self.err("effect with no operations"));
