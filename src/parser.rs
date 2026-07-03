@@ -473,6 +473,14 @@ impl Parser {
             Tok::Int(n) => Ok(Expr::IntLit(n)),
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
+            // string literal → list of Unicode scalar codepoints (REQ-LLL-010,
+            // DEC-LLL-030: String modeled as List[Char], Char = Int scalar). This
+            // reuses the verified List machinery directly — a string contract is a
+            // contract over a cons-list of bounded Ints, already in the fragment.
+            Tok::Str(s) => {
+                let items = s.chars().map(|c| Expr::IntLit(c as i64)).collect();
+                Ok(Expr::ListLit(items))
+            }
             Tok::LParen => {
                 let e = self.expr()?;
                 self.eat(Tok::RParen)?;

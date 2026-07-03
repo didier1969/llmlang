@@ -221,6 +221,38 @@ fn generics_prove_once_and_run_at_multiple_instantiations() {
 }
 
 #[test]
+fn string_literal_is_a_verified_codepoint_list() {
+    // REQ-LLL-010 / DEC-LLL-030: a string literal desugars to a List[Int] of
+    // Unicode scalars, so length/contract verification comes from the existing
+    // (proved) list machinery — no new SMT theory.
+    let src = "module T:\n\n  part len(xs: List[Int]) -> Int:\n    ensures result >= 0\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + len(t)\n\n  part main() -> Int via IO:\n    let n = len(\"hello\")\n    let r = IO.print(n)\n    yield r\n";
+    // the string contract (len >= 0) verifies via the list fragment
+    let report = verify_src(src);
+    assert!(report.ok(), "string-as-list contract must verify: {:?}", failures(&report));
+    // and the generated program runs, counting the 5 codepoints of "hello"
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("s.rs");
+    let bin = dir.join("s_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "string program failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('5'), "len(\"hello\") must be 5, got: {stdout}");
+}
+
+#[test]
 fn euclidean_semantics_match_between_smt_and_rust() {
     // (-7) mod 3 = 2 in both SMT-LIB and i64::rem_euclid — the verified model
     // and the runtime must agree on negative operands.
