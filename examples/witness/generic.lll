@@ -1,0 +1,20 @@
+module Witness.Generic:
+
+  # Witness project (REQ-LLL-006, criterion #2 of VIS-LLL-001): reusable code
+  # written ONCE, no duplication imposed by the language.
+
+  # generic length — a single proof serves List[Int], List[Bool], List[Cmd], …
+  part length(xs: List[a]) -> Int:
+    ensures result >= 0
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + length(t)
+
+  # generic reverse via an accumulator — again, one definition for every element
+  part rev_acc(xs: List[a], acc: List[a]) -> List[a]:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield rev_acc(t, h :: acc)
+
+  part reverse(xs: List[a]) -> List[a]:
+    yield rev_acc(xs, [])

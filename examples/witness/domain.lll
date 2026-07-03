@@ -1,0 +1,19 @@
+module Witness.Domain:
+
+  # A tiny domain modelled with a user ADT (REQ-LLL-011) and folded with a
+  # higher-order function (REQ-LLL-009) — no hand-written loop.
+
+  type Cmd = Inc | Dec | Set(Int)
+
+  # interpret one command against a running state
+  part apply(c: Cmd, s: Int) -> Int:
+    match c:
+      Inc    -> yield s + 1
+      Dec    -> yield s - 1
+      Set(v) -> yield v
+
+  # fold a step function over a command list (structural recursion → terminates)
+  part run(f: (Cmd, Int) -> Int, init: Int, cmds: List[Cmd]) -> Int:
+    match cmds:
+      []     -> yield init
+      h :: t -> yield run(f, f(h, init), t)

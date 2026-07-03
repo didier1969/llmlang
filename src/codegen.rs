@@ -90,6 +90,14 @@ fn mangle(name: &str) -> String {
     format!("lll_{name}")
 }
 
+/// Emit a user value identifier (param, let-binding, pattern binder, lambda
+/// param) with a `u_` prefix. This keeps valid llmlang names that happen to be
+/// Rust keywords (`final`, `move`, `ref`, …) from producing invalid Rust, and
+/// avoids clashes with generated helpers.
+fn local(name: &str) -> String {
+    format!("u_{name}")
+}
+
 fn emit_enum(out: &mut String, td: &TypeDecl) {
     out.push_str(&format!(
         "\n#[derive(Debug, Clone, PartialEq)]\npub enum {} {{\n",
@@ -132,7 +140,7 @@ fn emit_part(
     let params: Vec<String> = part
         .params
         .iter()
-        .map(|(n, t)| format!("{n}: {}", rs_ty(t)))
+        .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
         .collect();
     out.push_str(&format!(
         "\n#[allow(unused_variables, clippy::all)]\npub fn {}{}({}) -> {} {{\n",
@@ -170,8 +178,9 @@ fn emit_body(
         match s {
             Stmt::Let(name, e) => {
                 out.push_str(&format!(
-                    "{}let {name} = {};\n",
+                    "{}let {} = {};\n",
                     indent(depth),
+                    local(name),
                     expr(e, fns, ctors)?
                 ));
             }
@@ -217,15 +226,16 @@ fn emit_match(
             Pattern::IntLit(v) => format!("{v}"),
             Pattern::BoolLit(v) => format!("{v}"),
             Pattern::Wildcard => "_".into(),
-            Pattern::Var(v) => v.clone(),
+            Pattern::Var(v) => local(v),
             Pattern::Nil => "LstI::Nil".into(),
-            Pattern::Cons(h, t) => format!("LstI::Cons({h}, {t})"),
+            Pattern::Cons(h, t) => format!("LstI::Cons({}, {})", local(h), local(t)),
             // user ADT constructor: variant is bare-nameable via `use Name::*`
             Pattern::Ctor(cn, binders) => {
                 if binders.is_empty() {
                     cn.clone()
                 } else {
-                    format!("{cn}({})", binders.join(", "))
+                    let bs: Vec<String> = binders.iter().map(|b| local(b)).collect();
+                    format!("{cn}({})", bs.join(", "))
                 }
             }
         };
@@ -237,8 +247,9 @@ fn emit_match(
         // rebind list pattern names to owned values (clone: the element type
         // may be a generic T that is Clone but not Copy — REQ-LLL-007)
         if let Pattern::Cons(h, t) = &arm.pattern {
-            out.push_str(&format!("{}let {h} = {h}.clone();\n", indent(d + 1)));
-            out.push_str(&format!("{}let {t} = {t}.clone();\n", indent(d + 1)));
+            let (hh, tt) = (local(h), local(t));
+            out.push_str(&format!("{ind}let {hh} = {hh}.clone();\n", ind = indent(d + 1)));
+            out.push_str(&format!("{ind}let {tt} = {tt}.clone();\n", ind = indent(d + 1)));
         }
         emit_body(out, &arm.body, d + 1, fns, ctors)?;
         out.push_str(&format!("{}}}\n", indent(d)));
@@ -276,7 +287,7 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
                 n.clone()
             } else {
                 // `.clone()` is uniform: cheap for Copy (i64/bool), needed for Rc lists
-                format!("{n}.clone()")
+                format!("{}.clone()", local(n))
             }
         }
         Expr::ListLit(items) => {
@@ -309,10 +320,12 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
         Expr::Call(name, args) => {
             let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, fns, ctors)).collect();
             let xs = xs?.join(", ");
-            if ctors.contains(name) || fns.contains(name) {
-                // ADT constructor application (bare variant) OR function-value
-                // application (REQ-LLL-011 / REQ-LLL-009) — both call by bare name
+            if ctors.contains(name) {
+                // ADT constructor application → bare variant (REQ-LLL-011)
                 format!("{name}({xs})")
+            } else if fns.contains(name) {
+                // application of a function-valued parameter (REQ-LLL-009)
+                format!("{}({xs})", local(name))
             } else {
                 format!("{}({xs})", mangle(name))
             }
@@ -321,7 +334,7 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
             // non-capturing closure — coerces to the fn-pointer parameter type
             let ps: Vec<String> = params
                 .iter()
-                .map(|(n, t)| format!("{n}: {}", rs_ty(t)))
+                .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
                 .collect();
             format!("(|{}| {})", ps.join(", "), expr(body, fns, ctors)?)
         }

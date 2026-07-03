@@ -413,6 +413,39 @@ fn non_exhaustive_user_match_is_rejected() {
 }
 
 #[test]
+fn witness_project_verifies_and_runs() {
+    // REQ-LLL-006 (criterion #2 of VIS-LLL-001): a non-trivial multi-module
+    // program combining generics (length reused at List[Int] AND List[Bool]),
+    // a higher-order fold, and a user ADT — verified fully by Z3 and run, with
+    // NO duplication imposed by the language.
+    let (_, m) = loader::load_program("examples/witness/main.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "witness must verify: {:?}", failures(&report));
+
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("w.rs");
+    let bin = dir.join("w_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "witness Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('9'), "witness must print 9, got: {stdout}");
+}
+
+#[test]
 fn euclidean_semantics_match_between_smt_and_rust() {
     // (-7) mod 3 = 2 in both SMT-LIB and i64::rem_euclid — the verified model
     // and the runtime must agree on negative operands.

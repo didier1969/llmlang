@@ -1,0 +1,16 @@
+import "generic.lll"
+import "domain.lll"
+
+module Witness.Main:
+
+  # End-to-end witness: the SAME generic `length` is applied to two different
+  # element types (no per-type copy), an ADT models the commands, and a lambda
+  # drives the higher-order `run` — all statically verified by Z3.
+
+  part main() -> Int via IO:
+    let n = length([10, 20, 30])        # length @ List[Int]  = 3
+    let m = length([true, false])       # length @ List[Bool] = 2 (same proof)
+    let cmds = Inc :: Inc :: Set(5) :: Dec :: []
+    let final = run(\(c: Cmd, s: Int) -> apply(c, s), 0, cmds)  # 0→1→2→5→4 = 4
+    let total = IO.print(n + m + final) # 3 + 2 + 4 = 9
+    yield total
