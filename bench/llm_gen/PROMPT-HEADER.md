@@ -32,4 +32,19 @@ Rules:
 - Contracts (`requires`/`ensures`/`measure`) may not contain calls.
 - Every `ensures` must be provable by an SMT solver from the requires + body.
 
+Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
+algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):
+- Carry the LOOP INVARIANT as the recursive helper's `requires`; the `ensures`
+  then falls out at the base case.
+- Terminate with a `measure` that HALVES, not one that counts by ones — a
+  bisection with `measure hi - lo` is O(log) depth; a `measure` that drops by 1
+  per call is O(n).
+- Take a midpoint OVERFLOW-SAFELY as `lo + (hi - lo) div 2`, never `(lo + hi) div 2`.
+- To test a squared/product condition without the product overflowing at runtime,
+  divide instead: compare `mid <= n div mid` rather than `mid * mid <= n`
+  (Euclidean `div` makes them equivalent for `mid >= 1`).
+- Contracts are ERASED at runtime, so products in `requires`/`ensures`
+  (`lo*lo`, `(result+1)*(result+1)`) cost nothing and never overflow — only
+  expressions in the BODY execute.
+
 Output ONLY the `.lll` module, no commentary.

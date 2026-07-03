@@ -1330,6 +1330,25 @@ fn build_run(src: &str) -> String {
 }
 
 #[test]
+fn efficient_verified_isqrt_bisection_is_log_n() {
+    // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
+    // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`
+    // rides as a `requires`, `measure hi - lo` halves, the midpoint is overflow-safe
+    // (`lo + (hi-lo) div 2`), and the test divides (`mid <= n div mid`) so no product
+    // overflows. Runs instantly at 10^18 (the O(sqrt n) scan would take ~10^9 steps).
+    // Guards examples/isqrt_fast.lll and the primer pattern the bench models adopted.
+    let src = "module IsqrtFast:\n\n  part isqrt_bs(n: Int, lo: Int, hi: Int) -> Int:\n    requires lo >= 1, lo * lo <= n, n < hi * hi, lo < hi\n    ensures result * result <= n, n < (result + 1) * (result + 1)\n    measure hi - lo\n    match hi - lo <= 1:\n      v when v -> yield lo\n      _ when lo + (hi - lo) div 2 <= n div (lo + (hi - lo) div 2) -> yield isqrt_bs(n, lo + (hi - lo) div 2, hi)\n      _ -> yield isqrt_bs(n, lo, lo + (hi - lo) div 2)\n\n  part isqrt(n: Int) -> Int:\n    requires n >= 0\n    ensures result * result <= n, n < (result + 1) * (result + 1)\n    match n == 0:\n      v when v -> yield 0\n      _ -> yield isqrt_bs(n, 1, n + 1)\n\n  part main() -> Int via IO:\n    yield IO.print(isqrt(1000000000000000000))\n";
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "the efficient bisection isqrt must verify: {:?}",
+        failures(&report)
+    );
+    let out = build_run(src);
+    assert!(out.contains("1000000000"), "isqrt(10^18) must be 10^9, got: {out}");
+}
+
+#[test]
 fn self_hosting_constant_folder_verifies_and_preserves_semantics() {
     // REQ-LLL-019 (self-hosting step 2): a REAL compiler pass — constant folding
     // over the core's euclidean arithmetic AST modelled as an ADT — written in

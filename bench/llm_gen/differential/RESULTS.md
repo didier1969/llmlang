@@ -66,3 +66,28 @@ algorithm (isqrt O(√n) vs O(log n)). Token counts are comparable (Euclidean: l
 
 Reproduce: solutions are verbatim in `isqrt/` and `emod/`; re-judge with `lll check`
 on the `.lll` files and `rustc` + the batteries above on the `.rs` files.
+
+## Followup — the isqrt cost was GUIDANCE, not the language (measured impact)
+
+The isqrt finding ("proof obligations steer models to O(√n)") was tested at the
+root: can current llmlang even express an efficient PROVED isqrt? Yes — a bisection
+with the invariant `lo*lo <= n < hi*hi` as a `requires`, `measure hi - lo`, an
+overflow-safe midpoint `lo + (hi - lo) div 2`, and a division test `mid <= n div mid`
+(no product) **verifies in ~30 ms and runs O(log n)** (`examples/isqrt_fast.lll`:
+`isqrt(10^18)=10^9` instantly, correct to near `i64::MAX`). So the language was never
+the limit — the isolated models just didn't know the pattern.
+
+Closing the loop (the wave-3 "measure→product" method): that pattern was added to
+`PROMPT-HEADER.md` (general, NOT the isqrt solution), and the **same isolated models
+were re-run**:
+
+| model | before guidance | after guidance |
+|---|---|---|
+| haiku  | O(√n) linear scan (verified) | **O(log n) bisection, verified** (`isqrt/haiku_v2_augmented.lll`) |
+| sonnet | O(√n) linear scan (verified) | **O(log n) bisection, verified** (`isqrt/sonnet_v2_augmented.lll`) |
+
+Both flipped to a verified binary search (each a different midpoint variant). The
+lesson generalises: when the bench shows a model reaching for a weaker construct, the
+fix is usually a line in the authoring primer, re-measured — not a language change.
+(It also confirmed block-form match arms `_ ->` with a nested `let`+`match` parse and
+verify.)

@@ -1,0 +1,18 @@
+module Isqrt:
+
+  part isqrt_search(n: Int, lo: Int, hi: Int) -> Int:
+    requires n >= 0, lo >= 0, lo <= hi, lo * lo <= n, n < (hi + 1) * (hi + 1)
+    ensures result * result <= n and n < (result + 1) * (result + 1)
+    measure hi - lo
+    match hi - lo:
+      0 -> yield lo
+      _ ->
+        let mid = lo + (hi - lo + 1) div 2
+        match mid <= n div mid:
+          true -> yield isqrt_search(n, mid, hi)
+          false -> yield isqrt_search(n, lo, mid - 1)
+
+  part isqrt(n: Int) -> Int:
+    requires n >= 0
+    ensures result * result <= n and n < (result + 1) * (result + 1)
+    yield isqrt_search(n, 0, n)

@@ -1,0 +1,32 @@
+module IsqrtFast:
+
+  # The EFFICIENT verified pattern (REQ-LLL-016 followup). A proof obligation does
+  # NOT force a slow algorithm: this integer square root is O(log n) — a bisection —
+  # yet fully verified. The bench (bench/llm_gen/differential) found isolated models
+  # default to an O(sqrt n) linear scan for want of this pattern; it is now taught in
+  # bench/llm_gen/PROMPT-HEADER.md. Three moves make it verify AND stay overflow-safe:
+  #   1. the loop INVARIANT rides as the helper's `requires` (lo*lo <= n < hi*hi);
+  #   2. termination `measure hi - lo` HALVES → O(log n) depth (not O(sqrt n));
+  #   3. the midpoint is `lo + (hi - lo) div 2` (never overflows), and the test uses
+  #      `mid <= n div mid` instead of `mid*mid <= n` so no large product is formed.
+  # Contracts are erased at runtime, so lo*lo / hi*hi / (result+1)^2 cost nothing.
+  part isqrt_bs(n: Int, lo: Int, hi: Int) -> Int:
+    requires lo >= 1, lo * lo <= n, n < hi * hi, lo < hi
+    ensures result * result <= n, n < (result + 1) * (result + 1)
+    measure hi - lo
+    match hi - lo <= 1:
+      v when v -> yield lo
+      _ when lo + (hi - lo) div 2 <= n div (lo + (hi - lo) div 2) -> yield isqrt_bs(n, lo + (hi - lo) div 2, hi)
+      _ -> yield isqrt_bs(n, lo, lo + (hi - lo) div 2)
+
+  part isqrt(n: Int) -> Int:
+    requires n >= 0
+    ensures result * result <= n, n < (result + 1) * (result + 1)
+    match n == 0:
+      v when v -> yield 0
+      _ -> yield isqrt_bs(n, 1, n + 1)
+
+  part main() -> Int via IO:
+    let a = IO.print(isqrt(15))                    # 3
+    let b = IO.print(isqrt(1000000000000000000))   # 10^9, instant (O(log n))
+    yield IO.print(isqrt(9223372030926249001))     # 3037000499 (near i64::MAX)
