@@ -1330,6 +1330,38 @@ fn build_run(src: &str) -> String {
 }
 
 #[test]
+fn verified_array_length_get_verify_and_run() {
+    // REQ-LLL-037 / DEC-LLL-043: verified array (read-only slice) — `array(…)`
+    // literal, `length(a)`, `get(a, i)`. Contracts may use `length`/`get` as spec
+    // terms (DEC-LLL-017 amendment); the vc proves the index is in bounds via Z3 Seq.
+    let src = "module ArrTest:\n\n  part first(a: Array[Int]) -> Int:\n    requires length(a) >= 1\n    ensures result == get(a, 0)\n    yield get(a, 0)\n\n  part main() -> Int via IO:\n    let a = array(10, 20, 30)\n    let x = IO.print(length(a))\n    let y = IO.print(get(a, 1))\n    yield IO.print(first(a))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "verified array must check: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("3\n20\n10"), "expected length 3, get 20, first 10; got: {out}");
+}
+
+#[test]
+fn array_out_of_bounds_get_is_a_compile_error() {
+    // SOUNDNESS: `get(a, 5)` on an array only known to be non-empty leaves the bounds
+    // obligation `0 <= 5 < length(a)` undischarged → a compile error (DEC-LLL-015).
+    let src = "module ArrBad:\n\n  part oops(a: Array[Int]) -> Int:\n    requires length(a) >= 1\n    yield get(a, 5)\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "an unprovable array index must fail verification");
+}
+
+#[test]
+fn user_part_shadows_array_builtin_name() {
+    // REQ-LLL-037: `length`/`get` are not globally reserved — a user part of the same
+    // name (idiomatic for lists) shadows the array builtin in its module.
+    let src = "module Shadow:\n\n  part length(xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + length(t)\n\n  part main() -> Int via IO:\n    yield IO.print(length(1 :: 2 :: 3 :: []))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a user `length` part must verify (shadows the builtin): {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains('3'), "user length([1,2,3]) must be 3, got: {out}");
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`

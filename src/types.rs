@@ -280,10 +280,13 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // call-graph SCCs (wave 3): mutual recursion is allowed, measured
     let (scc_id, scc_multi) = compute_sccs(&module, &index);
 
+    // names a contract call could resolve to (used to keep array spec primitives
+    // exempt from the no-calls rule only when NOT shadowed by a user definition).
+    let callables: HashSet<String> = index.keys().chain(ctors.keys()).cloned().collect();
     let mut recursion = HashMap::new();
     for part in &module.parts {
         check_signature(part)?;
-        check_contracts(part)?;
+        check_contracts(part, &callables)?;
         // no local may shadow a part or constructor name, so a bare `Var` that
         // names a part is unambiguously a first-class function value (REQ-LLL-009)
         let mut locals: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
@@ -417,7 +420,7 @@ fn validate_extern_path(effect: &str, op: &str, path: &str) -> Result<(), String
 fn check_user_ty_declared(t: &Ty, types: &HashSet<String>) -> Result<(), String> {
     match t {
         Ty::User(n) if !types.contains(n) => Err(format!("unknown type `{n}`")),
-        Ty::List(e) => check_user_ty_declared(e, types),
+        Ty::List(e) | Ty::Array(e) => check_user_ty_declared(e, types),
         Ty::Fun(ps, r) => {
             for p in ps {
                 check_user_ty_declared(p, types)?;
@@ -442,14 +445,14 @@ fn tuple_has_fun_component(t: &Ty) -> bool {
     fn has_fun(t: &Ty) -> bool {
         match t {
             Ty::Fun(..) => true,
-            Ty::List(e) => has_fun(e),
+            Ty::List(e) | Ty::Array(e) => has_fun(e),
             Ty::Tuple(cs) => cs.iter().any(has_fun),
             _ => false,
         }
     }
     match t {
         Ty::Tuple(cs) => cs.iter().any(has_fun) || cs.iter().any(tuple_has_fun_component),
-        Ty::List(e) => tuple_has_fun_component(e),
+        Ty::List(e) | Ty::Array(e) => tuple_has_fun_component(e),
         Ty::Fun(ps, r) => ps.iter().any(tuple_has_fun_component) || tuple_has_fun_component(r),
         _ => false,
     }
@@ -928,12 +931,19 @@ fn check_signature(part: &Part) -> Result<(), String> {
     Ok(())
 }
 
-fn check_contracts(part: &Part) -> Result<(), String> {
+fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), String> {
     let params: HashMap<String, Ty> = part.params.iter().cloned().collect();
     let no_calls = |e: &Expr, clause: &str| -> Result<(), String> {
         let mut bad = None;
         e.walk(&mut |x| {
-            if matches!(x, Expr::Call(..) | Expr::EffCall(..)) && bad.is_none() {
+            // array spec primitives (length/get/array) are admitted terms, not calls
+            // — UNLESS the name is a user part/constructor (then it is a real call).
+            let is_disallowed_call = match x {
+                Expr::EffCall(..) => true,
+                Expr::Call(n, _) => !is_array_builtin(n) || callables.contains(n),
+                _ => false,
+            };
+            if is_disallowed_call && bad.is_none() {
                 bad = Some(());
             }
         });
@@ -1057,6 +1067,46 @@ fn type_of_pure(
             }
             Ty::list(th)
         }
+        // array spec primitives are admitted in contracts (DEC-LLL-017 amendment):
+        // they are TERM constructors backed by a Z3 theory operator, not user calls.
+        Expr::Call(name, args) if is_array_builtin(name) => match name.as_str() {
+            "length" => {
+                if args.len() != 1 {
+                    return Err("`length` takes 1 argument".into());
+                }
+                if !matches!(type_of_pure(&args[0], vars, result.clone())?, Ty::Array(_)) {
+                    return Err("`length` needs an Array".into());
+                }
+                Ty::Int
+            }
+            "get" => {
+                if args.len() != 2 {
+                    return Err("`get` takes 2 arguments (array, index)".into());
+                }
+                let elem = match type_of_pure(&args[0], vars, result.clone())? {
+                    Ty::Array(e) => *e,
+                    _ => return Err("`get` needs an Array".into()),
+                };
+                if type_of_pure(&args[1], vars, result)? != Ty::Int {
+                    return Err("`get` index must be Int".into());
+                }
+                elem
+            }
+            "array" => {
+                if let Some(first) = args.first() {
+                    let elem = type_of_pure(first, vars, result.clone())?;
+                    for a in &args[1..] {
+                        if type_of_pure(a, vars, result.clone())? != elem {
+                            return Err("array literal elements must share one type".into());
+                        }
+                    }
+                    Ty::array(elem)
+                } else {
+                    return Err("empty `array()` is not allowed in contracts (v1)".into());
+                }
+            }
+            _ => unreachable!(),
+        },
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
         Expr::Lambda(..) => return Err("lambdas are not allowed in contracts (v1)".into()),
     })
@@ -1118,6 +1168,7 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
             }
         },
         (Ty::List(pe), Ty::List(ae)) => unify_arg(pe, ae, subst),
+        (Ty::Array(pe), Ty::Array(ae)) => unify_arg(pe, ae, subst),
         (Ty::User(pn), Ty::User(an)) if pn == an => Ok(()),
         (Ty::Fun(pp, pr), Ty::Fun(ap, ar)) if pp.len() == ap.len() => {
             for (p, a) in pp.iter().zip(ap) {
@@ -1143,6 +1194,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
         Ty::User(n) => Ty::User(n.clone()),
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
+        Ty::Array(e) => Ty::array(subst_ty(e, subst)),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| subst_ty(p, subst)).collect(),
             Box::new(subst_ty(r, subst)),
@@ -1652,6 +1704,73 @@ fn check_expr(
                 }
             }
             ret
+        }
+        // array primitives, UNLESS the module shadows the name with a user
+        // part/constructor/local (then the user definition wins) — REQ-LLL-037.
+        Expr::Call(name, args)
+            if is_array_builtin(name)
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            // verified array primitives (REQ-LLL-037): `array(…)` literal,
+            // `length(a) -> Int`, `get(a, i) -> T` (bounds are a PROOF obligation
+            // emitted by the vc fork, not a type error).
+            match name.as_str() {
+                "array" => {
+                    if let Some(first) = args.first() {
+                        let elem = check_expr(ctx, first, None)?;
+                        for a in &args[1..] {
+                            let ta = check_expr(ctx, a, None)?;
+                            if ta != elem {
+                                return Err(format!(
+                                    "part `{}`: array literal elements must share one type, got {elem} and {ta}",
+                                    ctx.part.name
+                                ));
+                            }
+                        }
+                        Ty::array(elem)
+                    } else {
+                        // slice 1: array literals are non-empty (empty needs a sort the
+                        // vc/codegen can't infer without an expected type — deferred).
+                        return Err(format!(
+                            "part `{}`: empty `array()` is not supported yet (v1 slice 1) \
+                             — an array literal needs at least one element",
+                            ctx.part.name
+                        ));
+                    }
+                }
+                "length" => {
+                    if args.len() != 1 {
+                        return Err(format!("part `{}`: `length` takes 1 argument", ctx.part.name));
+                    }
+                    let ta = check_expr(ctx, &args[0], None)?;
+                    if !matches!(ta, Ty::Array(_)) {
+                        return Err(format!("part `{}`: `length` needs an Array, got {ta}", ctx.part.name));
+                    }
+                    Ty::Int
+                }
+                "get" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `get` takes 2 arguments (array, index)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = match check_expr(ctx, &args[0], None)? {
+                        Ty::Array(e) => *e,
+                        other => {
+                            return Err(format!("part `{}`: `get` needs an Array, got {other}", ctx.part.name))
+                        }
+                    };
+                    let ti = check_expr(ctx, &args[1], Some(&Ty::Int))?;
+                    if ti != Ty::Int {
+                        return Err(format!("part `{}`: `get` index must be Int, got {ti}", ctx.part.name));
+                    }
+                    elem
+                }
+                _ => unreachable!("is_array_builtin covers exactly array/length/get"),
+            }
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {
             // ADT constructor application `Ctor(f1, …)` (REQ-LLL-011)

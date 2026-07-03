@@ -195,6 +195,9 @@ fn rs_ty(t: &Ty) -> String {
         // each instantiation into static-dispatch code (DEC-LLL-018: C speed).
         Ty::Var(a) => tv_param(a),
         Ty::List(e) => format!("Lst<{}>", rs_ty(e)),
+        // a verified array is an Rc-shared Vec (REQ-LLL-037): O(1) index, and the
+        // borrow model passes it by reference like a list (is_heap).
+        Ty::Array(e) => format!("Arr<{}>", rs_ty(e)),
         // first-class function → Rust fn pointer (REQ-LLL-009); a non-capturing
         // lambda / mangled part name coerces to it.
         Ty::Fun(ps, r) => {
@@ -231,7 +234,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
                 acc.push(a.clone());
             }
         }
-        Ty::List(e) => collect_tvars(e, acc),
+        Ty::List(e) | Ty::Array(e) => collect_tvars(e, acc),
         Ty::Fun(ps, r) => {
             for p in ps {
                 collect_tvars(p, acc);
@@ -256,7 +259,7 @@ fn mangle(name: &str) -> String {
 /// traversal skip the per-node refcount inc/dec (DEC-LLL-031 voie B) — every other
 /// type (Int/Bool/Unit/Fun/Tuple/type-var) is Copy or moved, with no refcount.
 fn is_heap(t: &Ty) -> bool {
-    matches!(t, Ty::List(_) | Ty::User(_))
+    matches!(t, Ty::List(_) | Ty::User(_) | Ty::Array(_))
 }
 
 /// Collect the names of parts USED AS A FIRST-CLASS VALUE — a bare `Expr::Var`
@@ -1240,6 +1243,33 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 }
             }
         },
+        Expr::Call(name, args)
+            if is_array_builtin(name)
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            // verified array primitives (REQ-LLL-037): `Arr<T> = Rc<Vec<T>>`. Reads
+            // borrow the array (`&Rc<Vec>` → `**` reaches the `Vec`); the literal
+            // retains its elements (owned). Bounds proven → the index panic is dead
+            // in verified code (a fail-stop backstop under `--unchecked`/FFI).
+            match name.as_str() {
+                "array" => {
+                    let mut xs = Vec::with_capacity(args.len());
+                    for a in args {
+                        xs.push(expr(a, cx, res)?);
+                    }
+                    format!("Rc::new(vec![{}])", xs.join(", "))
+                }
+                "length" => format!("((**{}).len() as i64)", borrowed(&args[0], cx, res)?),
+                "get" => {
+                    let a = borrowed(&args[0], cx, res)?;
+                    let i = expr(&args[1], cx, res)?;
+                    format!("(**{a})[({i}) as usize].clone()")
+                }
+                _ => unreachable!("is_array_builtin covers exactly array/length/get"),
+            }
+        }
         Expr::Call(name, args) => {
             // heap arguments are BORROWED at the positions the callee borrows
             // (DEC-LLL-031); a constructor / fn-valued-param name has no mask, so
@@ -1335,6 +1365,10 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq)]
 pub enum LstI<T> { Nil, Cons(T, Lst<T>) }
 pub type Lst<T> = Rc<LstI<T>>;
+
+// Verified array (REQ-LLL-037): an Rc-shared Vec — O(1) indexing, structural
+// sharing on read; `set` (a later slice) uses Rc::make_mut for in-place-if-unique.
+pub type Arr<T> = Rc<Vec<T>>;
 
 // ---- effect runtime: normal / trace ($LLL_TRACE) / replay ($LLL_REPLAY) ----
 use std::cell::RefCell;

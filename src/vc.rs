@@ -245,6 +245,9 @@ fn smt_ty(t: &Ty) -> String {
         Ty::Bool => "Bool".to_string(),
         Ty::Var(a) => format!("Tv_{a}"),
         Ty::List(e) => format!("(Lst {})", smt_ty(e)),
+        // a verified array uses Z3's Seq theory: `seq.len` is the native length the
+        // bounds obligations need, `seq.nth` the indexed read (REQ-LLL-037, DEC-043).
+        Ty::Array(e) => format!("(Seq {})", smt_ty(e)),
         // functions are declared as uninterpreted functions (declare-fun), never
         // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
@@ -522,6 +525,44 @@ impl<'a> Emit<'a> {
                     self.fresh(&sort)
                 } else {
                     return Err(format!("vcgen: unknown effect `{name}`"));
+                }
+            }
+            Expr::Call(name, args)
+                if is_array_builtin(name)
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                // verified array primitives via Z3 Seq (REQ-LLL-037, DEC-LLL-043)
+                match name.as_str() {
+                    "array" => {
+                        let mut units = Vec::with_capacity(args.len());
+                        for a in args {
+                            units.push(format!("(seq.unit {})", self.tr(a, env)?));
+                        }
+                        match units.len() {
+                            0 => return Err("vcgen: empty array() has no element sort".into()),
+                            1 => units.into_iter().next().unwrap(),
+                            _ => format!("(seq.++ {})", units.join(" ")),
+                        }
+                    }
+                    "length" => {
+                        let a = self.tr(&args[0], env)?;
+                        format!("(seq.len {a})")
+                    }
+                    "get" => {
+                        let a = self.tr(&args[0], env)?;
+                        let i = self.tr(&args[1], env)?;
+                        // BOUNDS obligation: 0 <= i < length(a). Discharged here → the
+                        // panic branch of `a[i]` in codegen is provably dead in
+                        // verified code (mirrors the div-by-zero obligation).
+                        self.oblige(
+                            "array index in bounds".into(),
+                            format!("(and (<= 0 {i}) (< {i} (seq.len {a})))"),
+                        );
+                        format!("(seq.nth {a} {i})")
+                    }
+                    _ => unreachable!("is_array_builtin covers exactly array/length/get"),
                 }
             }
             Expr::Call(name, args) => {

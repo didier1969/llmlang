@@ -88,6 +88,10 @@ pub enum Ty {
     Bool,
     Var(String),
     List(Box<Ty>),
+    /// A verified array `Array[T]` (REQ-LLL-037, DEC-LLL-043): O(1) indexed access
+    /// with bounds proven by Z3 (theory Seq at proof, `Rc<Vec<T>>` at runtime).
+    /// Read-only in slice 1 — `array(…)` literal, `length(a)`, `get(a, i)`.
+    Array(Box<Ty>),
     /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
     /// v1: parameter and result types are concrete (monomorphic HOF).
     Fun(Vec<Ty>, Box<Ty>),
@@ -112,6 +116,10 @@ impl Ty {
     pub fn list(elem: Ty) -> Ty {
         Ty::List(Box::new(elem))
     }
+    /// `Array[elem]` (REQ-LLL-037).
+    pub fn array(elem: Ty) -> Ty {
+        Ty::Array(Box::new(elem))
+    }
     /// The concrete `List[Int]` — the v1 monomorphic list, now a special case.
     pub fn list_int() -> Ty {
         Ty::list(Ty::Int)
@@ -121,7 +129,7 @@ impl Ty {
         match self {
             Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => true,
             Ty::Var(_) => false,
-            Ty::List(e) => e.is_concrete(),
+            Ty::List(e) | Ty::Array(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
             Ty::Tuple(cs) => cs.iter().all(|c| c.is_concrete()),
         }
@@ -135,6 +143,7 @@ impl std::fmt::Display for Ty {
             Ty::Bool => write!(f, "Bool"),
             Ty::Var(a) => write!(f, "{a}"),
             Ty::List(e) => write!(f, "List[{e}]"),
+            Ty::Array(e) => write!(f, "Array[{e}]"),
             Ty::Fun(ps, r) => {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
                 write!(f, "({}) -> {r}", ps.join(", "))
@@ -223,6 +232,16 @@ pub enum BinOp {
     Ne,
     And,
     Or,
+}
+
+/// Reserved builtin names for the verified array (REQ-LLL-037, DEC-LLL-043).
+/// They surface as `Expr::Call` but are intercepted BY NAME in every fork
+/// (checker, vc, codegen, hash) rather than resolving to a user part — the single
+/// source of truth for "is this an array primitive". `length`/`get` are also
+/// admitted as spec terms in contracts (DEC-LLL-017 amendment); `array` is a
+/// value-literal constructor. A user part/constructor may not take these names.
+pub fn is_array_builtin(name: &str) -> bool {
+    matches!(name, "array" | "length" | "get")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

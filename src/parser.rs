@@ -548,6 +548,13 @@ impl Parser {
                 self.eat(Tok::RBracket)?;
                 Ok(Ty::list(elem))
             }
+            Tok::Ident(s) if s == "Array" => {
+                // verified array `Array[T]` (REQ-LLL-037) — same grammar as List
+                self.eat(Tok::LBracket)?;
+                let elem = self.ty()?;
+                self.eat(Tok::RBracket)?;
+                Ok(Ty::array(elem))
+            }
             // a lowercase-initial bareword is a parametric type variable
             // (REQ-LLL-007). Constructors (Int/Bool/List) are capitalized.
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {

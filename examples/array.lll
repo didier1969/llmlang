@@ -1,0 +1,23 @@
+module Array.Demo:
+
+  # Verified array (REQ-LLL-037, DEC-LLL-043), read-only slice: `array(…)` literal,
+  # `length(a)`, `get(a, i)`. Backed by Z3's Seq theory at proof time (`seq.len`/
+  # `seq.nth`) and `Rc<Vec<T>>` at runtime — O(1) indexed access. The index bound is
+  # PROVED: `get` emits `0 <= i < length(a)`, so the runtime panic branch is dead in
+  # verified code. Contracts may use `length`/`get` as spec terms (DEC-LLL-017 amend).
+  part first(a: Array[Int]) -> Int:
+    requires length(a) >= 1
+    ensures result == get(a, 0)
+    yield get(a, 0)
+
+  # a safe indexed read guarded by an explicit bound — the requires discharges get's
+  # obligation compositionally.
+  part at(a: Array[Int], i: Int) -> Int:
+    requires 0 <= i, i < length(a)
+    yield get(a, i)
+
+  part main() -> Int via IO:
+    let a = array(10, 20, 30, 40)
+    let n = IO.print(length(a))     # 4
+    let f = IO.print(first(a))      # 10
+    yield IO.print(at(a, 2))        # 30
