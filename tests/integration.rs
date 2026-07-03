@@ -1699,12 +1699,15 @@ fn rationale_add_show_round_trips() {
     let lll = dir.join("m.lll");
     std::fs::write(&lll, "module M:\n\n  part inc(n: Int) -> Int:\n    yield n + 1\n").unwrap();
     let bin = env!("CARGO_BIN_EXE_lll");
+    // run in the temp dir so the `.lll/rationale/` sidecar lands there, not in the repo
     let add = std::process::Command::new(bin)
+        .current_dir(&dir)
         .args(["rationale", "add", lll.to_str().unwrap(), "inc", "adds one to n"])
         .output()
         .unwrap();
     assert!(add.status.success(), "rationale add failed: {}", String::from_utf8_lossy(&add.stderr));
     let show = std::process::Command::new(bin)
+        .current_dir(&dir)
         .args(["rationale", "show", lll.to_str().unwrap(), "inc"])
         .output()
         .unwrap();

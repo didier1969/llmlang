@@ -10,7 +10,7 @@ DEC-LLL-001..027, session pointer `CPT-LLL-012`) — ne jamais dupliquer ici.
 | action | commande |
 |---|---|
 | build + tests | `cargo build && cargo test --test integration` |
-| vérifier un module | `./target/debug/lll check <f.lll>` (`--no-cache` pour forcer) |
+| vérifier un module | `./target/debug/lll check <f.lll>` (`--no-cache` forcer · `--format=json` diagnostics LLM structurés) |
 | compiler/exécuter | `lll build [--unchecked] <f>` · `lll run <f> [--trace t\|--replay t]` |
 | identité / refactor | `lll hash <f>` · `lll rename <f> <old> <new>` |
 | édition structurelle (par content-hash) | `lll dedup <f> [--merge]` · `lll move <f> <part> <dest>` |
