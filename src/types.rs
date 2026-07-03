@@ -271,6 +271,22 @@ fn collect_calls_expr(e: &Expr, f: &mut dyn FnMut(&str)) {
 }
 
 fn check_signature(part: &Part) -> Result<(), String> {
+    if matches!(part.ret, Ty::Fun(..)) {
+        return Err(format!(
+            "part `{}`: returning a function is not supported (v1)",
+            part.name
+        ));
+    }
+    for (_, t) in &part.params {
+        if let Ty::Fun(argtys, ret) = t {
+            if argtys.iter().any(|a| matches!(a, Ty::Fun(..))) || matches!(**ret, Ty::Fun(..)) {
+                return Err(format!(
+                    "part `{}`: higher-order function parameters (functions of functions) are not supported (v1)",
+                    part.name
+                ));
+            }
+        }
+    }
     let mut seen = HashSet::new();
     for (n, _) in &part.params {
         if !seen.insert(n) {
@@ -406,6 +422,7 @@ fn type_of_pure(
             Ty::list(th)
         }
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
+        Expr::Lambda(..) => return Err("lambdas are not allowed in contracts (v1)".into()),
     })
 }
 
@@ -465,6 +482,12 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
             }
         },
         (Ty::List(pe), Ty::List(ae)) => unify_arg(pe, ae, subst),
+        (Ty::Fun(pp, pr), Ty::Fun(ap, ar)) if pp.len() == ap.len() => {
+            for (p, a) in pp.iter().zip(ap) {
+                unify_arg(p, a, subst)?;
+            }
+            unify_arg(pr, ar, subst)
+        }
         _ => Err(format!("expected {pat}, got {arg}")),
     }
 }
@@ -476,6 +499,10 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Bool => Ty::Bool,
         Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
+        Ty::Fun(ps, r) => Ty::Fun(
+            ps.iter().map(|p| subst_ty(p, subst)).collect(),
+            Box::new(subst_ty(r, subst)),
+        ),
     }
 }
 
@@ -511,6 +538,13 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                     ));
                 }
                 let t = check_expr(ctx, e, effectful, None)?;
+                if matches!(t, Ty::Fun(..)) {
+                    return Err(format!(
+                        "part `{}`: binding a function value with `let` is not supported (v1) — \
+                         apply it inline or pass a lambda directly",
+                        ctx.part.name
+                    ));
+                }
                 if name != "_" {
                     ctx.vars.last_mut().unwrap().insert(name.clone(), t);
                 }
@@ -642,9 +676,20 @@ fn check_expr(
                 }
             }
         }
-        Expr::Var(n) => ctx
-            .lookup(n)
-            .ok_or_else(|| unknown_var_msg(&ctx.part.name, n, &ctx.all_binders))?,
+        Expr::Var(n) => match ctx.lookup(n) {
+            Some(t) => t,
+            None => {
+                if ctx.index.contains_key(n) {
+                    // functions become first-class through lambdas in v1
+                    return Err(format!(
+                        "part `{}`: `{n}` is a part — to pass it as a value, wrap it in a lambda \
+                         `\\(x: T) -> {n}(x)` (REQ-LLL-009)",
+                        ctx.part.name
+                    ));
+                }
+                return Err(unknown_var_msg(&ctx.part.name, n, &ctx.all_binders));
+            }
+        },
         Expr::Neg(a) => {
             if check_expr(ctx, a, effectful, None)? != Ty::Int {
                 return Err(format!("part `{}`: negation needs Int", ctx.part.name));
@@ -709,6 +754,36 @@ fn check_expr(
                 }
             }
         }
+        Expr::Call(name, args) if ctx.lookup(name).is_some() => {
+            // application of a function-valued local variable (REQ-LLL-009)
+            let (ptys, ret) = match ctx.lookup(name).unwrap() {
+                Ty::Fun(ps, r) => (ps, r),
+                other => {
+                    return Err(format!(
+                        "part `{}`: `{name}` is a {other}, not a function — cannot call it",
+                        ctx.part.name
+                    ))
+                }
+            };
+            if args.len() != ptys.len() {
+                return Err(format!(
+                    "part `{}`: `{name}` is a function of {} argument(s), got {}",
+                    ctx.part.name,
+                    ptys.len(),
+                    args.len()
+                ));
+            }
+            for (a, pt) in args.iter().zip(&ptys) {
+                let ta = check_expr(ctx, a, effectful, Some(pt))?;
+                if ta != *pt {
+                    return Err(format!(
+                        "part `{}`: applying `{name}` — argument expects {pt}, got {ta}",
+                        ctx.part.name
+                    ));
+                }
+            }
+            *ret
+        }
         Expr::Call(name, args) => {
             let idx = *ctx.index.get(name).ok_or_else(|| {
                 format!("part `{}`: call to unknown part `{name}`", ctx.part.name)
@@ -761,6 +836,18 @@ fn check_expr(
                 ctx.rec_calls.push(structural);
             }
             subst_ty(&callee_ret, &subst)
+        }
+        Expr::Lambda(params, body) => {
+            // lambdas are pure (v1); check the body in a fresh scope holding the
+            // lambda parameters (it may still read enclosing locals — codegen
+            // emits a capturing closure).
+            ctx.vars.push(params.iter().cloned().collect());
+            ctx.smaller.push(HashMap::new());
+            let bt = check_expr(ctx, body, false, None)?;
+            ctx.smaller.pop();
+            ctx.vars.pop();
+            let ptys = params.iter().map(|(_, t)| t.clone()).collect();
+            Ty::Fun(ptys, Box::new(bt))
         }
     })
 }

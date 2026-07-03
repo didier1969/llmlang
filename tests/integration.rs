@@ -332,6 +332,43 @@ fn ackermann_terminates_by_lexicographic_measure() {
 }
 
 #[test]
+fn higher_order_functions_verify_and_run_with_lambdas() {
+    // REQ-LLL-009 / DEC-LLL-029: function-valued parameters are opaque uninterpreted
+    // functions in the proof; the HOF is proved once, generic in `f`. Lambdas are
+    // first-class values, monomorphized to Rust closures.
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    ensures result == result\n    yield f(x)\n\n  part map(f: (Int) -> Int, xs: List[Int]) -> List[Int]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield f(h) :: map(f, t)\n\n  part fold(f: (Int, Int) -> Int, acc: Int, xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield acc\n      h :: t -> yield fold(f, f(acc, h), t)\n\n  part main() -> Int via IO:\n    let base = apply(\\(x: Int) -> x + 10, 0)\n    let doubled = map(\\(x: Int) -> x * 2, [1, 2, 3])\n    let total = fold(\\(a: Int, b: Int) -> a + b, base, doubled)\n    let r = IO.print(total)\n    yield r\n";
+    // proof: `apply` discharges with `f` as an opaque UF; map/fold terminate
+    // structurally, all generic in their function parameter.
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "higher-order definitions must verify: {:?}",
+        failures(&report)
+    );
+    // run: apply(+10)(0)=10; map(*2)[1,2,3]=[2,4,6]; fold(+)10[2,4,6]=22
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("hof.rs");
+    let bin = dir.join("hof_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "HOF Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("22"), "expected 22, got: {stdout}");
+}
+
+#[test]
 fn euclidean_semantics_match_between_smt_and_rust() {
     // (-7) mod 3 = 2 in both SMT-LIB and i64::rem_euclid — the verified model
     // and the runtime must agree on negative operands.

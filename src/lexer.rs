@@ -53,6 +53,7 @@ pub enum Tok {
     Minus,
     Star,
     Underscore,
+    Backslash, // lambda: \(x: T) -> expr
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +139,10 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
             }
             '*' => {
                 push(out, Tok::Star);
+                i += 1;
+            }
+            '\\' => {
+                push(out, Tok::Backslash);
                 i += 1;
             }
             '-' => {

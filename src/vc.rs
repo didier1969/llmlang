@@ -198,8 +198,19 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
     let mut env: HashMap<String, String> = HashMap::new();
     for (n, t) in &part.params {
         let c = format!("p_{n}");
-        em.decls
-            .push(format!("(declare-const {c} {})", smt_ty(t)));
+        match t {
+            // a function-valued parameter is an uninterpreted function; the body
+            // reasons about it opaquely (contract-firewall, DEC-LLL-029)
+            Ty::Fun(argtys, ret) => {
+                let sorts: Vec<String> = argtys.iter().map(smt_ty).collect();
+                em.decls.push(format!(
+                    "(declare-fun {c} ({}) {})",
+                    sorts.join(" "),
+                    smt_ty(ret)
+                ));
+            }
+            _ => em.decls.push(format!("(declare-const {c} {})", smt_ty(t))),
+        }
         env.insert(n.clone(), c);
     }
     // requires as hypotheses
@@ -222,6 +233,9 @@ fn smt_ty(t: &Ty) -> String {
         Ty::Bool => "Bool".to_string(),
         Ty::Var(a) => format!("Tv_{a}"),
         Ty::List(e) => format!("(Lst {})", smt_ty(e)),
+        // functions are declared as uninterpreted functions (declare-fun), never
+        // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
+        Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
     }
 }
 
@@ -230,6 +244,15 @@ impl<'a> Emit<'a> {
         self.fresh += 1;
         let n = format!("v{}", self.fresh);
         self.decls.push(format!("(declare-const {n} {ty})"));
+        n
+    }
+    /// A fresh uninterpreted function symbol — an opaque stand-in for a function
+    /// value passed as an argument (REQ-LLL-009, DEC-LLL-029).
+    fn fresh_fun(&mut self, argsorts: &[String], retsort: &str) -> String {
+        self.fresh += 1;
+        let n = format!("g{}", self.fresh);
+        self.decls
+            .push(format!("(declare-fun {n} ({}) {retsort})", argsorts.join(" ")));
         n
     }
     fn oblige(&mut self, descr: String, goal: String) {
@@ -357,14 +380,33 @@ impl<'a> Emit<'a> {
                 other => return Err(format!("vcgen: unknown effect `{other}`")),
             },
             Expr::Call(name, args) => {
-                let callee = &self.cm.module.parts[self.cm.index[name]];
-                let mut argts = Vec::new();
-                for a in args {
-                    argts.push(self.tr(a, env)?);
+                // application of a function-valued parameter: `(f_uf arg …)`
+                // (REQ-LLL-009). `f` was declared as an uninterpreted function.
+                if let Some(fsym) = env.get(name).cloned() {
+                    let mut ts = Vec::new();
+                    for a in args {
+                        ts.push(self.tr(a, env)?);
+                    }
+                    return Ok(format!("({fsym} {})", ts.join(" ")));
                 }
+                let callee = &self.cm.module.parts[self.cm.index[name]];
+                let callee_params = callee.params.clone();
                 let mut cenv: HashMap<String, String> = HashMap::new();
-                for ((pn, _), at) in callee.params.iter().zip(&argts) {
-                    cenv.insert(pn.clone(), at.clone());
+                for (a, (pn, pt)) in args.iter().zip(&callee_params) {
+                    match pt {
+                        // function argument → opaque UF: the callee is proved
+                        // generic in it, so the concrete lambda/function passed
+                        // here is NOT translated into SMT (DEC-LLL-029).
+                        Ty::Fun(argtys, ret) => {
+                            let sorts: Vec<String> = argtys.iter().map(smt_ty).collect();
+                            let f = self.fresh_fun(&sorts, &smt_ty(ret));
+                            cenv.insert(pn.clone(), f);
+                        }
+                        _ => {
+                            let at = self.tr(a, env)?;
+                            cenv.insert(pn.clone(), at);
+                        }
+                    }
                 }
                 // prove callee requires at this call site
                 for (i, req) in callee.requires.clone().iter().enumerate() {
@@ -441,6 +483,9 @@ impl<'a> Emit<'a> {
                     self.hyps.push(a);
                 }
                 r
+            }
+            Expr::Lambda(..) => {
+                return Err("vcgen: a lambda may only appear as a function argument (v1)".into())
             }
         })
     }

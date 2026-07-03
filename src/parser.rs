@@ -341,6 +341,21 @@ impl Parser {
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {
                 Ok(Ty::Var(s))
             }
+            // function type `(T1, T2, ...) -> R` (REQ-LLL-009)
+            Tok::LParen => {
+                let mut params = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    params.push(self.ty()?);
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        params.push(self.ty()?);
+                    }
+                }
+                self.eat(Tok::RParen)?;
+                self.eat(Tok::Arrow)?;
+                let ret = self.ty()?;
+                Ok(Ty::Fun(params, Box::new(ret)))
+            }
             other => Err(self.err(&format!("expected type, found {other:?}"))),
         }
     }
@@ -481,6 +496,28 @@ impl Parser {
             Tok::Str(s) => {
                 let items = s.chars().map(|c| Expr::IntLit(c as i64)).collect();
                 Ok(Expr::ListLit(items))
+            }
+            // lambda `\(x: T, y: U) -> expr` (REQ-LLL-009)
+            Tok::Backslash => {
+                self.eat(Tok::LParen)?;
+                let mut params = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    loop {
+                        let name = self.ident()?;
+                        self.eat(Tok::Colon)?;
+                        let t = self.ty()?;
+                        params.push((name, t));
+                        if self.peek() == &Tok::Comma {
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.eat(Tok::RParen)?;
+                self.eat(Tok::Arrow)?;
+                let body = self.expr()?;
+                Ok(Expr::Lambda(params, Box::new(body)))
             }
             Tok::LParen => {
                 let e = self.expr()?;

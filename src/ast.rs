@@ -46,6 +46,9 @@ pub enum Ty {
     Bool,
     Var(String),
     List(Box<Ty>),
+    /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
+    /// v1: parameter and result types are concrete (monomorphic HOF).
+    Fun(Vec<Ty>, Box<Ty>),
 }
 
 impl Ty {
@@ -63,6 +66,7 @@ impl Ty {
             Ty::Int | Ty::Bool => true,
             Ty::Var(_) => false,
             Ty::List(e) => e.is_concrete(),
+            Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
         }
     }
 }
@@ -74,6 +78,10 @@ impl std::fmt::Display for Ty {
             Ty::Bool => write!(f, "Bool"),
             Ty::Var(a) => write!(f, "{a}"),
             Ty::List(e) => write!(f, "List[{e}]"),
+            Ty::Fun(ps, r) => {
+                let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
+                write!(f, "({}) -> {r}", ps.join(", "))
+            }
         }
     }
 }
@@ -133,10 +141,14 @@ pub enum Expr {
     Neg(Box<Expr>),
     /// List construction `h :: t` (mirror of the Cons pattern, DEC-LLL-027).
     Cons(Box<Expr>, Box<Expr>),
-    /// Call to another part in the module.
+    /// Call to another part in the module, OR application of a function-valued
+    /// variable `f(args)` — the checker disambiguates (REQ-LLL-009).
     Call(String, Vec<Expr>),
     /// Effect call, e.g. `IO.print(x)`, `IO.read()`.
     EffCall(String, Vec<Expr>),
+    /// Anonymous function `\(x: T) -> expr` (REQ-LLL-009). v1: typed params,
+    /// single-expression body, no captures of enclosing locals.
+    Lambda(Vec<(String, Ty)>, Box<Expr>),
 }
 
 impl Expr {
@@ -154,6 +166,7 @@ impl Expr {
                     a.walk(f);
                 }
             }
+            Expr::Lambda(_, body) => body.walk(f),
             _ => {}
         }
     }

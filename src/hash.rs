@@ -363,6 +363,19 @@ impl<'a> Norm<'a> {
                 };
                 format!("(call {target} {})", xs.join(" "))
             }
+            Expr::Lambda(params, body) => {
+                // lambda params are binders → de Bruijn; param types are part of
+                // the definition's identity (REQ-LLL-009)
+                let tys: Vec<String> = params.iter().map(|(_, t)| t.to_string()).collect();
+                for (n, _) in params {
+                    self.env.push(n.clone());
+                }
+                let b = self.expr(body);
+                for _ in params {
+                    self.env.pop();
+                }
+                format!("(lambda ({}) {b})", tys.join(" "))
+            }
         }
     }
 }

@@ -45,6 +45,12 @@ fn rs_ty(t: &Ty) -> String {
         // each instantiation into static-dispatch code (DEC-LLL-018: C speed).
         Ty::Var(a) => tv_param(a),
         Ty::List(e) => format!("Lst<{}>", rs_ty(e)),
+        // first-class function → Rust fn pointer (REQ-LLL-009); a non-capturing
+        // lambda / mangled part name coerces to it.
+        Ty::Fun(ps, r) => {
+            let a: Vec<String> = ps.iter().map(rs_ty).collect();
+            format!("fn({}) -> {}", a.join(", "), rs_ty(r))
+        }
     }
 }
 
@@ -62,6 +68,12 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             }
         }
         Ty::List(e) => collect_tvars(e, acc),
+        Ty::Fun(ps, r) => {
+            for p in ps {
+                collect_tvars(p, acc);
+            }
+            collect_tvars(r, acc);
+        }
         Ty::Int | Ty::Bool => {}
     }
 }
@@ -100,7 +112,14 @@ fn emit_part(out: &mut String, part: &Part) -> Result<(), String> {
         params.join(", "),
         rs_ty(&part.ret)
     ));
-    emit_body(out, &part.body, 1)?;
+    // names of function-valued parameters — applied as `f(args)`, not `lll_f(args)`
+    let fns: std::collections::HashSet<String> = part
+        .params
+        .iter()
+        .filter(|(_, t)| matches!(t, Ty::Fun(..)))
+        .map(|(n, _)| n.clone())
+        .collect();
+    emit_body(out, &part.body, 1, &fns)?;
     out.push_str("}\n");
     Ok(())
 }
@@ -109,28 +128,39 @@ fn indent(n: usize) -> String {
     "    ".repeat(n)
 }
 
-fn emit_body(out: &mut String, body: &[Stmt], depth: usize) -> Result<(), String> {
+fn emit_body(
+    out: &mut String,
+    body: &[Stmt],
+    depth: usize,
+    fns: &std::collections::HashSet<String>,
+) -> Result<(), String> {
     for s in body {
         match s {
             Stmt::Let(name, e) => {
-                out.push_str(&format!("{}let {name} = {};\n", indent(depth), expr(e)?));
+                out.push_str(&format!("{}let {name} = {};\n", indent(depth), expr(e, fns)?));
             }
             Stmt::Yield(e) => {
-                out.push_str(&format!("{}return {};\n", indent(depth), expr(e)?));
+                out.push_str(&format!("{}return {};\n", indent(depth), expr(e, fns)?));
             }
             Stmt::Match(scrut, arms) => {
-                emit_match(out, scrut, arms, depth)?;
+                emit_match(out, scrut, arms, depth, fns)?;
             }
         }
     }
     Ok(())
 }
 
-fn emit_match(out: &mut String, scrut: &Expr, arms: &[Arm], depth: usize) -> Result<(), String> {
+fn emit_match(
+    out: &mut String,
+    scrut: &Expr,
+    arms: &[Arm],
+    depth: usize,
+    fns: &std::collections::HashSet<String>,
+) -> Result<(), String> {
     let is_list = arms
         .iter()
         .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..)));
-    let s = expr(scrut)?;
+    let s = expr(scrut, fns)?;
     if is_list {
         out.push_str(&format!(
             "{}let __s = {s};\n{}match &*__s {{\n",
@@ -151,7 +181,7 @@ fn emit_match(out: &mut String, scrut: &Expr, arms: &[Arm], depth: usize) -> Res
             Pattern::Cons(h, t) => format!("LstI::Cons({h}, {t})"),
         };
         let guard = match &arm.guard {
-            Some(g) => format!(" if {}", expr(g)?),
+            Some(g) => format!(" if {}", expr(g, fns)?),
             None => String::new(),
         };
         out.push_str(&format!("{}{pat}{guard} => {{\n", indent(d)));
@@ -161,7 +191,7 @@ fn emit_match(out: &mut String, scrut: &Expr, arms: &[Arm], depth: usize) -> Res
             out.push_str(&format!("{}let {h} = {h}.clone();\n", indent(d + 1)));
             out.push_str(&format!("{}let {t} = {t}.clone();\n", indent(d + 1)));
         }
-        emit_body(out, &arm.body, d + 1)?;
+        emit_body(out, &arm.body, d + 1, fns)?;
         out.push_str(&format!("{}}}\n", indent(d)));
     }
     // exhaustiveness was PROVED by the vc fork; rustc can't see that proof,
@@ -183,45 +213,52 @@ fn emit_match(out: &mut String, scrut: &Expr, arms: &[Arm], depth: usize) -> Res
     Ok(())
 }
 
-fn expr(e: &Expr) -> Result<String, String> {
+fn expr(e: &Expr, fns: &std::collections::HashSet<String>) -> Result<String, String> {
     Ok(match e {
         Expr::IntLit(v) => format!("{v}i64"),
         Expr::BoolLit(v) => format!("{v}"),
-        Expr::Var(n) => {
-            // list vars are Rc — clone on use (RC semantics, cheap)
-            // We can't know the type here without an env; clone() on i64/bool is
-            // identity-free only for Rc... so we thread `.clone()` only via Lst-typed
-            // contexts. Simplification: emit `Clone::clone(&x)` universally is noisy;
-            // instead rely on i64/bool being Copy and Lst needing clone at call sites.
-            // Rust accepts `x.clone()` for Copy types too — emit it uniformly.
-            format!("{n}.clone()")
-        }
+        // `.clone()` is uniform: no-op-cheap for Copy (i64/bool), needed for Rc lists.
+        Expr::Var(n) => format!("{n}.clone()"),
         Expr::ListLit(items) => {
             let mut t = "Rc::new(LstI::Nil)".to_string();
             for i in items.iter().rev() {
-                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i)?);
+                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, fns)?);
             }
             t
         }
-        Expr::Cons(h, t) => format!("Rc::new(LstI::Cons({}, {}))", expr(h)?, expr(t)?),
-        Expr::Neg(a) => format!("(-{})", expr(a)?),
-        Expr::Not(a) => format!("(!{})", expr(a)?),
+        Expr::Cons(h, t) => format!("Rc::new(LstI::Cons({}, {}))", expr(h, fns)?, expr(t, fns)?),
+        Expr::Neg(a) => format!("(-{})", expr(a, fns)?),
+        Expr::Not(a) => format!("(!{})", expr(a, fns)?),
         Expr::Bin(op, a, b) => {
             // Rust rendering comes from the single operator-semantics source
             // (opsem.rs) — same place the vc fork reads its SMT form, so the
             // euclidean div/mod pairing can never silently drift (DEC-LLL-026).
-            let ta = expr(a)?;
-            let tb = expr(b)?;
+            let ta = expr(a, fns)?;
+            let tb = expr(b, fns)?;
             crate::opsem::form(*op).rust(&ta, &tb)
         }
         Expr::EffCall(name, args) => match name.as_str() {
-            "IO.print" => format!("__lll_io_print({})", expr(&args[0])?),
+            "IO.print" => format!("__lll_io_print({})", expr(&args[0], fns)?),
             "IO.read" => "__lll_io_read()".to_string(),
             other => return Err(format!("codegen: unknown effect `{other}`")),
         },
         Expr::Call(name, args) => {
-            let xs: Result<Vec<String>, String> = args.iter().map(expr).collect();
-            format!("{}({})", mangle(name), xs?.join(", "))
+            let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, fns)).collect();
+            let xs = xs?.join(", ");
+            if fns.contains(name) {
+                // applying a function-valued parameter (REQ-LLL-009)
+                format!("{name}({xs})")
+            } else {
+                format!("{}({xs})", mangle(name))
+            }
+        }
+        Expr::Lambda(params, body) => {
+            // non-capturing closure — coerces to the fn-pointer parameter type
+            let ps: Vec<String> = params
+                .iter()
+                .map(|(n, t)| format!("{n}: {}", rs_ty(t)))
+                .collect();
+            format!("(|{}| {})", ps.join(", "), expr(body, fns)?)
         }
     })
 }
