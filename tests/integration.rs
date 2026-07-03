@@ -1508,3 +1508,67 @@ fn effect_generic_needs_one_function_param() {
     let err = types::check_module(m).expect_err("must reject row var without fn param");
     assert!(err.contains("function-typed parameter"), "unexpected error: {err}");
 }
+
+#[test]
+fn effect_generic_nonterminating_recursion_is_rejected() {
+    // TERMINATION (DEC-LLL-016): a recursive effect-generic part is classified like
+    // any other — a non-structural self-recursion with no `measure` MUST be rejected.
+    // (Z3 cannot catch this; it is a checker-side classification.)
+    let src = "module T:\n\n  part loopy(f: (Int) -> Int, x: Int) -> Int via e:\n    yield loopy(f, x + 1)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject non-terminating generic recursion");
+    assert!(err.contains("structurally decreasing"), "unexpected error: {err}");
+}
+
+#[test]
+fn effect_generic_reader_instantiation() {
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part addenv(n: Int) -> Int via Reader:\n    let v = Reader.ask()\n    yield n + v\n\n  part run() -> Int via Reader:\n    yield apply(addenv, 5)\n\n  part main() -> Int:\n    handle run() with Reader from 100:\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "Reader-instantiated HOF must verify");
+    assert!(build_run(src).contains("=> 105"), "Reader instantiation wrong");
+}
+
+#[test]
+fn effect_generic_user_tail_instantiation() {
+    // a HOF instantiated at a user tail-resumptive (capability) effect: the row's
+    // capability is threaded into the specialization.
+    let src = "module T:\n\n  effect Oracle:\n    ask(Int) -> Int\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part useit(n: Int) -> Int via Oracle:\n    yield Oracle.ask(n)\n\n  part run() -> Int via Oracle:\n    yield apply(useit, 7)\n\n  part main() -> Int:\n    handle run() with Oracle:\n      ask(m) -> yield m * 10\n      return r -> yield r\n";
+    assert!(build_run(src).contains("=> 70"), "user-tail instantiation wrong");
+}
+
+#[test]
+fn effect_generic_cross_generic_transitive_fixpoint() {
+    // one generic HOF calls ANOTHER passing its own row parameter → the second
+    // must be specialized at the same row (the instantiation fixpoint, DEC-038).
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part twice(g: (Int) -> Int, x: Int) -> Int via e:\n    let a = apply(g, x)\n    yield apply(g, a)\n\n  part bump(n: Int) -> Int via State:\n    let o = State.get()\n    let _ = State.put(o + 1)\n    yield n + o\n\n  part run() -> Int via State:\n    yield twice(bump, 0)\n\n  part main() -> Int:\n    handle run() with State from 10:\n      return r -> yield r\n";
+    assert!(build_run(src).contains("=> 21"), "cross-generic transitive fixpoint wrong");
+}
+
+#[test]
+fn effect_generic_polymorphic_type_changing_map() {
+    // effect-generic AND type-var-generic at once: `map(f: (a) -> b, …)` changes
+    // element type (Int → Bool) while staying row-polymorphic.
+    let src = "module T:\n\n  part map(f: (a) -> b, xs: List[a]) -> List[b] via e:\n    match xs:\n      [] -> yield []\n      h :: t -> yield f(h) :: map(f, t)\n\n  part isbig(n: Int) -> Bool:\n    yield n > 2\n\n  part firstbool(bs: List[Bool]) -> Int:\n    match bs:\n      [] -> yield -1\n      a :: rest ->\n        match a:\n          true -> yield 1\n          false -> yield 0\n\n  part main() -> Int:\n    yield firstbool(map(isbig, 1 :: 5 :: 3 :: []))\n";
+    assert!(verify_src(src).ok(), "polymorphic generic map must verify");
+    assert!(build_run(src).contains("=> 0"), "polymorphic type-changing map wrong");
+}
+
+#[test]
+fn effect_generic_abort_in_recursive_map() {
+    // abort effect inside a RECURSIVE generic map: every element application
+    // `?`-propagates; a bail short-circuits the whole specialization.
+    let ok = "module T:\n\n  effect Fail:\n    bail() -> Never\n\n  part map(f: (Int) -> Int, xs: List[Int]) -> List[Int] via e:\n    match xs:\n      [] -> yield []\n      h :: t -> yield f(h) :: map(f, t)\n\n  part nonzero(n: Int) -> Int via Fail:\n    match n:\n      0 -> yield Fail.bail()\n      _ -> yield n * 2\n\n  part sumlist(xs: List[Int]) -> Int:\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + sumlist(t)\n\n  part run() -> Int via Fail:\n    let ys = map(nonzero, 1 :: 2 :: 3 :: [])\n    yield sumlist(ys)\n\n  part main() -> Int:\n    handle run() with Fail:\n      return r -> yield r\n      bail() -> yield -99\n";
+    assert!(build_run(ok).contains("=> 12"), "abort-in-map ok-path wrong");
+    let bail = ok.replace("1 :: 2 :: 3", "0 :: 2 :: 3");
+    assert!(build_run(&bail).contains("=> -99"), "abort-in-map bail-path wrong");
+}
+
+#[test]
+fn effect_generic_part_has_stable_rename_identity() {
+    // content-identity (DEC-LLL-019/020) holds for an effect-generic part: a
+    // structural rename preserves its hash (the row variable is part of the form).
+    let base = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n";
+    let renamed = hash::rename_part_in_source(base, "apply", "run").unwrap();
+    let (_, h1) = full(base);
+    let (_, h2) = full(&renamed);
+    assert_eq!(h1.def_hash["apply"], h2.def_hash["run"], "effect-generic rename changed identity");
+}

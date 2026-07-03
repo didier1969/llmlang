@@ -1731,6 +1731,17 @@ fn check_expr(
                     format!("part `{}`: argument `{pn}` of `{name}`: {e}", ctx.part.name)
                 })?;
             }
+            // termination classification of a self-recursive effect-generic call
+            // (DEC-LLL-016): identical to the ordinary call path — a recursive HOF
+            // must descend structurally (e.g. `map` on the list tail) or carry a
+            // `measure`, else it is rejected as possibly non-terminating.
+            if name == &ctx.part.name {
+                let structural = ctx.part.params.iter().enumerate().any(|(i, (pname, pty))| {
+                    matches!(pty, Ty::List(_) | Ty::User(_))
+                        && matches!(&args[i], Expr::Var(v) if ctx.smaller_root(v) == Some(pname.as_str()))
+                });
+                ctx.rec_calls.push(structural);
+            }
             subst_ty(&callee_ret, &subst)
         }
         Expr::Call(name, args) => {
