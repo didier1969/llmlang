@@ -562,7 +562,23 @@ impl<'a> Emit<'a> {
                         );
                         format!("(seq.nth {a} {i})")
                     }
-                    _ => unreachable!("is_array_builtin covers exactly array/length/get"),
+                    "set" => {
+                        let a = self.tr(&args[0], env)?;
+                        let i = self.tr(&args[1], env)?;
+                        let v = self.tr(&args[2], env)?;
+                        self.oblige(
+                            "array index in bounds".into(),
+                            format!("(and (<= 0 {i}) (< {i} (seq.len {a})))"),
+                        );
+                        // replace element i: prefix ++ [v] ++ suffix. This Z3 lacks
+                        // `seq.update`, so we splice via extract/concat; it proves
+                        // length-preservation and `get(set,i)=v` (checked de-risk).
+                        format!(
+                            "(seq.++ (seq.extract {a} 0 {i}) (seq.++ (seq.unit {v}) \
+                             (seq.extract {a} (+ {i} 1) (- (seq.len {a}) (+ {i} 1)))))"
+                        )
+                    }
+                    _ => unreachable!("is_array_builtin covers exactly array/length/get/set"),
                 }
             }
             Expr::Call(name, args) => {

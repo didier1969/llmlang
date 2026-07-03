@@ -940,7 +940,7 @@ fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), Strin
             // — UNLESS the name is a user part/constructor (then it is a real call).
             let is_disallowed_call = match x {
                 Expr::EffCall(..) => true,
-                Expr::Call(n, _) => !is_array_builtin(n) || callables.contains(n),
+                Expr::Call(n, _) => !is_array_spec_term(n) || callables.contains(n),
                 _ => false,
             };
             if is_disallowed_call && bad.is_none() {
@@ -1069,7 +1069,7 @@ fn type_of_pure(
         }
         // array spec primitives are admitted in contracts (DEC-LLL-017 amendment):
         // they are TERM constructors backed by a Z3 theory operator, not user calls.
-        Expr::Call(name, args) if is_array_builtin(name) => match name.as_str() {
+        Expr::Call(name, args) if is_array_spec_term(name) => match name.as_str() {
             "length" => {
                 if args.len() != 1 {
                     return Err("`length` takes 1 argument".into());
@@ -1769,7 +1769,33 @@ fn check_expr(
                     }
                     elem
                 }
-                _ => unreachable!("is_array_builtin covers exactly array/length/get"),
+                "set" => {
+                    if args.len() != 3 {
+                        return Err(format!(
+                            "part `{}`: `set` takes 3 arguments (array, index, value)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = match check_expr(ctx, &args[0], None)? {
+                        Ty::Array(e) => *e,
+                        other => {
+                            return Err(format!("part `{}`: `set` needs an Array, got {other}", ctx.part.name))
+                        }
+                    };
+                    let ti = check_expr(ctx, &args[1], Some(&Ty::Int))?;
+                    if ti != Ty::Int {
+                        return Err(format!("part `{}`: `set` index must be Int, got {ti}", ctx.part.name));
+                    }
+                    let tv = check_expr(ctx, &args[2], Some(&elem))?;
+                    if tv != elem {
+                        return Err(format!(
+                            "part `{}`: `set` value must be {elem}, got {tv}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::array(elem)
+                }
+                _ => unreachable!("is_array_builtin covers exactly array/length/get/set"),
             }
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {

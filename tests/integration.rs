@@ -1362,6 +1362,18 @@ fn user_part_shadows_array_builtin_name() {
 }
 
 #[test]
+fn verified_array_set_is_a_functional_update() {
+    // REQ-LLL-037 slice 2: `set(a, i, v)` — a verified functional update. Z3 proves
+    // `get(set(a,i,v), i) == v` (seq splice model); at runtime `Rc::make_mut` leaves
+    // the caller's array unchanged (purity — copy-on-write, in-place if uniquely owned).
+    let src = "module SetTest:\n\n  part upd(a: Array[Int], i: Int, v: Int) -> Int:\n    requires 0 <= i, i < length(a)\n    ensures result == v\n    yield get(set(a, i, v), i)\n\n  part main() -> Int via IO:\n    let a = array(1, 2, 3)\n    let b = set(a, 1, 99)\n    let p = IO.print(get(b, 1))\n    let q = IO.print(get(a, 1))\n    yield IO.print(length(b))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "the array set update must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("99\n2\n3"), "expected set 99, original 2 (unchanged), len 3; got: {out}");
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`

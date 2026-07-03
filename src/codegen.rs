@@ -1267,7 +1267,18 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     let i = expr(&args[1], cx, res)?;
                     format!("(**{a})[({i}) as usize].clone()")
                 }
-                _ => unreachable!("is_array_builtin covers exactly array/length/get"),
+                "set" => {
+                    // functional update: `Rc::make_mut` mutates in place when the
+                    // array is uniquely owned, else copies-on-write — sound under
+                    // pure semantics (the caller's array is never observed changed).
+                    let a = expr(&args[0], cx, res)?;
+                    let i = expr(&args[1], cx, res)?;
+                    let v = expr(&args[2], cx, res)?;
+                    format!(
+                        "{{ let mut __aset = {a}; Rc::make_mut(&mut __aset)[({i}) as usize] = {v}; __aset }}"
+                    )
+                }
+                _ => unreachable!("is_array_builtin covers exactly array/length/get/set"),
             }
         }
         Expr::Call(name, args) => {

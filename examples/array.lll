@@ -16,8 +16,17 @@ module Array.Demo:
     requires 0 <= i, i < length(a)
     yield get(a, i)
 
+  # a verified functional update: `set(a, i, v)` returns a new array with element i
+  # replaced. Z3 proves `get(set(a,i,v), i) == v`; runtime `Rc::make_mut` is
+  # copy-on-write (in-place when uniquely owned) so the caller's array is unchanged.
+  part put(a: Array[Int], i: Int, v: Int) -> Int:
+    requires 0 <= i, i < length(a)
+    ensures result == v
+    yield get(set(a, i, v), i)
+
   part main() -> Int via IO:
     let a = array(10, 20, 30, 40)
     let n = IO.print(length(a))     # 4
     let f = IO.print(first(a))      # 10
-    yield IO.print(at(a, 2))        # 30
+    let m = IO.print(at(a, 2))      # 30
+    yield IO.print(put(a, 2, 99))   # 99 (a itself is unchanged — pure)
