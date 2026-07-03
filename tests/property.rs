@@ -125,7 +125,7 @@ fn leaf(v: i64) -> String {
 /// found bugs, not just integer math. Returns the full module text + expected
 /// value, or `None` on overflow.
 fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
-    match rng.below(8) {
+    match rng.below(10) {
         0 => {
             let (e, v) = gen_expr(rng, 2)?;
             Some((format!("module T:\n\n  part main() -> Int:\n    yield {e}\n"), v))
@@ -197,7 +197,7 @@ fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
                 sum,
             ))
         }
-        _ => {
+        7 => {
             // user ADT: construct + destructure a single-field record
             let n = rng.small();
             Some((
@@ -205,6 +205,38 @@ fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
                 n,
             ))
         }
+        8 => {
+            // deep RECURSIVE user ADT: a binary tree folded to its leaf sum
+            let (tree, v) = gen_tree(rng, 3)?;
+            Some((
+                format!("module T:\n\n  type Tree = Leaf(Int) | Node(Tree, Tree)\n\n  part sumtree(t: Tree) -> Int:\n    match t:\n      Leaf(v) -> yield v\n      Node(l, r) -> yield sumtree(l) + sumtree(r)\n\n  part main() -> Int:\n    yield sumtree({tree})\n"),
+                v,
+            ))
+        }
+        _ => {
+            // effect-generic HOF at an EFFECTFUL row: apply(bump, n) under State ==
+            // n + init (exercises effect-monomorphization end to end, DEC-LLL-038).
+            let n = rng.small();
+            let init = rng.small();
+            let val = n.checked_add(init)?;
+            Some((
+                format!("module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part bump(n: Int) -> Int via State:\n    let o = State.get()\n    let _ = State.put(o + 1)\n    yield n + o\n\n  part run() -> Int via State:\n    yield apply(bump, {n})\n\n  part main() -> Int:\n    handle run() with State from {init}:\n      return r -> yield r\n", n = leaf(n), init = leaf(init)),
+                val,
+            ))
+        }
+    }
+}
+
+/// A random binary tree literal + its leaf sum (overflow-checked). Depth-bounded so
+/// the sum stays in range; `Node` recurses on structurally-smaller subtrees.
+fn gen_tree(rng: &mut Rng, depth: u32) -> Option<(String, i64)> {
+    if depth == 0 || rng.below(2) == 0 {
+        let v = rng.small();
+        Some((format!("Leaf({})", leaf(v)), v))
+    } else {
+        let (l, lv) = gen_tree(rng, depth - 1)?;
+        let (r, rv) = gen_tree(rng, depth - 1)?;
+        Some((format!("Node({l}, {r})"), lv.checked_add(rv)?))
     }
 }
 
@@ -248,7 +280,7 @@ fn verified_programs_agree_with_the_binary() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut checked = 0;
     let mut attempts = 0;
-    while checked < 48 && attempts < 1200 {
+    while checked < 60 && attempts < 2000 {
         attempts += 1;
         let Some((body, expected)) = gen_body(&mut rng) else { continue };
         let m = parser::parse_module(&body).expect("parse");
@@ -283,5 +315,5 @@ fn verified_programs_agree_with_the_binary() {
         );
         checked += 1;
     }
-    assert!(checked >= 48, "differential produced too few cases ({checked})");
+    assert!(checked >= 60, "differential produced too few cases ({checked})");
 }
