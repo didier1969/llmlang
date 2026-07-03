@@ -128,40 +128,57 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         ["rename", file, old, new] => {
-            let (src, cm, hm) = load(file)?;
+            let (_, cm, hm) = load(file)?;
             if !cm.index.contains_key(*old) {
                 return Err(format!("unknown part `{old}`"));
-            }
-            if let Some(origin) = &cm.module.parts[cm.index[*old]].origin {
-                return Err(format!(
-                    "`{old}` is defined in imported file {origin} — run the rename there                      (cross-file rename lands with workspace resolution, wave 4)"
-                ));
             }
             if cm.index.contains_key(*new) {
                 return Err(format!("a part named `{new}` already exists"));
             }
             let old_hash = hm.def_hash[*old].clone();
-            let new_src = hash::rename_part_in_source(&src, old, new)?;
-            // validate: reparse, recheck, rehash — identity must be preserved
-            let module2 = parser::parse_module(&new_src)?;
-            let cm2 = types::check_module(module2)?;
-            let hm2 = hash::hash_module(&cm2)?;
-            let new_hash = hm2
-                .def_hash
-                .get(*new)
-                .ok_or("rename validation failed: renamed part not found")?;
-            if *new_hash != old_hash {
-                return Err(format!(
-                    "rename would CHANGE the definition hash ({} -> {}) — refused. \
-                     This indicates a name collision or shadowing; nothing was written.",
-                    &old_hash[..16],
-                    &new_hash[..16]
-                ));
+            // The definition lives in one file, but call sites (name refs in
+            // text) can be in ANY importing file — rewrite the whole workspace
+            // (REQ-LLL-012). rename_part_in_source is a token-boundary pass, so
+            // files that don't mention `old` come back unchanged.
+            let files = loader::workspace_files(file)?;
+            let mut rewrites: Vec<(std::path::PathBuf, String, String)> = Vec::new();
+            for f in &files {
+                let src = std::fs::read_to_string(f).map_err(|e| e.to_string())?;
+                let new_src = hash::rename_part_in_source(&src, old, new)?;
+                if new_src != src {
+                    rewrites.push((f.clone(), src, new_src));
+                }
             }
-            std::fs::write(file, &new_src).map_err(|e| e.to_string())?;
+            // apply, then validate the rewritten workspace re-hashes to the same
+            // identity; roll back every file on any failure (fail-safe).
+            for (f, _, new_src) in &rewrites {
+                std::fs::write(f, new_src).map_err(|e| e.to_string())?;
+            }
+            let rollback = |rewrites: &[(std::path::PathBuf, String, String)]| {
+                for (f, orig, _) in rewrites {
+                    let _ = std::fs::write(f, orig);
+                }
+            };
+            let validated = load(file).and_then(|(_, _, hm2)| {
+                match hm2.def_hash.get(*new) {
+                    Some(h) if *h == old_hash => Ok(()),
+                    Some(h) => Err(format!(
+                        "rename would CHANGE the definition hash ({} -> {}) — refused \
+                         (name collision or shadowing); all files restored.",
+                        &old_hash[..16],
+                        &h[..16]
+                    )),
+                    None => Err("rename validation failed: renamed part not found".into()),
+                }
+            });
+            if let Err(e) = validated {
+                rollback(&rewrites);
+                return Err(e);
+            }
             println!(
-                "✔ renamed `{old}` -> `{new}`; def-hash unchanged ({}…) — \
-                 identity preserved, dependents untouched (DEC-LLL-019)",
+                "✔ renamed `{old}` -> `{new}` across {} file(s); def-hash unchanged ({}…) — \
+                 identity preserved, call sites re-pointed by name (DEC-LLL-019)",
+                rewrites.len(),
                 &old_hash[..16]
             );
             Ok(())

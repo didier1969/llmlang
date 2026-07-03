@@ -253,6 +253,49 @@ fn string_literal_is_a_verified_codepoint_list() {
 }
 
 #[test]
+fn cross_file_rename_repoints_call_sites_and_preserves_identity() {
+    // REQ-LLL-012: renaming a part defined in one file must re-point call sites
+    // in OTHER workspace files AND preserve the definition's identity (hash).
+    let dir = std::env::temp_dir().join(format!("lll-xrename-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let helper = dir.join("helper.lll");
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &helper,
+        "module H:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &root,
+        "import \"helper.lll\"\n\nmodule M:\n\n  part main() -> Int via IO:\n    let r = IO.print(inc(41))\n    yield r\n",
+    )
+    .unwrap();
+    let root_s = root.to_str().unwrap();
+
+    // identity of `inc` before rename
+    let (_, m0) = loader::load_program(root_s).unwrap();
+    let cm0 = types::check_module(m0).unwrap();
+    let inc_hash = hash::hash_module(&cm0).unwrap().def_hash["inc"].clone();
+
+    // the workspace sees BOTH files; rewrite each
+    let files = loader::workspace_files(root_s).unwrap();
+    assert_eq!(files.len(), 2, "workspace must see main + helper");
+    for f in &files {
+        let src = std::fs::read_to_string(f).unwrap();
+        std::fs::write(f, hash::rename_part_in_source(&src, "inc", "succ").unwrap()).unwrap();
+    }
+
+    // reload: `succ` has the SAME hash, `inc` is gone, and the call site in
+    // main.lll re-pointed (the workspace still type-checks → main calls succ).
+    let (_, m1) = loader::load_program(root_s).unwrap();
+    let cm1 = types::check_module(m1).expect("renamed workspace must type-check");
+    let hm1 = hash::hash_module(&cm1).unwrap();
+    assert_eq!(hm1.def_hash["succ"], inc_hash, "cross-file rename changed identity");
+    assert!(!cm1.index.contains_key("inc"), "old name `inc` still present");
+    assert!(cm1.index.contains_key("main"), "caller lost");
+}
+
+#[test]
 fn ackermann_terminates_by_lexicographic_measure() {
     // REQ-LLL-012 / DEC-LLL-016: Ackermann is the canonical non-primitive-
     // recursive function — it needs a LEXICOGRAPHIC measure (m, n). Neither m

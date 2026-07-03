@@ -46,6 +46,36 @@ fn canon(p: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 
+/// Every `.lll` file reachable from `root` through `import`s — root first, then
+/// imports depth-first, deduplicated by canonical path. Writable (relative)
+/// paths are returned so workspace-wide operations (e.g. `lll rename`,
+/// REQ-LLL-012) can rewrite each file in place.
+pub fn workspace_files(root: &str) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    collect_files(Path::new(root), &mut files, &mut seen)?;
+    Ok(files)
+}
+
+fn collect_files(
+    path: &Path,
+    files: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), String> {
+    let canon_path = canon(path)?;
+    if !seen.insert(canon_path) {
+        return Ok(()); // diamond imports: visit each file once
+    }
+    let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let module = parser::parse_module(&src)?;
+    files.push(path.to_path_buf());
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    for imp in &module.imports {
+        collect_files(&base.join(imp), files, seen)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn load_rec(
     path: &Path,
