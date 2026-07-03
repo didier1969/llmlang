@@ -16,8 +16,74 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Export the module as Axon's `ExtractionResult` JSON (REQ-LLL-021): every
+/// `part` → a function Symbol carrying content-hash + purity + contract counts;
+/// every intra-module call → a `calls` Relation; user types → `type` Symbols.
+fn export_ist(file: &str) -> Result<String, String> {
+    let (_, cm, hm) = load(file)?;
+    let mut symbols: Vec<serde_json::Value> = Vec::new();
+    let mut relations: Vec<serde_json::Value> = Vec::new();
+    for p in &cm.module.parts {
+        let effectful = p.effects.iter().any(|e| e == "IO");
+        symbols.push(serde_json::json!({
+            "name": p.name,
+            "kind": "function",
+            "start_line": p.line,
+            "end_line": p.line,
+            "docstring": serde_json::Value::Null,
+            "is_entry_point": p.name == "main",
+            "is_public": true,
+            "tested": false,
+            "is_nif": false,
+            "is_unsafe": false,
+            "properties": {
+                "content_hash": hm.def_hash[&p.name],
+                "purity": if effectful { "effectful" } else { "pure" },
+                "effects": p.effects.join(","),
+                "contracts": format!(
+                    "requires={},ensures={},measure={}",
+                    p.requires.len(), p.ensures.len(), p.measure.len()
+                ),
+            },
+        }));
+        let mut deps: Vec<String> = Vec::new();
+        hash_deps(&p.body, &mut deps);
+        deps.sort();
+        deps.dedup();
+        for callee in deps {
+            if cm.index.contains_key(&callee) {
+                relations.push(serde_json::json!({
+                    "from": p.name, "to": callee, "rel_type": "calls", "properties": {}
+                }));
+            }
+        }
+    }
+    for td in &cm.module.types {
+        let ctors: Vec<String> = td.ctors.iter().map(|(c, _)| c.clone()).collect();
+        symbols.push(serde_json::json!({
+            "name": td.name,
+            "kind": "type",
+            "start_line": 0,
+            "end_line": 0,
+            "docstring": serde_json::Value::Null,
+            "is_entry_point": false,
+            "is_public": true,
+            "tested": false,
+            "is_nif": false,
+            "is_unsafe": false,
+            "properties": { "constructors": ctors.join(",") },
+        }));
+    }
+    let out = serde_json::json!({
+        "project_code": serde_json::Value::Null,
+        "symbols": symbols,
+        "relations": relations,
+    });
+    serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
+}
+
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -125,6 +191,14 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                     &hm.contract_hash[&p.name][..32]
                 );
             }
+            Ok(())
+        }
+        ["export-ist", file] | ["mcp", "--export-ist", file] => {
+            // REQ-LLL-021: export the canonical structure as Axon's ExtractionResult
+            // JSON (symbols + relations), enriched with purity + content-hash. This
+            // is the contract Axon's `parser/lll.rs` consumes (datalog shell-out
+            // pattern) — llmlang stays the single source of truth for its grammar.
+            println!("{}", export_ist(file)?);
             Ok(())
         }
         ["dedup", file] | ["dedup", file, "--merge"] => {

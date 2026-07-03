@@ -567,6 +567,48 @@ fn dedup_merge_removes_duplicate_and_preserves_identity() {
 }
 
 #[test]
+fn export_ist_emits_axon_extraction_result() {
+    // REQ-LLL-021: `lll export-ist` emits Axon's ExtractionResult JSON straight
+    // from the real parser — a function Symbol per part (carrying content-hash +
+    // purity), a `calls` Relation per intra-module edge, a `type` Symbol per ADT.
+    // The bridge is DRY: Axon reuses this structure, never re-parses `.lll`.
+    let dir = tempdir();
+    let path = dir.join("ist.lll");
+    std::fs::write(
+        &path,
+        "module T:\n\n  type Color = Red | Green\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n\n  part twice(x: Int) -> Int:\n    yield inc(inc(x))\n\n  part main() -> Int via IO:\n    yield IO.print(twice(20))\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["export-ist", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "export-ist failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let syms = v["symbols"].as_array().unwrap();
+    // the pure part `inc` carries a content-hash and a decoded contract count
+    let inc = syms.iter().find(|s| s["name"] == "inc").expect("inc symbol");
+    assert_eq!(inc["kind"], "function");
+    assert_eq!(inc["properties"]["purity"], "pure");
+    assert!(inc["properties"]["content_hash"].as_str().unwrap().len() == 64);
+    assert_eq!(inc["properties"]["contracts"], "requires=0,ensures=1,measure=0");
+    // the effectful entry point is flagged
+    let main = syms.iter().find(|s| s["name"] == "main").expect("main symbol");
+    assert_eq!(main["is_entry_point"], true);
+    assert_eq!(main["properties"]["purity"], "effectful");
+    // the ADT surfaces as a `type` Symbol with its constructors
+    let color = syms.iter().find(|s| s["name"] == "Color").expect("Color symbol");
+    assert_eq!(color["kind"], "type");
+    assert_eq!(color["properties"]["constructors"], "Red,Green");
+    // intra-module call edges are captured as `calls` relations
+    let rels = v["relations"].as_array().unwrap();
+    assert!(
+        rels.iter().any(|r| r["from"] == "twice" && r["to"] == "inc" && r["rel_type"] == "calls"),
+        "twice→inc call edge must be present"
+    );
+}
+
+#[test]
 fn generic_definitions_are_alpha_equivalent_in_type_vars() {
     // REQ-LLL-007 follow-up: two generic definitions that differ only in the
     // NAME of their type variable are the same definition (same identity).
