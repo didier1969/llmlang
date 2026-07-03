@@ -1563,6 +1563,44 @@ fn effect_generic_abort_in_recursive_map() {
 }
 
 #[test]
+fn pure_program_trace_replay_round_trips() {
+    // REQ-LLL-028: an IO-free run must trace→replay cleanly — a missing/empty trace
+    // file is a valid "nothing recorded", not a panic. Exercises the real CLI E2E.
+    let dir = tempdir().join("replay028");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("p.lll");
+    std::fs::write(&lll, "module P:\n\n  part main() -> Int:\n    yield 40 + 2\n").unwrap();
+    let trace = dir.join("t.jsonl");
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let traced = std::process::Command::new(bin)
+        .args(["run", lll.to_str().unwrap(), "--trace", trace.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(traced.status.success(), "trace run failed: {}", String::from_utf8_lossy(&traced.stderr));
+    let replayed = std::process::Command::new(bin)
+        .args(["run", lll.to_str().unwrap(), "--replay", trace.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        replayed.status.success(),
+        "replay of an IO-free run must not panic (REQ-LLL-028): {}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&replayed.stdout).contains("replay: OK"), "replay not clean");
+}
+
+#[test]
+fn higher_order_definitions_are_alpha_equivalent_blind_to_binder_and_row_names() {
+    // content-identity (DEC-LLL-019/020) is blind to BOUND names: two HOFs that
+    // differ only in the function-parameter name AND the effect row-variable name
+    // must share one identity (de Bruijn / positional canonicalization). Guards two
+    // fixes surfaced by adversarial dedup testing.
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part run(g: (Int) -> Int, y: Int) -> Int via r:\n    yield g(y)\n";
+    let (_, h) = full(src);
+    assert_eq!(h.def_hash["apply"], h.def_hash["run"], "α-equivalent HOFs must share identity");
+}
+
+#[test]
 fn effect_generic_part_has_stable_rename_identity() {
     // content-identity (DEC-LLL-019/020) holds for an effect-generic part: a
     // structural rename preserves its hash (the row variable is part of the form).

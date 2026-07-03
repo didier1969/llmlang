@@ -257,9 +257,27 @@ fn normalize_part(
         .map(|(_, t)| canon_ty(t, &ty_rename))
         .collect();
     let effects = {
-        let mut e = part.effects.clone();
-        e.sort();
-        e.join(",")
+        // concrete effects (uppercase) are identity-significant by name; row
+        // VARIABLES (lowercase, REQ-LLL-026 item 3) are BOUND names → canonicalize
+        // them to positional markers so two α-equivalent effect-generic definitions
+        // that differ only in the row-variable name share one identity, exactly like
+        // type variables (DEC-LLL-019/020, blind to bound names).
+        let mut concrete: Vec<String> = part
+            .effects
+            .iter()
+            .filter(|e| e.chars().next().is_some_and(|c| c.is_uppercase()))
+            .cloned()
+            .collect();
+        concrete.sort();
+        let n_rows = part
+            .effects
+            .iter()
+            .filter(|e| e.chars().next().is_some_and(|c| c.is_lowercase()))
+            .count();
+        for i in 0..n_rows {
+            concrete.push(format!("#row{i}"));
+        }
+        concrete.join(",")
     };
     let requires: Vec<String> = part.requires.iter().map(|e| n.expr(e)).collect();
     // ensures may mention `result`: bind it as an extra de Bruijn slot
@@ -407,6 +425,13 @@ impl<'a> Norm<'a> {
             }
             Expr::Call(n, args) => {
                 let xs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                // a call whose head is a BOUND LOCAL is the application of a
+                // function-valued parameter (REQ-LLL-009): canonicalize it by its
+                // de Bruijn index, not by name, so two α-equivalent higher-order
+                // definitions share one identity (DEC-LLL-019, blind to bound names).
+                if let Some(i) = self.db(n) {
+                    return format!("(app %{i} {})", xs.join(" "));
+                }
                 let target = if n == self.self_name {
                     "$self".to_string()
                 } else if let Some(tok) = self.peers.get(n) {

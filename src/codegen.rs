@@ -159,7 +159,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             return Err("`main` must be `part main() -> Int` (optionally via IO)".into());
         }
         out.push_str(
-            "\nfn main() {\n    let r = lll_main();\n    println!(\"=> {}\", r);\n    __lll_replay_finish();\n}\n",
+            "\nfn main() {\n    __lll_trace_init();\n    let r = lll_main();\n    println!(\"=> {}\", r);\n    __lll_replay_finish();\n}\n",
         );
     } else {
         return Err("no `part main() -> Int` found — required by `lll build` in v1".into());
@@ -1179,15 +1179,24 @@ thread_local! {
     static TRACE: RefCell<Option<std::fs::File>> = RefCell::new(
         std::env::var("LLL_TRACE").ok().map(|p| std::fs::File::create(p).expect("open trace")));
     static REPLAY: RefCell<Option<Vec<(String, i64)>>> = RefCell::new(
-        std::env::var("LLL_REPLAY").ok().map(|p| {
-            let f = std::fs::File::open(p).expect("open replay");
-            std::io::BufReader::new(f).lines().map(|l| {
+        std::env::var("LLL_REPLAY").ok().map(|p| match std::fs::File::open(&p) {
+            Ok(f) => std::io::BufReader::new(f).lines().map(|l| {
                 let l = l.unwrap();
                 let eff = l.split("\"eff\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
                 let v: i64 = l.split("\"v\":").nth(1).unwrap().trim_end_matches('}').trim().parse().unwrap();
                 (eff, v)
-            }).collect::<Vec<_>>().into_iter().rev().collect() // pop from the back
+            }).collect::<Vec<_>>().into_iter().rev().collect(), // pop from the back
+            // a missing trace file = an IO-free run recorded nothing → nothing to
+            // replay. A run that DOES perform IO will still fail-fast at replay_next
+            // ("trace exhausted"), preserving divergence detection (REQ-LLL-028).
+            Err(_) => Vec::new(),
         }));
+}
+
+// Force the trace thread-local so `--trace` always yields a file (empty for an
+// IO-free run), keeping the trace/replay round-trip total (REQ-LLL-028).
+pub fn __lll_trace_init() {
+    TRACE.with(|_| {});
 }
 
 fn trace_write(eff: &str, v: i64) {
