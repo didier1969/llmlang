@@ -230,7 +230,23 @@ fn normalize_part(
         dep_hashes,
         peers,
     };
-    let params: Vec<String> = part.params.iter().map(|(_, t)| format!("{t}")).collect();
+    // canonicalize type-variable NAMES to positional indices so two
+    // α-equivalent generic definitions share one identity (REQ-LLL-007)
+    let mut tyvars: Vec<String> = Vec::new();
+    for (_, t) in &part.params {
+        collect_tyvars(t, &mut tyvars);
+    }
+    collect_tyvars(&part.ret, &mut tyvars);
+    let ty_rename: HashMap<String, String> = tyvars
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.clone(), format!("#{i}")))
+        .collect();
+    let params: Vec<String> = part
+        .params
+        .iter()
+        .map(|(_, t)| canon_ty(t, &ty_rename))
+        .collect();
     let effects = {
         let mut e = part.effects.clone();
         e.sort();
@@ -252,7 +268,7 @@ fn normalize_part(
     let mut s = format!(
         "(part (params {}) (ret {}) (eff {effects}) (req {}) (ens {}) (meas {measure})",
         params.join(" "),
-        part.ret,
+        canon_ty(&part.ret, &ty_rename),
         requires.join(" "),
         ensures.join(" "),
     );
@@ -380,6 +396,45 @@ impl<'a> Norm<'a> {
                 format!("(lambda ({}) {b})", tys.join(" "))
             }
         }
+    }
+}
+
+/// Type variables of a type, in order of first appearance (REQ-LLL-007).
+fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
+    match t {
+        Ty::Var(a) => {
+            if !acc.contains(a) {
+                acc.push(a.clone());
+            }
+        }
+        Ty::List(e) => collect_tyvars(e, acc),
+        Ty::Fun(ps, r) => {
+            for p in ps {
+                collect_tyvars(p, acc);
+            }
+            collect_tyvars(r, acc);
+        }
+        Ty::Int | Ty::Bool | Ty::User(_) => {}
+    }
+}
+
+/// Render a type with its type variables replaced by canonical positional
+/// names, so α-equivalent generic signatures produce the same string.
+fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
+    match t {
+        Ty::Int => "Int".to_string(),
+        Ty::Bool => "Bool".to_string(),
+        Ty::Var(a) => rename.get(a).cloned().unwrap_or_else(|| a.clone()),
+        Ty::List(e) => format!("List[{}]", canon_ty(e, rename)),
+        Ty::Fun(ps, r) => format!(
+            "({}) -> {}",
+            ps.iter()
+                .map(|p| canon_ty(p, rename))
+                .collect::<Vec<_>>()
+                .join(", "),
+            canon_ty(r, rename)
+        ),
+        Ty::User(n) => n.clone(),
     }
 }
 

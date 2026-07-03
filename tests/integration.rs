@@ -413,6 +413,24 @@ fn non_exhaustive_user_match_is_rejected() {
 }
 
 #[test]
+fn generic_definitions_are_alpha_equivalent_in_type_vars() {
+    // REQ-LLL-007 follow-up: two generic definitions that differ only in the
+    // NAME of their type variable are the same definition (same identity).
+    let a = "module T:\n\n  part id(x: a) -> a:\n    yield x\n";
+    let b = "module T:\n\n  part id(x: zzz) -> zzz:\n    yield x\n";
+    let (_, ha) = full(a);
+    let (_, hb) = full(b);
+    assert_eq!(
+        ha.def_hash["id"], hb.def_hash["id"],
+        "α-equivalent type-variable names must not change identity"
+    );
+    // but a genuinely different signature still differs
+    let c = "module T:\n\n  part id(x: List[a]) -> List[a]:\n    yield x\n";
+    let (_, hc) = full(c);
+    assert_ne!(ha.def_hash["id"], hc.def_hash["id"]);
+}
+
+#[test]
 fn generic_stdlib_reused_across_element_types() {
     // REQ-LLL-007 follow-up: the stdlib combinators (reverse, len) are generic —
     // one proof serves List[Int] AND List[Bool], no per-type duplication.
