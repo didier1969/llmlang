@@ -23,11 +23,13 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // user ADTs → Rust enums (REQ-LLL-011); constructor names are globally unique
     // so `use Name::*` lets variants be referenced bare (as in the .lll source).
     let ctors: std::collections::HashSet<String> = cm.ctors.keys().cloned().collect();
+    let parts: std::collections::HashSet<String> =
+        cm.module.parts.iter().map(|p| p.name.clone()).collect();
     for td in &cm.module.types {
         emit_enum(&mut out, td);
     }
     for part in &cm.module.parts {
-        emit_part(&mut out, part, &ctors)?;
+        emit_part(&mut out, part, &ctors, &parts)?;
     }
     // entry point
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
@@ -121,6 +123,7 @@ fn emit_part(
     out: &mut String,
     part: &Part,
     ctors: &std::collections::HashSet<String>,
+    parts: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
@@ -158,7 +161,7 @@ fn emit_part(
         .filter(|(_, t)| matches!(t, Ty::Fun(..)))
         .map(|(n, _)| n.clone())
         .collect();
-    emit_body(out, &part.body, 1, &fns, ctors)?;
+    emit_body(out, &part.body, 1, &fns, ctors, parts)?;
     out.push_str("}\n");
     Ok(())
 }
@@ -175,6 +178,7 @@ fn emit_body(
     depth: usize,
     fns: &Names,
     ctors: &Names,
+    parts: &Names,
 ) -> Result<(), String> {
     for s in body {
         match s {
@@ -183,18 +187,18 @@ fn emit_body(
                     "{}let {} = {};\n",
                     indent(depth),
                     local(name),
-                    expr(e, fns, ctors)?
+                    expr(e, fns, ctors, parts)?
                 ));
             }
             Stmt::Yield(e) => {
                 out.push_str(&format!(
                     "{}return {};\n",
                     indent(depth),
-                    expr(e, fns, ctors)?
+                    expr(e, fns, ctors, parts)?
                 ));
             }
             Stmt::Match(scrut, arms) => {
-                emit_match(out, scrut, arms, depth, fns, ctors)?;
+                emit_match(out, scrut, arms, depth, fns, ctors, parts)?;
             }
         }
     }
@@ -208,12 +212,13 @@ fn emit_match(
     depth: usize,
     fns: &Names,
     ctors: &Names,
+    parts: &Names,
 ) -> Result<(), String> {
     // list AND user-ADT values are Rc-wrapped → match on the dereferenced enum
     let is_boxed = arms
         .iter()
         .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..) | Pattern::Ctor(..)));
-    let s = expr(scrut, fns, ctors)?;
+    let s = expr(scrut, fns, ctors, parts)?;
     if is_boxed {
         out.push_str(&format!(
             "{}let __s = {s};\n{}match &*__s {{\n",
@@ -243,7 +248,7 @@ fn emit_match(
             }
         };
         let guard = match &arm.guard {
-            Some(g) => format!(" if {}", expr(g, fns, ctors)?),
+            Some(g) => format!(" if {}", expr(g, fns, ctors, parts)?),
             None => String::new(),
         };
         out.push_str(&format!("{}{pat}{guard} => {{\n", indent(d)));
@@ -263,7 +268,7 @@ fn emit_match(
             }
             _ => {}
         }
-        emit_body(out, &arm.body, d + 1, fns, ctors)?;
+        emit_body(out, &arm.body, d + 1, fns, ctors, parts)?;
         out.push_str(&format!("{}}}\n", indent(d)));
     }
     // exhaustiveness was PROVED by the vc fork; rustc can't see that proof,
@@ -289,7 +294,7 @@ fn emit_match(
     Ok(())
 }
 
-fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
+fn expr(e: &Expr, fns: &Names, ctors: &Names, parts: &Names) -> Result<String, String> {
     Ok(match e {
         Expr::IntLit(v) => format!("{v}i64"),
         Expr::BoolLit(v) => format!("{v}"),
@@ -297,6 +302,10 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
             if ctors.contains(n) {
                 // nullary ADT constructor value → Rc-wrapped (REQ-LLL-011)
                 format!("Rc::new({n})")
+            } else if parts.contains(n) {
+                // a bare part name as a first-class function value → the fn item
+                // (coerces to the fn-pointer parameter type) (REQ-LLL-009)
+                mangle(n)
             } else {
                 // `.clone()` is uniform: cheap for Copy (i64/bool), needed for Rc lists
                 format!("{}.clone()", local(n))
@@ -305,32 +314,33 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
         Expr::ListLit(items) => {
             let mut t = "Rc::new(LstI::Nil)".to_string();
             for i in items.iter().rev() {
-                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, fns, ctors)?);
+                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, fns, ctors, parts)?);
             }
             t
         }
         Expr::Cons(h, t) => format!(
             "Rc::new(LstI::Cons({}, {}))",
-            expr(h, fns, ctors)?,
-            expr(t, fns, ctors)?
+            expr(h, fns, ctors, parts)?,
+            expr(t, fns, ctors, parts)?
         ),
-        Expr::Neg(a) => format!("(-{})", expr(a, fns, ctors)?),
-        Expr::Not(a) => format!("(!{})", expr(a, fns, ctors)?),
+        Expr::Neg(a) => format!("(-{})", expr(a, fns, ctors, parts)?),
+        Expr::Not(a) => format!("(!{})", expr(a, fns, ctors, parts)?),
         Expr::Bin(op, a, b) => {
             // Rust rendering comes from the single operator-semantics source
             // (opsem.rs) — same place the vc fork reads its SMT form, so the
             // euclidean div/mod pairing can never silently drift (DEC-LLL-026).
-            let ta = expr(a, fns, ctors)?;
-            let tb = expr(b, fns, ctors)?;
+            let ta = expr(a, fns, ctors, parts)?;
+            let tb = expr(b, fns, ctors, parts)?;
             crate::opsem::form(*op).rust(&ta, &tb)
         }
         Expr::EffCall(name, args) => match name.as_str() {
-            "IO.print" => format!("__lll_io_print({})", expr(&args[0], fns, ctors)?),
+            "IO.print" => format!("__lll_io_print({})", expr(&args[0], fns, ctors, parts)?),
             "IO.read" => "__lll_io_read()".to_string(),
             other => return Err(format!("codegen: unknown effect `{other}`")),
         },
         Expr::Call(name, args) => {
-            let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, fns, ctors)).collect();
+            let xs: Result<Vec<String>, String> =
+                args.iter().map(|a| expr(a, fns, ctors, parts)).collect();
             let xs = xs?.join(", ");
             if ctors.contains(name) {
                 // ADT constructor application → Rc-wrapped variant (REQ-LLL-011)
@@ -348,7 +358,7 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names) -> Result<String, String> {
                 .iter()
                 .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
                 .collect();
-            format!("(|{}| {})", ps.join(", "), expr(body, fns, ctors)?)
+            format!("(|{}| {})", ps.join(", "), expr(body, fns, ctors, parts)?)
         }
     })
 }

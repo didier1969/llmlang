@@ -364,6 +364,34 @@ fn generic_type_changing_map_verifies_and_runs() {
 }
 
 #[test]
+fn a_part_can_be_passed_as_a_first_class_value() {
+    // REQ-LLL-009 follow-up: a pure part is a first-class function value —
+    // `map(inc, xs)` with no lambda wrapper.
+    let src = "module T:\n\n  part inc(x: Int) -> Int:\n    yield x + 1\n\n  part map(f: (Int) -> Int, xs: List[Int]) -> List[Int]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield f(h) :: map(f, t)\n\n  part len(xs: List[Int]) -> Int:\n    ensures result >= 0\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + len(t)\n\n  part main() -> Int via IO:\n    let ys = map(inc, [1, 2, 3])\n    yield IO.print(len(ys))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "part-as-value must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("pv.rs");
+    let bin = dir.join("pv_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "part-as-value Rust failed:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains('3'), "len must be 3");
+}
+
+#[test]
 fn higher_order_functions_verify_and_run_with_lambdas() {
     // REQ-LLL-009 / DEC-LLL-029: function-valued parameters are opaque uninterpreted
     // functions in the proof; the HOF is proved once, generic in `f`. Lambdas are

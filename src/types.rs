@@ -114,6 +114,18 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     for part in &module.parts {
         check_signature(part)?;
         check_contracts(part)?;
+        // no local may shadow a part or constructor name, so a bare `Var` that
+        // names a part is unambiguously a first-class function value (REQ-LLL-009)
+        let mut locals: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
+        collect_locals(&part.body, &mut locals);
+        for ln in &locals {
+            if index.contains_key(ln) || ctors.contains_key(ln) {
+                return Err(format!(
+                    "part `{}`: local `{ln}` shadows a part or constructor of the same name — rename it",
+                    part.name
+                ));
+            }
+        }
         let mut ctx = Ctx {
             module: &module,
             index: &index,
@@ -294,6 +306,49 @@ fn unknown_var_msg(part: &str, n: &str, binders: &std::collections::HashSet<Stri
         _ => "",
     };
     format!("part `{part}`: unknown variable `{n}`{hint}")
+}
+
+/// Collect every local value name a part introduces (let-bindings, match
+/// binders, lambda parameters) — used to reject shadowing of parts/constructors.
+fn collect_locals(body: &[Stmt], out: &mut Vec<String>) {
+    fn in_expr(e: &Expr, out: &mut Vec<String>) {
+        e.walk(&mut |x| {
+            if let Expr::Lambda(params, _) = x {
+                for (n, _) in params {
+                    out.push(n.clone());
+                }
+            }
+        });
+    }
+    for s in body {
+        match s {
+            Stmt::Let(name, e) => {
+                if name != "_" {
+                    out.push(name.clone());
+                }
+                in_expr(e, out);
+            }
+            Stmt::Yield(e) => in_expr(e, out),
+            Stmt::Match(scrut, arms) => {
+                in_expr(scrut, out);
+                for a in arms {
+                    match &a.pattern {
+                        Pattern::Var(v) => out.push(v.clone()),
+                        Pattern::Cons(h, t) => {
+                            out.push(h.clone());
+                            out.push(t.clone());
+                        }
+                        Pattern::Ctor(_, bs) => out.extend(bs.iter().cloned()),
+                        _ => {}
+                    }
+                    if let Some(g) = &a.guard {
+                        in_expr(g, out);
+                    }
+                    collect_locals(&a.body, out);
+                }
+            }
+        }
+    }
 }
 
 fn collect_binders(body: &[Stmt]) -> std::collections::HashSet<String> {
@@ -810,13 +865,17 @@ fn check_expr(
                         ));
                     }
                     Ty::User(tyname.clone())
-                } else if ctx.index.contains_key(n) {
-                    // functions become first-class through lambdas in v1
-                    return Err(format!(
-                        "part `{}`: `{n}` is a part — to pass it as a value, wrap it in a lambda \
-                         `\\(x: T) -> {n}(x)` (REQ-LLL-009)",
-                        ctx.part.name
-                    ));
+                } else if let Some(&idx) = ctx.index.get(n) {
+                    // a pure part used as a first-class function value (REQ-LLL-009)
+                    let callee = &ctx.module.parts[idx];
+                    if callee.effects.iter().any(|e| e == "IO") {
+                        return Err(format!(
+                            "part `{}`: `{n}` has effects and cannot be used as a value",
+                            ctx.part.name
+                        ));
+                    }
+                    let ptys = callee.params.iter().map(|(_, t)| t.clone()).collect();
+                    Ty::Fun(ptys, Box::new(callee.ret.clone()))
                 } else {
                     return Err(unknown_var_msg(&ctx.part.name, n, &ctx.all_binders));
                 }
