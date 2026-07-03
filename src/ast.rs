@@ -22,7 +22,10 @@ pub struct Part {
     pub effects: Vec<String>,
     pub requires: Vec<Expr>,
     pub ensures: Vec<Expr>,
-    pub measure: Option<Expr>,
+    /// Termination measure. Empty = none; one expr = scalar measure; several =
+    /// a lexicographic tuple (well-founded on ℕ^k) — REQ-LLL-012, DEC-LLL-016.
+    #[serde(default)]
+    pub measure: Vec<Expr>,
     pub body: Vec<Stmt>,
     /// 1-based source line of the `part` keyword (diagnostics only, erased from hash).
     pub line: usize,

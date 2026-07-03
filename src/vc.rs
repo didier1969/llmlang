@@ -378,21 +378,25 @@ impl<'a> Emit<'a> {
                 if name == &self.part.name
                     && self.cm.recursion.get(name) == Some(&Recursion::Measured)
                 {
-                    let m = self.part.measure.clone().unwrap();
-                    let m_args = self.tr_contract(&m, &cenv)?;
+                    let ms = self.part.measure.clone();
                     // current params env
                     let mut penv = HashMap::new();
                     for (pn, _) in &self.part.params {
                         penv.insert(pn.clone(), format!("p_{pn}"));
                     }
-                    let m_cur = self.tr_contract(&m, &penv)?;
+                    let mut next = Vec::new();
+                    let mut cur = Vec::new();
+                    for m in &ms {
+                        next.push(self.tr_contract(m, &cenv)?);
+                        cur.push(self.tr_contract(m, &penv)?);
+                    }
                     self.oblige(
-                        "measure is bounded below (>= 0) at recursive call".into(),
-                        format!("(>= {m_args} 0)"),
+                        "measure tuple is bounded below (>= 0) at recursive call".into(),
+                        lex_bounded(&next),
                     );
                     self.oblige(
-                        "measure strictly decreases at recursive call".into(),
-                        format!("(< {m_args} {m_cur})"),
+                        "measure tuple strictly decreases (lexicographic) at recursive call".into(),
+                        lex_less(&next, &cur),
                     );
                 }
                 // MUTUAL recursion (wave 3): at an intra-SCC call, prove the
@@ -401,28 +405,30 @@ impl<'a> Emit<'a> {
                 // a shared well-founded order on ℕ licenses assuming the
                 // peer's contract (DEC-LLL-016 extended to components).
                 if self.cm.same_multi_scc(&self.part.name, name) {
-                    let callee_m = callee
-                        .measure
-                        .clone()
-                        .expect("checker guarantees measures inside multi-SCCs");
-                    let caller_m = self
-                        .part
-                        .measure
-                        .clone()
-                        .expect("checker guarantees measures inside multi-SCCs");
-                    let m_args = self.tr_contract(&callee_m, &cenv)?;
+                    // checker guarantees every multi-SCC member carries a measure
+                    let callee_ms = callee.measure.clone();
+                    let caller_ms = self.part.measure.clone();
                     let mut penv = HashMap::new();
                     for (pn, _) in &self.part.params {
                         penv.insert(pn.clone(), format!("p_{pn}"));
                     }
-                    let m_cur = self.tr_contract(&caller_m, &penv)?;
+                    let mut next = Vec::new();
+                    for m in &callee_ms {
+                        next.push(self.tr_contract(m, &cenv)?);
+                    }
+                    let mut cur = Vec::new();
+                    for m in &caller_ms {
+                        cur.push(self.tr_contract(m, &penv)?);
+                    }
                     self.oblige(
-                        format!("mutual measure of `{name}` is bounded below (>= 0) at call"),
-                        format!("(>= {m_args} 0)"),
+                        format!("mutual measure tuple of `{name}` is bounded below (>= 0) at call"),
+                        lex_bounded(&next),
                     );
                     self.oblige(
-                        format!("mutual measure strictly decreases calling `{name}`"),
-                        format!("(< {m_args} {m_cur})"),
+                        format!(
+                            "mutual measure tuple strictly decreases (lexicographic) calling `{name}`"
+                        ),
+                        lex_less(&next, &cur),
                     );
                 }
                 // havoc result + assume callee ensures
@@ -443,6 +449,28 @@ impl<'a> Emit<'a> {
     fn tr_contract(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
         self.tr(e, env)
     }
+}
+
+/// Every component of a measure tuple is bounded below by 0 — the well-founded
+/// floor of the lexicographic order on ℕ^k (REQ-LLL-012, DEC-LLL-016).
+fn lex_bounded(ms: &[String]) -> String {
+    let conj: Vec<String> = ms.iter().map(|m| format!("(>= {m} 0)")).collect();
+    if conj.len() == 1 {
+        conj.into_iter().next().unwrap()
+    } else {
+        format!("(and {})", conj.join(" "))
+    }
+}
+
+/// Strict lexicographic decrease of `next` vs `cur`, right-folded:
+/// `next₁ < cur₁ ∨ (next₁ = cur₁ ∧ (next₂ < cur₂ ∨ …))`. For a single
+/// component this is just `next₁ < cur₁` (Z3 simplifies the trailing `false`).
+fn lex_less(next: &[String], cur: &[String]) -> String {
+    let mut acc = "false".to_string();
+    for (n, c) in next.iter().zip(cur).rev() {
+        acc = format!("(or (< {n} {c}) (and (= {n} {c}) {acc}))");
+    }
+    acc
 }
 
 fn pattern_cond(p: &Pattern, scrut: &str) -> (String, Vec<(String, String)>) {

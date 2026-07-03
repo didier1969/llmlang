@@ -253,6 +253,42 @@ fn string_literal_is_a_verified_codepoint_list() {
 }
 
 #[test]
+fn ackermann_terminates_by_lexicographic_measure() {
+    // REQ-LLL-012 / DEC-LLL-016: Ackermann is the canonical non-primitive-
+    // recursive function — it needs a LEXICOGRAPHIC measure (m, n). Neither m
+    // nor n decreases alone at every call, but (m, n) strictly decreases lex.
+    let src = "module T:\n\n  part ack(m: Int, n: Int) -> Int:\n    requires m >= 0, n >= 0\n    ensures result >= 0\n    measure m, n\n    match m:\n      0 -> yield n + 1\n      _ ->\n        match n:\n          0 -> yield ack(m - 1, 1)\n          _ ->\n            let inner = ack(m, n - 1)\n            yield ack(m - 1, inner)\n\n  part main() -> Int via IO:\n    let r = IO.print(ack(2, 2))\n    yield r\n";
+    // termination proof: the lexicographic tuple discharges at every call site
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "Ackermann must verify by lexicographic termination: {:?}",
+        failures(&report)
+    );
+    // and it runs: ack(2,2) = 7
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("ack.rs");
+    let bin = dir.join("ack_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "Ackermann Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('7'), "ack(2,2) must be 7, got: {stdout}");
+}
+
+#[test]
 fn euclidean_semantics_match_between_smt_and_rust() {
     // (-7) mod 3 = 2 in both SMT-LIB and i64::rem_euclid — the verified model
     // and the runtime must agree on negative operands.

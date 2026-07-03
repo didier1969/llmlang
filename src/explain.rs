@@ -113,10 +113,10 @@ pub fn audit_repl(ctx: &AuditCtx) -> Result<(), String> {
                     for e in &p.ensures {
                         println!("  ensures  {e:?}");
                     }
-                    if let Some(m) = &p.measure {
+                    for m in &p.measure {
                         println!("  measure  {m:?}");
                     }
-                    if p.requires.is_empty() && p.ensures.is_empty() && p.measure.is_none() {
+                    if p.requires.is_empty() && p.ensures.is_empty() && p.measure.is_empty() {
                         println!("  (no contract clauses)");
                     }
                 }

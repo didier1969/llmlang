@@ -88,7 +88,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         let in_multi = scc_multi.contains(&part.name);
         let rec = if in_multi {
             // mutual recursion: every SCC member must carry a measure
-            if part.measure.is_none() {
+            if part.measure.is_empty() {
                 return Err(format!(
                     "part `{}` is mutually recursive (call-graph cycle) — every member of the \
                      cycle needs a `measure <Int expr>` so cross-decrease can be proved \
@@ -101,7 +101,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             Recursion::None
         } else if ctx.rec_calls.iter().all(|s| *s) {
             Recursion::Structural
-        } else if part.measure.is_some() {
+        } else if !part.measure.is_empty() {
             Recursion::Measured
         } else {
             return Err(format!(
@@ -110,7 +110,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 part.name
             ));
         };
-        if rec == Recursion::None && part.measure.is_some() {
+        if rec == Recursion::None && !part.measure.is_empty() {
             return Err(format!(
                 "part `{}`: `measure` clause on a non-recursive part",
                 part.name
@@ -320,13 +320,13 @@ fn check_contracts(part: &Part) -> Result<(), String> {
             return Err(format!("part `{}`: ensures clause must be Bool", part.name));
         }
     }
-    if let Some(m) = &part.measure {
+    for m in &part.measure {
         no_calls(m, "measure")?;
         let t = type_of_pure(m, &params, None)
             .map_err(|e| format!("part `{}` measure: {e}", part.name))?;
         if t != Ty::Int {
             return Err(format!(
-                "part `{}`: measure must be an Int expression over parameters (v1)",
+                "part `{}`: each measure component must be an Int expression over parameters (v1)",
                 part.name
             ));
         }

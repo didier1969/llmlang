@@ -146,7 +146,7 @@ impl Parser {
 
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
-        let mut measure = None;
+        let mut measure = Vec::new();
         // contract clauses first, in any order, each on its own line
         loop {
             match self.peek() {
@@ -162,10 +162,11 @@ impl Parser {
                 }
                 Tok::Measure => {
                     self.pos += 1;
-                    if measure.is_some() {
+                    if !measure.is_empty() {
                         return Err(self.err("duplicate measure clause"));
                     }
-                    measure = Some(self.expr()?);
+                    // one expr = scalar; comma-separated = lexicographic tuple
+                    measure = self.expr_list()?;
                     self.eat(Tok::Newline)?;
                 }
                 _ => break,

@@ -241,7 +241,14 @@ fn normalize_part(
     n.env.push("result".to_string());
     let ensures: Vec<String> = part.ensures.iter().map(|e| n.expr(e)).collect();
     n.env.pop();
-    let measure = part.measure.as_ref().map(|e| n.expr(e)).unwrap_or_default();
+    // measure tuple: space-joined normal forms (identical string for the
+    // single-measure case, so existing identities are preserved)
+    let measure = part
+        .measure
+        .iter()
+        .map(|e| n.expr(e))
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut s = format!(
         "(part (params {}) (ret {}) (eff {effects}) (req {}) (ens {}) (meas {measure})",
         params.join(" "),

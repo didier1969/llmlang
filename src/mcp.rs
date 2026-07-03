@@ -163,7 +163,7 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
             for e in &p.ensures {
                 s.push_str(&format!("  ensures  {e:?}\n"));
             }
-            if let Some(m) = &p.measure {
+            for m in &p.measure {
                 s.push_str(&format!("  measure  {m:?}\n"));
             }
             let mut deps = Vec::new();
