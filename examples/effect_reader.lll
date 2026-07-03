@@ -1,0 +1,18 @@
+module ReaderDemo:
+
+  # Typed algebraic effect — Reader (REQ-LLL-025 slice 3), a tail-resumptive
+  # effect over an IMMUTABLE environment. `ask` reads a value threaded by the
+  # handler; there is no `put`, so the environment cannot change.
+
+  part scaled(factor: Int) -> Int via Reader:
+    let base = Reader.ask()
+    yield base * factor
+
+  # `handle … with Reader from <env>` installs the canonical handler: the compiler
+  # threads a `&i64` environment (evidence-passing, no allocation). `run` is pure.
+  part run() -> Int:
+    handle scaled(3) with Reader from 14:
+      return r -> yield r
+
+  part main() -> Int via IO:
+    yield IO.print(run())   # ask() = 14, 14 * 3 = 42

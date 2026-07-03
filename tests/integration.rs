@@ -174,7 +174,7 @@ fn state_handle_requires_initial_cell() {
     // REQ-LLL-025: State's canonical handler needs an initial value (`from <Int>`).
     let src = "module B:\n\n  part g() -> Int via State:\n    yield State.get()\n\n  part run() -> Int:\n    handle g() with State:\n      return r -> yield r\n";
     let m = parser::parse_module(src).unwrap();
-    assert!(types::check_module(m).unwrap_err().contains("initial cell value"));
+    assert!(types::check_module(m).unwrap_err().contains("initial value"));
 }
 
 #[test]
@@ -754,6 +754,37 @@ fn algebraic_effect_state_verifies_and_runs() {
     let out = std::process::Command::new(&bin).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("42"), "State counter must print 42, got: {stdout}");
+}
+
+#[test]
+fn algebraic_effect_reader_and_combos_verify_and_run() {
+    // REQ-LLL-025 slice 3: Reader (immutable env, tail-resumptive) + free
+    // composition of effects. A single part may carry State + Reader + abort; each
+    // effect is discharged independently (evidence params and the Result return
+    // thread orthogonally). Here: Reader alone, then a State+Reader+Exc mix.
+    let reader = "module R:\n\n  part scaled(f: Int) -> Int via Reader:\n    let base = Reader.ask()\n    yield base * f\n\n  part run() -> Int:\n    handle scaled(3) with Reader from 14:\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(run())\n";
+    let combo = "module C:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part accum(n: Int) -> Int via State, Reader, Exc:\n    match n == 0:\n      true  -> yield Exc.raise(7)\n      false ->\n        let e = Reader.ask()\n        let c = State.get()\n        let _ = State.put(c + e + n)\n        yield State.get()\n\n  part withSR(n: Int) -> Int via Exc:\n    handle inner(n) with State from 100:\n      return r -> yield r\n\n  part inner(n: Int) -> Int via State, Exc:\n    handle accum(n) with Reader from 10:\n      return r -> yield r\n\n  part run(n: Int) -> Int:\n    handle withSR(n) with Exc:\n      raise(m) -> yield 0 - m\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(run(5) + run(0))\n";
+
+    for (label, src, expect) in [("reader", reader, "42"), ("combo", combo, "108")] {
+        let report = verify_src(src);
+        assert!(report.ok(), "{label} must verify: {:?}", failures(&report));
+        let (cm, _) = full(src);
+        let rust = codegen::emit_rust(&cm).expect("codegen");
+        let dir = tempdir();
+        let rs = dir.join("e.rs");
+        let bin = dir.join("e_bin");
+        std::fs::write(&rs, rust).unwrap();
+        let st = std::process::Command::new("rustc")
+            .args(["-O", "--edition", "2021", "-o"])
+            .arg(&bin)
+            .arg(&rs)
+            .output()
+            .expect("rustc");
+        assert!(st.status.success(), "{label} codegen failed:\n{}", String::from_utf8_lossy(&st.stderr));
+        let out = std::process::Command::new(&bin).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains(expect), "{label} must print {expect}, got: {stdout}");
+    }
 }
 
 #[test]

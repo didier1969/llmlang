@@ -41,8 +41,8 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         .filter(|p| p.effects.iter().any(|e| abort_effects.contains(e)))
         .map(|p| p.name.clone())
         .collect();
-    // parts whose row carries the builtin `State` effect → they take a `&mut i64`
-    // cell evidence parameter (REQ-LLL-025).
+    // parts whose row carries the builtin `State` / `Reader` effects → they take a
+    // `&mut i64` cell resp. `&i64` env evidence parameter (REQ-LLL-025).
     let stateful: std::collections::HashSet<String> = cm
         .module
         .parts
@@ -50,11 +50,18 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         .filter(|p| p.effects.iter().any(|e| e == "State"))
         .map(|p| p.name.clone())
         .collect();
+    let readerful: std::collections::HashSet<String> = cm
+        .module
+        .parts
+        .iter()
+        .filter(|p| p.effects.iter().any(|e| e == "Reader"))
+        .map(|p| p.name.clone())
+        .collect();
     for td in &cm.module.types {
         emit_enum(&mut out, td);
     }
     for part in &cm.module.parts {
-        emit_part(&mut out, part, &ctors, &parts, &abort, &stateful)?;
+        emit_part(&mut out, part, &ctors, &parts, &abort, &stateful, &readerful)?;
     }
     // entry point
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
@@ -155,6 +162,7 @@ fn emit_part(
     parts: &std::collections::HashSet<String>,
     abort: &std::collections::HashSet<String>,
     stateful: &std::collections::HashSet<String>,
+    readerful: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
@@ -182,17 +190,16 @@ fn emit_part(
     // abort payload is the raised Int; a raise compiles to an early `Err`, and
     // callers propagate with `?` or discharge the effect with a `handle` match.
     let res = abort.contains(&part.name);
-    // a `via State` part takes a `&mut i64` cell evidence parameter (REQ-LLL-025).
+    // evidence parameters, in a fixed order so call sites match: `&mut i64` cell
+    // for State, then `&i64` env for Reader (REQ-LLL-025). These compose freely
+    // with the abort `Result` return (orthogonal threading).
     let is_state = stateful.contains(&part.name);
-    if is_state && res {
-        return Err(format!(
-            "codegen: part `{}` combines a stateful effect with an abort effect — \
-             not supported yet (REQ-LLL-025 slice 3)",
-            part.name
-        ));
-    }
+    let is_reader = readerful.contains(&part.name);
     if is_state {
         params.push("__st: &mut i64".to_string());
+    }
+    if is_reader {
+        params.push("__env: &i64".to_string());
     }
     let ret_ty = if res {
         format!("Result<{}, i64>", rs_ty(&part.ret))
@@ -219,7 +226,9 @@ fn emit_part(
         parts,
         abort,
         stateful,
+        readerful,
         state_ev: if is_state { Some("__st".to_string()) } else { None },
+        reader_ev: if is_reader { Some("__env".to_string()) } else { None },
     };
     emit_body(out, &part.body, 1, &cx, res)?;
     out.push_str("}\n");
@@ -243,9 +252,14 @@ struct Cx<'a> {
     /// parts whose row carries `State` — they take a `&mut i64` cell evidence
     /// parameter, and a call to one must forward the current evidence (REQ-LLL-025).
     stateful: &'a Names,
+    /// parts whose row carries `Reader` — they take an `&i64` environment evidence
+    /// parameter (REQ-LLL-025 slice 3).
+    readerful: &'a Names,
     /// the in-scope State evidence (`&mut i64`) to read/write/forward: the part's
     /// `__st` param inside a `via State` body, or `__st_<d>` inside a State handle.
     state_ev: Option<String>,
+    /// the in-scope Reader evidence (`&i64`) to read/forward.
+    reader_ev: Option<String>,
 }
 
 fn emit_body(
@@ -292,30 +306,48 @@ fn emit_body(
             Stmt::Match(scrut, arms) => {
                 emit_match(out, scrut, arms, depth, cx, res)?;
             }
-            Stmt::Handle(h) if h.effect == "State" => {
-                // canonical State cell handler (REQ-LLL-025): install the cell from
-                // `from`, thread `&mut` into the handled call, bind the result, then
-                // run the `return` clause. get/put read/write the cell inline — no
+            Stmt::Handle(h) if h.effect == "State" || h.effect == "Reader" => {
+                // canonical builtin handler (REQ-LLL-025): install the evidence from
+                // `from`, thread it into the handled call, bind the result, then run
+                // the `return` clause. get/put/ask read/write the evidence inline — no
                 // continuation, the "rest of the computation" is just the code after.
-                let init = expr(h.from.as_ref().expect("State handle requires `from`"), cx, res)?;
-                let cell = format!("__cell_{depth}");
-                let stv = format!("__st_{depth}");
-                out.push_str(&format!("{}let mut {cell}: i64 = {init};\n", indent(depth)));
-                out.push_str(&format!("{}let {stv} = &mut {cell};\n", indent(depth)));
+                let init = expr(
+                    h.from.as_ref().expect("builtin handle requires `from`"),
+                    cx,
+                    res,
+                )?;
+                let (mut ev_state, mut ev_reader) = (cx.state_ev.clone(), cx.reader_ev.clone());
+                if h.effect == "State" {
+                    let cell = format!("__cell_{depth}");
+                    let stv = format!("__st_{depth}");
+                    out.push_str(&format!("{}let mut {cell}: i64 = {init};\n", indent(depth)));
+                    out.push_str(&format!("{}let {stv} = &mut {cell};\n", indent(depth)));
+                    ev_state = Some(stv);
+                } else {
+                    let envval = format!("__envval_{depth}");
+                    let env = format!("__env_{depth}");
+                    out.push_str(&format!("{}let {envval}: i64 = {init};\n", indent(depth)));
+                    out.push_str(&format!("{}let {env} = &{envval};\n", indent(depth)));
+                    ev_reader = Some(env);
+                }
                 let cx2 = Cx {
                     fns: cx.fns,
                     ctors: cx.ctors,
                     parts: cx.parts,
                     abort: cx.abort,
                     stateful: cx.stateful,
-                    state_ev: Some(stv),
+                    readerful: cx.readerful,
+                    state_ev: ev_state,
+                    reader_ev: ev_reader,
                 };
                 let ret_clause = h
                     .clauses
                     .iter()
                     .find(|c| c.op == "return")
-                    .expect("State handle has a return clause");
-                let call = expr(&h.call, &cx2, false)?;
+                    .expect("builtin handle has a return clause");
+                // use the enclosing `res`: an abort effect the call still carries
+                // (not discharged here) must propagate with `?`.
+                let call = expr(&h.call, &cx2, res)?;
                 out.push_str(&format!(
                     "{}let {} = {call};\n",
                     indent(depth),
@@ -350,10 +382,12 @@ fn emit_body(
     Ok(())
 }
 
-/// A `yield`ed abort operation (`E.raise(x)`): a user effect op, which in slice 1
-/// is always an abort op and lowers to an early `return Err(..)` (REQ-LLL-018).
+/// A `yield`ed abort operation (a user effect op — always an abort op in the
+/// current slices), which lowers to an early `return Err(..)` (REQ-LLL-018). The
+/// builtin effects (IO, State, Reader) are tail-resumptive, never abort.
 fn is_abort_effcall(e: &Expr) -> bool {
-    matches!(e, Expr::EffCall(n, _) if n != "IO.print" && n != "IO.read")
+    const BUILTIN: [&str; 5] = ["IO.print", "IO.read", "State.get", "State.put", "Reader.ask"];
+    matches!(e, Expr::EffCall(n, _) if !BUILTIN.contains(&n.as_str()))
 }
 
 fn emit_match(
@@ -495,6 +529,11 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 let ev = cx.state_ev.clone().unwrap_or_else(|| "__st".to_string());
                 format!("{{ let __pv = {}; *{ev} = __pv; __pv }}", expr(&args[0], cx, res)?)
             }
+            // builtin Reader (REQ-LLL-025 slice 3): read the immutable `&i64` env.
+            "Reader.ask" => {
+                let ev = cx.reader_ev.clone().unwrap_or_else(|| "__env".to_string());
+                format!("(*{ev})")
+            }
             // a user effect op (slice 1: abort only) → early `Err` with the raised
             // value; valid because the performing part is Result-typed (REQ-LLL-018).
             _ => {
@@ -517,10 +556,13 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 // application of a function-valued parameter (REQ-LLL-009)
                 format!("{}({})", local(name), xs.join(", "))
             } else {
-                // forward the State cell evidence to a stateful callee (implicit
-                // reborrow keeps the caller's `&mut` usable afterwards) — REQ-LLL-025.
+                // forward evidence to the callee in the fixed order [State, Reader]
+                // (implicit reborrow keeps the caller's refs usable) — REQ-LLL-025.
                 if cx.stateful.contains(name) {
                     xs.push(cx.state_ev.clone().unwrap_or_else(|| "__st".to_string()));
+                }
+                if cx.readerful.contains(name) {
+                    xs.push(cx.reader_ev.clone().unwrap_or_else(|| "__env".to_string()));
                 }
                 let call = format!("{}({})", mangle(name), xs.join(", "));
                 if res && cx.abort.contains(name) {

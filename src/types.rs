@@ -133,11 +133,15 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     effect_names.insert("State".to_string());
     effect_ops.insert("State.get".into(), ("State".into(), vec![], Ty::Int));
     effect_ops.insert("State.put".into(), ("State".into(), vec![Ty::Int], Ty::Int));
+    // Reader is a builtin tail-resumptive effect with a canonical env handler
+    // (REQ-LLL-025 slice 3): `ask` reads an immutable environment value.
+    effect_names.insert("Reader".to_string());
+    effect_ops.insert("Reader.ask".into(), ("Reader".into(), vec![], Ty::Int));
     for ed in &module.effects {
         if !effect_names.insert(ed.name.clone()) {
             return Err(format!("duplicate effect `{}`", ed.name));
         }
-        if ed.name == "IO" || ed.name == "State" {
+        if ed.name == "IO" || ed.name == "State" || ed.name == "Reader" {
             return Err(format!("`{}` is a builtin effect and cannot be redeclared", ed.name));
         }
         for op in &ed.ops {
@@ -923,32 +927,33 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                         ctx.part.name, h.effect, h.effect
                     ));
                 }
-                // `State` uses a canonical cell handler (REQ-LLL-025): it REQUIRES an
-                // initial value (`from n`) and forbids user-authored op clauses —
-                // get/put are interpreted by the compiler-installed cell.
-                let is_state = h.effect == "State";
-                if is_state {
+                // `State`/`Reader` use canonical builtin handlers (REQ-LLL-025): they
+                // REQUIRE an initial evidence value (`from n` — the cell resp. the
+                // environment) and forbid user-authored op clauses; get/put/ask are
+                // interpreted by the compiler-installed evidence.
+                let is_builtin_param = h.effect == "State" || h.effect == "Reader";
+                if is_builtin_param {
                     if h.from.is_none() {
                         return Err(format!(
-                            "part `{}`: `handle … with State` needs an initial cell value \
-                             (`from <Int>`)",
-                            ctx.part.name
+                            "part `{}`: `handle … with {}` needs an initial value (`from <Int>`)",
+                            ctx.part.name, h.effect
                         ));
                     }
                     if h.clauses.iter().any(|c| c.op != "return") {
                         return Err(format!(
-                            "part `{}`: State uses a canonical handler — only a `return` clause \
-                             is allowed (get/put are interpreted by the cell)",
-                            ctx.part.name
+                            "part `{}`: {} uses a canonical handler — only a `return` clause is \
+                             allowed (its operations are interpreted by the evidence)",
+                            ctx.part.name, h.effect
                         ));
                     }
                 } else if h.from.is_some() {
                     return Err(format!(
-                        "part `{}`: `from` is only valid for a parameterized effect like State",
+                        "part `{}`: `from` is only valid for a parameterized builtin effect \
+                         (State/Reader)",
                         ctx.part.name
                     ));
                 }
-                // evidence expression (State `from n`) is an Int
+                // evidence expression (`from n`) is an Int
                 if let Some(f) = &h.from {
                     check_expr(ctx, f, Some(&Ty::Int))?;
                 }
