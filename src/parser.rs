@@ -85,10 +85,12 @@ impl Parser {
         self.eat(Tok::Indent)?;
         let mut parts = Vec::new();
         let mut types = Vec::new();
+        let mut effects = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek() {
                 Tok::Type => types.push(self.type_decl()?),
+                Tok::Effect => effects.push(self.effect_decl()?),
                 Tok::Part => parts.push(self.part()?),
                 Tok::Dedent => {
                     self.pos += 1;
@@ -96,7 +98,9 @@ impl Parser {
                 }
                 _ if self.at_end() => break,
                 other => {
-                    return Err(self.err(&format!("expected `type` or `part`, found {other:?}")))
+                    return Err(self.err(&format!(
+                        "expected `type`, `effect` or `part`, found {other:?}"
+                    )))
                 }
             }
         }
@@ -104,6 +108,7 @@ impl Parser {
             name,
             imports,
             types,
+            effects,
             parts,
         })
     }
@@ -137,6 +142,42 @@ impl Parser {
         }
         self.eat(Tok::Newline)?;
         Ok(TypeDecl { name, ctors })
+    }
+
+    /// `effect Name:` + one `op(T, …) -> Ret` per indented line (REQ-LLL-018).
+    fn effect_decl(&mut self) -> Result<EffectDecl, String> {
+        self.eat(Tok::Effect)?;
+        let name = self.ident()?;
+        self.eat(Tok::Colon)?;
+        self.eat(Tok::Newline)?;
+        self.eat(Tok::Indent)?;
+        let mut ops = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek() == &Tok::Dedent {
+                self.pos += 1;
+                break;
+            }
+            let opname = self.ident()?;
+            self.eat(Tok::LParen)?;
+            let mut params = Vec::new();
+            if self.peek() != &Tok::RParen {
+                params.push(self.ty()?);
+                while self.peek() == &Tok::Comma {
+                    self.pos += 1;
+                    params.push(self.ty()?);
+                }
+            }
+            self.eat(Tok::RParen)?;
+            self.eat(Tok::Arrow)?;
+            let ret = self.ty()?;
+            self.eat(Tok::Newline)?;
+            ops.push(OpSig { name: opname, params, ret });
+        }
+        if ops.is_empty() {
+            return Err(self.err("effect with no operations"));
+        }
+        Ok(EffectDecl { name, ops })
     }
 
     fn part(&mut self) -> Result<Part, String> {
@@ -273,6 +314,39 @@ impl Parser {
                     }
                     out.push(Stmt::Match(scrut, arms));
                 }
+                Tok::Handle => {
+                    self.pos += 1;
+                    let call = self.expr()?;
+                    self.eat(Tok::With)?;
+                    let effect = self.ident()?;
+                    let from = if self.peek() == &Tok::From {
+                        self.pos += 1;
+                        Some(self.expr()?)
+                    } else {
+                        None
+                    };
+                    self.eat(Tok::Colon)?;
+                    self.eat(Tok::Newline)?;
+                    self.eat(Tok::Indent)?;
+                    let mut clauses = Vec::new();
+                    loop {
+                        self.skip_newlines();
+                        if self.peek() == &Tok::Dedent {
+                            self.pos += 1;
+                            break;
+                        }
+                        clauses.push(self.handle_clause()?);
+                    }
+                    if clauses.is_empty() {
+                        return Err(self.err("handle with no clauses"));
+                    }
+                    out.push(Stmt::Handle(Handle {
+                        call,
+                        effect,
+                        from,
+                        clauses,
+                    }));
+                }
                 _ => break,
             }
         }
@@ -280,6 +354,56 @@ impl Parser {
             return Err(self.err("empty body"));
         }
         Ok(out)
+    }
+
+    /// One clause of a `handle`: `op(b1, …) -> body`, or `return r -> body`
+    /// (the mandatory value clause). Body is inline `yield e` or an indented block.
+    fn handle_clause(&mut self) -> Result<HandleClause, String> {
+        let op = if self.peek() == &Tok::Return {
+            self.pos += 1;
+            "return".to_string()
+        } else {
+            self.ident()?
+        };
+        let mut params = Vec::new();
+        if self.peek() == &Tok::LParen {
+            self.pos += 1;
+            if self.peek() != &Tok::RParen {
+                params.push(self.ident()?);
+                while self.peek() == &Tok::Comma {
+                    self.pos += 1;
+                    params.push(self.ident()?);
+                }
+            }
+            self.eat(Tok::RParen)?;
+        } else if op == "return" {
+            // `return r ->` : a single result binder, no parentheses
+            params.push(self.ident()?);
+        }
+        self.eat(Tok::Arrow)?;
+        let body = match self.peek() {
+            Tok::Yield => {
+                self.pos += 1;
+                let e = self.expr()?;
+                if self.peek() == &Tok::Newline {
+                    self.pos += 1;
+                }
+                vec![Stmt::Yield(e)]
+            }
+            Tok::Newline => {
+                self.pos += 1;
+                self.eat(Tok::Indent)?;
+                let b = self.block_stmts()?;
+                self.eat(Tok::Dedent)?;
+                b
+            }
+            other => {
+                return Err(self.err(&format!(
+                    "expected `yield` or indented block after `->`, found {other:?}"
+                )))
+            }
+        };
+        Ok(HandleClause { op, params, body })
     }
 
     fn arm(&mut self) -> Result<Arm, String> {
@@ -381,6 +505,7 @@ impl Parser {
         match self.bump() {
             Tok::Ident(s) if s == "Int" => Ok(Ty::Int),
             Tok::Ident(s) if s == "Bool" => Ok(Ty::Bool),
+            Tok::Ident(s) if s == "Never" => Ok(Ty::Never),
             Tok::Ident(s) if s == "List" => {
                 // generic element type: List[Int], List[a], List[List[Int]]
                 self.eat(Tok::LBracket)?;

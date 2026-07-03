@@ -25,11 +25,27 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let ctors: std::collections::HashSet<String> = cm.ctors.keys().cloned().collect();
     let parts: std::collections::HashSet<String> =
         cm.module.parts.iter().map(|p| p.name.clone()).collect();
+    // effects carrying an abort op (a `Never`-returning operation); a part whose
+    // row contains one compiles to a `Result`-returning fn (REQ-LLL-018).
+    let abort_effects: std::collections::HashSet<String> = cm
+        .module
+        .effects
+        .iter()
+        .filter(|ed| ed.ops.iter().any(|op| op.ret == Ty::Never))
+        .map(|ed| ed.name.clone())
+        .collect();
+    let abort: std::collections::HashSet<String> = cm
+        .module
+        .parts
+        .iter()
+        .filter(|p| p.effects.iter().any(|e| abort_effects.contains(e)))
+        .map(|p| p.name.clone())
+        .collect();
     for td in &cm.module.types {
         emit_enum(&mut out, td);
     }
     for part in &cm.module.parts {
-        emit_part(&mut out, part, &ctors, &parts)?;
+        emit_part(&mut out, part, &ctors, &parts, &abort)?;
     }
     // entry point
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
@@ -61,6 +77,10 @@ fn rs_ty(t: &Ty) -> String {
         }
         // a user ADT is a Rust enum of the same name (REQ-LLL-011)
         Ty::User(n) => n.clone(),
+        // `Never` is the return type of an abort op; it is never lowered as a
+        // value type — an abort op compiles to an early `return Err`, so its
+        // "result" has Rust's never type.
+        Ty::Never => "!".to_string(),
     }
 }
 
@@ -84,7 +104,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             }
             collect_tvars(r, acc);
         }
-        Ty::Int | Ty::Bool | Ty::User(_) => {}
+        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never => {}
     }
 }
 
@@ -124,6 +144,7 @@ fn emit_part(
     part: &Part,
     ctors: &std::collections::HashSet<String>,
     parts: &std::collections::HashSet<String>,
+    abort: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
@@ -147,12 +168,21 @@ fn emit_part(
         .iter()
         .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
         .collect();
+    // a part whose row carries an abort effect returns `Result<Ret, i64>` — the
+    // abort payload is the raised Int; a raise compiles to an early `Err`, and
+    // callers propagate with `?` or discharge the effect with a `handle` match.
+    let res = abort.contains(&part.name);
+    let ret_ty = if res {
+        format!("Result<{}, i64>", rs_ty(&part.ret))
+    } else {
+        rs_ty(&part.ret)
+    };
     out.push_str(&format!(
         "\n#[allow(unused_variables, clippy::all)]\npub fn {}{}({}) -> {} {{\n",
         mangle(&part.name),
         generics,
         params.join(", "),
-        rs_ty(&part.ret)
+        ret_ty
     ));
     // names of function-valued parameters — applied as `f(args)`, not `lll_f(args)`
     let fns: std::collections::HashSet<String> = part
@@ -161,7 +191,8 @@ fn emit_part(
         .filter(|(_, t)| matches!(t, Ty::Fun(..)))
         .map(|(n, _)| n.clone())
         .collect();
-    emit_body(out, &part.body, 1, &fns, ctors, parts)?;
+    let cx = Cx { fns: &fns, ctors, parts, abort };
+    emit_body(out, &part.body, 1, &cx, res)?;
     out.push_str("}\n");
     Ok(())
 }
@@ -172,13 +203,22 @@ fn indent(n: usize) -> String {
 
 type Names = std::collections::HashSet<String>;
 
+/// Shared codegen context: the name-sets that classify an identifier at a call
+/// site — constructors, function-valued params, part names, and abort-row parts
+/// (whose calls propagate with `?`). Bundled so emit helpers take few arguments.
+struct Cx<'a> {
+    fns: &'a Names,
+    ctors: &'a Names,
+    parts: &'a Names,
+    abort: &'a Names,
+}
+
 fn emit_body(
     out: &mut String,
     body: &[Stmt],
     depth: usize,
-    fns: &Names,
-    ctors: &Names,
-    parts: &Names,
+    cx: &Cx,
+    res: bool,
 ) -> Result<(), String> {
     for s in body {
         match s {
@@ -187,22 +227,67 @@ fn emit_body(
                     "{}let {} = {};\n",
                     indent(depth),
                     local(name),
-                    expr(e, fns, ctors, parts)?
+                    expr(e, cx, res)?
                 ));
             }
             Stmt::Yield(e) => {
-                out.push_str(&format!(
-                    "{}return {};\n",
-                    indent(depth),
-                    expr(e, fns, ctors, parts)?
-                ));
+                if is_abort_effcall(e) {
+                    // `yield E.raise(x)` — the raise already IS `return Err(x)`;
+                    // emit it as the diverging statement (REQ-LLL-018).
+                    out.push_str(&format!(
+                        "{}{};\n",
+                        indent(depth),
+                        expr(e, cx, res)?
+                    ));
+                } else if res {
+                    // a Result-returning (abort-row) part wraps its value in `Ok`.
+                    out.push_str(&format!(
+                        "{}return Ok({});\n",
+                        indent(depth),
+                        expr(e, cx, res)?
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "{}return {};\n",
+                        indent(depth),
+                        expr(e, cx, res)?
+                    ));
+                }
             }
             Stmt::Match(scrut, arms) => {
-                emit_match(out, scrut, arms, depth, fns, ctors, parts)?;
+                emit_match(out, scrut, arms, depth, cx, res)?;
+            }
+            Stmt::Handle(h) => {
+                // discharge an abort effect: `match <call> { Ok(r) => …, Err(m) => … }`.
+                // The handled call is emitted raw (no `?`) so its `Result` is matched.
+                let call = expr(&h.call, cx, false)?;
+                out.push_str(&format!("{}match {call} {{\n", indent(depth)));
+                let d = depth + 1;
+                for c in &h.clauses {
+                    if c.op == "return" {
+                        out.push_str(&format!("{}Ok({}) => {{\n", indent(d), local(&c.params[0])));
+                    } else {
+                        let m = c
+                            .params
+                            .first()
+                            .map(|p| local(p))
+                            .unwrap_or_else(|| "_".to_string());
+                        out.push_str(&format!("{}Err({m}) => {{\n", indent(d)));
+                    }
+                    emit_body(out, &c.body, d + 1, cx, res)?;
+                    out.push_str(&format!("{}}}\n", indent(d)));
+                }
+                out.push_str(&format!("{}}}\n", indent(depth)));
             }
         }
     }
     Ok(())
+}
+
+/// A `yield`ed abort operation (`E.raise(x)`): a user effect op, which in slice 1
+/// is always an abort op and lowers to an early `return Err(..)` (REQ-LLL-018).
+fn is_abort_effcall(e: &Expr) -> bool {
+    matches!(e, Expr::EffCall(n, _) if n != "IO.print" && n != "IO.read")
 }
 
 fn emit_match(
@@ -210,15 +295,14 @@ fn emit_match(
     scrut: &Expr,
     arms: &[Arm],
     depth: usize,
-    fns: &Names,
-    ctors: &Names,
-    parts: &Names,
+    cx: &Cx,
+    res: bool,
 ) -> Result<(), String> {
     // list AND user-ADT values are Rc-wrapped → match on the dereferenced enum
     let is_boxed = arms
         .iter()
         .any(|a| matches!(a.pattern, Pattern::Nil | Pattern::Cons(..) | Pattern::Ctor(..)));
-    let s = expr(scrut, fns, ctors, parts)?;
+    let s = expr(scrut, cx, res)?;
     if is_boxed {
         out.push_str(&format!(
             "{}let __s = {s};\n{}match &*__s {{\n",
@@ -248,7 +332,7 @@ fn emit_match(
             }
         };
         let guard = match &arm.guard {
-            Some(g) => format!(" if {}", expr(g, fns, ctors, parts)?),
+            Some(g) => format!(" if {}", expr(g, cx, res)?),
             None => String::new(),
         };
         out.push_str(&format!("{}{pat}{guard} => {{\n", indent(d)));
@@ -268,7 +352,7 @@ fn emit_match(
             }
             _ => {}
         }
-        emit_body(out, &arm.body, d + 1, fns, ctors, parts)?;
+        emit_body(out, &arm.body, d + 1, cx, res)?;
         out.push_str(&format!("{}}}\n", indent(d)));
     }
     // exhaustiveness was PROVED by the vc fork; rustc can't see that proof,
@@ -294,15 +378,15 @@ fn emit_match(
     Ok(())
 }
 
-fn expr(e: &Expr, fns: &Names, ctors: &Names, parts: &Names) -> Result<String, String> {
+fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
     Ok(match e {
         Expr::IntLit(v) => format!("{v}i64"),
         Expr::BoolLit(v) => format!("{v}"),
         Expr::Var(n) => {
-            if ctors.contains(n) {
+            if cx.ctors.contains(n) {
                 // nullary ADT constructor value → Rc-wrapped (REQ-LLL-011)
                 format!("Rc::new({n})")
-            } else if parts.contains(n) {
+            } else if cx.parts.contains(n) {
                 // a bare part name as a first-class function value → the fn item
                 // (coerces to the fn-pointer parameter type) (REQ-LLL-009)
                 mangle(n)
@@ -314,40 +398,52 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names, parts: &Names) -> Result<String, S
         Expr::ListLit(items) => {
             let mut t = "Rc::new(LstI::Nil)".to_string();
             for i in items.iter().rev() {
-                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, fns, ctors, parts)?);
+                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, cx, res)?);
             }
             t
         }
         Expr::Cons(h, t) => format!(
             "Rc::new(LstI::Cons({}, {}))",
-            expr(h, fns, ctors, parts)?,
-            expr(t, fns, ctors, parts)?
+            expr(h, cx, res)?,
+            expr(t, cx, res)?
         ),
-        Expr::Neg(a) => format!("(-{})", expr(a, fns, ctors, parts)?),
-        Expr::Not(a) => format!("(!{})", expr(a, fns, ctors, parts)?),
+        Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),
+        Expr::Not(a) => format!("(!{})", expr(a, cx, res)?),
         Expr::Bin(op, a, b) => {
             // Rust rendering comes from the single operator-semantics source
             // (opsem.rs) — same place the vc fork reads its SMT form, so the
             // euclidean div/mod pairing can never silently drift (DEC-LLL-026).
-            let ta = expr(a, fns, ctors, parts)?;
-            let tb = expr(b, fns, ctors, parts)?;
+            let ta = expr(a, cx, res)?;
+            let tb = expr(b, cx, res)?;
             crate::opsem::form(*op).rust(&ta, &tb)
         }
         Expr::EffCall(name, args) => match name.as_str() {
-            "IO.print" => format!("__lll_io_print({})", expr(&args[0], fns, ctors, parts)?),
+            "IO.print" => format!("__lll_io_print({})", expr(&args[0], cx, res)?),
             "IO.read" => "__lll_io_read()".to_string(),
-            other => return Err(format!("codegen: unknown effect `{other}`")),
+            // a user effect op (slice 1: abort only) → early `Err` with the raised
+            // value; valid because the performing part is Result-typed (REQ-LLL-018).
+            _ => {
+                let payload = match args.first() {
+                    Some(a) => expr(a, cx, res)?,
+                    None => "0".to_string(),
+                };
+                format!("return Err({payload})")
+            }
         },
         Expr::Call(name, args) => {
             let xs: Result<Vec<String>, String> =
-                args.iter().map(|a| expr(a, fns, ctors, parts)).collect();
+                args.iter().map(|a| expr(a, cx, res)).collect();
             let xs = xs?.join(", ");
-            if ctors.contains(name) {
+            if cx.ctors.contains(name) {
                 // ADT constructor application → Rc-wrapped variant (REQ-LLL-011)
                 format!("Rc::new({name}({xs}))")
-            } else if fns.contains(name) {
+            } else if cx.fns.contains(name) {
                 // application of a function-valued parameter (REQ-LLL-009)
                 format!("{}({xs})", local(name))
+            } else if res && cx.abort.contains(name) {
+                // calling an abort-row part from a Result-returning part: propagate
+                // the abort with `?` (zero-cost, no unwinding) — REQ-LLL-018.
+                format!("{}({xs})?", mangle(name))
             } else {
                 format!("{}({xs})", mangle(name))
             }
@@ -358,7 +454,7 @@ fn expr(e: &Expr, fns: &Names, ctors: &Names, parts: &Names) -> Result<String, S
                 .iter()
                 .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
                 .collect();
-            format!("(|{}| {})", ps.join(", "), expr(body, fns, ctors, parts)?)
+            format!("(|{}| {})", ps.join(", "), expr(body, cx, res)?)
         }
     })
 }

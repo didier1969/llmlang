@@ -189,6 +189,15 @@ fn collect_dep_names(body: &[Stmt], out: &mut Vec<String>) {
                     collect_dep_names(&a.body, out);
                 }
             }
+            Stmt::Handle(h) => {
+                collect_dep_expr(&h.call, out);
+                if let Some(f) = &h.from {
+                    collect_dep_expr(f, out);
+                }
+                for c in &h.clauses {
+                    collect_dep_names(&c.body, out);
+                }
+            }
         }
     }
 }
@@ -331,6 +340,26 @@ impl<'a> Norm<'a> {
                     }
                     parts.push(format!("(match {ne} {})", na.join(" ")));
                 }
+                Stmt::Handle(h) => {
+                    let call = self.expr(&h.call);
+                    let from = h.from.as_ref().map(|f| self.expr(f)).unwrap_or_default();
+                    let mut cls = Vec::new();
+                    for c in &h.clauses {
+                        for p in &c.params {
+                            self.env.push(p.clone());
+                        }
+                        let b = self.body(&c.body);
+                        for _ in &c.params {
+                            self.env.pop();
+                        }
+                        cls.push(format!("(clause {} {} {b})", c.op, c.params.len()));
+                    }
+                    parts.push(format!(
+                        "(handle {call} {} (from {from}) {})",
+                        h.effect,
+                        cls.join(" ")
+                    ));
+                }
             }
         }
         for _ in 0..pushed {
@@ -414,7 +443,7 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
             }
             collect_tyvars(r, acc);
         }
-        Ty::Int | Ty::Bool | Ty::User(_) => {}
+        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never => {}
     }
 }
 
@@ -435,6 +464,7 @@ fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
             canon_ty(r, rename)
         ),
         Ty::User(n) => n.clone(),
+        Ty::Never => "Never".to_string(),
     }
 }
 

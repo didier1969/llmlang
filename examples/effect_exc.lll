@@ -1,0 +1,31 @@
+module ExcDemo:
+
+  # Typed algebraic effect — the ABORT archetype (REQ-LLL-018).
+  # An operation whose return type is `Never` never resumes: performing it
+  # aborts the handled computation. No `resume` keyword exists, so multi-shot /
+  # non-tail resumption is unrepresentable — the checker cannot miscompile it.
+  effect Exc:
+    raise(Int) -> Never
+
+  # `safeDiv` performs `Exc.raise` behind a guard. Its row carries `Exc`, so the
+  # compiler proves the pure core with the aborting path dead (partial
+  # correctness): the div-by-zero side-condition is discharged from the `false`
+  # arm, and the `true` arm produces no value.
+  part safeDiv(a: Int, b: Int) -> Int via Exc:
+    match b == 0:
+      true  -> yield Exc.raise(a)
+      false -> yield a div b
+
+  # `handle … with Exc` discharges the effect: the `return` clause receives a
+  # normal result, the `raise` clause the aborted value. `run` is therefore PURE
+  # again (no `via`). Codegen lowers this to a `Result`/`?` and an Ok/Err match —
+  # zero continuations, zero unwinding.
+  part run(a: Int, b: Int) -> Int:
+    handle safeDiv(a, b) with Exc:
+      raise(m) -> yield 0 - m
+      return r -> yield r
+
+  part main() -> Int via IO:
+    let ok  = run(10, 2)   # 5
+    let bad = run(10, 0)   # aborts → 0 - 10 = -10
+    yield IO.print(ok + bad)   # -5

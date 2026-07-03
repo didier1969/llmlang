@@ -56,6 +56,20 @@ struct Ctx<'a> {
     smaller: Vec<HashMap<String, String>>, // var -> root param
     /// collected recursive-call classification
     rec_calls: Vec<bool>, // true = structural at this call
+    /// effect table: "Effect.op" -> (effect, param types, ret type) — REQ-LLL-018
+    effect_ops: &'a HashMap<String, (String, Vec<Ty>, Ty)>,
+    /// effects currently discharged by an enclosing `handle` (row extension while
+    /// checking the handled call). A perform is allowed if its effect is in the
+    /// part's declared row OR in this handled stack.
+    handled: Vec<String>,
+}
+
+impl Ctx<'_> {
+    /// The effect labels this context may currently perform: the part's declared
+    /// row plus any effect discharged by an enclosing `handle`.
+    fn effect_allowed(&self, effect: &str) -> bool {
+        self.part.effects.iter().any(|e| e == effect) || self.handled.iter().any(|e| e == effect)
+    }
 }
 
 pub fn check_module(module: Module) -> Result<CheckedModule, String> {
@@ -107,6 +121,48 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         check_user_ty_declared(&p.ret, &type_names)?;
     }
+    // effect table (REQ-LLL-018): "Effect.op" -> (effect, param types, ret type).
+    // IO is a builtin effect; user effects come from `effect` declarations.
+    let mut effect_names: HashSet<String> = HashSet::new();
+    effect_names.insert("IO".to_string());
+    let mut effect_ops: HashMap<String, (String, Vec<Ty>, Ty)> = HashMap::new();
+    effect_ops.insert("IO.print".into(), ("IO".into(), vec![Ty::Int], Ty::Int));
+    effect_ops.insert("IO.read".into(), ("IO".into(), vec![], Ty::Int));
+    for ed in &module.effects {
+        if !effect_names.insert(ed.name.clone()) {
+            return Err(format!("duplicate effect `{}`", ed.name));
+        }
+        if ed.name == "IO" {
+            return Err("`IO` is a builtin effect and cannot be redeclared".into());
+        }
+        for op in &ed.ops {
+            for t in &op.params {
+                check_user_ty_declared(t, &type_names)?;
+            }
+            if op.ret != Ty::Never {
+                check_user_ty_declared(&op.ret, &type_names)?;
+            }
+            let key = format!("{}.{}", ed.name, op.name);
+            if effect_ops
+                .insert(key.clone(), (ed.name.clone(), op.params.clone(), op.ret.clone()))
+                .is_some()
+            {
+                return Err(format!("duplicate effect operation `{key}`"));
+            }
+        }
+    }
+    // every effect named in a `via` clause must be declared (generalizes v1's IO-only)
+    for part in &module.parts {
+        for e in &part.effects {
+            if !effect_names.contains(e) {
+                return Err(format!(
+                    "part `{}`: unknown effect `{e}` in `via` — declare it with `effect {e}:`",
+                    part.name
+                ));
+            }
+        }
+    }
+
     // call-graph SCCs (wave 3): mutual recursion is allowed, measured
     let (scc_id, scc_multi) = compute_sccs(&module, &index);
 
@@ -135,15 +191,13 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             vars: vec![part.params.iter().cloned().collect()],
             smaller: vec![HashMap::new()],
             rec_calls: Vec::new(),
+            effect_ops: &effect_ops,
+            handled: Vec::new(),
         };
-        let effectful = part.effects.iter().any(|e| e == "IO");
-        if !part.effects.is_empty() && !effectful {
-            return Err(format!(
-                "part `{}`: unknown effect(s) {:?} (v1 supports IO)",
-                part.name, part.effects
-            ));
-        }
-        check_body(&mut ctx, &part.body, &part.ret, effectful)?;
+        // effect checking is row-based (REQ-LLL-018): each perform / effectful call
+        // is validated against ctx.effect_allowed (the part's `via` row ∪ any effect
+        // discharged by an enclosing `handle`), so no ambient "effectful" flag.
+        check_body(&mut ctx, &part.body, &part.ret)?;
         let in_multi = scc_multi.contains(&part.name);
         let rec = if in_multi {
             // mutual recursion: every SCC member must carry a measure
@@ -347,6 +401,16 @@ fn collect_locals(body: &[Stmt], out: &mut Vec<String>) {
                     collect_locals(&a.body, out);
                 }
             }
+            Stmt::Handle(h) => {
+                in_expr(&h.call, out);
+                if let Some(f) = &h.from {
+                    in_expr(f, out);
+                }
+                for c in &h.clauses {
+                    out.extend(c.params.iter().cloned());
+                    collect_locals(&c.body, out);
+                }
+            }
         }
     }
 }
@@ -355,25 +419,36 @@ fn collect_binders(body: &[Stmt]) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     fn walk(body: &[Stmt], out: &mut std::collections::HashSet<String>) {
         for s in body {
-            if let Stmt::Match(_, arms) = s {
-                for a in arms {
-                    match &a.pattern {
-                        Pattern::Var(v) => {
-                            out.insert(v.clone());
-                        }
-                        Pattern::Cons(h, t) => {
-                            out.insert(h.clone());
-                            out.insert(t.clone());
-                        }
-                        Pattern::Ctor(_, binders) => {
-                            for b in binders {
-                                out.insert(b.clone());
+            match s {
+                Stmt::Match(_, arms) => {
+                    for a in arms {
+                        match &a.pattern {
+                            Pattern::Var(v) => {
+                                out.insert(v.clone());
                             }
+                            Pattern::Cons(h, t) => {
+                                out.insert(h.clone());
+                                out.insert(t.clone());
+                            }
+                            Pattern::Ctor(_, binders) => {
+                                for b in binders {
+                                    out.insert(b.clone());
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        walk(&a.body, out);
                     }
-                    walk(&a.body, out);
                 }
+                Stmt::Handle(h) => {
+                    for c in &h.clauses {
+                        for b in &c.params {
+                            out.insert(b.clone());
+                        }
+                        walk(&c.body, out);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -392,6 +467,15 @@ fn collect_calls(body: &[Stmt], f: &mut dyn FnMut(&str)) {
                         collect_calls_expr(g, f);
                     }
                     collect_calls(&a.body, f);
+                }
+            }
+            Stmt::Handle(h) => {
+                collect_calls_expr(&h.call, f);
+                if let Some(fr) = &h.from {
+                    collect_calls_expr(fr, f);
+                }
+                for c in &h.clauses {
+                    collect_calls(&c.body, f);
                 }
             }
         }
@@ -640,6 +724,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
             ps.iter().map(|p| subst_ty(p, subst)).collect(),
             Box::new(subst_ty(r, subst)),
         ),
+        Ty::Never => Ty::Never,
     }
 }
 
@@ -662,7 +747,7 @@ impl<'a> Ctx<'a> {
     }
 }
 
-fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result<(), String> {
+fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
     let n = body.len();
     for (i, s) in body.iter().enumerate() {
         let last = i + 1 == n;
@@ -674,7 +759,7 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                         ctx.part.name
                     ));
                 }
-                let t = check_expr(ctx, e, effectful, None)?;
+                let t = check_expr(ctx, e, None)?;
                 if matches!(t, Ty::Fun(..)) {
                     return Err(format!(
                         "part `{}`: binding a function value with `let` is not supported (v1) — \
@@ -695,8 +780,10 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                 }
                 // the return type is the expected type — lets `yield []` fix the
                 // element type of an empty list in a generic base case (REQ-LLL-007)
-                let t = check_expr(ctx, e, effectful, Some(ret))?;
-                if &t != ret {
+                let t = check_expr(ctx, e, Some(ret))?;
+                // `Never` (an abort op) diverges — it coerces to any return type,
+                // and the path produces no value (REQ-LLL-018).
+                if &t != ret && t != Ty::Never {
                     return Err(format!(
                         "part `{}`: yields {t} but is declared -> {ret}",
                         ctx.part.name
@@ -710,7 +797,7 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                         ctx.part.name
                     ));
                 }
-                let ts = check_expr(ctx, scrut, effectful, None)?;
+                let ts = check_expr(ctx, scrut, None)?;
                 // scrutinee root for structural-descent tracking: either a list
                 // param, or a var already known smaller-than a param
                 let scrut_root: Option<String> = match scrut {
@@ -798,7 +885,7 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                         }
                     }
                     if let Some(g) = &arm.guard {
-                        let tg = check_expr(ctx, g, effectful, None)?;
+                        let tg = check_expr(ctx, g, None)?;
                         if tg != Ty::Bool {
                             return Err(format!(
                                 "part `{}`: `when` guard must be Bool",
@@ -806,9 +893,97 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
                             ));
                         }
                     }
-                    check_body(ctx, &arm.body, ret, effectful)?;
+                    check_body(ctx, &arm.body, ret)?;
                     ctx.vars.pop();
                     ctx.smaller.pop();
+                }
+            }
+            Stmt::Handle(h) => {
+                if !last {
+                    return Err(format!(
+                        "part `{}`: `handle` must be the final statement of its block",
+                        ctx.part.name
+                    ));
+                }
+                // the handled effect must be declared (own at least one operation)
+                let ops_of_effect: Vec<(String, Vec<Ty>, Ty)> = ctx
+                    .effect_ops
+                    .iter()
+                    .filter(|(_, (e, _, _))| e == &h.effect)
+                    .map(|(k, (_, p, r))| (k.clone(), p.clone(), r.clone()))
+                    .collect();
+                if ops_of_effect.is_empty() {
+                    return Err(format!(
+                        "part `{}`: `handle … with {}` — unknown effect (declare `effect {}:`)",
+                        ctx.part.name, h.effect, h.effect
+                    ));
+                }
+                // optional evidence expression (parameterized handlers, e.g. State `from n`)
+                if let Some(f) = &h.from {
+                    check_expr(ctx, f, Some(&Ty::Int))?;
+                }
+                // type the handled call under a row extended with the handled effect
+                ctx.handled.push(h.effect.clone());
+                let call_ty = check_expr(ctx, &h.call, None)?;
+                ctx.handled.pop();
+                // clauses: exactly one `return` + operation clauses of this effect,
+                // each body yielding the handle result type (= the part's `ret`).
+                let mut seen_return = false;
+                for c in &h.clauses {
+                    ctx.vars.push(HashMap::new());
+                    ctx.smaller.push(HashMap::new());
+                    if c.op == "return" {
+                        if seen_return {
+                            return Err(format!(
+                                "part `{}`: duplicate `return` clause",
+                                ctx.part.name
+                            ));
+                        }
+                        seen_return = true;
+                        if c.params.len() != 1 {
+                            return Err(format!(
+                                "part `{}`: `return` clause binds exactly one result value",
+                                ctx.part.name
+                            ));
+                        }
+                        ctx.vars
+                            .last_mut()
+                            .unwrap()
+                            .insert(c.params[0].clone(), call_ty.clone());
+                    } else {
+                        let key = format!("{}.{}", h.effect, c.op);
+                        let (_, params, _ret) = match ops_of_effect.iter().find(|(k, _, _)| k == &key)
+                        {
+                            Some(s) => s,
+                            None => {
+                                return Err(format!(
+                                    "part `{}`: `handle … with {}` has no operation `{}`",
+                                    ctx.part.name, h.effect, c.op
+                                ))
+                            }
+                        };
+                        if c.params.len() != params.len() {
+                            return Err(format!(
+                                "part `{}`: clause `{}` binds {} parameter(s), operation takes {}",
+                                ctx.part.name,
+                                c.op,
+                                c.params.len(),
+                                params.len()
+                            ));
+                        }
+                        for (bn, bt) in c.params.iter().zip(params) {
+                            ctx.vars.last_mut().unwrap().insert(bn.clone(), bt.clone());
+                        }
+                    }
+                    check_body(ctx, &c.body, ret)?;
+                    ctx.vars.pop();
+                    ctx.smaller.pop();
+                }
+                if !seen_return {
+                    return Err(format!(
+                        "part `{}`: `handle` needs a `return` clause",
+                        ctx.part.name
+                    ));
                 }
             }
         }
@@ -819,7 +994,6 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty, effectful: bool) -> Result
 fn check_expr(
     ctx: &mut Ctx,
     e: &Expr,
-    effectful: bool,
     expected: Option<&Ty>,
 ) -> Result<Ty, String> {
     Ok(match e {
@@ -827,9 +1001,9 @@ fn check_expr(
         Expr::BoolLit(_) => Ty::Bool,
         Expr::ListLit(items) => {
             if let Some(first) = items.first() {
-                let elem = check_expr(ctx, first, effectful, None)?;
+                let elem = check_expr(ctx, first, None)?;
                 for i in &items[1..] {
-                    let ti = check_expr(ctx, i, effectful, None)?;
+                    let ti = check_expr(ctx, i, None)?;
                     if ti != elem {
                         return Err(format!(
                             "part `{}`: list literal elements must share one type, got {elem} and {ti}",
@@ -868,7 +1042,7 @@ fn check_expr(
                 } else if let Some(&idx) = ctx.index.get(n) {
                     // a pure part used as a first-class function value (REQ-LLL-009)
                     let callee = &ctx.module.parts[idx];
-                    if callee.effects.iter().any(|e| e == "IO") {
+                    if !callee.effects.is_empty() {
                         return Err(format!(
                             "part `{}`: `{n}` has effects and cannot be used as a value",
                             ctx.part.name
@@ -882,26 +1056,26 @@ fn check_expr(
             }
         },
         Expr::Neg(a) => {
-            if check_expr(ctx, a, effectful, None)? != Ty::Int {
+            if check_expr(ctx, a, None)? != Ty::Int {
                 return Err(format!("part `{}`: negation needs Int", ctx.part.name));
             }
             Ty::Int
         }
         Expr::Not(a) => {
-            if check_expr(ctx, a, effectful, None)? != Ty::Bool {
+            if check_expr(ctx, a, None)? != Ty::Bool {
                 return Err(format!("part `{}`: `not` needs Bool", ctx.part.name));
             }
             Ty::Bool
         }
         Expr::Bin(op, a, b) => {
-            let ta = check_expr(ctx, a, effectful, None)?;
-            let tb = check_expr(ctx, b, effectful, None)?;
+            let ta = check_expr(ctx, a, None)?;
+            let tb = check_expr(ctx, b, None)?;
             bin_type(*op, ta, tb).map_err(|e| format!("part `{}`: {e}", ctx.part.name))?
         }
         Expr::Cons(h, t) => {
-            let th = check_expr(ctx, h, effectful, None)?;
+            let th = check_expr(ctx, h, None)?;
             let want_tail = Ty::list(th.clone());
-            let tt = check_expr(ctx, t, effectful, Some(&want_tail))?;
+            let tt = check_expr(ctx, t, Some(&want_tail))?;
             if tt != want_tail {
                 return Err(format!(
                     "part `{}`: `::` needs T on the left and List[T] on the right, got {th} :: {tt}",
@@ -911,39 +1085,43 @@ fn check_expr(
             Ty::list(th)
         }
         Expr::EffCall(name, args) => {
-            if !effectful {
+            // table-driven effect operation (REQ-LLL-018): look up its effect +
+            // signature, require that effect in the current row, check the args.
+            let (effect, params, ret) = match ctx.effect_ops.get(name) {
+                Some(sig) => sig.clone(),
+                None => {
+                    return Err(format!(
+                        "part `{}`: unknown effect operation `{name}` — declare it in an `effect`",
+                        ctx.part.name
+                    ))
+                }
+            };
+            if !ctx.effect_allowed(&effect) {
                 return Err(format!(
-                    "part `{}` is pure but calls effect `{name}` — declare `via IO` \
+                    "part `{}` is pure w.r.t. `{effect}` but performs `{name}` — declare \
+                     `via {effect}` or discharge it with `handle … with {effect}` \
                      (purity is a language invariant, DEC-LLL-003)",
                     ctx.part.name
                 ));
             }
-            match name.as_str() {
-                "IO.print" => {
-                    if args.len() != 1 || check_expr(ctx, &args[0], effectful, None)? != Ty::Int {
-                        return Err(format!(
-                            "part `{}`: IO.print takes one Int argument",
-                            ctx.part.name
-                        ));
-                    }
-                    Ty::Int
-                }
-                "IO.read" => {
-                    if !args.is_empty() {
-                        return Err(format!(
-                            "part `{}`: IO.read takes no arguments",
-                            ctx.part.name
-                        ));
-                    }
-                    Ty::Int
-                }
-                other => {
+            if args.len() != params.len() {
+                return Err(format!(
+                    "part `{}`: `{name}` takes {} argument(s), got {}",
+                    ctx.part.name,
+                    params.len(),
+                    args.len()
+                ));
+            }
+            for (a, pt) in args.iter().zip(&params) {
+                let ta = check_expr(ctx, a, Some(pt))?;
+                if &ta != pt {
                     return Err(format!(
-                        "part `{}`: unknown effect operation `{other}` (v1: IO.print, IO.read)",
+                        "part `{}`: `{name}` expects {pt} but got {ta}",
                         ctx.part.name
-                    ))
+                    ));
                 }
             }
+            ret
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {
             // ADT constructor application `Ctor(f1, …)` (REQ-LLL-011)
@@ -957,7 +1135,7 @@ fn check_expr(
                 ));
             }
             for (a, ft) in args.iter().zip(&fields) {
-                let ta = check_expr(ctx, a, effectful, Some(ft))?;
+                let ta = check_expr(ctx, a, Some(ft))?;
                 if ta != *ft {
                     return Err(format!(
                         "part `{}`: constructor `{name}` field expects {ft}, got {ta}",
@@ -987,7 +1165,7 @@ fn check_expr(
                 ));
             }
             for (a, pt) in args.iter().zip(&ptys) {
-                let ta = check_expr(ctx, a, effectful, Some(pt))?;
+                let ta = check_expr(ctx, a, Some(pt))?;
                 if ta != *pt {
                     return Err(format!(
                         "part `{}`: applying `{name}` — argument expects {pt}, got {ta}",
@@ -1002,16 +1180,21 @@ fn check_expr(
                 format!("part `{}`: call to unknown part `{name}`", ctx.part.name)
             })?;
             let callee = &ctx.module.parts[idx];
-            let callee_effectful = callee.effects.iter().any(|e| e == "IO");
             // clone the signature so the immutable module borrow is released
             // before the (mutable) argument checks below
             let callee_params = callee.params.clone();
             let callee_ret = callee.ret.clone();
-            if callee_effectful && !effectful {
-                return Err(format!(
-                    "part `{}` is pure but calls effectful part `{name}` — declare `via IO`",
-                    ctx.part.name
-                ));
+            let callee_effects = callee.effects.clone();
+            // effect propagation (REQ-LLL-018): the caller's row must cover every
+            // effect the callee declares, unless discharged by an enclosing handle.
+            for e in &callee_effects {
+                if !ctx.effect_allowed(e) {
+                    return Err(format!(
+                        "part `{}` calls `{name}` which performs `{e}`, but `{e}` is not in its \
+                         row — declare `via {e}` or handle it (DEC-LLL-003)",
+                        ctx.part.name
+                    ));
+                }
             }
             if args.len() != callee_params.len() {
                 return Err(format!(
@@ -1029,7 +1212,7 @@ fn check_expr(
                 // push the declared param type inward as the expected type, so an
                 // empty list `[]` in argument position takes its element type from
                 // the callee's signature (e.g. `rev_acc(xs, [])`).
-                let ta = check_expr(ctx, a, effectful, Some(pt))?;
+                let ta = check_expr(ctx, a, Some(pt))?;
                 unify_arg(pt, &ta, &mut subst).map_err(|e| {
                     format!("part `{}`: argument `{pn}` of `{name}`: {e}", ctx.part.name)
                 })?;
@@ -1056,7 +1239,7 @@ fn check_expr(
             // emits a capturing closure).
             ctx.vars.push(params.iter().cloned().collect());
             ctx.smaller.push(HashMap::new());
-            let bt = check_expr(ctx, body, false, None)?;
+            let bt = check_expr(ctx, body, None)?;
             ctx.smaller.pop();
             ctx.vars.pop();
             let ptys = params.iter().map(|(_, t)| t.clone()).collect();

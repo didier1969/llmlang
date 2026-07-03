@@ -34,6 +34,15 @@ pub fn hash_deps(body: &[Stmt], out: &mut Vec<String>) {
                     hash_deps(&a.body, out);
                 }
             }
+            Stmt::Handle(h) => {
+                collect(&h.call, out);
+                if let Some(f) = &h.from {
+                    collect(f, out);
+                }
+                for c in &h.clauses {
+                    hash_deps(&c.body, out);
+                }
+            }
         }
     }
     fn collect(e: &Expr, out: &mut Vec<String>) {

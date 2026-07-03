@@ -149,6 +149,25 @@ fn purity_is_an_invariant_not_a_convention() {
 }
 
 #[test]
+fn abort_effect_purity_is_enforced() {
+    // REQ-LLL-018: a user-declared effect is a typed row obligation. A part that
+    // performs `Exc.raise` without `via Exc` (and without a `handle`) is rejected
+    // at compile time — the same invariant that governs IO (DEC-LLL-003).
+    let src = "module B:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part oops(a: Int) -> Int:\n    yield Exc.raise(a)\n";
+    let m = parser::parse_module(src).unwrap();
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("Exc") && err.contains("pure"), "must reject undeclared effect: {err}");
+}
+
+#[test]
+fn unknown_effect_in_via_is_rejected() {
+    // an effect named in `via` must be declared with `effect …:` (REQ-LLL-018).
+    let src = "module B:\n\n  part f(n: Int) -> Int via Ghost:\n    yield n\n";
+    let m = parser::parse_module(src).unwrap();
+    assert!(types::check_module(m).unwrap_err().contains("unknown effect `Ghost`"));
+}
+
+#[test]
 fn pure_cannot_call_effectful() {
     let src = "module T:\n\n  part e(n: Int) -> Int via IO:\n    let x = IO.print(n)\n    yield x\n\n  part f(n: Int) -> Int:\n    yield e(n)\n";
     let m = parser::parse_module(src).unwrap();
@@ -180,6 +199,40 @@ fn generated_rust_compiles_and_runs() {
     let out = std::process::Command::new(&bin).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("42"), "gcd(126,84) must print 42, got: {stdout}");
+}
+
+#[test]
+fn algebraic_effect_abort_verifies_and_runs() {
+    // REQ-LLL-018: a typed abort effect (Exc) — declare it, perform `raise` behind
+    // a guard, discharge it with `handle … with Exc`. The pure core is proved with
+    // the aborting path dead (partial correctness); codegen lowers the effect to a
+    // `Result`/`?` with the handler as an `Ok`/`Err` match — no continuations.
+    let src = "module T:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part safeDiv(a: Int, b: Int) -> Int via Exc:\n    match b == 0:\n      true -> yield Exc.raise(a)\n      false -> yield a div b\n\n  part run(a: Int, b: Int) -> Int:\n    handle safeDiv(a, b) with Exc:\n      raise(m) -> yield 0 - m\n      return r -> yield r\n\n  part main() -> Int via IO:\n    let x = run(10, 2)\n    let y = run(10, 0)\n    yield IO.print(x + y)\n";
+    // the pure core verifies: safeDiv's div-by-zero side-condition is discharged
+    // from the guard, and the aborting path carries no `ensures` obligation.
+    let report = verify_src(src);
+    assert!(report.ok(), "effectful program must verify: {:?}", failures(&report));
+    // and it compiles + runs: run(10,2)=5, run(10,0)=0-10=-10 → prints -5.
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("eff.rs");
+    let bin = dir.join("eff_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "effect codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("-5"), "handled abort must print -5, got: {stdout}");
 }
 
 #[test]
@@ -650,6 +703,18 @@ fn export_ist_emits_axon_extraction_result() {
         rels.iter().any(|r| r["from"] == "twice" && r["to"] == "inc" && r["rel_type"] == "calls"),
         "twice→inc call edge must be present"
     );
+}
+
+#[test]
+fn effect_exc_example_verifies() {
+    // REQ-LLL-018: the canonical typed-effect example (examples/effect_exc.lll)
+    // must stay green — declare `Exc`, raise behind a guard, discharge via handle.
+    let (_, m) = loader::load_program("examples/effect_exc.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "effect_exc.lll must verify: {:?}", failures(&report));
 }
 
 #[test]

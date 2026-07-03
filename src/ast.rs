@@ -13,7 +13,29 @@ pub struct Module {
     /// user-defined algebraic data types (REQ-LLL-011)
     #[serde(default)]
     pub types: Vec<TypeDecl>,
+    /// user-declared algebraic effects (REQ-LLL-018)
+    #[serde(default)]
+    pub effects: Vec<EffectDecl>,
     pub parts: Vec<Part>,
+}
+
+/// A user-declared algebraic effect `effect Name` with a set of typed operations
+/// (REQ-LLL-018). An operation whose return type is `Never` is an ABORT op (it
+/// never resumes); any other return type is TAIL-RESUMPTIVE (the handler clause's
+/// value is the reply, resumption is implicit). No first-class continuation is
+/// exposed, so multi-shot / non-tail resume is unrepresentable by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectDecl {
+    pub name: String,
+    /// each operation: its name + positional parameter types + return type
+    pub ops: Vec<OpSig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpSig {
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
 }
 
 /// A user algebraic data type `type Name = C1(T…) | C2 | …` (REQ-LLL-011).
@@ -64,6 +86,10 @@ pub enum Ty {
     Fun(Vec<Ty>, Box<Ty>),
     /// A user-declared algebraic data type, by name (REQ-LLL-011).
     User(String),
+    /// The empty type — the return type of an ABORT effect operation (REQ-LLL-018).
+    /// A `Never`-typed expression diverges (aborts the handled block), so it
+    /// coerces to any expected type and code after it is dead.
+    Never,
 }
 
 impl Ty {
@@ -78,7 +104,7 @@ impl Ty {
     /// True when the type mentions no type variable (fully concrete).
     pub fn is_concrete(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::User(_) => true,
+            Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never => true,
             Ty::Var(_) => false,
             Ty::List(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
@@ -98,6 +124,7 @@ impl std::fmt::Display for Ty {
                 write!(f, "({}) -> {r}", ps.join(", "))
             }
             Ty::User(name) => write!(f, "{name}"),
+            Ty::Never => write!(f, "Never"),
         }
     }
 }
@@ -107,6 +134,30 @@ pub enum Stmt {
     Let(String, Expr),
     Yield(Expr),
     Match(Expr, Vec<Arm>),
+    /// `handle <call> with <Effect> [from <init>]:` + clauses (REQ-LLL-018). Runs
+    /// `call` under a row extended with `Effect`; each operation clause interprets
+    /// an op (abort ops via early `Err`, tail-resumptive via evidence), and the
+    /// mandatory `return` clause receives the normal result. Terminal like `match`.
+    Handle(Handle),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Handle {
+    pub call: Expr,
+    pub effect: String,
+    /// initial evidence for a parameterized handler (`from e`), e.g. State's cell.
+    pub from: Option<Expr>,
+    /// operation clauses + the mandatory `return` clause (op name `return`).
+    pub clauses: Vec<HandleClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandleClause {
+    /// operation name, or `return` for the value clause.
+    pub op: String,
+    /// clause binders (op parameters, or the single result binder for `return`).
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

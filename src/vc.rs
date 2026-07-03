@@ -250,6 +250,9 @@ fn smt_ty(t: &Ty) -> String {
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
         // a user ADT is a Z3 datatype of the same name (REQ-LLL-011)
         Ty::User(n) => n.clone(),
+        // `Never` is the return type of an abort op; an abort path is proven dead
+        // (assume false), so its result is never translated to a value sort.
+        Ty::Never => unreachable!("Never has no value sort — abort paths are proven unreachable"),
     }
 }
 
@@ -290,6 +293,17 @@ impl<'a> Emit<'a> {
                     }
                 }
                 Stmt::Yield(e) => {
+                    // an aborting yield (`yield E.raise(x)`) diverges: translate the
+                    // argument for its side-conditions, then the path is dead — the
+                    // `ensures` hold vacuously (partial correctness, REQ-LLL-018).
+                    if let Expr::EffCall(name, args) = e {
+                        if self.is_abort_op(name) {
+                            for a in args {
+                                self.tr(a, &env)?;
+                            }
+                            continue;
+                        }
+                    }
                     let t = self.tr(e, &env)?;
                     let mut env2 = env.clone();
                     env2.insert("result".into(), t);
@@ -353,9 +367,46 @@ impl<'a> Emit<'a> {
                     let goal = format!("(or {})", arm_conds.join(" "));
                     self.oblige("match is exhaustive".into(), goal);
                 }
+                Stmt::Handle(h) => {
+                    // effects are opaque at the boundary: the handled computation's
+                    // result is havoc'd, so a handler choice can't affect the proof
+                    // (REQ-LLL-018, DEC-LLL-017). The `return` binder takes the Ok-path
+                    // result of the call; each op clause binder is a fresh symbolic.
+                    let call_term = self.tr(&h.call, &env)?;
+                    for c in &h.clauses {
+                        let mut env2 = env.clone();
+                        if c.op == "return" {
+                            env2.insert(c.params[0].clone(), call_term.clone());
+                        } else if let Some(op) = self.find_op(&format!("{}.{}", h.effect, c.op)) {
+                            let params = op.params.clone();
+                            for (bn, pt) in c.params.iter().zip(&params) {
+                                let f = self.fresh(&smt_ty(pt));
+                                env2.insert(bn.clone(), f);
+                            }
+                        }
+                        self.walk_body(&c.body, env2)?;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// Look up an effect operation `Effect.op` by its dotted name (REQ-LLL-018).
+    fn find_op(&self, name: &str) -> Option<&'a crate::ast::OpSig> {
+        for ed in &self.cm.module.effects {
+            for op in &ed.ops {
+                if format!("{}.{}", ed.name, op.name) == *name {
+                    return Some(op);
+                }
+            }
+        }
+        None
+    }
+
+    /// True when `name` is an abort operation (its declared return type is `Never`).
+    fn is_abort_op(&self, name: &str) -> bool {
+        self.find_op(name).map(|op| op.ret == Ty::Never).unwrap_or(false)
     }
 
     /// Translate an expression to an SMT term, emitting side-condition
@@ -406,13 +457,33 @@ impl<'a> Emit<'a> {
                 }
                 f.smt(&ta, &tb)
             }
-            Expr::EffCall(name, args) => match name.as_str() {
+            Expr::EffCall(name, args) => {
                 // IO.print returns its argument (deterministic value semantics)
-                "IO.print" => self.tr(&args[0], env)?,
-                // IO.read: arbitrary Int from the world — havoc
-                "IO.read" => self.fresh("Int"),
-                other => return Err(format!("vcgen: unknown effect `{other}`")),
-            },
+                if name == "IO.print" {
+                    self.tr(&args[0], env)?
+                } else if name == "IO.read" {
+                    // IO.read: arbitrary Int from the world — havoc
+                    self.fresh("Int")
+                } else if let Some(op) = self.find_op(name) {
+                    // effect operations are opaque at the boundary (REQ-LLL-018):
+                    // the pure-core proof never depends on a handler's choice.
+                    if op.ret == Ty::Never {
+                        // an abort op is only valid in yield/handle position, where
+                        // the aborting path is proven dead — never a value here.
+                        return Err(format!(
+                            "vcgen: abort op `{name}` used as a value (only valid in yield/handle)"
+                        ));
+                    }
+                    // tail-resumptive: translate args (side-conditions), havoc result
+                    let sort = smt_ty(&op.ret);
+                    for a in args {
+                        self.tr(a, env)?;
+                    }
+                    self.fresh(&sort)
+                } else {
+                    return Err(format!("vcgen: unknown effect `{name}`"));
+                }
+            }
             Expr::Call(name, args) => {
                 // application of a function-valued parameter: `(f_uf arg …)`
                 // (REQ-LLL-009). `f` was declared as an uninterpreted function.
