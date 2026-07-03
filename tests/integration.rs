@@ -1269,6 +1269,27 @@ fn build_run(src: &str) -> String {
 }
 
 #[test]
+fn self_hosting_constant_folder_verifies_and_preserves_semantics() {
+    // REQ-LLL-019 (self-hosting step 2): a REAL compiler pass — constant folding
+    // over the core's euclidean arithmetic AST modelled as an ADT — written in
+    // llmlang and verified by the real Z3 pipeline (termination + exhaustiveness of
+    // every fold/eval part). Semantic preservation isn't expressible as a contract
+    // (no calls in requires/ensures, DEC-LLL-017), so it's DEMONSTRATED at runtime:
+    // eval(fold(e)) == eval(e). Guards the dogfood module examples/self_host_constfold.lll.
+    let src = "module SelfHost.ConstFold:\n\n  type Expr = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)\n\n  part eval(e: Expr) -> Int:\n    match e:\n      Lit(n)    -> yield n\n      Neg(a)    -> yield 0 - eval(a)\n      Add(a, b) -> yield eval(a) + eval(b)\n      Sub(a, b) -> yield eval(a) - eval(b)\n      Mul(a, b) -> yield eval(a) * eval(b)\n\n  part foldNeg(a: Expr) -> Expr:\n    match a:\n      Lit(x) -> yield Lit(0 - x)\n      _      -> yield Neg(a)\n\n  part foldAddL(x: Int, b: Expr) -> Expr:\n    match b:\n      Lit(y) -> yield Lit(x + y)\n      _      -> yield Add(Lit(x), b)\n\n  part foldAdd(a: Expr, b: Expr) -> Expr:\n    match a:\n      Lit(x) -> yield foldAddL(x, b)\n      _      -> yield Add(a, b)\n\n  part foldSubL(x: Int, b: Expr) -> Expr:\n    match b:\n      Lit(y) -> yield Lit(x - y)\n      _      -> yield Sub(Lit(x), b)\n\n  part foldSub(a: Expr, b: Expr) -> Expr:\n    match a:\n      Lit(x) -> yield foldSubL(x, b)\n      _      -> yield Sub(a, b)\n\n  part foldMulL(x: Int, b: Expr) -> Expr:\n    match b:\n      Lit(y) -> yield Lit(x * y)\n      _      -> yield Mul(Lit(x), b)\n\n  part foldMul(a: Expr, b: Expr) -> Expr:\n    match a:\n      Lit(x) -> yield foldMulL(x, b)\n      _      -> yield Mul(a, b)\n\n  part fold(e: Expr) -> Expr:\n    match e:\n      Lit(n)    -> yield Lit(n)\n      Neg(a)    -> yield foldNeg(fold(a))\n      Add(a, b) -> yield foldAdd(fold(a), fold(b))\n      Sub(a, b) -> yield foldSub(fold(a), fold(b))\n      Mul(a, b) -> yield foldMul(fold(a), fold(b))\n\n  part main() -> Int via IO:\n    let e = Add(Mul(Lit(3), Lit(4)), Neg(Lit(5)))\n    let delta = eval(fold(e)) - eval(e)\n    let d = IO.print(delta)\n    yield IO.print(eval(fold(e)))\n";
+    // proof: every eval/fold part terminates (structural) + exhaustive over 5 ctors
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "the self-hosting constant folder must verify: {:?}",
+        failures(&report)
+    );
+    // run: delta = 0 (semantics preserved), folded tree evaluates to 7
+    let out = build_run(src);
+    assert!(out.contains("0\n7"), "expected delta 0 then value 7, got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
