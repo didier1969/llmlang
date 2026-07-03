@@ -125,7 +125,7 @@ fn leaf(v: i64) -> String {
 /// found bugs, not just integer math. Returns the full module text + expected
 /// value, or `None` on overflow.
 fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
-    match rng.below(4) {
+    match rng.below(8) {
         0 => {
             let (e, v) = gen_expr(rng, 2)?;
             Some((format!("module T:\n\n  part main() -> Int:\n    yield {e}\n"), v))
@@ -152,13 +152,57 @@ fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
                 val,
             ))
         }
-        _ => {
+        3 => {
             // a pure effect-generic HOF: apply(dbl, e) == 2*e
             let (e, v) = gen_expr(rng, 1)?;
             let val = v.checked_add(v)?;
             Some((
                 format!("module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part dbl(n: Int) -> Int:\n    yield n + n\n\n  part main() -> Int:\n    yield apply(dbl, {e})\n"),
                 val,
+            ))
+        }
+        4 => {
+            // State effect: a=get, put(a+k), b=get, yield a+b == 2*init + k
+            let init = rng.small();
+            let k = rng.small();
+            let val = init.checked_mul(2)?.checked_add(k)?;
+            Some((
+                format!("module T:\n\n  part run() -> Int via State:\n    let a = State.get()\n    let _ = State.put(a + {k})\n    let b = State.get()\n    yield a + b\n\n  part main() -> Int:\n    handle run() with State from {init}:\n      return r -> yield r\n", k = leaf(k), init = leaf(init)),
+                val,
+            ))
+        }
+        5 => {
+            // abort effect: bail on 0, else n*3, discharged by the handler
+            let n = rng.small();
+            let val = if n == 0 { -1 } else { n.checked_mul(3)? };
+            Some((
+                format!("module T:\n\n  effect Fail:\n    bail() -> Never\n\n  part check(n: Int) -> Int via Fail:\n    match n:\n      0 -> yield Fail.bail()\n      _ -> yield n * 3\n\n  part main() -> Int:\n    handle check({n}) with Fail:\n      return r -> yield r\n      bail() -> yield (0 - 1)\n", n = leaf(n)),
+                val,
+            ))
+        }
+        6 => {
+            // structural recursion over a List literal: sum
+            let len = 2 + rng.below(3) as usize;
+            let mut vals = Vec::new();
+            for _ in 0..len {
+                vals.push(rng.small());
+            }
+            let mut sum: i64 = 0;
+            for &v in &vals {
+                sum = sum.checked_add(v)?;
+            }
+            let list: String = vals.iter().map(|&v| format!("{} :: ", leaf(v))).collect::<String>() + "[]";
+            Some((
+                format!("module T:\n\n  part sum(xs: List[Int]) -> Int:\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + sum(t)\n\n  part main() -> Int:\n    yield sum({list})\n"),
+                sum,
+            ))
+        }
+        _ => {
+            // user ADT: construct + destructure a single-field record
+            let n = rng.small();
+            Some((
+                format!("module T:\n\n  type Box = B(Int)\n\n  part unbox(x: Box) -> Int:\n    match x:\n      B(v) -> yield v\n\n  part main() -> Int:\n    yield unbox(B({n}))\n", n = leaf(n)),
+                n,
             ))
         }
     }
@@ -204,7 +248,7 @@ fn verified_programs_agree_with_the_binary() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut checked = 0;
     let mut attempts = 0;
-    while checked < 32 && attempts < 600 {
+    while checked < 48 && attempts < 1200 {
         attempts += 1;
         let Some((body, expected)) = gen_body(&mut rng) else { continue };
         let m = parser::parse_module(&body).expect("parse");
@@ -239,5 +283,5 @@ fn verified_programs_agree_with_the_binary() {
         );
         checked += 1;
     }
-    assert!(checked >= 32, "differential produced too few cases ({checked})");
+    assert!(checked >= 48, "differential produced too few cases ({checked})");
 }
