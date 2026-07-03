@@ -62,12 +62,24 @@ struct Ctx<'a> {
     /// checking the handled call). A perform is allowed if its effect is in the
     /// part's declared row OR in this handled stack.
     handled: Vec<String>,
+    /// user-authored tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037)
+    user_tail_effects: &'a HashSet<String>,
+    /// ambient effects (IO + all-extern) — performable inside a capture-free
+    /// handler clause because they need no evidence (DEC-LLL-037).
+    ambient_effects: &'a HashSet<String>,
+    /// true while checking a user-effect handler clause body: it must be
+    /// capture-free, so only ambient effects may be performed (DEC-LLL-037).
+    captureless: bool,
 }
 
 impl Ctx<'_> {
     /// The effect labels this context may currently perform: the part's declared
-    /// row plus any effect discharged by an enclosing `handle`.
+    /// row plus any effect discharged by an enclosing `handle`. Inside a
+    /// capture-free handler clause, only ambient effects are allowed.
     fn effect_allowed(&self, effect: &str) -> bool {
+        if self.captureless {
+            return self.ambient_effects.contains(effect);
+        }
         self.part.effects.iter().any(|e| e == effect) || self.handled.iter().any(|e| e == effect)
     }
 }
@@ -137,6 +149,13 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // (REQ-LLL-025 slice 3): `ask` reads an immutable environment value.
     effect_names.insert("Reader".to_string());
     effect_ops.insert("Reader.ask".into(), ("Reader".into(), vec![], Ty::Int));
+    // effect classification (REQ-LLL-026 item 2, DEC-LLL-037): `ambient` effects
+    // are performed globally with no evidence (IO, and effects whose ops are ALL
+    // `= extern`); `user_tail` effects are user-authored tail-resumptive effects
+    // (ops all value-returning, non-extern) — handled via capability-passing.
+    let mut ambient_effects: HashSet<String> = HashSet::new();
+    ambient_effects.insert("IO".to_string());
+    let mut user_tail_effects: HashSet<String> = HashSet::new();
     for ed in &module.effects {
         if !effect_names.insert(ed.name.clone()) {
             return Err(format!("duplicate effect `{}`", ed.name));
@@ -144,6 +163,10 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         if ed.name == "IO" || ed.name == "State" || ed.name == "Reader" {
             return Err(format!("`{}` is a builtin effect and cannot be redeclared", ed.name));
         }
+        // per-effect op-kind flags → classification + homogeneity check
+        let mut has_abort = false;
+        let mut has_extern = false;
+        let mut has_user_tail = false;
         for op in &ed.ops {
             for t in &op.params {
                 check_user_ty_declared(t, &type_names)?;
@@ -151,10 +174,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             if op.ret != Ty::Never {
                 check_user_ty_declared(&op.ret, &type_names)?;
             }
-            // FFI/handler consistency (REQ-LLL-022): a user operation is either an
-            // ABORT op (`-> Never`, no binding) or an EXTERN op (`= extern "path"`,
-            // value return). A value-returning op WITHOUT an extern binding would
-            // need a user-authored resumptive handler (REQ-LLL-026, not yet).
+            // op kinds (REQ-LLL-022 + REQ-LLL-026 item 2): an ABORT op (`-> Never`,
+            // no binding), an EXTERN op (`= extern "path"`, value return), or a
+            // USER TAIL-RESUMPTIVE op (value return, no binding — DEC-LLL-037).
             match (op.ret == Ty::Never, op.extern_path.is_some()) {
                 (true, true) => {
                     return Err(format!(
@@ -163,15 +185,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                         ed.name, op.name
                     ))
                 }
-                (false, false) => {
-                    return Err(format!(
-                        "effect `{}`: operation `{}` returns {} but has no `= extern \"rust::path\"` \
-                         binding — bind it to Rust (FFI, REQ-LLL-022), or make it an abort op \
-                         (`-> Never`); user-authored resumptive handlers are not yet supported",
-                        ed.name, op.name, op.ret
-                    ))
-                }
-                _ => {}
+                (true, false) => has_abort = true,
+                (false, true) => has_extern = true,
+                (false, false) => has_user_tail = true,
             }
             let key = format!("{}.{}", ed.name, op.name);
             if effect_ops
@@ -180,6 +196,23 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             {
                 return Err(format!("duplicate effect operation `{key}`"));
             }
+        }
+        // homogeneity (DEC-LLL-037): a user tail-resumptive effect is handled by
+        // capability-passing (fn-pointer evidence) and cannot be mixed with abort
+        // (`Result` path) or extern (ambient) ops in the same effect.
+        if has_user_tail && (has_abort || has_extern) {
+            return Err(format!(
+                "effect `{}`: a user-handled tail-resumptive effect must have ONLY value-returning \
+                 non-extern operations — do not mix with abort (`-> Never`) or `= extern` ops \
+                 (REQ-LLL-026, DEC-LLL-037)",
+                ed.name
+            ));
+        }
+        if has_user_tail {
+            user_tail_effects.insert(ed.name.clone());
+        } else if has_extern {
+            // all-extern (no abort, no user-tail) → ambient, performed globally
+            ambient_effects.insert(ed.name.clone());
         }
     }
     // every effect named in a `via` clause must be declared (generalizes v1's IO-only)
@@ -224,6 +257,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             rec_calls: Vec::new(),
             effect_ops: &effect_ops,
             handled: Vec::new(),
+            user_tail_effects: &user_tail_effects,
+            ambient_effects: &ambient_effects,
+            captureless: false,
         };
         // effect checking is row-based (REQ-LLL-018): each perform / effectful call
         // is validated against ctx.effect_allowed (the part's `via` row ∪ any effect
@@ -1069,12 +1105,15 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                 ctx.handled.push(h.effect.clone());
                 let call_ty = check_expr(ctx, &h.call, None)?;
                 ctx.handled.pop();
-                // clauses: exactly one `return` + operation clauses of this effect,
-                // each body yielding the handle result type (= the part's `ret`).
+                // clauses: exactly one `return` clause (yields the handle result =
+                // the part's `ret`) + operation clauses. For an ABORT effect an op
+                // clause yields the handle result (it does not resume); for a USER
+                // TAIL-RESUMPTIVE effect (DEC-LLL-037) an op clause yields the OP's
+                // return type (the resume reply) and is checked CAPTURE-FREE.
+                let is_user_tail = ctx.user_tail_effects.contains(&h.effect);
                 let mut seen_return = false;
+                let mut seen_ops: std::collections::HashSet<String> = HashSet::new();
                 for c in &h.clauses {
-                    ctx.vars.push(HashMap::new());
-                    ctx.smaller.push(HashMap::new());
                     if c.op == "return" {
                         if seen_return {
                             return Err(format!(
@@ -1089,44 +1128,88 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                 ctx.part.name
                             ));
                         }
+                        ctx.vars.push(HashMap::new());
+                        ctx.smaller.push(HashMap::new());
                         ctx.vars
                             .last_mut()
                             .unwrap()
                             .insert(c.params[0].clone(), call_ty.clone());
-                    } else {
-                        let key = format!("{}.{}", h.effect, c.op);
-                        let (_, params, _ret) = match ops_of_effect.iter().find(|(k, _, _)| k == &key)
-                        {
-                            Some(s) => s,
-                            None => {
-                                return Err(format!(
-                                    "part `{}`: `handle … with {}` has no operation `{}`",
-                                    ctx.part.name, h.effect, c.op
-                                ))
-                            }
-                        };
-                        if c.params.len() != params.len() {
+                        check_body(ctx, &c.body, ret)?;
+                        ctx.vars.pop();
+                        ctx.smaller.pop();
+                        continue;
+                    }
+                    let key = format!("{}.{}", h.effect, c.op);
+                    let (_, params, op_ret) = match ops_of_effect.iter().find(|(k, _, _)| k == &key) {
+                        Some(s) => s.clone(),
+                        None => {
                             return Err(format!(
-                                "part `{}`: clause `{}` binds {} parameter(s), operation takes {}",
-                                ctx.part.name,
-                                c.op,
-                                c.params.len(),
-                                params.len()
-                            ));
+                                "part `{}`: `handle … with {}` has no operation `{}`",
+                                ctx.part.name, h.effect, c.op
+                            ))
                         }
-                        for (bn, bt) in c.params.iter().zip(params) {
+                    };
+                    if c.params.len() != params.len() {
+                        return Err(format!(
+                            "part `{}`: clause `{}` binds {} parameter(s), operation takes {}",
+                            ctx.part.name,
+                            c.op,
+                            c.params.len(),
+                            params.len()
+                        ));
+                    }
+                    seen_ops.insert(c.op.clone());
+                    if is_user_tail {
+                        // capture-free clause: an isolated scope holding ONLY the op
+                        // params (a reference to any enclosing local is now an
+                        // unknown-variable error), and captureless mode (only ambient
+                        // effects performable) — so the compiled capability is a
+                        // non-capturing fn pointer. Body yields the op's return type.
+                        let mut scope: HashMap<String, Ty> = HashMap::new();
+                        for (bn, bt) in c.params.iter().zip(&params) {
+                            scope.insert(bn.clone(), bt.clone());
+                        }
+                        let saved_vars = std::mem::replace(&mut ctx.vars, vec![scope]);
+                        let saved_smaller =
+                            std::mem::replace(&mut ctx.smaller, vec![HashMap::new()]);
+                        let saved_capless = ctx.captureless;
+                        ctx.captureless = true;
+                        let r = check_body(ctx, &c.body, &op_ret);
+                        ctx.captureless = saved_capless;
+                        ctx.vars = saved_vars;
+                        ctx.smaller = saved_smaller;
+                        r?;
+                    } else {
+                        ctx.vars.push(HashMap::new());
+                        ctx.smaller.push(HashMap::new());
+                        for (bn, bt) in c.params.iter().zip(&params) {
                             ctx.vars.last_mut().unwrap().insert(bn.clone(), bt.clone());
                         }
+                        check_body(ctx, &c.body, ret)?;
+                        ctx.vars.pop();
+                        ctx.smaller.pop();
                     }
-                    check_body(ctx, &c.body, ret)?;
-                    ctx.vars.pop();
-                    ctx.smaller.pop();
                 }
                 if !seen_return {
                     return Err(format!(
                         "part `{}`: `handle` needs a `return` clause",
                         ctx.part.name
                     ));
+                }
+                // a user tail-resumptive handler must interpret EVERY operation, so
+                // that codegen can install a capability for each (DEC-LLL-037).
+                if is_user_tail {
+                    for (key, _, _) in &ops_of_effect {
+                        let opname = key.rsplit('.').next().unwrap();
+                        if !seen_ops.contains(opname) {
+                            return Err(format!(
+                                "part `{}`: `handle … with {}` is missing a clause for `{}` — a \
+                                 user tail-resumptive handler must interpret every operation \
+                                 (DEC-LLL-037)",
+                                ctx.part.name, h.effect, opname
+                            ));
+                        }
+                    }
                 }
             }
         }

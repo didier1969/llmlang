@@ -77,6 +77,29 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             }
         }
     }
+    // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
+    // its ops (sorted). An effect is user-tail iff every op is value-returning
+    // and non-extern; performing one lowers to a call of an installed capability.
+    let mut user_tail_ops: std::collections::HashMap<String, Vec<OpSig>> =
+        std::collections::HashMap::new();
+    for ed in &cm.module.effects {
+        let all_user_tail = ed
+            .ops
+            .iter()
+            .all(|op| op.ret != Ty::Never && op.extern_path.is_none());
+        if all_user_tail && !ed.ops.is_empty() {
+            let mut ops = ed.ops.clone();
+            ops.sort_by(|a, b| a.name.cmp(&b.name));
+            user_tail_ops.insert(ed.name.clone(), ops);
+        }
+    }
+    let user_tail: Names = user_tail_ops.keys().cloned().collect();
+    // per-part ordered capabilities (fixed order: sorted by effect then op) — used
+    // both for the part's evidence params and for forwarding at call sites.
+    let mut part_caps: PartCaps = std::collections::HashMap::new();
+    for part in &cm.module.parts {
+        part_caps.insert(part.name.clone(), caps_of(&part.effects, &user_tail_ops));
+    }
     let g = Globals {
         ctors: &ctors,
         parts: &parts,
@@ -85,6 +108,9 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         readerful: &readerful,
         extern_ops: &extern_ops,
         abort_ops: &abort_ops,
+        user_tail: &user_tail,
+        user_tail_ops: &user_tail_ops,
+        part_caps: &part_caps,
     };
     for td in &cm.module.types {
         emit_enum(&mut out, td);
@@ -170,6 +196,34 @@ fn mangle(name: &str) -> String {
     format!("lll_{name}")
 }
 
+/// The in-scope Rust variable name for a user tail-resumptive capability, keyed
+/// by the dotted op name `E.op` (REQ-LLL-026 item 2, DEC-LLL-037).
+fn cap_name(dotted: &str) -> String {
+    format!("__cap_{}", dotted.replace('.', "_"))
+}
+
+/// The ordered capabilities a part's effect row requires — one per operation of
+/// each user tail-resumptive effect, in a fixed order (sorted by effect then op)
+/// so a call site's forwarded arguments line up with the callee's params.
+fn caps_of(
+    effects: &[String],
+    user_tail_ops: &std::collections::HashMap<String, Vec<OpSig>>,
+) -> Vec<CapSig> {
+    let mut effs: Vec<&String> = effects
+        .iter()
+        .filter(|e| user_tail_ops.contains_key(*e))
+        .collect();
+    effs.sort();
+    effs.dedup();
+    let mut out = Vec::new();
+    for e in effs {
+        for op in &user_tail_ops[e] {
+            out.push((format!("{e}.{}", op.name), op.params.clone(), op.ret.clone()));
+        }
+    }
+    out
+}
+
 /// Emit a user value identifier (param, let-binding, pattern binder, lambda
 /// param) with a `u_` prefix. This keeps valid llmlang names that happen to be
 /// Rust keywords (`final`, `move`, `ref`, …) from producing invalid Rust, and
@@ -235,6 +289,23 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     if is_reader {
         params.push("__env: &i64".to_string());
     }
+    // user tail-resumptive capabilities (DEC-LLL-037): one `fn(P…) -> R` evidence
+    // param per op of each user-tail effect in the row, AFTER State/Reader, in the
+    // fixed `caps_of` order so call sites line up. Ambient in-scope caps = these.
+    let caps = &g.part_caps[&part.name];
+    for (dotted, ptys, cret) in caps {
+        let ptys_s: Vec<String> = ptys.iter().map(rs_ty).collect();
+        params.push(format!(
+            "{}: fn({}) -> {}",
+            cap_name(dotted),
+            ptys_s.join(", "),
+            rs_ty(cret)
+        ));
+    }
+    let caps_map: std::collections::HashMap<String, String> = caps
+        .iter()
+        .map(|(d, _, _)| (d.clone(), cap_name(d)))
+        .collect();
     let ret_ty = if res {
         format!("Result<{}, i64>", rs_ty(&part.ret))
     } else {
@@ -265,6 +336,10 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         readerful: g.readerful,
         state_ev: if is_state { Some("__st".to_string()) } else { None },
         reader_ev: if is_reader { Some("__env".to_string()) } else { None },
+        caps: caps_map,
+        user_tail: g.user_tail,
+        user_tail_ops: g.user_tail_ops,
+        part_caps: g.part_caps,
     };
     emit_body(out, &part.body, 1, &cx, res)?;
     out.push_str("}\n");
@@ -276,6 +351,12 @@ fn indent(n: usize) -> String {
 }
 
 type Names = std::collections::HashSet<String>;
+
+/// One capability requirement: the dotted op name `E.op`, its parameter types,
+/// and its return type (REQ-LLL-026 item 2, DEC-LLL-037).
+type CapSig = (String, Vec<Ty>, Ty);
+/// part name → its ordered capability requirements.
+type PartCaps = std::collections::HashMap<String, Vec<CapSig>>;
 
 /// Shared codegen context: the name-sets that classify an identifier at a call
 /// site — constructors, function-valued params, part names, and abort-row parts
@@ -292,6 +373,12 @@ struct Globals<'a> {
     extern_ops: &'a std::collections::HashMap<String, String>,
     /// dotted op names that are abort ops (`-> Never`)
     abort_ops: &'a Names,
+    /// user tail-resumptive effect names (REQ-LLL-026 item 2, DEC-LLL-037)
+    user_tail: &'a Names,
+    /// user tail-resumptive effect → its ops (sorted)
+    user_tail_ops: &'a std::collections::HashMap<String, Vec<OpSig>>,
+    /// part name → its ordered capability requirements (effect,op → types)
+    part_caps: &'a PartCaps,
 }
 
 struct Cx<'a> {
@@ -314,6 +401,16 @@ struct Cx<'a> {
     state_ev: Option<String>,
     /// the in-scope Reader evidence (`&i64`) to read/forward.
     reader_ev: Option<String>,
+    /// in-scope user tail-resumptive capabilities: dotted op `E.op` → the Rust
+    /// variable holding the installed fn-pointer (param `__cap_E_op` inside a
+    /// `via E` body, or a fresh closure inside a `handle … with E`) — DEC-LLL-037.
+    caps: std::collections::HashMap<String, String>,
+    /// user tail-resumptive effect names (for classifying a `handle`)
+    user_tail: &'a Names,
+    /// user tail-resumptive effect → its ops (sorted) — to build handler closures
+    user_tail_ops: &'a std::collections::HashMap<String, Vec<OpSig>>,
+    /// part name → its ordered capability requirements (for call-site forwarding)
+    part_caps: &'a PartCaps,
 }
 
 fn emit_body(
@@ -395,6 +492,10 @@ fn emit_body(
                     readerful: cx.readerful,
                     state_ev: ev_state,
                     reader_ev: ev_reader,
+                    caps: cx.caps.clone(),
+                    user_tail: cx.user_tail,
+                    user_tail_ops: cx.user_tail_ops,
+                    part_caps: cx.part_caps,
                 };
                 let ret_clause = h
                     .clauses
@@ -404,6 +505,87 @@ fn emit_body(
                 // use the enclosing `res`: an abort effect the call still carries
                 // (not discharged here) must propagate with `?`.
                 let call = expr(&h.call, &cx2, res)?;
+                out.push_str(&format!(
+                    "{}let {} = {call};\n",
+                    indent(depth),
+                    local(&ret_clause.params[0])
+                ));
+                emit_body(out, &ret_clause.body, depth, cx, res)?;
+            }
+            Stmt::Handle(h) if cx.user_tail.contains(&h.effect) => {
+                // user tail-resumptive handler (DEC-LLL-037): install one capability
+                // per op as a NON-CAPTURING closure derived from its clause (the
+                // checker guarantees capture-freedom), thread them into the handled
+                // call via the normal evidence-forwarding, bind the result, run the
+                // `return` clause. No continuation, no dyn, no alloc.
+                let ops = &cx.user_tail_ops[&h.effect];
+                let mut new_caps = cx.caps.clone();
+                for c in &h.clauses {
+                    if c.op == "return" {
+                        continue;
+                    }
+                    let sig = ops
+                        .iter()
+                        .find(|op| op.name == c.op)
+                        .expect("checked: clause op exists");
+                    let ptys_s: Vec<String> = sig.params.iter().map(rs_ty).collect();
+                    let ps: Vec<String> = c
+                        .params
+                        .iter()
+                        .zip(&sig.params)
+                        .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
+                        .collect();
+                    let capvar = format!("__capv_{depth}_{}", c.op);
+                    out.push_str(&format!(
+                        "{}let {capvar}: fn({}) -> {} = |{}| {{\n",
+                        indent(depth),
+                        ptys_s.join(", "),
+                        rs_ty(&sig.ret),
+                        ps.join(", ")
+                    ));
+                    // capture-free context: no evidence, no in-scope caps
+                    let clause_cx = Cx {
+                        fns: cx.fns,
+                        ctors: cx.ctors,
+                        parts: cx.parts,
+                        abort: cx.abort,
+                        extern_ops: cx.extern_ops,
+                        abort_ops: cx.abort_ops,
+                        stateful: cx.stateful,
+                        readerful: cx.readerful,
+                        state_ev: None,
+                        reader_ev: None,
+                        caps: std::collections::HashMap::new(),
+                        user_tail: cx.user_tail,
+                        user_tail_ops: cx.user_tail_ops,
+                        part_caps: cx.part_caps,
+                    };
+                    emit_body(out, &c.body, depth + 1, &clause_cx, false)?;
+                    out.push_str(&format!("{}}};\n", indent(depth)));
+                    new_caps.insert(format!("{}.{}", h.effect, c.op), capvar);
+                }
+                let cx2 = Cx {
+                    fns: cx.fns,
+                    ctors: cx.ctors,
+                    parts: cx.parts,
+                    abort: cx.abort,
+                    extern_ops: cx.extern_ops,
+                    abort_ops: cx.abort_ops,
+                    stateful: cx.stateful,
+                    readerful: cx.readerful,
+                    state_ev: cx.state_ev.clone(),
+                    reader_ev: cx.reader_ev.clone(),
+                    caps: new_caps,
+                    user_tail: cx.user_tail,
+                    user_tail_ops: cx.user_tail_ops,
+                    part_caps: cx.part_caps,
+                };
+                let call = expr(&h.call, &cx2, res)?;
+                let ret_clause = h
+                    .clauses
+                    .iter()
+                    .find(|c| c.op == "return")
+                    .expect("checked: handle has a return clause");
                 out.push_str(&format!(
                     "{}let {} = {call};\n",
                     indent(depth),
@@ -605,7 +787,13 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             // raised value (valid because the performing part is Result-typed,
             // REQ-LLL-018).
             _ => {
-                if let Some(path) = cx.extern_ops.get(name) {
+                if let Some(cap) = cx.caps.get(name) {
+                    // user tail-resumptive op → call the installed capability
+                    // (fn-pointer evidence), returning its reply (DEC-LLL-037).
+                    let a: Result<Vec<String>, String> =
+                        args.iter().map(|x| expr(x, cx, res)).collect();
+                    format!("{cap}({})", a?.join(", "))
+                } else if let Some(path) = cx.extern_ops.get(name) {
                     let a: Result<Vec<String>, String> =
                         args.iter().map(|x| expr(x, cx, res)).collect();
                     format!("{path}({})", a?.join(", "))
@@ -638,6 +826,13 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 if cx.readerful.contains(name) {
                     xs.push(cx.reader_ev.clone().unwrap_or_else(|| "__env".to_string()));
                 }
+                // forward user tail-resumptive capabilities in the fixed order
+                // (DEC-LLL-037) — matches the callee's evidence-param order.
+                if let Some(keys) = cx.part_caps.get(name) {
+                    for (dotted, _, _) in keys {
+                        xs.push(cx.caps.get(dotted).cloned().unwrap_or_else(|| cap_name(dotted)));
+                    }
+                }
                 let call = format!("{}({})", mangle(name), xs.join(", "));
                 if res && cx.abort.contains(name) {
                     // abort-row callee from a Result-returning part: propagate with `?`.
@@ -659,7 +854,9 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
 }
 
 const RUNTIME: &str = r#"// generated by lllc — do not edit (the .lll text is the source of truth)
-#![allow(dead_code, unused_parens)]
+// non_snake_case: capability evidence params fold the (capitalized) effect name,
+// e.g. `__cap_Counter_tick` (REQ-LLL-026 item 2) — an intentional target name.
+#![allow(dead_code, unused_parens, non_snake_case)]
 use std::rc::Rc;
 
 // Generic cons list (REQ-LLL-007): List[Int] = Lst<i64>, List[a] = Lst<Ta>.

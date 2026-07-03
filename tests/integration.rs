@@ -236,13 +236,13 @@ fn ffi_import_derives_extern_block_from_rust_signatures() {
 }
 
 #[test]
-fn value_effect_op_without_extern_is_rejected() {
-    // REQ-LLL-022: a value-returning user op with neither `= extern` nor `Never`
-    // has no implementation (user-authored resumptive handlers = REQ-026) → reject.
+fn value_effect_op_without_extern_is_a_user_tail_effect() {
+    // REQ-LLL-026 item 2 (DEC-LLL-037) LIFTED the old restriction: a value-returning
+    // user op with neither `= extern` nor `Never` is now a user tail-resumptive
+    // operation, interpreted by a user-authored handler. It type-checks.
     let src = "module B:\n\n  effect E:\n    thing() -> Int\n\n  part f() -> Int via E:\n    yield E.thing()\n";
     let m = parser::parse_module(src).unwrap();
-    let err = types::check_module(m).unwrap_err();
-    assert!(err.contains("extern"), "must require an extern binding: {err}");
+    assert!(types::check_module(m).is_ok(), "user tail-resumptive effect must type-check");
 }
 
 #[test]
@@ -1347,4 +1347,82 @@ fn tuple_components_first_order_is_rejected() {
     let m = parser::parse_module(src).expect("parse");
     let err = types::check_module(m).expect_err("must reject function-in-tuple");
     assert!(err.contains("first-order"), "unexpected error: {err}");
+}
+
+// ===================================================================
+// REQ-LLL-026 slice 3c item 2 — user-authored tail-resumptive handlers,
+// compiled by capability-passing (fn-pointer evidence), DEC-LLL-037.
+// The proof fork already havocs a user op's result (REQ-LLL-018), so the
+// pure core stays sound regardless of the handler; codegen threads a
+// non-capturing closure per op. Tests: E2E runs, composition through an
+// intermediate part, the soundness boundary, and the checker gates.
+// ===================================================================
+
+#[test]
+fn user_effect_generator_verifies_and_runs() {
+    // a user tail-resumptive effect with a pure step: tick(1)=2, tick(2)=3,
+    // tick(3)=4 → 9. The handled call receives the capability as evidence.
+    let src = "module Gen:\n\n  effect Counter:\n    tick(Int) -> Int\n\n  part sum3() -> Int via Counter:\n    let a = Counter.tick(1)\n    let b = Counter.tick(a)\n    let c = Counter.tick(b)\n    yield a + b + c\n\n  part main() -> Int:\n    handle sum3() with Counter:\n      tick(n) -> yield n + 1\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "user-effect program must verify");
+    let out = build_run(src);
+    assert!(out.contains("=> 9"), "user effect generator wrong: {out}");
+}
+
+#[test]
+fn user_effect_handler_forwards_to_io() {
+    // a handler clause may perform an AMBIENT effect (IO) — the capability closure
+    // stays non-capturing (IO is global). Prints 5 and 7, returns 12.
+    let src = "module Log:\n\n  effect Log:\n    log(Int) -> Int\n\n  part work() -> Int via Log:\n    let a = Log.log(5)\n    let b = Log.log(7)\n    yield a + b\n\n  part main() -> Int via IO:\n    handle work() with Log:\n      log(x) -> yield IO.print(x)\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "IO-forwarding handler must verify");
+    let out = build_run(src);
+    assert!(out.contains("=> 12"), "IO-forwarding handler wrong: {out}");
+}
+
+#[test]
+fn user_effects_compose_through_intermediate_part() {
+    // two user effects, discharged at different layers: the capability for the
+    // still-open effect B is forwarded THROUGH `mid` while A is handled locally.
+    // A.a(3)=6, B.b(6)=106, work=112.
+    let src = "module Comp:\n\n  effect A:\n    a(Int) -> Int\n\n  effect B:\n    b(Int) -> Int\n\n  part work() -> Int via A, B:\n    let x = A.a(3)\n    let y = B.b(x)\n    yield x + y\n\n  part mid() -> Int via B:\n    handle work() with A:\n      a(n) -> yield n * 2\n      return r -> yield r\n\n  part main() -> Int:\n    handle mid() with B:\n      b(n) -> yield n + 100\n      return r -> yield r\n";
+    assert!(verify_src(src).ok(), "composed user effects must verify");
+    let out = build_run(src);
+    assert!(out.contains("=> 112"), "composed user effects wrong: {out}");
+}
+
+#[test]
+fn user_effect_result_is_opaque_to_proof() {
+    // SOUNDNESS: the pure core cannot assume anything about a handler's reply —
+    // the op result is havoc'd, so `ensures result == 0` over an op result must
+    // NOT be provable (the handler could reply with anything).
+    let src = "module T:\n\n  effect Oracle:\n    ask(Int) -> Int\n\n  part q() -> Int via Oracle:\n    ensures result == 0\n    yield Oracle.ask(5)\n";
+    assert!(!verify_src(src).ok(), "a user op result must be opaque to the proof (soundness)");
+}
+
+#[test]
+fn user_effect_capturing_clause_is_rejected() {
+    // capability closures are fn pointers → a clause may NOT capture an enclosing
+    // local (`extra`), else it could not coerce; the checker rejects it (DEC-037).
+    let src = "module T:\n\n  effect Counter:\n    tick(Int) -> Int\n\n  part sum1() -> Int via Counter:\n    yield Counter.tick(1)\n\n  part main() -> Int:\n    let extra = 100\n    handle sum1() with Counter:\n      tick(n) -> yield n + extra\n      return r -> yield r\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject capturing clause");
+    assert!(err.contains("extra"), "expected an unknown-variable error on `extra`: {err}");
+}
+
+#[test]
+fn user_effect_missing_clause_is_rejected() {
+    // a user tail-resumptive handler must interpret EVERY operation (DEC-LLL-037)
+    let src = "module T:\n\n  effect Two:\n    one(Int) -> Int\n    two(Int) -> Int\n\n  part w() -> Int via Two:\n    yield Two.one(1) + Two.two(2)\n\n  part main() -> Int:\n    handle w() with Two:\n      one(n) -> yield n\n      return r -> yield r\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject missing clause");
+    assert!(err.contains("missing a clause"), "unexpected error: {err}");
+}
+
+#[test]
+fn user_effect_mixed_with_abort_is_rejected() {
+    // homogeneity (DEC-LLL-037): a user tail-resumptive effect cannot also carry
+    // an abort (`-> Never`) operation.
+    let src = "module T:\n\n  effect Bad:\n    step(Int) -> Int\n    stop() -> Never\n\n  part w() -> Int via Bad:\n    yield Bad.step(1)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject mixed effect");
+    assert!(err.contains("ONLY value-returning"), "unexpected error: {err}");
 }
