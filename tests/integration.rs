@@ -1711,3 +1711,29 @@ fn rationale_add_show_round_trips() {
     assert!(show.status.success(), "rationale show failed: {}", String::from_utf8_lossy(&show.stderr));
     assert!(String::from_utf8_lossy(&show.stdout).contains("adds one to n"), "rationale not round-tripped");
 }
+
+#[test]
+fn check_format_json_emits_structured_diagnostics_with_counterexample() {
+    // REQ-LLL-033: the LLM channel — `lll check --format=json` yields structured,
+    // repair-oriented diagnostics (codes, did-you-mean fixes, and for a failed
+    // proof a Z3 model DECODED into a named counterexample).
+    let dir = tempdir().join("diagjson");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let run = |name: &str, src: &str| -> String {
+        let f = dir.join(name);
+        std::fs::write(&f, src).unwrap();
+        let out = std::process::Command::new(bin)
+            .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let good = run("good.lll", "module M:\n\n  part inc(n: Int) -> Int:\n    ensures result == n + 1\n    yield n + 1\n");
+    assert!(good.contains("\"ok\": true"), "good program: {good}");
+    let bad = run("bad.lll", "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    ensures result >= 0\n    yield a - b\n");
+    assert!(bad.contains("\"ok\": false"), "bad program not failed: {bad}");
+    assert!(bad.contains("LLL-E5001") && bad.contains("counterexample"), "no decoded counterexample: {bad}");
+    let name = run("name.lll", "module M:\n\n  part h(x: Int) -> Bool:\n    yield True\n");
+    assert!(name.contains("LLL-E2001") && name.contains("lowercase"), "did-you-mean not lifted to fix: {name}");
+}

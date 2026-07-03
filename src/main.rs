@@ -193,7 +193,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -208,15 +208,70 @@ fn cache_dir() -> PathBuf {
     PathBuf::from(".lll-cache")
 }
 
+/// Run the check pipeline and collect every failure as a structured diagnostic
+/// (REQ-LLL-033) — the machine channel for `lll check --format=json`. Each stage
+/// stops the pipeline (a parse error precludes checking, etc.); a verification
+/// failure yields one diagnostic per undischarged obligation, with the Z3 model
+/// decoded to a named counterexample.
+fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
+    let (module, cm) = match loader::load_program(file) {
+        Err(e) => {
+            return diag::Report { ok: false, module: None, diagnostics: vec![diag::Diagnostic::from_error(&e)] }
+        }
+        Ok((_, module)) => match types::check_module(module) {
+            Err(e) => {
+                return diag::Report { ok: false, module: None, diagnostics: vec![diag::Diagnostic::from_error(&e)] }
+            }
+            Ok(cm) => (cm.module.name.clone(), cm),
+        },
+    };
+    let hm = match hash::hash_module(&cm) {
+        Err(e) => {
+            return diag::Report { ok: false, module: Some(module), diagnostics: vec![diag::Diagnostic::from_error(&e)] }
+        }
+        Ok(hm) => hm,
+    };
+    let report = match vc::verify(&cm, &hm, &cache_dir(), !no_cache) {
+        Err(e) => {
+            return diag::Report { ok: false, module: Some(module), diagnostics: vec![diag::Diagnostic::from_error(&e)] }
+        }
+        Ok(r) => r,
+    };
+    let mut diagnostics = Vec::new();
+    for (part, v) in &report.parts {
+        if let vc::PartVerdict::Failed { failures } = v {
+            for f in failures {
+                diagnostics.push(diag::Diagnostic::from_failed_obligation(part, f));
+            }
+        }
+    }
+    diag::Report { ok: diagnostics.is_empty(), module: Some(module), diagnostics }
+}
+
 fn dispatch(args: &[String]) -> Result<(), String> {
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     match a.as_slice() {
         ["check", rest @ ..] => {
-            let (no_cache, file) = match rest {
-                ["--no-cache", f] => (true, *f),
-                [f] => (false, *f),
-                _ => return Err(usage()),
-            };
+            // flags in any order: --no-cache, --format=json (REQ-LLL-033)
+            let mut no_cache = false;
+            let mut json = false;
+            let mut file: Option<&str> = None;
+            for &t in rest {
+                match t {
+                    "--no-cache" => no_cache = true,
+                    "--format=json" => json = true,
+                    f if !f.starts_with("--") => file = Some(f),
+                    _ => return Err(usage()),
+                }
+            }
+            let file = file.ok_or_else(usage)?;
+            if json {
+                // LLM channel: structured diagnostics on stdout, always exit 0 —
+                // the consumer reads `ok` and repairs from `diagnostics`.
+                let report = check_report_json(file, no_cache);
+                println!("{}", report.to_json());
+                return Ok(());
+            }
             let (_, cm, hm) = load(file)?;
             let report = vc::verify(&cm, &hm, &cache_dir(), !no_cache)?;
             print_report(&report);

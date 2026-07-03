@@ -8,6 +8,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod diag;
 pub mod explain;
 pub mod hash;
 pub mod lexer;
