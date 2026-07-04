@@ -47,9 +47,9 @@ fn typeclass_surface_parses_class_instance_law() {
     assert_eq!(m.instances[0].defs.len(), 1);
     assert_eq!(m.instances[0].defs[0].0, "eq");
 
-    // sound intermediate: check rejects until the law-check VC exists (inc.2/3)
+    // a well-typed instance now passes check (its law is proven in the vc fork, inc.3)
     let m2 = parser::parse_module(src).expect("parse");
-    assert!(types::check_module(m2).is_err(), "typeclasses must not pass check yet");
+    assert!(types::check_module(m2).is_ok(), "a well-typed instance type-checks");
 }
 
 #[test]
@@ -64,12 +64,27 @@ fn typeclass_instance_signature_is_checked_ground() {
         "expected a precise method-type error, got: {err}"
     );
 
-    // a well-typed instance passes type-checking but is still not accepted until the
-    // ground law-check exists (inc.3) — the reject names that, not a type error.
+    // a well-typed instance now type-checks (its law is proven in the vc fork, inc.3)
     let ok = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n";
     let m2 = parser::parse_module(ok).expect("parse");
-    let err2 = types::check_module(m2).expect_err("no law-check yet");
-    assert!(err2.contains("law-check"), "expected the law-check-pending reject, got: {err2}");
+    assert!(types::check_module(m2).is_ok(), "a well-typed instance type-checks");
+}
+
+#[test]
+fn typeclass_lawful_instance_verifies() {
+    // REQ-LLL-048 slice A inc.3 — a lawful instance passes the GROUND law-check.
+    let ok = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n";
+    let report = verify_src(ok);
+    assert!(report.ok(), "a lawful instance must pass the law-check");
+}
+
+#[test]
+fn typeclass_law_is_load_bearing_n5() {
+    // N5 (DEC-LLL-047) — a well-TYPED instance whose method VIOLATES a law is rejected
+    // by the ground law-check, not the type-check. Proves the law is load-bearing.
+    let bad = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> false\n";
+    let report = verify_src(bad);
+    assert!(!report.ok(), "a law-violating instance must fail the law-check");
 }
 
 // ---- determinism & identity (target 3) ----

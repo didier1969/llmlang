@@ -611,16 +611,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             }
         }
     }
-    // the ground law-check VC (REQ-LLL-048 slice A inc.3, DEC-LLL-047) is not emitted
-    // yet — a well-typed instance is not accepted until its laws are proven at the
-    // ground type. Reject here (soundly) rather than pass an unproven instance.
-    if !module.classes.is_empty() || !module.instances.is_empty() {
-        return Err(
-            "typeclasses type-check but the ground law-check is not implemented yet \
-             (REQ-LLL-048 slice A inc.3) — instances are not accepted until their laws are proven"
-                .to_string(),
-        );
-    }
+    // instances that type-check here are LAW-checked in the vc fork (REQ-LLL-048
+    // inc.3, `gen_instance_law_obligations`) — an unlawful instance fails there, at
+    // the instance's ground type, never a silent runtime downgrade (DEC-LLL-015/047).
 
     // effect-monomorphization worklist (DEC-LLL-038): collected after checking,
     // when every call site is known valid.
@@ -651,8 +644,9 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
 
 /// Ground-instantiate a class method signature by replacing the class type
 /// variable `var` with the concrete instance type `with` (REQ-LLL-048,
-/// DEC-LLL-047 — a class is instantiated GROUND, never left quantified).
-fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
+/// DEC-LLL-047 — a class is instantiated GROUND, never left quantified). Shared
+/// with the vc fork's law-check (`gen_instance_law_obligations`).
+pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
     match t {
         Ty::Var(a) if a == var => with.clone(),
         Ty::Var(_) | Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => t.clone(),

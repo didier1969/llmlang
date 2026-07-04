@@ -20,7 +20,7 @@
 
 use crate::ast::*;
 use crate::hash::HashedModule;
-use crate::types::{CheckedModule, Recursion};
+use crate::types::{subst_tyvar, CheckedModule, Recursion};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -130,6 +130,27 @@ pub fn verify(
             parts.push((part.name.clone(), PartVerdict::Failed { failures }));
         }
     }
+    // typeclass law obligations (REQ-LLL-048 slice A inc.3, DEC-LLL-047): every
+    // instance must satisfy each class law, proven at its GROUND type by fresh-const
+    // (universal-generalization) instantiation — never a quantified `assert forall`.
+    let class_by_name: HashMap<&str, &Class> =
+        cm.module.classes.iter().map(|c| (c.name.as_str(), c)).collect();
+    for inst in &cm.module.instances {
+        let class = *class_by_name
+            .get(inst.class.as_str())
+            .ok_or_else(|| format!("vcgen: instance for unknown class `{}`", inst.class))?;
+        let obligations = gen_instance_law_obligations(cm, class, inst)?;
+        let name = format!("instance {}[{}]", inst.class, inst.ty);
+        let n = obligations.len();
+        let t0 = std::time::Instant::now();
+        let failures = discharge(&z3, &obligations, &dt_decls)?;
+        let time_ms = t0.elapsed().as_millis();
+        if failures.is_empty() {
+            parts.push((name, PartVerdict::Proved { obligations: n, time_ms }));
+        } else {
+            parts.push((name, PartVerdict::Failed { failures }));
+        }
+    }
     std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
     std::fs::write(
         &cache_path,
@@ -232,6 +253,193 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
     }
     em.walk_body(&part.body, env)?;
     Ok(em.obls)
+}
+
+/// Law obligations for one instance (REQ-LLL-048 slice A inc.3, DEC-LLL-047).
+/// Each class law is proven at the instance's GROUND type by introducing a FRESH
+/// unconstrained constant per binder — universal generalization, the SOUND form
+/// of ground instantiation (a fresh symbolic constant stands for "any"), never a
+/// quantified `assert forall`. The class-method calls in the law body are replaced
+/// by the instance's concrete (beta-reduced) definitions, so the obligation is a
+/// quantifier-free term in the decidable fragment.
+fn gen_instance_law_obligations(
+    cm: &CheckedModule,
+    class: &Class,
+    inst: &Instance,
+) -> Result<Vec<Obligation>, String> {
+    let synth = Part {
+        name: format!("instance {}[{}]", inst.class, inst.ty),
+        params: Vec::new(),
+        ret: Ty::Unit,
+        effects: Vec::new(),
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        measure: Vec::new(),
+        body: Vec::new(),
+        line: inst.line,
+        origin: None,
+    };
+    let mut out = Vec::new();
+    for law in &class.laws {
+        let mut em = Emit {
+            cm,
+            part: &synth,
+            decls: Vec::new(),
+            hyps: Vec::new(),
+            obls: Vec::new(),
+            fresh: 0,
+            sorts: HashMap::new(),
+        };
+        let mut env: HashMap<String, String> = HashMap::new();
+        for (bn, bt) in &law.binders {
+            // ground the binder sort (class variable → instance type) and give it a
+            // FRESH const — an arbitrary value, so proving the body proves it for all.
+            let gt = subst_tyvar(bt, &class.tyvar, &inst.ty);
+            let c = format!("law_{bn}");
+            let sort = smt_ty(&gt);
+            em.decls.push(format!("(declare-const {c} {sort})"));
+            em.sorts.insert(c.clone(), sort);
+            env.insert(bn.clone(), c);
+        }
+        let inlined = inline_methods(&law.body, class, inst)?;
+        let goal = em.tr(&inlined, &env, Some(&Ty::Bool))?;
+        // side-conditions tr raised (e.g. a div in a law body) are discharged first
+        out.extend(em.obls.clone());
+        out.push(Obligation {
+            part: synth.name.clone(),
+            descr: format!(
+                "law `{}` holds for instance {}[{}]",
+                law.name, inst.class, inst.ty
+            ),
+            decls: em.decls.clone(),
+            hyps: em.hyps.clone(),
+            goal,
+        });
+    }
+    Ok(out)
+}
+
+/// Replace every class-method call in `e` with the instance's concrete definition,
+/// beta-reduced at the (already-inlined) call arguments (REQ-LLL-048 slice A). v1
+/// instance methods are lambdas, so a call inlines by substituting the lambda
+/// parameters with the arguments; the result is re-inlined so a method that calls
+/// another method flattens fully.
+fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, String> {
+    Ok(match e {
+        Expr::Call(name, args) if class.methods.iter().any(|(m, _, _)| m == name) => {
+            let inl_args: Vec<Expr> = args
+                .iter()
+                .map(|a| inline_methods(a, class, inst))
+                .collect::<Result<_, _>>()?;
+            let def = &inst
+                .defs
+                .iter()
+                .find(|(m, _)| m == name)
+                .ok_or_else(|| {
+                    format!("law references method `{name}` with no instance definition")
+                })?
+                .1;
+            match def {
+                Expr::Lambda(params, body) => {
+                    if params.len() != inl_args.len() {
+                        return Err(format!(
+                            "law: method `{name}` applied to {} argument(s) but its instance \
+                             definition takes {}",
+                            inl_args.len(),
+                            params.len()
+                        ));
+                    }
+                    let mut b = (**body).clone();
+                    for ((pn, _), arg) in params.iter().zip(&inl_args) {
+                        b = subst_var(&b, pn, arg);
+                    }
+                    inline_methods(&b, class, inst)?
+                }
+                _ => {
+                    return Err(format!(
+                        "law-check (REQ-LLL-048 slice A): instance method `{name}` must be a \
+                         lambda `\\(…) -> …` to inline into a law — a bare part reference is a \
+                         later slice"
+                    ))
+                }
+            }
+        }
+        Expr::Bin(op, a, b) => Expr::Bin(
+            *op,
+            Box::new(inline_methods(a, class, inst)?),
+            Box::new(inline_methods(b, class, inst)?),
+        ),
+        Expr::Not(a) => Expr::Not(Box::new(inline_methods(a, class, inst)?)),
+        Expr::Neg(a) => Expr::Neg(Box::new(inline_methods(a, class, inst)?)),
+        Expr::Cons(h, t) => Expr::Cons(
+            Box::new(inline_methods(h, class, inst)?),
+            Box::new(inline_methods(t, class, inst)?),
+        ),
+        Expr::ListLit(xs) => Expr::ListLit(
+            xs.iter()
+                .map(|x| inline_methods(x, class, inst))
+                .collect::<Result<_, _>>()?,
+        ),
+        Expr::Tuple(xs) => Expr::Tuple(
+            xs.iter()
+                .map(|x| inline_methods(x, class, inst))
+                .collect::<Result<_, _>>()?,
+        ),
+        Expr::Call(name, args) => Expr::Call(
+            name.clone(),
+            args.iter()
+                .map(|a| inline_methods(a, class, inst))
+                .collect::<Result<_, _>>()?,
+        ),
+        Expr::EffCall(name, args) => Expr::EffCall(
+            name.clone(),
+            args.iter()
+                .map(|a| inline_methods(a, class, inst))
+                .collect::<Result<_, _>>()?,
+        ),
+        Expr::Lambda(ps, body) => {
+            Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
+        }
+        Expr::Var(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
+    })
+}
+
+/// Substitute every free occurrence of `name` in `e` with `val` (capture-avoiding
+/// against nested lambda binders) — beta-reduces an instance method's lambda body
+/// at a law's call arguments.
+fn subst_var(e: &Expr, name: &str, val: &Expr) -> Expr {
+    match e {
+        Expr::Var(n) if n == name => val.clone(),
+        Expr::Var(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
+        Expr::Bin(op, a, b) => Expr::Bin(
+            *op,
+            Box::new(subst_var(a, name, val)),
+            Box::new(subst_var(b, name, val)),
+        ),
+        Expr::Not(a) => Expr::Not(Box::new(subst_var(a, name, val))),
+        Expr::Neg(a) => Expr::Neg(Box::new(subst_var(a, name, val))),
+        Expr::Cons(h, t) => Expr::Cons(
+            Box::new(subst_var(h, name, val)),
+            Box::new(subst_var(t, name, val)),
+        ),
+        Expr::ListLit(xs) => Expr::ListLit(xs.iter().map(|x| subst_var(x, name, val)).collect()),
+        Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| subst_var(x, name, val)).collect()),
+        Expr::Call(n, args) => Expr::Call(
+            n.clone(),
+            args.iter().map(|a| subst_var(a, name, val)).collect(),
+        ),
+        Expr::EffCall(n, args) => Expr::EffCall(
+            n.clone(),
+            args.iter().map(|a| subst_var(a, name, val)).collect(),
+        ),
+        Expr::Lambda(ps, body) => {
+            if ps.iter().any(|(pn, _)| pn == name) {
+                e.clone()
+            } else {
+                Expr::Lambda(ps.clone(), Box::new(subst_var(body, name, val)))
+            }
+        }
+    }
 }
 
 /// SMT-LIB sort for a type (REQ-LLL-007, DEC-LLL-028). A type variable becomes a
