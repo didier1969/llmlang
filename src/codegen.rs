@@ -36,6 +36,22 @@ fn marshal_arg(i: usize, f: Option<&Foreign>) -> String {
     }
 }
 
+/// Marshal a foreign Rust return value `val` OUT to its llmlang form (REQ-LLL-042/045):
+/// a `String` becomes a codepoint list, a tuple is projected component-by-component;
+/// `i64`/`bool` pass through. Used for the return, a `Result` Ok payload, and each tuple
+/// component (recursively).
+fn marshal_out(f: &Foreign, val: &str) -> String {
+    match f {
+        Foreign::RString => format!("__lll_str_of_rust(&{val})"),
+        Foreign::Tuple(fs) => {
+            let cs: Vec<String> =
+                fs.iter().enumerate().map(|(i, c)| marshal_out(c, &format!("{val}.{i}"))).collect();
+            format!("({})", cs.join(", "))
+        }
+        _ => val.to_string(),
+    }
+}
+
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
@@ -146,6 +162,16 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                 // codepoint list; identity (i64/bool or no clause) passes through.
                 let body = match op.extern_foreign.as_ref().map(|fs| &fs.ret) {
                     Some(Foreign::RString) => format!("__lll_str_of_rust(&{call})"),
+                    // a structured foreign tuple → a llmlang native tuple, projected
+                    // component-by-component (REQ-LLL-026); bind the call once.
+                    Some(Foreign::Tuple(fs)) => {
+                        let cs: Vec<String> = fs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| marshal_out(c, &format!("__r.{i}")))
+                            .collect();
+                        format!("{{ let __r = {call}; ({}) }}", cs.join(", "))
+                    }
                     // fallible foreign `Result<T, E>` → errors-as-values (REQ-LLL-038
                     // slice 038e, DEC-LLL-046): `Ok` → the ADT's success (1st) ctor with
                     // T marshalled, `Err` → its error (2nd) ctor carrying the message.
@@ -159,9 +185,18 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                         }
                         .expect("checker guarantees a 2-ctor ADT return for a `Result` foreign");
                         let ei = format!("{}I", td.name);
+                        // the Ok payload fills the success ctor: a structured tuple is
+                        // SPREAD across the ctor's fields (`Got(t.0, t.1)`); a scalar/String
+                        // fills its single field. The Err message is the error's
+                        // `to_string()` as a codepoint list.
                         let ok = match &**ft {
-                            Foreign::RString => "__lll_str_of_rust(&__ok)",
-                            _ => "__ok",
+                            Foreign::Tuple(fs) => fs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, c)| marshal_out(c, &format!("__ok.{i}")))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            _ => marshal_out(ft, "__ok"),
                         };
                         format!(
                             "match {call} {{ \

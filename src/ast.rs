@@ -91,6 +91,12 @@ pub enum Foreign {
     /// no abort machinery). v1: the error `E` is always marshalled to a `String` message
     /// via `to_string()` — lossy of the error STRUCTURE, never of the information.
     Result(Box<Foreign>, Box<Foreign>),
+    /// A structured foreign return `(T, U, …)` (arity ≥ 2) — a Rust tuple marshalled
+    /// POSITIONALLY to a llmlang native tuple `(Ty, …)` (REQ-LLL-026). Lets one FFI call
+    /// return several typed values (e.g. `i64::overflowing_add → (i64, bool)`, or a JSON
+    /// wrapper flattening a struct to a tuple). Return position only; v1 components ∈
+    /// {i64, bool, String}.
+    Tuple(Vec<Foreign>),
 }
 
 impl Foreign {
@@ -102,6 +108,10 @@ impl Foreign {
             Foreign::RString => "String".to_string(),
             Foreign::RStr => "str".to_string(),
             Foreign::Result(t, e) => format!("Result<{},{}>", t.canon(), e.canon()),
+            Foreign::Tuple(cs) => {
+                let inner: Vec<String> = cs.iter().map(Foreign::canon).collect();
+                format!("({})", inner.join(","))
+            }
         }
     }
 }

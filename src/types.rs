@@ -264,37 +264,68 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                                 ed.name, op.name, op.ret
                             )
                         })?;
-                        if td.ctors.len() != 2
-                            || td.ctors[0].1.len() != 1
-                            || td.ctors[1].1.len() != 1
-                        {
+                        if td.ctors.len() != 2 {
                             return Err(format!(
                                 "effect `{}` op `{}`: the ADT `{}` for a foreign `Result` must have \
-                                 exactly two single-field constructors — the first is the success \
-                                 arm, the second the error arm",
+                                 exactly two constructors — the first is the success arm, the \
+                                 second the error arm",
                                 ed.name, op.name, td.name
                             ));
                         }
-                        if !foreign_marshal_ok(&td.ctors[0].1[0], ft) {
+                        // error arm: a single `List[Int]` message field.
+                        if td.ctors[1].1.len() != 1 || td.ctors[1].1[0] != Ty::list(Ty::Int) {
                             return Err(format!(
-                                "effect `{}` op `{}`: the success constructor `{}` field (`{}`) \
-                                 cannot marshal from the foreign `Ok` type `{}`",
-                                ed.name,
-                                op.name,
-                                td.ctors[0].0,
-                                td.ctors[0].1[0],
-                                ft.canon()
+                                "effect `{}` op `{}`: the error constructor `{}` must have a single \
+                                 `List[Int]` field (the String message)",
+                                ed.name, op.name, td.ctors[1].0
                             ));
                         }
-                        if td.ctors[1].1[0] != Ty::list(Ty::Int) {
-                            return Err(format!(
-                                "effect `{}` op `{}`: the error constructor `{}` field must be \
-                                 `List[Int]` (the String message), found `{}`",
-                                ed.name,
-                                op.name,
-                                td.ctors[1].0,
-                                td.ctors[1].1[0]
-                            ));
+                        // success arm: one field for a scalar/String `Ok`, or one field
+                        // PER tuple component for a structured `Ok` (the tuple is spread).
+                        let succ = &td.ctors[0];
+                        match &**ft {
+                            Foreign::Tuple(fs) => {
+                                if succ.1.len() != fs.len() {
+                                    return Err(format!(
+                                        "effect `{}` op `{}`: the success constructor `{}` must have \
+                                         {} fields to receive the foreign tuple `{}`, found {}",
+                                        ed.name,
+                                        op.name,
+                                        succ.0,
+                                        fs.len(),
+                                        ft.canon(),
+                                        succ.1.len()
+                                    ));
+                                }
+                                for (fieldty, comp) in succ.1.iter().zip(fs) {
+                                    if !matches!(
+                                        comp,
+                                        Foreign::I64 | Foreign::Bool | Foreign::RString
+                                    ) || !foreign_marshal_ok(fieldty, comp)
+                                    {
+                                        return Err(format!(
+                                            "effect `{}` op `{}`: success constructor `{}` field \
+                                             `{fieldty}` cannot marshal from foreign `{}`",
+                                            ed.name,
+                                            op.name,
+                                            succ.0,
+                                            comp.canon()
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                if succ.1.len() != 1 || !foreign_marshal_ok(&succ.1[0], ft) {
+                                    return Err(format!(
+                                        "effect `{}` op `{}`: the success constructor `{}` must have \
+                                         a single field marshalable from the foreign `Ok` type `{}`",
+                                        ed.name,
+                                        op.name,
+                                        succ.0,
+                                        ft.canon()
+                                    ));
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -509,6 +540,15 @@ fn foreign_marshal_ok(llt: &Ty, f: &Foreign) -> bool {
         (Ty::Int, Foreign::I64) => true,
         (Ty::Bool, Foreign::Bool) => true,
         (Ty::List(e), Foreign::RString | Foreign::RStr) => **e == Ty::Int,
+        // a foreign tuple `(T, …)` ↔ a llmlang native tuple, positional (REQ-LLL-026).
+        // v1 components are scalar/string (no nested tuple/Result/&str at the boundary).
+        (Ty::Tuple(ts), Foreign::Tuple(fs)) => {
+            ts.len() == fs.len()
+                && ts.iter().zip(fs).all(|(t, comp)| {
+                    matches!(comp, Foreign::I64 | Foreign::Bool | Foreign::RString)
+                        && foreign_marshal_ok(t, comp)
+                })
+        }
         _ => false,
     }
 }

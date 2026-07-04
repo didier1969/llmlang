@@ -187,6 +187,25 @@ impl Parser {
     /// `Result` lands here — is rejected with a clear v1 message (guards against a
     /// silent unwrap that would drop an I/O error, the 038e sum-marshalling gap).
     fn foreign_ty(&mut self) -> Result<Foreign, String> {
+        // a structured foreign tuple `(T, U, …)` (REQ-LLL-038 slice 038e). `(T)` is
+        // grouping (= T); `()` is unsupported (no foreign unit yet); arity ≥ 2 is a tuple.
+        if self.peek() == &Tok::LParen {
+            self.pos += 1;
+            let mut cs = Vec::new();
+            if self.peek() != &Tok::RParen {
+                cs.push(self.foreign_ty()?);
+                while self.peek() == &Tok::Comma {
+                    self.pos += 1;
+                    cs.push(self.foreign_ty()?);
+                }
+            }
+            self.eat(Tok::RParen)?;
+            return match cs.len() {
+                0 => Err(self.err("empty foreign tuple `()` is unsupported in an `as` clause")),
+                1 => Ok(cs.into_iter().next().unwrap()),
+                _ => Ok(Foreign::Tuple(cs)),
+            };
+        }
         match self.bump() {
             Tok::Ident(k) => match k.as_str() {
                 "i64" => Ok(Foreign::I64),

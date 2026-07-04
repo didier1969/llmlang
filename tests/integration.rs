@@ -1720,6 +1720,45 @@ fn adt_ctors_named_ok_err_do_not_clash_with_rust_result() {
 }
 
 #[test]
+fn ffi_tuple_return_marshals_positionally() {
+    // REQ-LLL-038 slice 038e: a foreign Rust tuple return marshals POSITIONALLY to a
+    // llmlang native tuple (REQ-LLL-026). `i64::overflowing_add(41, 1) → (42, false)`;
+    // the llmlang side destructures `(s, o)` and yields the sum. Single-file (std path).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "module M:\n\n  effect Ar:\n    addc(Int, Int) -> (Int, Bool) = extern \"i64::overflowing_add\" as (i64, i64) -> (i64, bool)\n\n  part hi(x: Int) -> Int via Ar:\n    match Ar.addc(x, 1):\n      (s, o) -> yield s\n\n  part main() -> Int via IO, Ar:\n    yield IO.print(hi(41))\n";
+    let dir = tempdir();
+    let f = dir.join("tup.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(out.status.success(), "tuple FFI run failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("42"),
+        "overflowing_add(41,1).0 must be 42; got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_result_of_tuple_composes() {
+    // REQ-LLL-038 slice 038e: `Result<(T,…), String>` composes the sum and tuple
+    // marshallers — a fallible STRUCTURED return (e.g. a JSON wrapper flattening a
+    // struct to a tuple). It type-checks and lowers (the success ctor's single field is
+    // the tuple). Check + codegen only (no std fn returns this exact shape).
+    // the success ctor has ONE FIELD PER tuple component (the tuple is spread), so the
+    // pre-existing ADT limitation (no tuple-typed ctor field) does not bite.
+    let src = "module M:\n\n  type Pair = Got(Int, Int) | Fail(List[Int])\n\n  effect Io:\n    parse(List[Int]) -> Pair = extern \"std::fs::read_to_string\" as (str) -> Result<(i64, i64), String>\n\n  part g(p: List[Int]) -> Pair via Io:\n    yield Io.parse(p)\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let cm = types::check_module(m).expect("Result<tuple> must type-check");
+    let rust = codegen::emit_rust(&cm).expect("Result<tuple> must lower");
+    assert!(rust.contains("PairI :: Got") || rust.contains("PairI::Got"), "must build the tuple success arm: {rust}");
+}
+
+#[test]
 fn ffi_result_v1_constraints_are_enforced() {
     // REQ-LLL-038 slice 038e / DEC-LLL-046: v1 marshals a foreign `Result` error as a
     // String message and requires a 2-constructor ADT (success arm, error arm). A typed
