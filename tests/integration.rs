@@ -2095,6 +2095,50 @@ fn pure_program_trace_replay_round_trips() {
 }
 
 #[test]
+fn ffi_scalar_effect_is_recorded_and_replayed() {
+    // REQ-LLL-044 → REQ-LLL-028 (Pillar-6, Vision #4): an Int-returning `= extern` op
+    // is an ambient (possibly impure) effect, so — like IO.read — its result is
+    // RECORDED under `--trace` and REPLAYED (returned from the recording) under
+    // `--replay`, keeping an FFI run reproducible for deterministic audit. Uses a std
+    // path (single-file, offline).
+    let dir = tempdir().join("ffi-replay");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("f.lll");
+    std::fs::write(
+        &lll,
+        "module Ft:\n\n  effect Cmp:\n    max(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part pick(x: Int) -> Int via Cmp:\n    yield Cmp.max(x, 7)\n\n  part main() -> Int via IO, Cmp:\n    yield IO.print(pick(3))\n",
+    )
+    .unwrap();
+    let trace = dir.join("t.jsonl");
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let traced = std::process::Command::new(bin)
+        .args(["run", lll.to_str().unwrap(), "--trace", trace.to_str().unwrap()])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(traced.status.success(), "trace run failed: {}", String::from_utf8_lossy(&traced.stderr));
+    // the FFI effect's result is recorded (not just IO) — proving it is captured.
+    let recorded = std::fs::read_to_string(&trace).unwrap();
+    assert!(recorded.contains("Cmp.max"), "the FFI effect must be recorded in the trace: {recorded}");
+    let replayed = std::process::Command::new(bin)
+        .args(["run", lll.to_str().unwrap(), "--replay", trace.to_str().unwrap()])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        replayed.status.success(),
+        "FFI replay must round-trip without divergence: {}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&replayed.stdout).contains("replay: OK"),
+        "replay must reproduce the FFI run cleanly: {}",
+        String::from_utf8_lossy(&replayed.stdout)
+    );
+}
+
+#[test]
 fn higher_order_definitions_are_alpha_equivalent_blind_to_binder_and_row_names() {
     // content-identity (DEC-LLL-019/020) is blind to BOUND names: two HOFs that
     // differ only in the function-parameter name AND the effect row-variable name

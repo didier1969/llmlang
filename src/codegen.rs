@@ -142,11 +142,29 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                     Some(Foreign::RString) => format!("__lll_str_of_rust(&{call})"),
                     _ => call,
                 };
+                let key = format!("{}.{}", ed.name, op.name);
+                let ret_ty = rs_ty(&op.ret);
+                // FFI replay/trace (REQ-LLL-043 → REQ-LLL-028, Pillar-6): an extern op is
+                // an ambient, possibly impure/nondeterministic effect, so — like IO.read
+                // — its scalar result is recorded under `--trace` and REPLAYED (returned
+                // from the recording) under `--replay`, keeping the run reproducible for
+                // deterministic audit (Vision #4). Only an `Int` return fits the scalar
+                // (i64) trace format; a bool/String result is not yet recorded (a later
+                // slice of the explicability layer, REQ-LLL-002). Kept on ONE line so the
+                // frontier diagnostic (REQ-LLL-041) still re-anchors a build error here.
+                let wrapped = if ret_ty == "i64" {
+                    format!(
+                        "if let Some(__r) = replay_next(\"{key}\") {{ return __r; }} \
+                         let __r = {body}; trace_write(\"{key}\", __r); __r"
+                    )
+                } else {
+                    body
+                };
                 out.push_str(&format!(
-                    "#[inline] fn {}({}) -> {} {{ {body} }}\n",
-                    ffi_shim(&format!("{}.{}", ed.name, op.name)),
+                    "#[inline] fn {}({}) -> {} {{ {wrapped} }}\n",
+                    ffi_shim(&key),
                     params.join(", "),
-                    rs_ty(&op.ret),
+                    ret_ty,
                 ));
             }
         }
