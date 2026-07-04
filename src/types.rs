@@ -434,6 +434,31 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // call-graph SCCs (wave 3): mutual recursion is allowed, measured
     let (scc_id, scc_multi) = compute_sccs(&module, &index);
 
+    // typeclasses (REQ-LLL-048, DEC-LLL-047): register classes BEFORE the per-part
+    // loop below, so a part's `given Class[a]` clause can resolve the class's
+    // methods while checking that part's own body.
+    let mut class_map: HashMap<String, &Class> = HashMap::new();
+    for c in &module.classes {
+        if !c.tyvar.chars().next().is_some_and(|ch| ch.is_lowercase()) {
+            return Err(format!(
+                "class `{}`: the class type variable `{}` must be a lowercase name",
+                c.name, c.tyvar
+            ));
+        }
+        let mut mnames: HashSet<&str> = HashSet::new();
+        for (mn, mparams, mret) in &c.methods {
+            if !mnames.insert(mn.as_str()) {
+                return Err(format!("class `{}`: duplicate method `{mn}`", c.name));
+            }
+            for t in mparams.iter().chain(std::iter::once(mret)) {
+                check_user_ty_declared(t, &type_names)?;
+            }
+        }
+        if class_map.insert(c.name.clone(), c).is_some() {
+            return Err(format!("duplicate class `{}`", c.name));
+        }
+    }
+
     // names a contract call could resolve to (used to keep array spec primitives
     // exempt from the no-calls rule only when NOT shadowed by a user definition).
     let callables: HashSet<String> = index.keys().chain(ctors.keys()).cloned().collect();
@@ -445,7 +470,60 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         // names a part is unambiguously a first-class function value (REQ-LLL-009)
         let mut locals: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
         collect_locals(&part.body, &mut locals);
+
+        // typeclass constraints `given Class[a]` (REQ-LLL-039, DEC-LLL-047): each
+        // required method becomes an OPAQUE function-valued binding over the
+        // abstract sort of `a` — reusing the EXISTING function-valued-parameter
+        // machinery (REQ-LLL-009 / DEC-LLL-029 UF-firewall) rather than a new
+        // resolution path. No class law is assumed here — the part is verified
+        // ONCE, abstractly, blind to which instance will resolve `a` later
+        // (never `assert forall`; laws stay ground-instantiated per instance,
+        // slice A inc.3).
+        let mut given_seen: HashSet<(&str, &str)> = HashSet::new();
+        let mut given_vars: HashMap<String, Ty> = HashMap::new();
+        for (cname, tv) in &part.given {
+            if !given_seen.insert((cname.as_str(), tv.as_str())) {
+                return Err(format!("part `{}`: duplicate `given {cname}[{tv}]`", part.name));
+            }
+            let class = class_map.get(cname.as_str()).ok_or_else(|| {
+                format!(
+                    "part `{}`: `given {cname}[{tv}]` names an unknown class — declare it with \
+                     `class {cname}[a]:`",
+                    part.name
+                )
+            })?;
+            for (mn, mparams, mret) in &class.methods {
+                let gparams: Vec<Ty> = mparams
+                    .iter()
+                    .map(|t| subst_tyvar(t, &class.tyvar, &Ty::Var(tv.clone())))
+                    .collect();
+                let gret = subst_tyvar(mret, &class.tyvar, &Ty::Var(tv.clone()));
+                if given_vars.insert(mn.clone(), Ty::Fun(gparams, Box::new(gret))).is_some() {
+                    return Err(format!(
+                        "part `{}`: method `{mn}` is required by more than one `given` class in \
+                         scope — v1 has no qualified method calls, rename one",
+                        part.name
+                    ));
+                }
+            }
+        }
+        for (pn, _) in &part.params {
+            if given_vars.contains_key(pn) {
+                return Err(format!(
+                    "part `{}`: parameter `{pn}` has the same name as a method required by a \
+                     `given` clause — rename it",
+                    part.name
+                ));
+            }
+        }
         for ln in &locals {
+            if given_vars.contains_key(ln) {
+                return Err(format!(
+                    "part `{}`: local `{ln}` shadows a method required by a `given` clause — \
+                     rename it",
+                    part.name
+                ));
+            }
             if index.contains_key(ln) || ctors.contains_key(ln) {
                 return Err(format!(
                     "part `{}`: local `{ln}` shadows a part or constructor of the same name — rename it",
@@ -453,13 +531,15 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 ));
             }
         }
+        let mut vars0: HashMap<String, Ty> = given_vars.clone();
+        vars0.extend(part.params.iter().cloned());
         let mut ctx = Ctx {
             module: &module,
             index: &index,
             ctors: &ctors,
             part,
             all_binders: collect_binders(&part.body),
-            vars: vec![part.params.iter().cloned().collect()],
+            vars: vec![vars0],
             smaller: vec![HashMap::new()],
             rec_calls: Vec::new(),
             effect_ops: &effect_ops,
@@ -506,31 +586,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         recursion.insert(part.name.clone(), rec);
     }
-    // typeclasses (REQ-LLL-048, DEC-LLL-047): register classes, then type-check each
-    // instance's methods at its GROUND type (the class variable substituted by the
-    // instance type). The ground law-check VC is inc.3 — so a well-typed instance is
-    // still not accepted yet, but a MIS-typed one is now rejected precisely.
-    let mut class_map: HashMap<String, &Class> = HashMap::new();
-    for c in &module.classes {
-        if !c.tyvar.chars().next().is_some_and(|ch| ch.is_lowercase()) {
-            return Err(format!(
-                "class `{}`: the class type variable `{}` must be a lowercase name",
-                c.name, c.tyvar
-            ));
-        }
-        let mut mnames: HashSet<&str> = HashSet::new();
-        for (mn, mparams, mret) in &c.methods {
-            if !mnames.insert(mn.as_str()) {
-                return Err(format!("class `{}`: duplicate method `{mn}`", c.name));
-            }
-            for t in mparams.iter().chain(std::iter::once(mret)) {
-                check_user_ty_declared(t, &type_names)?;
-            }
-        }
-        if class_map.insert(c.name.clone(), c).is_some() {
-            return Err(format!("duplicate class `{}`", c.name));
-        }
-    }
+    // instance type-checking (class_map was registered above, before the per-part
+    // loop). The ground law-check VC is inc.3 — so a well-typed instance is proven
+    // lawful in the vc fork, never a silent runtime downgrade.
     // coherence (REQ-LLL-048): at most one instance per (class, ground type) — a
     // future generic `given` resolution site must find a UNIQUE dictionary, so an
     // ambiguous second instance is rejected here rather than silently picking one.

@@ -246,6 +246,32 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
         }
         env.insert(n.clone(), c);
     }
+    // typeclass constraints `given Class[a]` (REQ-LLL-039, DEC-LLL-047): each
+    // required method is declared as an uninterpreted function over the abstract
+    // sort of `a`, exactly like a function-valued PARAMETER above (DEC-LLL-029
+    // UF-firewall) — no class law is assumed here (never `assert forall`); the
+    // part is verified once, abstractly (`check_module` already validated the
+    // `given` clauses and rejects a name collision between two required methods).
+    for (cname, tv) in &part.given {
+        let class = cm
+            .module
+            .classes
+            .iter()
+            .find(|c| &c.name == cname)
+            .ok_or_else(|| format!("vcgen: `given {cname}[{tv}]` names an unknown class"))?;
+        for (mn, mparams, mret) in &class.methods {
+            let gparams: Vec<Ty> = mparams
+                .iter()
+                .map(|t| subst_tyvar(t, &class.tyvar, &Ty::Var(tv.clone())))
+                .collect();
+            let gret = subst_tyvar(mret, &class.tyvar, &Ty::Var(tv.clone()));
+            let c = format!("gm_{mn}");
+            let sorts: Vec<String> = gparams.iter().map(smt_ty).collect();
+            em.decls
+                .push(format!("(declare-fun {c} ({}) {})", sorts.join(" "), smt_ty(&gret)));
+            env.insert(mn.clone(), c);
+        }
+    }
     // requires as hypotheses
     for r in &part.requires {
         let t = em.tr(r, &env, None)?;

@@ -618,15 +618,61 @@ fn typeclass_class_and_instance_merge_across_imports() {
 
 #[test]
 fn typeclass_given_clause_surface_parses() {
-    // REQ-LLL-039 slice B inc.1 — the `given Class[a]` constraint clause on a part
-    // parses into the AST. Consumption (resolving a class method call inside the
-    // generic body as an opaque UF) is a later increment — a body calling `eq`
-    // still errors as an unknown call, precisely (not a crash, not a silent pass).
+    // REQ-LLL-039 slice B inc.1 — the `given Class[a]` constraint clause parses.
     let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part refl(x: a) -> Bool given Eq[a]:\n    yield eq(x, x)\n";
     let m = parser::parse_module(src).expect("parse");
     assert_eq!(m.parts[0].given, vec![("Eq".to_string(), "a".to_string())]);
-    let err = types::check_module(m).expect_err("method consumption is not implemented yet");
-    assert!(err.contains("eq"), "expected an error naming the unresolved call, got: {err}");
+}
+
+#[test]
+fn typeclass_given_method_resolves_as_opaque_uf() {
+    // REQ-LLL-039 slice B inc.2 — a class method required by `given` is callable
+    // in the generic body, type-checks, and verifies: it's an OPAQUE uninterpreted
+    // function (reusing the function-valued-parameter machinery, DEC-LLL-029), so
+    // a body that only reasons ABOUT its own shape (not the law) verifies fine.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "calling an opaque given-method must verify");
+}
+
+#[test]
+fn typeclass_given_law_not_assumed_soundness() {
+    // SOUNDNESS-CRITICAL (DEC-LLL-047): the class law must NOT be usable as an
+    // axiom inside a generic `given`-consuming body — only ground instantiation
+    // proves a law (slice A inc.3), never `assert forall`. So a generic part whose
+    // ENSURES depends on the law (reflexivity) must FAIL to verify: `eq` is fully
+    // opaque here, Z3 knows nothing about it beyond its signature.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  part must_be_true(x: a) -> Bool given Eq[a]:\n    ensures result == true\n    yield eq(x, x)\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "a generic body must NOT get the law for free — that would be an unsound implicit `assert forall`");
+}
+
+#[test]
+fn typeclass_given_unknown_class_rejected() {
+    let src = "module T:\n\n  part refl(x: a) -> Bool given Nope[a]:\n    yield true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("unknown given class must be rejected");
+    assert!(err.contains("unknown class"), "expected unknown-class error, got: {err}");
+}
+
+#[test]
+fn typeclass_given_param_name_collision_rejected() {
+    // A parameter sharing a name with a required method is rejected precisely
+    // rather than silently shadowing the method (or vice versa).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part bad(eq: a) -> Bool given Eq[a]:\n    yield true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("param/method name collision must be rejected");
+    assert!(err.contains("same name"), "expected a name-collision error, got: {err}");
+}
+
+#[test]
+fn typeclass_given_ambiguous_method_across_classes_rejected() {
+    // Two given classes requiring a method of the SAME name is ambiguous in v1
+    // (no qualified method calls) — rejected precisely, not silently resolved.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  class Neq[a]:\n    eq(a, a) -> Bool\n\n  part bad(x: a, y: a) -> Bool given Eq[a], Neq[a]:\n    yield eq(x, y)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("ambiguous method across given classes must be rejected");
+    assert!(err.contains("more than one"), "expected an ambiguity error, got: {err}");
 }
 
 #[test]
