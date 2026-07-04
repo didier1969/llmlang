@@ -92,6 +92,11 @@ pub enum Ty {
     /// with bounds proven by Z3 (theory Seq at proof, `Rc<Vec<T>>` at runtime).
     /// Read-only in slice 1 — `array(…)` literal, `length(a)`, `get(a, i)`.
     Array(Box<Ty>),
+    /// A verified persistent map `Map[K, V]` (REQ-LLL-037, DEC-LLL-043): key→value
+    /// lookup with a key-present proof obligation (Z3 models it as `(Array K
+    /// (Maybe V))`; runtime `Rc<BTreeMap<K, V>>` + make_mut). v1 intrinsics —
+    /// `map()` literal, `insert(m, k, v)`, `lookup(m, k)`, `haskey(m, k)`.
+    Map(Box<Ty>, Box<Ty>),
     /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
     /// v1: parameter and result types are concrete (monomorphic HOF).
     Fun(Vec<Ty>, Box<Ty>),
@@ -120,6 +125,10 @@ impl Ty {
     pub fn array(elem: Ty) -> Ty {
         Ty::Array(Box::new(elem))
     }
+    /// `Map[key, val]` (REQ-LLL-037, DEC-LLL-043).
+    pub fn map(key: Ty, val: Ty) -> Ty {
+        Ty::Map(Box::new(key), Box::new(val))
+    }
     /// The concrete `List[Int]` — the v1 monomorphic list, now a special case.
     pub fn list_int() -> Ty {
         Ty::list(Ty::Int)
@@ -130,6 +139,7 @@ impl Ty {
             Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => true,
             Ty::Var(_) => false,
             Ty::List(e) | Ty::Array(e) => e.is_concrete(),
+            Ty::Map(k, v) => k.is_concrete() && v.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
             Ty::Tuple(cs) => cs.iter().all(|c| c.is_concrete()),
         }
@@ -144,6 +154,7 @@ impl std::fmt::Display for Ty {
             Ty::Var(a) => write!(f, "{a}"),
             Ty::List(e) => write!(f, "List[{e}]"),
             Ty::Array(e) => write!(f, "Array[{e}]"),
+            Ty::Map(k, v) => write!(f, "Map[{k}, {v}]"),
             Ty::Fun(ps, r) => {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
                 write!(f, "({}) -> {r}", ps.join(", "))
@@ -250,6 +261,22 @@ pub fn is_array_builtin(name: &str) -> bool {
 /// mentions it is a disallowed call, like any other.
 pub fn is_array_spec_term(name: &str) -> bool {
     matches!(name, "array" | "length" | "get" | "contains")
+}
+
+/// Reserved builtin names for the verified persistent map (REQ-LLL-037,
+/// DEC-LLL-043). Dispatched BY NAME in every fork, like the array builtins.
+/// `map` is the empty-map literal; `insert`/`lookup`/`haskey` are the v1 ops.
+/// Distinct from the array accessors (`get`/`set`) so the receiver kind is
+/// explicit at the call site with no type-directed dispatch (criterion #1).
+pub fn is_map_builtin(name: &str) -> bool {
+    matches!(name, "map" | "insert" | "lookup" | "haskey")
+}
+
+/// The subset of map builtins admitted as SPEC TERMS inside contracts: the
+/// read-only, decidable select/tester operators. `insert` is a value-producing
+/// op (like `set`), NOT a spec term; `map()` is a value literal.
+pub fn is_map_spec_term(name: &str) -> bool {
+    matches!(name, "lookup" | "haskey")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

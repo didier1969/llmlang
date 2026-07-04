@@ -198,6 +198,9 @@ fn rs_ty(t: &Ty) -> String {
         // a verified array is an Rc-shared Vec (REQ-LLL-037): O(1) index, and the
         // borrow model passes it by reference like a list (is_heap).
         Ty::Array(e) => format!("Arr<{}>", rs_ty(e)),
+        // a verified map is an Rc-shared BTreeMap (REQ-LLL-037, DEC-LLL-043):
+        // persistent via make_mut, ordered so equality/serialization is by content.
+        Ty::Map(k, v) => format!("Map<{}, {}>", rs_ty(k), rs_ty(v)),
         // first-class function → Rust fn pointer (REQ-LLL-009); a non-capturing
         // lambda / mangled part name coerces to it.
         Ty::Fun(ps, r) => {
@@ -226,6 +229,34 @@ fn tv_param(a: &str) -> String {
     format!("T{a}")
 }
 
+/// Collect type variables that appear in a KEY position of some `Map[K, _]`
+/// within `t` — those become Rust generic params used as a `BTreeMap` key, so
+/// they need a `+ Ord` bound (REQ-LLL-037, DEC-LLL-043). The `Ord` is selective:
+/// a tvar used only as a value / list element must NOT be over-constrained.
+fn collect_key_tvars(t: &Ty, acc: &mut Vec<String>) {
+    match t {
+        Ty::Map(k, v) => {
+            // every tvar in the key type is a BTreeMap key ⇒ needs Ord
+            collect_tvars(k, acc);
+            // the value may itself contain nested maps whose keys need Ord
+            collect_key_tvars(v, acc);
+        }
+        Ty::List(e) | Ty::Array(e) => collect_key_tvars(e, acc),
+        Ty::Fun(ps, r) => {
+            for p in ps {
+                collect_key_tvars(p, acc);
+            }
+            collect_key_tvars(r, acc);
+        }
+        Ty::Tuple(cs) => {
+            for c in cs {
+                collect_key_tvars(c, acc);
+            }
+        }
+        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
+    }
+}
+
 /// Collect the distinct type variables of a type, in order of first appearance.
 fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
     match t {
@@ -235,6 +266,10 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             }
         }
         Ty::List(e) | Ty::Array(e) => collect_tvars(e, acc),
+        Ty::Map(k, v) => {
+            collect_tvars(k, acc);
+            collect_tvars(v, acc);
+        }
         Ty::Fun(ps, r) => {
             for p in ps {
                 collect_tvars(p, acc);
@@ -259,7 +294,7 @@ fn mangle(name: &str) -> String {
 /// traversal skip the per-node refcount inc/dec (DEC-LLL-031 voie B) — every other
 /// type (Int/Bool/Unit/Fun/Tuple/type-var) is Copy or moved, with no refcount.
 fn is_heap(t: &Ty) -> bool {
-    matches!(t, Ty::List(_) | Ty::User(_) | Ty::Array(_))
+    matches!(t, Ty::List(_) | Ty::User(_) | Ty::Array(_) | Ty::Map(..))
 }
 
 /// Collect the names of parts USED AS A FIRST-CLASS VALUE — a bare `Expr::Var`
@@ -399,7 +434,12 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
     // (rs_ty renders it as `T` = the Rc alias) gives recursion for free
     // (REQ-LLL-011). Values are shared via reference counting.
     let ei = format!("{}I", td.name);
-    out.push_str(&format!("\n#[derive(Debug, Clone, PartialEq)]\npub enum {ei} {{\n"));
+    // Ord/Eq are derived so any concrete type may serve as a verified Map key
+    // (BTreeMap requires `K: Ord`); the proof never reasons about key order, so the
+    // total order is a runtime-only artifact (REQ-LLL-037, DEC-LLL-043).
+    out.push_str(&format!(
+        "\n#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]\npub enum {ei} {{\n"
+    ));
     for (cn, fields) in &td.ctors {
         if fields.is_empty() {
             out.push_str(&format!("    {cn},\n"));
@@ -422,12 +462,21 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         collect_tvars(t, &mut tvars);
     }
     collect_tvars(&part.ret, &mut tvars);
+    // tvars used as a Map key need `+ Ord` (BTreeMap key), selectively (DEC-LLL-043).
+    let mut key_tvars: Vec<String> = Vec::new();
+    for (_, t) in &part.params {
+        collect_key_tvars(t, &mut key_tvars);
+    }
+    collect_key_tvars(&part.ret, &mut key_tvars);
     let generics = if tvars.is_empty() {
         String::new()
     } else {
         let bounds: Vec<String> = tvars
             .iter()
-            .map(|a| format!("{}: Clone + PartialEq", tv_param(a)))
+            .map(|a| {
+                let ord = if key_tvars.contains(a) { " + Ord" } else { "" };
+                format!("{}: Clone + PartialEq{ord}", tv_param(a))
+            })
             .collect();
         format!("<{}>", bounds.join(", "))
     };
@@ -552,12 +601,21 @@ fn emit_specialized_part(
         collect_tvars(t, &mut tvars);
     }
     collect_tvars(&part.ret, &mut tvars);
+    // tvars used as a Map key need `+ Ord` (BTreeMap key), selectively (DEC-LLL-043).
+    let mut key_tvars: Vec<String> = Vec::new();
+    for (_, t) in &part.params {
+        collect_key_tvars(t, &mut key_tvars);
+    }
+    collect_key_tvars(&part.ret, &mut key_tvars);
     let generics = if tvars.is_empty() {
         String::new()
     } else {
         let bounds: Vec<String> = tvars
             .iter()
-            .map(|a| format!("{}: Clone + PartialEq", tv_param(a)))
+            .map(|a| {
+                let ord = if key_tvars.contains(a) { " + Ord" } else { "" };
+                format!("{}: Clone + PartialEq{ord}", tv_param(a))
+            })
             .collect();
         format!("<{}>", bounds.join(", "))
     };
@@ -1291,6 +1349,39 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
             }
         }
+        Expr::Call(name, args)
+            if is_map_builtin(name)
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            // verified map primitives (REQ-LLL-037, DEC-LLL-043): `Map<K,V> =
+            // Rc<BTreeMap<K,V>>`. Reads borrow the map (`**` reaches the BTreeMap);
+            // `insert` mutates in place via make_mut when uniquely owned, else
+            // copies-on-write. The `lookup` unwrap is proven-dead in verified code.
+            match name.as_str() {
+                "map" => "Rc::new(BTreeMap::new())".to_string(),
+                "insert" => {
+                    let m = expr(&args[0], cx, res)?;
+                    let k = expr(&args[1], cx, res)?;
+                    let v = expr(&args[2], cx, res)?;
+                    format!(
+                        "{{ let mut __mins = {m}; Rc::make_mut(&mut __mins).insert({k}, {v}); __mins }}"
+                    )
+                }
+                "lookup" => {
+                    let m = borrowed(&args[0], cx, res)?;
+                    let k = expr(&args[1], cx, res)?;
+                    format!("(**{m}).get(&({k})).cloned().unwrap()")
+                }
+                "haskey" => {
+                    let m = borrowed(&args[0], cx, res)?;
+                    let k = expr(&args[1], cx, res)?;
+                    format!("(**{m}).contains_key(&({k}))")
+                }
+                _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+            }
+        }
         Expr::Call(name, args) => {
             // heap arguments are BORROWED at the positions the callee borrows
             // (DEC-LLL-031); a constructor / fn-valued-param name has no mask, so
@@ -1383,13 +1474,21 @@ use std::rc::Rc;
 
 // Generic cons list (REQ-LLL-007): List[Int] = Lst<i64>, List[a] = Lst<Ta>.
 // rustc monomorphizes each instantiation → static dispatch (DEC-LLL-018).
-#[derive(Debug, PartialEq)]
+// Ord/Eq derived so a List may serve as a verified Map key (REQ-LLL-037).
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LstI<T> { Nil, Cons(T, Lst<T>) }
 pub type Lst<T> = Rc<LstI<T>>;
 
 // Verified array (REQ-LLL-037): an Rc-shared Vec — O(1) indexing, structural
 // sharing on read; `set` (a later slice) uses Rc::make_mut for in-place-if-unique.
 pub type Arr<T> = Rc<Vec<T>>;
+
+// Verified persistent map (REQ-LLL-037, DEC-LLL-043): an Rc-shared BTreeMap.
+// Ordered ⇒ content-deterministic equality/iteration (the proof reasons about
+// keys only, never their order); `insert` uses Rc::make_mut for O(log n)
+// in-place-if-unique, copy-on-write otherwise.
+use std::collections::BTreeMap;
+pub type Map<K, V> = Rc<BTreeMap<K, V>>;
 
 // ---- effect runtime: normal / trace ($LLL_TRACE) / replay ($LLL_REPLAY) ----
 use std::cell::RefCell;

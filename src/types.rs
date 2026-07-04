@@ -936,11 +936,14 @@ fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), Strin
     let no_calls = |e: &Expr, clause: &str| -> Result<(), String> {
         let mut bad = None;
         e.walk(&mut |x| {
-            // array spec primitives (length/get/array) are admitted terms, not calls
-            // — UNLESS the name is a user part/constructor (then it is a real call).
+            // array/map spec primitives (length/get/lookup/haskey/…) are admitted
+            // terms, not calls — UNLESS the name is a user part/constructor
+            // (then it is a real call).
             let is_disallowed_call = match x {
                 Expr::EffCall(..) => true,
-                Expr::Call(n, _) => !is_array_spec_term(n) || callables.contains(n),
+                Expr::Call(n, _) => {
+                    (!is_array_spec_term(n) && !is_map_spec_term(n)) || callables.contains(n)
+                }
                 _ => false,
             };
             if is_disallowed_call && bad.is_none() {
@@ -1120,6 +1123,38 @@ fn type_of_pure(
             }
             _ => unreachable!(),
         },
+        // map spec primitives admitted in contracts (DEC-LLL-043): `lookup`/`haskey`
+        // are decidable select/tester terms (the key-present obligation of `lookup`
+        // is emitted by the vc, exactly like array `get`'s bounds obligation).
+        Expr::Call(name, args) if is_map_spec_term(name) => match name.as_str() {
+            "lookup" => {
+                if args.len() != 2 {
+                    return Err("`lookup` takes 2 arguments (map, key)".into());
+                }
+                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone())? {
+                    Ty::Map(k, v) => (*k, *v),
+                    _ => return Err("`lookup` needs a Map".into()),
+                };
+                if type_of_pure(&args[1], vars, result)? != mk {
+                    return Err("`lookup` key type mismatch".into());
+                }
+                mv
+            }
+            "haskey" => {
+                if args.len() != 2 {
+                    return Err("`haskey` takes 2 arguments (map, key)".into());
+                }
+                let mk = match type_of_pure(&args[0], vars, result.clone())? {
+                    Ty::Map(k, _) => *k,
+                    _ => return Err("`haskey` needs a Map".into()),
+                };
+                if type_of_pure(&args[1], vars, result)? != mk {
+                    return Err("`haskey` key type mismatch".into());
+                }
+                Ty::Bool
+            }
+            _ => unreachable!(),
+        },
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
         Expr::Lambda(..) => return Err("lambdas are not allowed in contracts (v1)".into()),
     })
@@ -1182,6 +1217,10 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
         },
         (Ty::List(pe), Ty::List(ae)) => unify_arg(pe, ae, subst),
         (Ty::Array(pe), Ty::Array(ae)) => unify_arg(pe, ae, subst),
+        (Ty::Map(pk, pv), Ty::Map(ak, av)) => {
+            unify_arg(pk, ak, subst)?;
+            unify_arg(pv, av, subst)
+        }
         (Ty::User(pn), Ty::User(an)) if pn == an => Ok(()),
         (Ty::Fun(pp, pr), Ty::Fun(ap, ar)) if pp.len() == ap.len() => {
             for (p, a) in pp.iter().zip(ap) {
@@ -1208,6 +1247,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::User(n) => Ty::User(n.clone()),
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
         Ty::Array(e) => Ty::array(subst_ty(e, subst)),
+        Ty::Map(k, v) => Ty::map(subst_ty(k, subst), subst_ty(v, subst)),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| subst_ty(p, subst)).collect(),
             Box::new(subst_ty(r, subst)),
@@ -1862,6 +1902,127 @@ fn check_expr(
                     Ty::Bool
                 }
                 _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
+            }
+        }
+        // map primitives (REQ-LLL-037, DEC-LLL-043), UNLESS the module shadows the
+        // name with a user part/constructor/local. Distinct names from the array
+        // accessors — the receiver kind is explicit at each call site (criterion #1).
+        Expr::Call(name, args)
+            if is_map_builtin(name)
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            match name.as_str() {
+                "map" => {
+                    if !args.is_empty() {
+                        return Err(format!(
+                            "part `{}`: `map()` is the empty-map literal (v1: build with `insert`)",
+                            ctx.part.name
+                        ));
+                    }
+                    // empty map: key/value types come from context (mirror of the
+                    // empty `array()` / `[]` rule), else a compile error.
+                    match expected {
+                        Some(Ty::Map(k, v)) => Ty::map((**k).clone(), (**v).clone()),
+                        _ => {
+                            return Err(format!(
+                                "part `{}`: cannot infer the key/value types of the empty `map()` here \
+                                 — it must appear where its type is fixed (an expected `Map[K,V]`, \
+                                 e.g. a `yield`, a call argument, or a typed field)",
+                                ctx.part.name
+                            ))
+                        }
+                    }
+                }
+                "insert" => {
+                    if args.len() != 3 {
+                        return Err(format!(
+                            "part `{}`: `insert` takes 3 arguments (map, key, value)",
+                            ctx.part.name
+                        ));
+                    }
+                    // the map receiver drives the key/value types. `insert` returns
+                    // the same Map, so an empty `map()` receiver takes its type from
+                    // the surrounding expected — exactly like the vc threads it, so
+                    // the two forks accept the same programs (a bare `let m =
+                    // insert(map(), …)` has no expected → a compile error in both).
+                    let (mk, mv) = match check_expr(ctx, &args[0], expected)? {
+                        Ty::Map(k, v) => (*k, *v),
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `insert` needs a Map, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    let tk = check_expr(ctx, &args[1], Some(&mk))?;
+                    if tk != mk {
+                        return Err(format!(
+                            "part `{}`: `insert` key must be {mk}, got {tk}",
+                            ctx.part.name
+                        ));
+                    }
+                    let tv = check_expr(ctx, &args[2], Some(&mv))?;
+                    if tv != mv {
+                        return Err(format!(
+                            "part `{}`: `insert` value must be {mv}, got {tv}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::map(mk, mv)
+                }
+                "lookup" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `lookup` takes 2 arguments (map, key)",
+                            ctx.part.name
+                        ));
+                    }
+                    let (mk, mv) = match check_expr(ctx, &args[0], None)? {
+                        Ty::Map(k, v) => (*k, *v),
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `lookup` needs a Map, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    let tk = check_expr(ctx, &args[1], Some(&mk))?;
+                    if tk != mk {
+                        return Err(format!(
+                            "part `{}`: `lookup` key must be {mk}, got {tk}",
+                            ctx.part.name
+                        ));
+                    }
+                    mv
+                }
+                "haskey" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `haskey` takes 2 arguments (map, key)",
+                            ctx.part.name
+                        ));
+                    }
+                    let mk = match check_expr(ctx, &args[0], None)? {
+                        Ty::Map(k, _) => *k,
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `haskey` needs a Map, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    let tk = check_expr(ctx, &args[1], Some(&mk))?;
+                    if tk != mk {
+                        return Err(format!(
+                            "part `{}`: `haskey` key must be {mk}, got {tk}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::Bool
+                }
+                _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
             }
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {

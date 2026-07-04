@@ -555,6 +555,15 @@ impl Parser {
                 self.eat(Tok::RBracket)?;
                 Ok(Ty::array(elem))
             }
+            Tok::Ident(s) if s == "Map" => {
+                // verified persistent map `Map[K, V]` (REQ-LLL-037, DEC-LLL-043)
+                self.eat(Tok::LBracket)?;
+                let key = self.ty()?;
+                self.eat(Tok::Comma)?;
+                let val = self.ty()?;
+                self.eat(Tok::RBracket)?;
+                Ok(Ty::map(key, val))
+            }
             // a lowercase-initial bareword is a parametric type variable
             // (REQ-LLL-007). Constructors (Int/Bool/List) are capitalized.
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {

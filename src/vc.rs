@@ -248,6 +248,11 @@ fn smt_ty(t: &Ty) -> String {
         // a verified array uses Z3's Seq theory: `seq.len` is the native length the
         // bounds obligations need, `seq.nth` the indexed read (REQ-LLL-037, DEC-043).
         Ty::Array(e) => format!("(Seq {})", smt_ty(e)),
+        // a verified map uses Z3's extensional Array theory over an optional value:
+        // `(Array K (Maybe V))`. `select`/`store` are Z3's most robust array ops,
+        // and `Maybe` makes an absent key `none` so map equality is extensional
+        // (order-independent) by construction (REQ-LLL-037, DEC-LLL-043).
+        Ty::Map(k, v) => format!("(Array {} (Maybe {}))", smt_ty(k), smt_ty(v)),
         // functions are declared as uninterpreted functions (declare-fun), never
         // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
@@ -643,6 +648,70 @@ impl<'a> Emit<'a> {
                     _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
                 }
             }
+            Expr::Call(name, args)
+                if is_map_builtin(name)
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                // verified map via Z3's Array theory over `(Maybe V)` (REQ-LLL-037,
+                // DEC-LLL-043). `select`/`store` are the robust core; `lookup`
+                // carries a key-present obligation dischargeable by `haskey`.
+                match name.as_str() {
+                    "map" => {
+                        // empty map: the K/V sorts come from the expected `Map[K,V]`
+                        // threaded by context (mirror of empty `array()`). A const
+                        // array mapping every key to `none`.
+                        match expected {
+                            Some(Ty::Map(k, v)) => {
+                                let ksort = smt_ty(k);
+                                let vsort = smt_ty(v);
+                                format!(
+                                    "((as const (Array {ksort} (Maybe {vsort}))) (as none (Maybe {vsort})))"
+                                )
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "part `{}`: cannot infer the key/value types of the empty `map()` \
+                                     here — it needs an expected `Map[K,V]` from context (a `yield`, \
+                                     a call argument, or a typed field)",
+                                    self.part.name
+                                ))
+                            }
+                        }
+                    }
+                    "insert" => {
+                        // `insert` returns the same Map, so thread the expected Map
+                        // type to the receiver — an empty `map()` receiver reads its
+                        // K/V sorts off it (mirror of the checker; keeps the two forks
+                        // in step). key/value carry no empty-collection ambiguity here.
+                        let m = self.tr(&args[0], env, expected)?;
+                        let k = self.tr(&args[1], env, None)?;
+                        let v = self.tr(&args[2], env, None)?;
+                        format!("(store {m} {k} (some {v}))")
+                    }
+                    "lookup" => {
+                        let m = self.tr(&args[0], env, None)?;
+                        let k = self.tr(&args[1], env, None)?;
+                        // KEY-PRESENT obligation: `(select m k)` is not `none`. `Maybe`
+                        // has exactly none/some, so "not none" ⟺ "some" (Z3 4.16's
+                        // parametric-datatype tester `(_ is some)` is unreliable, the
+                        // `= none` form is robust). Discharged here → the `none` case is
+                        // dead, so the runtime `.unwrap()` is a fail-stop backstop.
+                        self.oblige(
+                            "map key is present".into(),
+                            format!("(not (= (select {m} {k}) none))"),
+                        );
+                        format!("(val (select {m} {k}))")
+                    }
+                    "haskey" => {
+                        let m = self.tr(&args[0], env, None)?;
+                        let k = self.tr(&args[1], env, None)?;
+                        format!("(not (= (select {m} {k}) none))")
+                    }
+                    _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+                }
+            }
             Expr::Call(name, args) => {
                 // application of a function-valued parameter: `(f_uf arg …)`
                 // (REQ-LLL-009). `f` was declared as an uninterpreted function.
@@ -867,6 +936,13 @@ fn pattern_cond(
 const LIST_DECL: &str =
     "(declare-datatypes ((Lst 1)) ((par (T) ((nil) (cons (head T) (tail (Lst T)))))))";
 
+// Parametric option datatype (REQ-LLL-037, DEC-LLL-043): a map is `(Array K
+// (Maybe V))`, so an absent key reads as `none` and a present one as `(some v)`.
+// Self-contained (references only its own param) — ordering vs Lst/user datatypes
+// is free.
+const MAYBE_DECL: &str =
+    "(declare-datatypes ((Maybe 1)) ((par (T) ((none) (some (val T))))))";
+
 /// Collect uninterpreted abstract-sort names (`Tv_<name>`) an SMT fragment
 /// mentions — one `declare-sort` per type variable is emitted per script.
 fn collect_abstract_sorts(text: &str, out: &mut std::collections::BTreeSet<String>) {
@@ -1003,6 +1079,7 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     // then the parametric list datatype if any list is used.
     let mut sorts: std::collections::BTreeSet<String> = Default::default();
     let mut uses_list = false;
+    let mut uses_maybe = false;
     for o in obls {
         for text in o
             .decls
@@ -1014,6 +1091,9 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
             if text.contains("(Lst ") || text.contains("nil") || text.contains("cons") {
                 uses_list = true;
             }
+            if text.contains("(Maybe ") {
+                uses_maybe = true;
+            }
         }
     }
     for srt in &sorts {
@@ -1024,6 +1104,12 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     // the parametric list must precede any user datatype that has a List field
     if uses_list || dt_decls.iter().any(|d| d.contains("(Lst")) {
         s.push_str(LIST_DECL);
+        s.push('\n');
+    }
+    // the parametric Maybe wraps a map's values so an absent key is `none` and map
+    // equality stays extensional (REQ-LLL-037, DEC-LLL-043). Self-contained.
+    if uses_maybe || dt_decls.iter().any(|d| d.contains("(Maybe")) {
+        s.push_str(MAYBE_DECL);
         s.push('\n');
     }
     // tuple product datatypes (REQ-LLL-026): one parametric declaration per arity

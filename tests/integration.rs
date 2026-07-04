@@ -1414,6 +1414,55 @@ fn empty_array_without_expected_type_is_a_compile_error() {
 }
 
 #[test]
+fn verified_map_insert_lookup_haskey() {
+    // REQ-LLL-037 slice 3 (DEC-LLL-043): a verified persistent Map[K,V]. Z3 models it
+    // as `(Array K (Maybe V))` (McCarthy select/store + parametric Maybe); `lookup`
+    // carries a key-present obligation dischargeable by `haskey` (mirror of the array
+    // bounds obligation). Runtime `Rc<BTreeMap>` + make_mut (persistent, O(log n)).
+    let src = "module MapTest:\n\n  part empty() -> Map[Int, Int]:\n    yield map()\n\n  part get_checked(m: Map[Int, Int], k: Int) -> Int:\n    requires haskey(m, k)\n    ensures result == lookup(m, k)\n    yield lookup(m, k)\n\n  part has(m: Map[Int, Int], k: Int) -> Int:\n    match haskey(m, k):\n      true  -> yield 1\n      false -> yield 0\n\n  part main() -> Int via IO:\n    let m0 = empty()\n    let m1 = insert(m0, 7, 100)\n    let m2 = insert(m1, 9, 200)\n    let a = IO.print(lookup(m2, 7))\n    let b = IO.print(get_checked(m2, 9))\n    let c = IO.print(has(m2, 7))\n    let d = IO.print(has(m2, 5))\n    yield IO.print(lookup(insert(m2, 7, 999), 7))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "verified map must check: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("100\n200\n1\n0\n999"), "expected 100,200,1,0,999; got: {out}");
+}
+
+#[test]
+fn map_lookup_without_haskey_is_a_compile_error() {
+    // SOUNDNESS: `lookup(m, k)` on a map not known to contain `k` leaves the
+    // key-present obligation `(is some (select m k))` undischarged → a compile error
+    // (DEC-LLL-015), exactly like an unprovable array index.
+    let src = "module MapBad:\n\n  part oops(m: Map[Int, Int], k: Int) -> Int:\n    yield lookup(m, k)\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "an unprovable map lookup must fail verification");
+}
+
+#[test]
+fn verified_map_equality_is_extensional() {
+    // DEC-LLL-043 (expert Q3): map equality is by CONTENT, independent of insertion
+    // order — Z3 proves it by array extensionality (absent key = `none` on both),
+    // and the runtime `Rc<BTreeMap>` agrees (ordered, content `PartialEq`). Building
+    // the same map two ways yields equal maps in BOTH the proof and the binary.
+    let src = "module MapEq:\n\n  part same(e: Map[Int, Int]) -> Int:\n    ensures result == 1\n    match insert(insert(e, 1, 10), 2, 20) == insert(insert(e, 2, 20), 1, 10):\n      true  -> yield 1\n      false -> yield 0\n\n  part main() -> Int via IO:\n    yield IO.print(same(map()))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "extensional map equality must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains('1'), "two insertion orders must be equal, got: {out}");
+}
+
+#[test]
+fn verified_map_is_polymorphic() {
+    // REQ-LLL-037, DEC-LLL-043: `Map[a, b]` is generic. In the proof the key/value
+    // are abstract sorts (`(Array Tv_a (Maybe Tv_b))`); in codegen the key tvar `Ta`
+    // gains a selective `+ Ord` bound (BTreeMap key) while `Tb` stays `Clone +
+    // PartialEq`. `first_val` is monomorphized to Int×Int at the call site.
+    let src = "module MapGen:\n\n  part first_val(m: Map[a, b], k: a) -> b:\n    requires haskey(m, k)\n    ensures result == lookup(m, k)\n    yield lookup(m, k)\n\n  part seed() -> Map[Int, Int]:\n    ensures haskey(result, 5)\n    yield insert(map(), 5, 42)\n\n  part main() -> Int via IO:\n    yield IO.print(first_val(seed(), 5))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a polymorphic map must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("42"), "first_val(seed(), 5) must be 42, got: {out}");
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`
