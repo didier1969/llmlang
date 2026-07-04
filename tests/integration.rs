@@ -24,6 +24,34 @@ fn tempdir() -> std::path::PathBuf {
 
 const GCD: &str = "module T:\n\n  part gcd(a: Int, b: Int) -> Int:\n    requires a >= 0, b >= 0\n    ensures  result >= 0\n    measure b\n    match b:\n      0 -> yield a\n      _ -> yield gcd(b, a mod b)\n";
 
+// ---- typeclasses (REQ-LLL-048 slice A inc.1: surface parse) ----
+
+#[test]
+fn typeclass_surface_parses_class_instance_law() {
+    // The class/instance/law surface parses into the AST (indentation style,
+    // DEC-LLL-014). Instance type-checking + the ground law-check are later
+    // increments; `check` rejects until then (sound intermediate, GUI-LLL-001).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert_eq!(m.classes.len(), 1, "one class");
+    assert_eq!(m.classes[0].name, "Eq");
+    assert_eq!(m.classes[0].tyvar, "a");
+    assert_eq!(m.classes[0].methods.len(), 1);
+    assert_eq!(m.classes[0].methods[0].0, "eq");
+    assert_eq!(m.classes[0].laws.len(), 1);
+    assert_eq!(m.classes[0].laws[0].name, "reflexive");
+    assert_eq!(m.classes[0].laws[0].binders.len(), 1);
+    assert_eq!(m.instances.len(), 1, "one instance");
+    assert_eq!(m.instances[0].class, "Eq");
+    assert_eq!(m.instances[0].ty, ast::Ty::Int);
+    assert_eq!(m.instances[0].defs.len(), 1);
+    assert_eq!(m.instances[0].defs[0].0, "eq");
+
+    // sound intermediate: check rejects until the law-check VC exists (inc.2/3)
+    let m2 = parser::parse_module(src).expect("parse");
+    assert!(types::check_module(m2).is_err(), "typeclasses must not pass check yet");
+}
+
 // ---- determinism & identity (target 3) ----
 
 #[test]

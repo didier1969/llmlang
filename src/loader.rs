@@ -64,6 +64,10 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
             deps: merged_deps,
             types,
             effects,
+            // typeclasses never reach here in slice A inc.1 — load_rec rejects any
+            // file that declares them (REQ-LLL-048); empty until inc.2 threads them.
+            classes: Vec::new(),
+            instances: Vec::new(),
             parts,
         },
     ))
@@ -131,6 +135,17 @@ fn load_rec(
     let src =
         std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let module = parser::parse_module(&src)?;
+    // typeclasses (REQ-LLL-048 slice A): the surface parses, but the loader does
+    // not yet merge classes/instances across files, and `check` does not yet
+    // discharge the ground law-check. Reject here rather than silently drop them
+    // (unsound-by-omission) — full support lands in inc.2/3.
+    if !module.classes.is_empty() || !module.instances.is_empty() {
+        return Err(format!(
+            "{}: typeclasses parse but are not yet supported past the surface \
+             (REQ-LLL-048 slice A, inc.2+)",
+            path.display()
+        ));
+    }
     // imports first (depth-first), relative to THIS file
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for imp in &module.imports {

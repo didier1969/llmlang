@@ -121,11 +121,15 @@ impl Parser {
         let mut parts = Vec::new();
         let mut types = Vec::new();
         let mut effects = Vec::new();
+        let mut classes = Vec::new();
+        let mut instances = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek() {
                 Tok::Type => types.push(self.type_decl()?),
                 Tok::Effect => effects.push(self.effect_decl()?),
+                Tok::Class => classes.push(self.class_decl()?),
+                Tok::Instance => instances.push(self.instance_decl()?),
                 Tok::Part => parts.push(self.part()?),
                 Tok::Dedent => {
                     self.pos += 1;
@@ -134,7 +138,7 @@ impl Parser {
                 _ if self.at_end() => break,
                 other => {
                     return Err(self.err(&format!(
-                        "expected `type`, `effect` or `part`, found {other:?}"
+                        "expected `type`, `effect`, `class`, `instance` or `part`, found {other:?}"
                     )))
                 }
             }
@@ -145,6 +149,8 @@ impl Parser {
             deps,
             types,
             effects,
+            classes,
+            instances,
             parts,
         })
     }
@@ -310,6 +316,109 @@ impl Parser {
             return Err(self.err("effect with no operations"));
         }
         Ok(EffectDecl { name, ops })
+    }
+
+    /// `class Name[a]:` + method sigs `m(T, …) -> R` and laws
+    /// `law name(x: T, …): <bool-expr>` (REQ-LLL-048, DEC-LLL-047). The single
+    /// class type variable scopes the method signatures and law binders; a law is
+    /// universally quantified over its binders (discharged by GROUND instantiation
+    /// per instance, never `assert forall`).
+    fn class_decl(&mut self) -> Result<Class, String> {
+        let line = self.line();
+        self.eat(Tok::Class)?;
+        let name = self.ident()?;
+        self.eat(Tok::LBracket)?;
+        let tyvar = self.ident()?;
+        self.eat(Tok::RBracket)?;
+        self.eat(Tok::Colon)?;
+        self.eat(Tok::Newline)?;
+        self.eat(Tok::Indent)?;
+        let mut methods = Vec::new();
+        let mut laws = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek() == &Tok::Dedent {
+                self.pos += 1;
+                break;
+            }
+            if self.peek() == &Tok::Law {
+                self.pos += 1;
+                let lname = self.ident()?;
+                self.eat(Tok::LParen)?;
+                let mut binders = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    loop {
+                        let bn = self.ident()?;
+                        self.eat(Tok::Colon)?;
+                        let bt = self.ty()?;
+                        binders.push((bn, bt));
+                        if self.peek() == &Tok::Comma {
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.eat(Tok::RParen)?;
+                self.eat(Tok::Colon)?;
+                let body = self.expr()?;
+                self.eat(Tok::Newline)?;
+                laws.push(Law { name: lname, binders, body });
+            } else {
+                let mname = self.ident()?;
+                self.eat(Tok::LParen)?;
+                let mut params = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    params.push(self.ty()?);
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        params.push(self.ty()?);
+                    }
+                }
+                self.eat(Tok::RParen)?;
+                self.eat(Tok::Arrow)?;
+                let ret = self.ty()?;
+                self.eat(Tok::Newline)?;
+                methods.push((mname, params, ret));
+            }
+        }
+        if methods.is_empty() {
+            return Err(self.err("class with no methods"));
+        }
+        Ok(Class { name, tyvar, methods, laws, line })
+    }
+
+    /// `instance Name[T]:` + one `method = <expr>` per indented line
+    /// (REQ-LLL-048). `T` is the concrete instantiation type; each method body is
+    /// a concrete expression (typically a lambda). The instance's law obligations
+    /// are discharged by Z3 at the ground type `T` (DEC-LLL-047).
+    fn instance_decl(&mut self) -> Result<Instance, String> {
+        let line = self.line();
+        self.eat(Tok::Instance)?;
+        let class = self.ident()?;
+        self.eat(Tok::LBracket)?;
+        let ty = self.ty()?;
+        self.eat(Tok::RBracket)?;
+        self.eat(Tok::Colon)?;
+        self.eat(Tok::Newline)?;
+        self.eat(Tok::Indent)?;
+        let mut defs = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek() == &Tok::Dedent {
+                self.pos += 1;
+                break;
+            }
+            let mname = self.ident()?;
+            self.eat(Tok::Assign)?;
+            let body = self.expr()?;
+            self.eat(Tok::Newline)?;
+            defs.push((mname, body));
+        }
+        if defs.is_empty() {
+            return Err(self.err("instance with no method definitions"));
+        }
+        Ok(Instance { class, ty, defs, line })
     }
 
     fn part(&mut self) -> Result<Part, String> {

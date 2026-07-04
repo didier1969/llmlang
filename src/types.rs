@@ -101,6 +101,17 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate part `{}`", p.name));
         }
     }
+    // typeclasses (REQ-LLL-048, DEC-LLL-047): the surface parses (slice A inc.1),
+    // but instance type-checking and the GROUND law-check VC land in the next
+    // increments. Until then reject rather than silently accept an unchecked
+    // instance — an unsound instance must never pass `check` (GUI-LLL-001).
+    if !module.classes.is_empty() || !module.instances.is_empty() {
+        return Err(
+            "typeclasses parse but are not yet checked past the surface (REQ-LLL-048 slice A, \
+             inc.2+): instance type-checking and the ground law-check are not implemented yet"
+                .to_string(),
+        );
+    }
     // user ADTs (REQ-LLL-011): register types + constructors, then validate
     let mut type_names: HashSet<String> = HashSet::new();
     for td in &module.types {

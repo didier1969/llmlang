@@ -21,6 +21,12 @@ pub struct Module {
     /// user-declared algebraic effects (REQ-LLL-018)
     #[serde(default)]
     pub effects: Vec<EffectDecl>,
+    /// user-declared typeclasses `class Eq[a]: …` (REQ-LLL-048, DEC-LLL-047)
+    #[serde(default)]
+    pub classes: Vec<Class>,
+    /// typeclass instances `instance Eq[Int]: …` (REQ-LLL-048)
+    #[serde(default)]
+    pub instances: Vec<Instance>,
     pub parts: Vec<Part>,
 }
 
@@ -131,6 +137,49 @@ pub struct TypeDecl {
     pub name: String,
     /// each constructor: its name + positional field types
     pub ctors: Vec<(String, Vec<Ty>)>,
+}
+
+/// A typeclass `class Eq[a]:` with required method signatures and laws
+/// (REQ-LLL-048, DEC-LLL-047). `tyvar` is the single class parameter scoping the
+/// method sigs and law binders. Each law is universally quantified over its
+/// binders and every instance must satisfy it — proven by GROUND instantiation
+/// per instance, NEVER `assert forall` (the soundness-critical invariant).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Class {
+    pub name: String,
+    pub tyvar: String,
+    /// each required method: name + positional param types + return type,
+    /// written over the class type variable `tyvar`.
+    pub methods: Vec<(String, Vec<Ty>, Ty)>,
+    #[serde(default)]
+    pub laws: Vec<Law>,
+    /// 1-based source line of the `class` keyword (diagnostics only).
+    pub line: usize,
+}
+
+/// A class law `law reflexive(x: a): eq(x, x)` (DEC-LLL-047). `binders` are the
+/// universally-quantified variables (of the class type variable's sort); `body`
+/// is a Bool expression over them and the class methods. Assumed/checked by
+/// GROUND instantiation only — never emitted as a quantified `assert forall`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Law {
+    pub name: String,
+    pub binders: Vec<(String, Ty)>,
+    pub body: Expr,
+}
+
+/// An instance `instance Eq[Int]: eq = \(x: Int, y: Int) -> x == y`
+/// (REQ-LLL-048). `ty` is the concrete instantiation type; `defs` gives each
+/// class method a concrete implementation. The instance's law obligations are
+/// discharged by Z3 at the ground type (DEC-LLL-047).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Instance {
+    pub class: String,
+    pub ty: Ty,
+    /// method name -> concrete body expression.
+    pub defs: Vec<(String, Expr)>,
+    /// 1-based source line of the `instance` keyword (diagnostics only).
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
