@@ -29,16 +29,24 @@ use crate::types::{subst_tyvar, CheckedModule};
 /// a thread the runtime doesn't itself own — our generated `main()` is exactly
 /// that thread).
 ///
+/// REQ-LLL-036 W2-t2b (CPT-LLL-015 §6/§8): each `step` application is wrapped
+/// in `catch_unwind` — a panic no longer takes the actor's task down silently;
+/// it's contained AND the actor restarts from its ORIGINAL `spawn` state
+/// (restart-fresh, the doc's stated default policy). Combined with per-actor
+/// state ownership (no shared Mutex to poison), this is the fix for slice-1's
+/// #1 resilience gap: one bad message now costs that actor one bad step, never
+/// the whole process. Cargo's `panic = "unwind"` (main.rs `cargo_manifest`) is
+/// required for this to be live — `catch_unwind` is INERT under `panic=abort`.
+/// CONFIGURABLE restart policy (restart-fresh vs restart-last-good vs stop) and
+/// anti-storm limits (MaxR restarts in MaxT) are W3 — this hardcodes
+/// restart-fresh only, no policy choice yet.
+///
 /// Still intentionally NOT a generic scheduler (unchanged restrictions from
 /// slice 1, documented there and enforced by `types.rs`'s `uses_actor_runtime`
 /// check): one hardcoded `step: (Int, Int) -> Int` behavior per module (passing
 /// a behavior AS A VALUE needs function marshalling across the extern boundary,
 /// which doesn't exist — REQ-LLL-052-adjacent gap, CPT-LLL-015 §9); Int-only
-/// messages (same root cause). No fault isolation yet EXCEPT what Tokio gives
-/// for free (a panicking task's failure is contained to that task by the
-/// executor, unlike slice-1's shared-Mutex-poisons-everything failure mode) —
-/// explicit `catch_unwind`/restart policy is W2-t2b (CPT-LLL-015 §6), a
-/// separate, later increment; not implemented here.
+/// messages (same root cause).
 fn emit_actor_runtime(out: &mut String) {
     out.push_str(
         "\nmod lll_actor_runtime {\n\
@@ -63,12 +71,17 @@ fn emit_actor_runtime(out: &mut String) {
          \x20\x20\x20\x20\x20\x20\x20\x20Mutex::new(None);\n\
          \x20\x20\x20\x20static NEXT_PID: AtomicI64 = AtomicI64::new(0);\n\
          \n\
-         \x20\x20\x20\x20async fn actor_loop(mut state: i64, mut rx: mpsc::Receiver<ActorMsg>) {\n\
+         \x20\x20\x20\x20async fn actor_loop(initial: i64, mut rx: mpsc::Receiver<ActorMsg>) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let mut state = initial;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20while let Some(msg) = rx.recv().await {\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20match msg {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::Step(m) => { state = super::lll_step(state, m); }\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::GetState(reply) => { let _ = reply.send(state); }\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::Step(m) => {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let outcome = std::panic::catch_unwind(\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20std::panic::AssertUnwindSafe(|| super::lll_step(state, m)));\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20state = outcome.unwrap_or(initial);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::GetState(reply) => { let _ = reply.send(state); }\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20}\n\
          \x20\x20\x20\x20\x20\x20\x20\x20}\n\
          \x20\x20\x20\x20}\n\
          \n\

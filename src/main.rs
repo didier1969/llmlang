@@ -326,10 +326,14 @@ fn cargo_manifest(module: &ast::Module, unchecked: bool) -> Result<String, Strin
         }
     }
     let overflow_checks = !unchecked;
+    // REQ-LLL-036 W2-t2b: `panic = "unwind"` explicit (already Rust's own
+    // default for a bin crate, but stated so it can never silently regress —
+    // the actor runtime's `catch_unwind` is INERT under `panic = "abort"`).
     Ok(format!(
         "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
          [dependencies]\n{deps}\n\
-         [profile.release]\nopt-level = 3\ncodegen-units = 1\noverflow-checks = {overflow_checks}\n",
+         [profile.release]\nopt-level = 3\ncodegen-units = 1\noverflow-checks = {overflow_checks}\n\
+         panic = \"unwind\"\n",
         cargo_pkg_name(&module.name)
     ))
 }

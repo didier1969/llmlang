@@ -1995,6 +1995,43 @@ fn depends_without_features_clause_is_empty() {
 }
 
 #[test]
+fn actor_runtime_panic_isolated_and_restarts_fresh() {
+    // REQ-LLL-036 W2-t2b: the #1 resilience gap slice-1 left (a panic poisons
+    // the shared Mutex and takes the WHOLE process down) is fixed here. A
+    // deliberate i64 overflow (`state + msg` with state = i64::MAX — Z3 proves
+    // 0 obligations for a bare `state + msg` body with no contract, so this is
+    // NOT caught statically; `overflow-checks = true` makes it a genuine Rust
+    // panic at runtime, fail-stop per DEC-LLL-026) is sent to ONE actor. Proof
+    // of isolation: (a) the whole process survives (`status.success()`), (b)
+    // an UNRELATED actor's subsequent sends still work correctly, (c) the
+    // panicked actor itself restarts-fresh (its state resets to its ORIGINAL
+    // spawn value, not left corrupt or hung).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorIsolation:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let healthy = Actor.spawn(10)\n    let doomed = Actor.spawn(9223372036854775807)\n    let _ = Actor.send(healthy, 5)\n    let _ = Actor.send(doomed, 1)\n    let _ = Actor.send(healthy, 3)\n    let h = Actor.state(healthy)\n    let d = Actor.state(doomed)\n    match d == 9223372036854775807:\n      true  -> yield IO.print(h)\n      false -> yield IO.print(0 - 1)\n";
+    let dir = tempdir();
+    let f = dir.join("actor_isolation.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "the WHOLE PROCESS must survive one actor's panic:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("=> 18"),
+        "expected 18 (healthy: 10+5+3=18, unaffected by doomed's panic) AND doomed restarted \
+         fresh to its initial spawn value; got:\n{stdout}"
+    );
+}
+
+#[test]
 fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
     // REQ-LLL-036 W2-t2: the actor runtime now uses REAL tokio tasks (one per
     // actor, each owning its state — no shared global Mutex, CPT-LLL-015 §5
