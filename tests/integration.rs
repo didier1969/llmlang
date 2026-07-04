@@ -1995,6 +1995,37 @@ fn depends_without_features_clause_is_empty() {
 }
 
 #[test]
+fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
+    // REQ-LLL-036 W2-t2: the actor runtime now uses REAL tokio tasks (one per
+    // actor, each owning its state — no shared global Mutex, CPT-LLL-015 §5
+    // candidate B). Spawns 5 independent actors, interleaves sends across
+    // them, and checks every final state is correct — proving the Pid→Sender
+    // table + per-actor task ownership doesn't cross-contaminate state.
+    // Requires Cargo mode (tokio dependency) — same pattern as
+    // ffi_external_crate_links_via_cargo.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorMulti:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let p0 = Actor.spawn(0)\n    let p1 = Actor.spawn(10)\n    let p2 = Actor.spawn(20)\n    let p3 = Actor.spawn(30)\n    let p4 = Actor.spawn(40)\n    let _ = Actor.send(p2, 1)\n    let _ = Actor.send(p0, 1)\n    let _ = Actor.send(p4, 1)\n    let _ = Actor.send(p1, 1)\n    let _ = Actor.send(p3, 1)\n    let _ = Actor.send(p0, 1)\n    let _ = Actor.send(p1, 1)\n    let s0 = Actor.state(p0)\n    let s1 = Actor.state(p1)\n    let s2 = Actor.state(p2)\n    let s3 = Actor.state(p3)\n    let s4 = Actor.state(p4)\n    yield IO.print(s0 + s1 + s2 + s3 + s4)\n";
+    let dir = tempdir();
+    let f = dir.join("actor_multi.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "tokio actor runtime (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // p0: 0+1+1=2, p1: 10+1+1=12, p2: 20+1=21, p3: 30+1=31, p4: 40+1=41 -> 107
+    assert!(stdout.contains("=> 107"), "expected 107 (5 independent actors, no cross-contamination), got:\n{stdout}");
+}
+
+#[test]
 fn ffi_external_crate_links_via_cargo() {
     // REQ-LLL-038 slice 038a: a module that `depends` on an external crate is built
     // as a generated Cargo project (not single-file rustc), so the extern binding
@@ -3119,14 +3150,20 @@ fn reactive_view_delta_verifies_and_runs() {
 // ===================================================================
 
 #[test]
-fn actor_runtime_spawn_send_state_verifies_and_runs() {
-    let src = "module ActorRuntime:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid1 = Actor.spawn(0)\n    let pid2 = Actor.spawn(100)\n    let _ = Actor.send(pid1, 5)\n    let _ = Actor.send(pid1, 3)\n    let _ = Actor.send(pid2, 0 - 50)\n    let s1 = Actor.state(pid1)\n    let s2 = Actor.state(pid2)\n    yield IO.print(s1 + s2)\n";
-    let report = verify_src(src);
-    assert!(report.ok(), "the actor-runtime program must verify");
-    assert!(
-        build_run(src).contains("=> 58"),
-        "expected 58 (pid1: 0->5->8, pid2: 100->50, 8+50=58), got wrong output"
-    );
+fn actor_runtime_missing_tokio_dependency_rejected() {
+    // REQ-LLL-036 W2-t2: the emitted glue unconditionally needs tokio — using
+    // the Actor effect without `depends tokio ... features "..."` must be
+    // rejected precisely at check-time, not surface as a confusing rustc
+    // error inside the generated `lll_actor_runtime` module.
+    let no_dep = "module ActorRuntime:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int = extern \"lll_actor_runtime::spawn\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m = parser::parse_module(no_dep).expect("parse");
+    let err = types::check_module(m).expect_err("missing `depends tokio` must be rejected");
+    assert!(err.contains("depends tokio"), "expected a missing-tokio-dep error, got: {err}");
+
+    let missing_feature = "depends tokio \"1.52.3\" features \"sync\"\n\nmodule ActorRuntime:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int = extern \"lll_actor_runtime::spawn\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m2 = parser::parse_module(missing_feature).expect("parse");
+    let err2 = types::check_module(m2).expect_err("missing `rt-multi-thread` feature must be rejected");
+    assert!(err2.contains("rt-multi-thread"), "expected a missing-feature error, got: {err2}");
 }
 
 #[test]

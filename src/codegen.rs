@@ -17,35 +17,88 @@
 use crate::ast::*;
 use crate::types::{subst_tyvar, CheckedModule};
 
-/// REQ-LLL-036 W2 (tracer-bullet slice 1): the built-in actor runtime. Multiple
-/// independent actor states live in a process-global mailbox vector, indexed by
-/// `Pid` (its position) — `spawn` pushes an initial state and returns its Pid,
-/// `send` applies the module's (single, fixed-name) `step(state, msg) -> state'`
-/// part to update an actor's state, `state` reads it back. This is intentionally
-/// NOT a generic scheduler: one hardcoded behavior per module (a `Ty::Fun` cannot
-/// yet marshal across the extern boundary — a later W2 increment), synchronous
-/// (no real concurrency/threading yet — `send` runs `step` inline under a lock).
-/// `types.rs` enforces that `step: (Int, Int) -> Int` exists whenever this is used
-/// (`uses_actor_runtime`), and `validate_extern_path` only ever recognizes these
-/// three exact paths — never a general `lll_actor_runtime::*` escape hatch.
+/// REQ-LLL-036 W2-t2: the built-in actor runtime, now REAL parallelism (tier-2
+/// of CPT-LLL-015's design-twice — Tokio recommended over OS-threads-per-actor
+/// or a custom scheduler). Each actor is its own Tokio task OWNING its `state`
+/// (never shared — the slice-1 global `Mutex<Vec<i64>>` is gone); a bounded
+/// `mpsc` mailbox feeds it. The ONLY shared structure is the Pid→Sender table,
+/// and only in the sense of "which channel to send to" — never actor state
+/// itself (CPT-LLL-015 §3 constraint 4: no mutable memory shared between
+/// actors except by message). `send`/`state` bridge sync llmlang-compiled call
+/// sites into the async world via `Runtime::block_on` (standard, supported from
+/// a thread the runtime doesn't itself own — our generated `main()` is exactly
+/// that thread).
+///
+/// Still intentionally NOT a generic scheduler (unchanged restrictions from
+/// slice 1, documented there and enforced by `types.rs`'s `uses_actor_runtime`
+/// check): one hardcoded `step: (Int, Int) -> Int` behavior per module (passing
+/// a behavior AS A VALUE needs function marshalling across the extern boundary,
+/// which doesn't exist — REQ-LLL-052-adjacent gap, CPT-LLL-015 §9); Int-only
+/// messages (same root cause). No fault isolation yet EXCEPT what Tokio gives
+/// for free (a panicking task's failure is contained to that task by the
+/// executor, unlike slice-1's shared-Mutex-poisons-everything failure mode) —
+/// explicit `catch_unwind`/restart policy is W2-t2b (CPT-LLL-015 §6), a
+/// separate, later increment; not implemented here.
 fn emit_actor_runtime(out: &mut String) {
     out.push_str(
         "\nmod lll_actor_runtime {\n\
-         \x20\x20\x20\x20use std::sync::Mutex;\n\
-         \x20\x20\x20\x20static ACTORS: Mutex<Vec<i64>> = Mutex::new(Vec::new());\n\
+         \x20\x20\x20\x20use std::collections::HashMap;\n\
+         \x20\x20\x20\x20use std::sync::{Mutex, OnceLock};\n\
+         \x20\x20\x20\x20use std::sync::atomic::{AtomicI64, Ordering};\n\
+         \x20\x20\x20\x20use tokio::sync::{mpsc, oneshot};\n\
+         \n\
+         \x20\x20\x20\x20enum ActorMsg { Step(i64), GetState(oneshot::Sender<i64>) }\n\
+         \n\
+         \x20\x20\x20\x20fn runtime() -> &'static tokio::runtime::Runtime {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20RT.get_or_init(|| {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20tokio::runtime::Builder::new_multi_thread()\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20.enable_all()\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20.build()\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20.expect(\"build tokio runtime for actor runtime\")\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20})\n\
+         \x20\x20\x20\x20}\n\
+         \n\
+         \x20\x20\x20\x20static TABLE: Mutex<Option<HashMap<i64, mpsc::Sender<ActorMsg>>>> =\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20Mutex::new(None);\n\
+         \x20\x20\x20\x20static NEXT_PID: AtomicI64 = AtomicI64::new(0);\n\
+         \n\
+         \x20\x20\x20\x20async fn actor_loop(mut state: i64, mut rx: mpsc::Receiver<ActorMsg>) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20while let Some(msg) = rx.recv().await {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20match msg {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::Step(m) => { state = super::lll_step(state, m); }\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::GetState(reply) => { let _ = reply.send(state); }\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20}\n\
+         \n\
+         \x20\x20\x20\x20fn sender_for(pid: i64) -> Option<mpsc::Sender<ActorMsg>> {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20TABLE.lock().unwrap().as_ref().and_then(|m| m.get(&pid).cloned())\n\
+         \x20\x20\x20\x20}\n\
+         \n\
          \x20\x20\x20\x20pub fn spawn(initial: i64) -> i64 {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20let mut a = ACTORS.lock().unwrap();\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20a.push(initial);\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20(a.len() - 1) as i64\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let (tx, rx) = mpsc::channel(64);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20runtime().spawn(actor_loop(initial, rx));\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20TABLE.lock().unwrap().get_or_insert_with(HashMap::new).insert(pid, tx);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20pid\n\
          \x20\x20\x20\x20}\n\
+         \n\
          \x20\x20\x20\x20pub fn send(pid: i64, msg: i64) {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20let mut a = ACTORS.lock().unwrap();\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20let idx = pid as usize;\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20a[idx] = super::lll_step(a[idx], msg);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if let Some(tx) = sender_for(pid) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let _ = runtime().block_on(tx.send(ActorMsg::Step(msg)));\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20}\n\
          \x20\x20\x20\x20}\n\
+         \n\
          \x20\x20\x20\x20pub fn state(pid: i64) -> i64 {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20let a = ACTORS.lock().unwrap();\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20a[pid as usize]\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20match sender_for(pid) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Some(tx) => runtime().block_on(async {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let (reply_tx, reply_rx) = oneshot::channel();\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let _ = tx.send(ActorMsg::GetState(reply_tx)).await;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20reply_rx.await.unwrap_or(0)\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20}),\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20None => 0,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20}\n\
          \x20\x20\x20\x20}\n\
          }\n",
     );

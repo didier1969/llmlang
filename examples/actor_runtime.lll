@@ -1,20 +1,23 @@
+depends tokio "1.52.3" features "rt-multi-thread, sync"
+
 module ActorRuntime:
 
-  # REQ-LLL-036 W2 (tracer-bullet slice 1, voie 2a CPT-LLL-014) : le
+  # REQ-LLL-036 W2-t2 (voie 2a CPT-LLL-014, design CPT-LLL-015) : le
   # comportement d'acteur (step, prouvé en W0 — examples/actor_reactive.lll)
-  # vit maintenant DERRIÈRE une frontière d'effet : plusieurs instances
-  # INDÉPENDANTES (Pid distincts), état géré par le runtime Rust (mailbox
-  # globale, src/codegen.rs `emit_actor_runtime`), jamais par le cœur vérifié
-  # (havoc à la frontière, DEC-LLL-017 — Z3 ne voit jamais ce que `spawn`/
-  # `send`/`state` font réellement, seulement leur signature).
+  # vit DERRIÈRE une frontière d'effet, avec un VRAI parallélisme maintenant :
+  # chaque acteur est sa propre tâche Tokio, possédant SON état (plus de mutex
+  # global partagé, src/codegen.rs `emit_actor_runtime`) — jamais vu par le
+  # cœur vérifié (havoc à la frontière, DEC-LLL-017 : Z3 ne voit jamais ce que
+  # `spawn`/`send`/`state` font réellement, seulement leur signature).
   #
-  # v1 délibérément restreint : UN SEUL comportement fixe par module (une part
-  # nommée `step`, signature imposée `(Int, Int) -> Int`) — passer un
-  # comportement EN VALEUR à `spawn` nécessiterait de marshaller une fonction à
-  # la frontière FFI, ce qui n'existe pas encore (increment futur de W2). De
-  # même, `send` est SYNCHRONE ici (pas de vraie boucle non-bornée/scheduler
-  # encore) : la généricité du comportement et l'ordonnancement réel restent
-  # des incréments séparés, dans l'esprit tracer-bullet de REQ-LLL-038.
+  # v1 délibérément restreint (inchangé depuis la tranche 1, CPT-LLL-015 §9) :
+  # UN SEUL comportement fixe par module (une part nommée `step`, signature
+  # imposée `(Int, Int) -> Int`) — passer un comportement EN VALEUR à `spawn`
+  # nécessiterait de marshaller une fonction à la frontière FFI, ce qui
+  # n'existe pas encore. Messages `Int` seulement, même raison. Aucune
+  # isolation de fautes explicite encore (au-delà de ce que Tokio isole par
+  # tâche gratuitement) — `catch_unwind`/politique de redémarrage est W2-t2b,
+  # un incrément séparé.
 
   part max0(x: Int) -> Int:
     ensures result >= 0

@@ -419,6 +419,27 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 step.ret
             ));
         }
+        // REQ-LLL-036 W2-t2: the emitted glue (`emit_actor_runtime`, codegen.rs)
+        // unconditionally uses `tokio::{runtime, sync::{mpsc, oneshot}}` — real
+        // parallelism (CPT-LLL-015 §5 candidate B). Without an explicit `depends
+        // tokio` the module either single-file-rustc's (tokio never linked at
+        // all) or Cargo-links a tokio missing the features the glue needs —
+        // both surface as a confusing rustc error deep in generated code. Catch
+        // it here instead, precisely, at check-time (DEC-LLL-015 fail-stop).
+        let tokio_dep = module.deps.iter().find(|d| d.crate_name == "tokio").ok_or_else(|| {
+            "an `lll_actor_runtime` extern op is used but no `depends tokio \"<version>\" \
+             features \"rt-multi-thread, sync\"` is declared — the built-in actor runtime needs \
+             a real tokio dependency (REQ-LLL-036 W2-t2)"
+                .to_string()
+        })?;
+        for needed in ["rt-multi-thread", "sync"] {
+            if !tokio_dep.features.iter().any(|f| f == needed) {
+                return Err(format!(
+                    "`depends tokio`: the actor runtime requires the `{needed}` feature — add it \
+                     to the `features \"...\"` list (REQ-LLL-036 W2-t2)"
+                ));
+            }
+        }
     }
     // classify `via` rows (REQ-LLL-026 item 3, DEC-LLL-038): an UPPERCASE name is
     // a concrete effect (must be declared); a lowercase name is a ROW VARIABLE that
