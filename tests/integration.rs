@@ -1995,6 +1995,42 @@ fn depends_without_features_clause_is_empty() {
 }
 
 #[test]
+fn actor_runtime_anti_storm_stops_crash_looping_actor() {
+    // REQ-LLL-036 W3 (anti-storm, CPT-LLL-015 §8 — scoped to this ONE piece:
+    // restart-fresh stays the only policy, no configurability yet). An actor
+    // that panics on EVERY message (state resets to i64::MAX each restart, so
+    // the next `+1` overflows again) would crash-loop forever under t2b alone.
+    // After MAX_RESTARTS (5) within the 1s window, the actor STOPS (its task
+    // returns) instead of looping — proof: `state()` on it afterward observes
+    // the closed mailbox (falls back to its existing sentinel, 0 — the same
+    // fallback `state()` already used for an unknown Pid), NOT i64::MAX (which
+    // a 6th silent restart-fresh would have produced).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorStorm:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(9223372036854775807)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    yield IO.print(Actor.state(pid))\n";
+    let dir = tempdir();
+    let f = dir.join("actor_storm.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "the process must survive a crash-looping actor:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("=> 0"),
+        "expected 0 (actor stopped by anti-storm, mailbox closed — not i64::MAX from a 6th \
+         restart-fresh), got:\n{stdout}"
+    );
+}
+
+#[test]
 fn actor_runtime_panic_isolated_and_restarts_fresh() {
     // REQ-LLL-036 W2-t2b: the #1 resilience gap slice-1 left (a panic poisons
     // the shared Mutex and takes the WHOLE process down) is fixed here. A
