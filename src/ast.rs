@@ -45,6 +45,13 @@ pub struct Dep {
     /// else a crates.io registry dependency.
     #[serde(default)]
     pub path: Option<String>,
+    /// `features "f1,f2"` (REQ-LLL-053) → the crate's Cargo features to enable.
+    /// Most crates (tokio included) enable little to nothing by default — this
+    /// was a real gap discovered building REQ-LLL-036 W2-t2 (Tokio needs
+    /// `rt-multi-thread`/`sync` explicitly). Not part of identity (like `path`):
+    /// only the crate+version fold into a bound op's `def_hash` (DEC-LLL-041).
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// A user-declared algebraic effect `effect Name` with a set of typed operations

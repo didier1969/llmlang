@@ -295,18 +295,34 @@ fn build_cargo_project(module: &ast::Module, rust: &str, unchecked: bool) -> Res
 fn cargo_manifest(module: &ast::Module, unchecked: bool) -> Result<String, String> {
     let mut deps = String::new();
     for d in &module.deps {
+        // REQ-LLL-053: most crates (tokio included) enable little to nothing by
+        // default — `features "f1,f2"` in `depends` folds into an inline TOML
+        // array here. Not part of identity (like `path`, DEC-LLL-041).
+        let features_toml = if d.features.is_empty() {
+            String::new()
+        } else {
+            let list =
+                d.features.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", ");
+            format!(", features = [{list}]")
+        };
         match &d.path {
             Some(p) => {
                 let abs = std::fs::canonicalize(p)
                     .map_err(|e| format!("depends {} from \"{p}\": {e}", d.crate_name))?;
                 deps.push_str(&format!(
-                    "{} = {{ path = \"{}\", version = \"={}\" }}\n",
+                    "{} = {{ path = \"{}\", version = \"={}\"{features_toml} }}\n",
                     d.crate_name,
                     abs.display(),
                     d.version
                 ));
             }
-            None => deps.push_str(&format!("{} = \"={}\"\n", d.crate_name, d.version)),
+            None if d.features.is_empty() => {
+                deps.push_str(&format!("{} = \"={}\"\n", d.crate_name, d.version))
+            }
+            None => deps.push_str(&format!(
+                "{} = {{ version = \"={}\"{features_toml} }}\n",
+                d.crate_name, d.version
+            )),
         }
     }
     let overflow_checks = !unchecked;

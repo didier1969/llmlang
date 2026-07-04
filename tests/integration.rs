@@ -1977,6 +1977,24 @@ fn verified_set_is_polymorphic() {
 }
 
 #[test]
+fn depends_features_clause_parses() {
+    // REQ-LLL-053: `features "f1,f2"` on a `depends` line — needed because most
+    // crates (tokio included) enable little to nothing by default.
+    let src = "depends tokio \"1.40.0\" features \"rt-multi-thread, sync\"\n\nmodule T:\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert_eq!(m.deps.len(), 1);
+    assert_eq!(m.deps[0].crate_name, "tokio");
+    assert_eq!(m.deps[0].features, vec!["rt-multi-thread".to_string(), "sync".to_string()]);
+}
+
+#[test]
+fn depends_without_features_clause_is_empty() {
+    let src = "depends tokio \"1.40.0\"\n\nmodule T:\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert!(m.deps[0].features.is_empty());
+}
+
+#[test]
 fn ffi_external_crate_links_via_cargo() {
     // REQ-LLL-038 slice 038a: a module that `depends` on an external crate is built
     // as a generated Cargo project (not single-file rustc), so the extern binding

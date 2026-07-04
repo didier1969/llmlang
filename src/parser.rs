@@ -102,10 +102,28 @@ impl Parser {
             } else {
                 None
             };
+            // `features "f1,f2"` (REQ-LLL-053): a single quoted, comma-separated
+            // list — most crates (tokio included) enable little by default.
+            let features = if matches!(self.peek(), Tok::Ident(s) if s == "features") {
+                self.pos += 1;
+                match self.bump() {
+                    Tok::Str(fs) => {
+                        fs.split(',').map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect()
+                    }
+                    other => {
+                        return Err(self.err(&format!(
+                            "expected a quoted feature list after `features`, found {other:?}"
+                        )))
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             deps.push(Dep {
                 crate_name,
                 version,
                 path,
+                features,
             });
             self.eat(Tok::Newline)?;
             self.skip_newlines();
