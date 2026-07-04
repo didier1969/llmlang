@@ -617,6 +617,19 @@ fn typeclass_class_and_instance_merge_across_imports() {
 }
 
 #[test]
+fn typeclass_given_clause_surface_parses() {
+    // REQ-LLL-039 slice B inc.1 — the `given Class[a]` constraint clause on a part
+    // parses into the AST. Consumption (resolving a class method call inside the
+    // generic body as an opaque UF) is a later increment — a body calling `eq`
+    // still errors as an unknown call, precisely (not a crash, not a silent pass).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part refl(x: a) -> Bool given Eq[a]:\n    yield eq(x, x)\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert_eq!(m.parts[0].given, vec![("Eq".to_string(), "a".to_string())]);
+    let err = types::check_module(m).expect_err("method consumption is not implemented yet");
+    assert!(err.contains("eq"), "expected an error naming the unresolved call, got: {err}");
+}
+
+#[test]
 fn typeclass_duplicate_instance_rejected_coherence() {
     // Coherence (REQ-LLL-048): two instances for the same (class, type) is
     // ambiguous for a future `given` resolution site — rejected precisely.

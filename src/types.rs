@@ -592,6 +592,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 params: Vec::new(),
                 ret: Ty::Unit,
                 effects: Vec::new(),
+                given: Vec::new(),
                 requires: Vec::new(),
                 ensures: Vec::new(),
                 measure: Vec::new(),

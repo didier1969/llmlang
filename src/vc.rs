@@ -272,6 +272,7 @@ fn gen_instance_law_obligations(
         params: Vec::new(),
         ret: Ty::Unit,
         effects: Vec::new(),
+        given: Vec::new(),
         requires: Vec::new(),
         ensures: Vec::new(),
         measure: Vec::new(),

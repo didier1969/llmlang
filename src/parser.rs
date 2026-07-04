@@ -458,6 +458,24 @@ impl Parser {
                 }
             }
         }
+        // `given Class1[tv1], Class2[tv2], …` (REQ-LLL-039) — typeclass
+        // constraints, after `via` and before the colon.
+        let mut given = Vec::new();
+        if self.peek() == &Tok::Given {
+            self.pos += 1;
+            loop {
+                let cname = self.ident()?;
+                self.eat(Tok::LBracket)?;
+                let tv = self.ident()?;
+                self.eat(Tok::RBracket)?;
+                given.push((cname, tv));
+                if self.peek() == &Tok::Comma {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
         self.eat(Tok::Colon)?;
         self.eat(Tok::Newline)?;
         self.eat(Tok::Indent)?;
@@ -497,6 +515,7 @@ impl Parser {
             params,
             ret,
             effects,
+            given,
             requires,
             ensures,
             measure,

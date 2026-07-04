@@ -189,6 +189,15 @@ pub struct Part {
     pub ret: Ty,
     /// Declared effects (`via IO`). Empty = pure. v1: only "IO".
     pub effects: Vec<String>,
+    /// Typeclass constraints `given Class[a]` (REQ-LLL-039, DEC-LLL-047): each
+    /// entry is (class name, the part's OWN type variable it constrains). A
+    /// class method call in the body resolves to an OPAQUE uninterpreted function
+    /// over that variable's abstract sort (DEC-LLL-029 UF-firewall reused) — the
+    /// part is verified ONCE, abstractly; no class law is assumed in the generic
+    /// body (DEC-LLL-047: never `assert forall`). Surface-only in this slice —
+    /// call-site resolution + monomorphized codegen are a later increment.
+    #[serde(default)]
+    pub given: Vec<(String, String)>,
     pub requires: Vec<Expr>,
     pub ensures: Vec<Expr>,
     /// Termination measure. Empty = none; one expr = scalar measure; several =
