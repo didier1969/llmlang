@@ -17,6 +17,14 @@
 use crate::ast::*;
 use crate::types::CheckedModule;
 
+/// The op-anchored typed FFI shim name for a dotted op key `Eff.op` (REQ-LLL-041,
+/// slice 038b): `Eff.op` → `__lll_ffi_Eff_op`. A perform of an `= extern` op lowers
+/// to a call of this uniquely-named adapter, so a boundary signature/arity mismatch
+/// fails to compile AT the shim and `lll build` can re-anchor the error to the op.
+fn ffi_shim(dotted_op: &str) -> String {
+    format!("__lll_ffi_{}", dotted_op.replace('.', "_"))
+}
+
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
@@ -94,6 +102,33 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         }
     }
     let user_tail: Names = user_tail_ops.keys().cloned().collect();
+    // FFI typed shims (REQ-LLL-041, slice 038b): one op-anchored, typed adapter per
+    // `= extern` op. A perform lowers to a call of the shim — NOT the raw path inline
+    // — so a boundary arity/type mismatch fails to compile at this uniquely-named
+    // function, letting `lll build` re-anchor the rustc/cargo error to the effect op
+    // (closes REQ-LLL-027 gap 2). `#[inline]` keeps it zero-cost (DEC-LLL-018); the
+    // shim is a derived artifact, so it carries no identity (DEC-LLL-020). One line so
+    // the failing rustc span shows the shim name for stderr-based re-anchoring.
+    for ed in &cm.module.effects {
+        for op in &ed.ops {
+            if let Some(path) = &op.extern_path {
+                let params: Vec<String> = op
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| format!("__a{i}: {}", rs_ty(t)))
+                    .collect();
+                let args: Vec<String> = (0..op.params.len()).map(|i| format!("__a{i}")).collect();
+                out.push_str(&format!(
+                    "#[inline] fn {}({}) -> {} {{ {path}({}) }}\n",
+                    ffi_shim(&format!("{}.{}", ed.name, op.name)),
+                    params.join(", "),
+                    rs_ty(&op.ret),
+                    args.join(", "),
+                ));
+            }
+        }
+    }
     // per-part ordered capabilities (fixed order: sorted by effect then op) — used
     // both for the part's evidence params and for forwarding at call sites.
     let mut part_caps: PartCaps = std::collections::HashMap::new();
@@ -1294,10 +1329,12 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     let a: Result<Vec<String>, String> =
                         args.iter().map(|x| expr(x, cx, res)).collect();
                     format!("{cap}({})", a?.join(", "))
-                } else if let Some(path) = cx.extern_ops.get(name) {
+                } else if cx.extern_ops.contains_key(name) {
+                    // FFI-bound op → call its op-anchored typed shim (REQ-LLL-041),
+                    // not the raw path inline, so a boundary mismatch localizes there.
                     let a: Result<Vec<String>, String> =
                         args.iter().map(|x| expr(x, cx, res)).collect();
-                    format!("{path}({})", a?.join(", "))
+                    format!("{}({})", ffi_shim(name), a?.join(", "))
                 } else {
                     let payload = match args.first() {
                         Some(a) => expr(a, cx, res)?,

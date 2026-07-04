@@ -145,6 +145,43 @@ fn cargo_pkg_name(module_name: &str) -> String {
     module_name.replace('.', "_").to_lowercase()
 }
 
+/// Re-anchor a failed build to the FFI boundary (REQ-LLL-041, slice 038b). Every
+/// `= extern` op lowers through a uniquely-named typed shim `__lll_ffi_<Eff>_<op>`;
+/// if that name appears in the compiler's stderr, the failure is a boundary
+/// signature/arity mismatch (the declared op signature disagrees with the real Rust
+/// function) — NOT a compiler bug and NOT a `depends` version issue. We then name the
+/// effect op, its declared signature, and the extern path so the fix is obvious;
+/// `None` = no shim implicated, keep the caller's generic message.
+fn ffi_frontier_diagnostic(module: &ast::Module, stderr: &str) -> Option<String> {
+    let mut hits: Vec<String> = Vec::new();
+    for ed in &module.effects {
+        for op in &ed.ops {
+            if let Some(path) = &op.extern_path {
+                if stderr.contains(&format!("__lll_ffi_{}_{}", ed.name, op.name)) {
+                    let sig: Vec<String> = op.params.iter().map(|t| t.to_string()).collect();
+                    hits.push(format!(
+                        "  effect {} op {}({}) -> {} = extern \"{}\"",
+                        ed.name,
+                        op.name,
+                        sig.join(", "),
+                        op.ret,
+                        path
+                    ));
+                }
+            }
+        }
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "FFI boundary mismatch (REQ-LLL-038): an `= extern` binding's declared signature does not \
+         match the Rust function's real one (arity or types) at the effect boundary. The typed \
+         shim(s) failed to compile:\n{}\nFix the effect op signature or the extern path.",
+        hits.join("\n")
+    ))
+}
+
 /// The fast path (no external deps): compile the single generated Rust file with
 /// rustc directly (unchanged behaviour, REQ-LLL-022).
 fn build_single_file(module: &ast::Module, rust: &str, unchecked: bool) -> Result<PathBuf, String> {
@@ -156,18 +193,22 @@ fn build_single_file(module: &ast::Module, rust: &str, unchecked: bool) -> Resul
     } else {
         "overflow-checks=on"
     };
-    let st = Command::new("rustc")
+    let out = Command::new("rustc")
         .args([
             "-C", "opt-level=3", "-C", "codegen-units=1", "-C", overflow, "--edition", "2021", "-o",
         ])
         .arg(&bin)
         .arg(&rs)
-        .status()
+        .output()
         .map_err(|e| format!("rustc: {e}"))?;
-    if !st.success() {
-        return Err(
-            "rustc failed on generated code (this is a compiler bug — the vc fork accepted it)".into(),
-        );
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(diag) = ffi_frontier_diagnostic(module, &stderr) {
+            return Err(format!("{diag}\n\n--- rustc ---\n{stderr}"));
+        }
+        return Err(format!(
+            "rustc failed on generated code (this is a compiler bug — the vc fork accepted it):\n{stderr}"
+        ));
     }
     Ok(bin)
 }
@@ -187,15 +228,19 @@ fn build_cargo_project(module: &ast::Module, rust: &str, unchecked: bool) -> Res
     // path/vendored dep or a pre-cached registry crate. Online fetch is a later
     // slice. A mistyped binding fails HERE at compile — fail-stop, no binary
     // (DEC-LLL-026/015); rustc is the boundary type judge for v1.
-    let st = Command::new("cargo")
+    let out = Command::new("cargo")
         .args(["build", "--release", "--offline"])
         .current_dir(&dir)
-        .status()
+        .output()
         .map_err(|e| format!("cargo: {e}"))?;
-    if !st.success() {
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(diag) = ffi_frontier_diagnostic(module, &stderr) {
+            return Err(format!("{diag}\n\n--- cargo ---\n{stderr}"));
+        }
         return Err(format!(
             "cargo build failed for the generated project `{}` (REQ-LLL-038) — check the \
-             `depends` versions and `extern` binding signatures",
+             `depends` versions and `extern` binding signatures:\n{stderr}",
             dir.display()
         ));
     }

@@ -1544,6 +1544,40 @@ fn dep_version_folds_into_def_hash_not_proof_hash() {
 }
 
 #[test]
+fn ffi_mistyped_extern_binding_yields_frontier_diagnostic() {
+    // REQ-LLL-041 (slice 038b): a binding that type-checks in llmlang but whose declared
+    // arity/type disagrees with the real Rust fn is caught at BUILD with a frontier
+    // diagnostic ANCHORED to the effect op — not the raw, misleading "compiler bug"
+    // message. `i64::pow(self, exp: u32)` bound as a 1-arg op is an arity mismatch; it
+    // uses the std single-file path (no `depends`), so it exercises rustc directly. The
+    // perform lowers through the typed shim `__lll_ffi_P_raise`, which fails to compile,
+    // and `lll build` re-anchors that failure to `effect P op raise`.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "module Mis:\n\n  effect P:\n    raise(Int) -> Int = extern \"i64::pow\"\n\n  part f(x: Int) -> Int via P:\n    requires x >= 0\n    yield P.raise(x)\n\n  part main() -> Int via IO, P:\n    yield IO.print(f(2))\n";
+    let dir = tempdir();
+    let f = dir.join("mis.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("build")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(!out.status.success(), "a mistyped extern binding must fail the build");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(err.contains("FFI boundary mismatch"), "must anchor to the FFI frontier: {err}");
+    assert!(
+        err.contains("effect P op raise") && err.contains("i64::pow"),
+        "must name the effect op + extern path: {err}"
+    );
+    assert!(!err.contains("compiler bug"), "must NOT blame the compiler for a boundary mismatch: {err}");
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`
