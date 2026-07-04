@@ -2657,3 +2657,14 @@ fn check_format_json_emits_structured_diagnostics_with_counterexample() {
     let name = run("name.lll", "module M:\n\n  part h(x: Int) -> Bool:\n    yield True\n");
     assert!(name.contains("LLL-E2001") && name.contains("lowercase"), "did-you-mean not lifted to fix: {name}");
 }
+
+#[test]
+fn example_clause_surface_parses() {
+    // REQ-LLL-049 inc.1: `example` is a per-part clause, same shape as
+    // requires/ensures/measure — unlike them, it MAY contain a call to the
+    // part it documents (checked in inc.2, verified in inc.3/4).
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3) == 5\n    example add(0, 0) == 0\n    yield x + y\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert_eq!(m.parts.len(), 1);
+    assert_eq!(m.parts[0].examples.len(), 2, "two example clauses");
+}

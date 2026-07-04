@@ -302,6 +302,7 @@ fn gen_instance_law_obligations(
         requires: Vec::new(),
         ensures: Vec::new(),
         measure: Vec::new(),
+        examples: Vec::new(),
         body: Vec::new(),
         line: inst.line,
         origin: None,

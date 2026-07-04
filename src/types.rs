@@ -665,6 +665,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 requires: Vec::new(),
                 ensures: Vec::new(),
                 measure: Vec::new(),
+                examples: Vec::new(),
                 body: Vec::new(),
                 line: inst.line,
                 origin: None,

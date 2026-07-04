@@ -483,6 +483,7 @@ impl Parser {
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
         let mut measure = Vec::new();
+        let mut examples = Vec::new();
         // contract clauses first, in any order, each on its own line
         loop {
             match self.peek() {
@@ -505,6 +506,11 @@ impl Parser {
                     measure = self.expr_list()?;
                     self.eat(Tok::Newline)?;
                 }
+                Tok::Example => {
+                    self.pos += 1;
+                    examples.append(&mut self.expr_list()?);
+                    self.eat(Tok::Newline)?;
+                }
                 _ => break,
             }
         }
@@ -519,6 +525,7 @@ impl Parser {
             requires,
             ensures,
             measure,
+            examples,
             body,
             line,
             origin: None,

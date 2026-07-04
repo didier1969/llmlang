@@ -204,6 +204,13 @@ pub struct Part {
     /// a lexicographic tuple (well-founded on ℕ^k) — REQ-LLL-012, DEC-LLL-016.
     #[serde(default)]
     pub measure: Vec<Expr>,
+    /// Ground examples `example <bool-expr>` (REQ-LLL-049): unlike
+    /// requires/ensures/measure, MAY contain calls (checked ground-only —
+    /// no free variable — by `check_examples`, not `check_contracts::no_calls`).
+    /// Verified twice: statically (Z3 ground obligation, vc.rs) and
+    /// dynamically (`#[test]` in generated Rust, codegen.rs).
+    #[serde(default)]
+    pub examples: Vec<Expr>,
     pub body: Vec<Stmt>,
     /// 1-based source line of the `part` keyword (diagnostics only, erased from hash).
     pub line: usize,
