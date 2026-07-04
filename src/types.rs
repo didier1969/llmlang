@@ -917,7 +917,7 @@ fn foreign_marshal_ok(llt: &Ty, f: &Foreign) -> bool {
     match (llt, f) {
         (Ty::Int, Foreign::I64) => true,
         (Ty::Bool, Foreign::Bool) => true,
-        (Ty::List(e), Foreign::RString | Foreign::RStr) => **e == Ty::Int,
+        (Ty::List(e), Foreign::RString | Foreign::RStr | Foreign::Bytes) => **e == Ty::Int,
         // a foreign tuple `(T, …)` ↔ a llmlang native tuple, positional (REQ-LLL-026).
         // v1 components are scalar/string (no nested tuple/Result/&str at the boundary).
         (Ty::Tuple(ts), Foreign::Tuple(fs)) => {

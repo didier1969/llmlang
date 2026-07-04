@@ -2256,6 +2256,76 @@ fn depends_hyphenated_crate_name_parses_and_links() {
 }
 
 #[test]
+fn ffi_vec_of_non_u8_rejected() {
+    // REQ-LLL-051: v1 only supports `Vec<u8>` — any other element type must be
+    // rejected precisely at parse-time, not silently accepted or misinterpreted.
+    let src = "module M:\n\n  effect Bytes:\n    f(List[Int]) -> Int = extern \"m::f\" as (Vec<i32>) -> i64\n\n  part main() -> Int:\n    yield 0\n";
+    let err = parser::parse_module(src).expect_err("Vec<i32> must be rejected");
+    assert!(err.contains("Vec<u8>"), "expected a Vec<u8>-only error, got: {err}");
+}
+
+#[test]
+fn ffi_bytes_marshals_round_trip_via_cargo() {
+    // REQ-LLL-051: Vec<u8> byte marshalling at the FFI boundary — distinct from
+    // String/&str (codepoints), for real binary I/O. Shares the SAME llmlang
+    // List[Int] shape (disambiguated by the `as` clause's Foreign::Bytes),
+    // exercised both as a PARAMETER (checksum) and a RETURN (xor_all).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_bytes");
+    let src = format!(
+        "depends ffi_bytes \"1.0.0\" from \"{fixture}\"\n\nmodule BytesTest:\n\n  effect Bytes:\n    checksum(List[Int]) -> Int = extern \"ffi_bytes::checksum\" as (Vec<u8>) -> i64\n    xor_all(List[Int], Int) -> List[Int] = extern \"ffi_bytes::xor_all\" as (Vec<u8>, i64) -> Vec<u8>\n\n  part main() -> Int via IO, Bytes:\n    let bs = 1 :: 2 :: 3 :: []\n    let sum = Bytes.checksum(bs)\n    let xored = Bytes.xor_all(bs, 255)\n    match xored:\n      h :: t -> yield IO.print(sum * 100 + h)\n      []     -> yield IO.print(0 - 1)\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("bytes_test.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "bytes marshalling (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // checksum(1,2,3)=6, xor_all([1,2,3],255)=[254,253,252] -> 6*100+254=854
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 854"),
+        "expected 854, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_bytes_out_of_range_fails_stop_not_silently_truncate() {
+    // REQ-LLL-051 acceptance criterion: an out-of-range element (e.g. 300, not
+    // a valid u8) must fail-stop at the boundary, never silently wrap/truncate
+    // via an unchecked `as u8` cast.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_bytes");
+    let src = format!(
+        "depends ffi_bytes \"1.0.0\" from \"{fixture}\"\n\nmodule BytesOverflow:\n\n  effect Bytes:\n    checksum(List[Int]) -> Int = extern \"ffi_bytes::checksum\" as (Vec<u8>) -> i64\n\n  part main() -> Int via IO, Bytes:\n    let bs = 1 :: 300 :: []\n    yield IO.print(Bytes.checksum(bs))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("bytes_overflow.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(!out.status.success(), "an out-of-range byte must fail-stop, not run to completion");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("out-of-range byte"),
+        "expected a clear fail-stop message, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn ffi_two_direct_crates_link_together_via_cargo() {
     // REQ-LLL-053 (1): declaring 2+ DIRECT `depends` crates in one module was
     // structurally already supported (parser loops at parser.rs, cargo_manifest

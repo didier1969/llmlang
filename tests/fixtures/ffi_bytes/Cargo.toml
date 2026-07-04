@@ -1,0 +1,10 @@
+# Test fixture for REQ-LLL-051: Vec<u8> byte marshalling at the FFI boundary.
+[package]
+name = "ffi_bytes"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

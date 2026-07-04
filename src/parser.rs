@@ -262,10 +262,26 @@ impl Parser {
                     self.eat(Tok::Gt)?;
                     Ok(Foreign::Result(Box::new(t), Box::new(e)))
                 }
+                // raw byte buffer (REQ-LLL-051) — v1 only `Vec<u8>` (no other
+                // element type; sized ints beyond u8 remain a later slice).
+                "Vec" => {
+                    self.eat(Tok::Lt)?;
+                    match self.bump() {
+                        Tok::Ident(e) if e == "u8" => {}
+                        other => {
+                            return Err(self.err(&format!(
+                                "unsupported `Vec<{other:?}>` in an `as` clause — v1 only supports \
+                                 `Vec<u8>` (REQ-LLL-051)"
+                            )))
+                        }
+                    }
+                    self.eat(Tok::Gt)?;
+                    Ok(Foreign::Bytes)
+                }
                 other => Err(self.err(&format!(
                     "unsupported foreign type `{other}` in an `as` clause — v1 supports `i64`, \
-                     `bool`, `String`, `str`, `Result<T, E>`. Richer types (`Vec<u8>`, sized \
-                     ints) are a later slice (REQ-LLL-038 / 038e)"
+                     `bool`, `String`, `str`, `Result<T, E>`, `Vec<u8>`. Sized ints beyond `u8` \
+                     are a later slice (REQ-LLL-038 / 038e)"
                 ))),
             },
             other => Err(self.err(&format!(

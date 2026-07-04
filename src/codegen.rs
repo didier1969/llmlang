@@ -147,6 +147,7 @@ fn marshal_arg(i: usize, f: Option<&Foreign>) -> String {
     match f {
         Some(Foreign::RString) => format!("__lll_str_to_rust(&__a{i})"),
         Some(Foreign::RStr) => format!("&__lll_str_to_rust(&__a{i})"),
+        Some(Foreign::Bytes) => format!("__lll_bytes_to_rust(&__a{i})"),
         _ => format!("__a{i}"),
     }
 }
@@ -158,6 +159,7 @@ fn marshal_arg(i: usize, f: Option<&Foreign>) -> String {
 fn marshal_out(f: &Foreign, val: &str) -> String {
     match f {
         Foreign::RString => format!("__lll_str_of_rust(&{val})"),
+        Foreign::Bytes => format!("__lll_bytes_of_rust(&{val})"),
         Foreign::Tuple(fs) => {
             let cs: Vec<String> =
                 fs.iter().enumerate().map(|(i, c)| marshal_out(c, &format!("{val}.{i}"))).collect();
@@ -282,6 +284,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                 // codepoint list; identity (i64/bool or no clause) passes through.
                 let body = match op.extern_foreign.as_ref().map(|fs| &fs.ret) {
                     Some(Foreign::RString) => format!("__lll_str_of_rust(&{call})"),
+                    Some(Foreign::Bytes) => format!("__lll_bytes_of_rust(&{call})"),
                     // a structured foreign tuple → a llmlang native tuple, projected
                     // component-by-component (REQ-LLL-026); bind the call once.
                     Some(Foreign::Tuple(fs)) => {
@@ -2024,6 +2027,37 @@ fn __lll_str_of_rust(s: &str) -> Lst<i64> {
     let mut acc: Lst<i64> = Rc::new(LstI::Nil);
     for c in s.chars().rev() {
         acc = Rc::new(LstI::Cons(c as i64, acc));
+    }
+    acc
+}
+
+// FFI byte marshalling (REQ-LLL-051): a raw `Vec<u8>` — distinct from the
+// codepoint-based String/&str above, for real binary I/O (sockets, file
+// formats, crypto). Shares the SAME llmlang `List[Int]` shape as String, just
+// a different Foreign target (disambiguated by the `as` clause). The param
+// path FAIL-STOPS on an out-of-range element (never wraps/truncates via `as
+// u8`, DEC-LLL-045) — a boundary backstop, provably dead for any input built
+// from real bytes (FFI-returned or an in-range literal list).
+fn __lll_bytes_to_rust(xs: &Lst<i64>) -> Vec<u8> {
+    let mut v = Vec::new();
+    let mut cur = xs.clone();
+    loop {
+        match &*cur {
+            LstI::Nil => break,
+            LstI::Cons(c, t) => {
+                v.push(u8::try_from(*c).unwrap_or_else(|_| {
+                    panic!("FFI boundary: List[Int]->Vec<u8> has an out-of-range byte {c} (must be 0..=255)")
+                }));
+                cur = t.clone();
+            }
+        }
+    }
+    v
+}
+fn __lll_bytes_of_rust(b: &[u8]) -> Lst<i64> {
+    let mut acc: Lst<i64> = Rc::new(LstI::Nil);
+    for x in b.iter().rev() {
+        acc = Rc::new(LstI::Cons(*x as i64, acc));
     }
     acc
 }

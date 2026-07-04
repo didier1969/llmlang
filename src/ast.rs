@@ -110,6 +110,15 @@ pub enum Foreign {
     /// wrapper flattening a struct to a tuple). Return position only; v1 components ∈
     /// {i64, bool, String}.
     Tuple(Vec<Foreign>),
+    /// A raw byte buffer `Vec<u8>` (REQ-LLL-051) — distinct from `String`/`&str`
+    /// (codepoints): real binary I/O (sockets, file formats, crypto) needs bytes
+    /// that are NOT valid Unicode scalars. Marshals to/from the SAME llmlang
+    /// `List[Int]` shape as String does (disambiguated by the `as` clause's
+    /// declared foreign type, exactly like `Tuple`/`Result` already share `Ty`
+    /// shapes with other Foreign variants) — no new llmlang-level type needed.
+    /// Param and return position; each element fail-stops if outside 0..=255
+    /// (parse-don't-validate, DEC-LLL-045) rather than silently truncating.
+    Bytes,
 }
 
 impl Foreign {
@@ -125,6 +134,7 @@ impl Foreign {
                 let inner: Vec<String> = cs.iter().map(Foreign::canon).collect();
                 format!("({})", inner.join(","))
             }
+            Foreign::Bytes => "Vec<u8>".to_string(),
         }
     }
 }
