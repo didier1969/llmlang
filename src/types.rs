@@ -942,7 +942,8 @@ fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), Strin
             let is_disallowed_call = match x {
                 Expr::EffCall(..) => true,
                 Expr::Call(n, _) => {
-                    (!is_array_spec_term(n) && !is_map_spec_term(n)) || callables.contains(n)
+                    (!is_array_spec_term(n) && !is_map_spec_term(n) && !is_set_spec_term(n))
+                        || callables.contains(n)
                 }
                 _ => false,
             };
@@ -1155,6 +1156,25 @@ fn type_of_pure(
             }
             _ => unreachable!(),
         },
+        // set spec primitive admitted in contracts (DEC-LLL-043 §5): `member` is a
+        // decidable select-based test, like `haskey` (membership is total — no
+        // obligation).
+        Expr::Call(name, args) if is_set_spec_term(name) => match name.as_str() {
+            "member" => {
+                if args.len() != 2 {
+                    return Err("`member` takes 2 arguments (set, element)".into());
+                }
+                let se = match type_of_pure(&args[0], vars, result.clone())? {
+                    Ty::Set(e) => *e,
+                    _ => return Err("`member` needs a Set".into()),
+                };
+                if type_of_pure(&args[1], vars, result)? != se {
+                    return Err("`member` element type mismatch".into());
+                }
+                Ty::Bool
+            }
+            _ => unreachable!(),
+        },
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
         Expr::Lambda(..) => return Err("lambdas are not allowed in contracts (v1)".into()),
     })
@@ -1221,6 +1241,7 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
             unify_arg(pk, ak, subst)?;
             unify_arg(pv, av, subst)
         }
+        (Ty::Set(pe), Ty::Set(ae)) => unify_arg(pe, ae, subst),
         (Ty::User(pn), Ty::User(an)) if pn == an => Ok(()),
         (Ty::Fun(pp, pr), Ty::Fun(ap, ar)) if pp.len() == ap.len() => {
             for (p, a) in pp.iter().zip(ap) {
@@ -1248,6 +1269,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
         Ty::Array(e) => Ty::array(subst_ty(e, subst)),
         Ty::Map(k, v) => Ty::map(subst_ty(k, subst), subst_ty(v, subst)),
+        Ty::Set(e) => Ty::set(subst_ty(e, subst)),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| subst_ty(p, subst)).collect(),
             Box::new(subst_ty(r, subst)),
@@ -2023,6 +2045,89 @@ fn check_expr(
                     Ty::Bool
                 }
                 _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+            }
+        }
+        // set primitives (REQ-LLL-037, DEC-LLL-043 §5) — a thin layer on the map.
+        Expr::Call(name, args)
+            if is_set_builtin(name)
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            match name.as_str() {
+                "emptyset" => {
+                    if !args.is_empty() {
+                        return Err(format!(
+                            "part `{}`: `emptyset()` is the empty-set literal (v1: build with `add`)",
+                            ctx.part.name
+                        ));
+                    }
+                    match expected {
+                        Some(Ty::Set(e)) => Ty::set((**e).clone()),
+                        _ => {
+                            return Err(format!(
+                                "part `{}`: cannot infer the element type of the empty `emptyset()` here \
+                                 — it must appear where its type is fixed (an expected `Set[T]`, \
+                                 e.g. a `yield`, a call argument, or a typed field)",
+                                ctx.part.name
+                            ))
+                        }
+                    }
+                }
+                "add" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `add` takes 2 arguments (set, element)",
+                            ctx.part.name
+                        ));
+                    }
+                    // the set receiver drives the element type; `add` returns the same
+                    // Set, so an empty `emptyset()` receiver takes its type from the
+                    // expected here (mirror of `insert`; the vc threads it the same way).
+                    let se = match check_expr(ctx, &args[0], expected)? {
+                        Ty::Set(e) => *e,
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `add` needs a Set, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    let tx = check_expr(ctx, &args[1], Some(&se))?;
+                    if tx != se {
+                        return Err(format!(
+                            "part `{}`: `add` element must be {se}, got {tx}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::set(se)
+                }
+                "member" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `member` takes 2 arguments (set, element)",
+                            ctx.part.name
+                        ));
+                    }
+                    let se = match check_expr(ctx, &args[0], None)? {
+                        Ty::Set(e) => *e,
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `member` needs a Set, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    let tx = check_expr(ctx, &args[1], Some(&se))?;
+                    if tx != se {
+                        return Err(format!(
+                            "part `{}`: `member` element must be {se}, got {tx}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::Bool
+                }
+                _ => unreachable!("is_set_builtin covers emptyset/add/member"),
             }
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {

@@ -201,6 +201,9 @@ fn rs_ty(t: &Ty) -> String {
         // a verified map is an Rc-shared BTreeMap (REQ-LLL-037, DEC-LLL-043):
         // persistent via make_mut, ordered so equality/serialization is by content.
         Ty::Map(k, v) => format!("Map<{}, {}>", rs_ty(k), rs_ty(v)),
+        // a set is a thin layer on the map (DEC-LLL-043 §5): `Map<T, ()>`, the same
+        // Rc<BTreeMap> machinery with a unit value.
+        Ty::Set(e) => format!("Map<{}, ()>", rs_ty(e)),
         // first-class function → Rust fn pointer (REQ-LLL-009); a non-capturing
         // lambda / mangled part name coerces to it.
         Ty::Fun(ps, r) => {
@@ -241,6 +244,8 @@ fn collect_key_tvars(t: &Ty, acc: &mut Vec<String>) {
             // the value may itself contain nested maps whose keys need Ord
             collect_key_tvars(v, acc);
         }
+        // a set is `Map[T, ()]`, so its element is a BTreeMap key ⇒ needs Ord
+        Ty::Set(e) => collect_tvars(e, acc),
         Ty::List(e) | Ty::Array(e) => collect_key_tvars(e, acc),
         Ty::Fun(ps, r) => {
             for p in ps {
@@ -270,6 +275,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             collect_tvars(k, acc);
             collect_tvars(v, acc);
         }
+        Ty::Set(e) => collect_tvars(e, acc),
         Ty::Fun(ps, r) => {
             for p in ps {
                 collect_tvars(p, acc);
@@ -294,7 +300,7 @@ fn mangle(name: &str) -> String {
 /// traversal skip the per-node refcount inc/dec (DEC-LLL-031 voie B) — every other
 /// type (Int/Bool/Unit/Fun/Tuple/type-var) is Copy or moved, with no refcount.
 fn is_heap(t: &Ty) -> bool {
-    matches!(t, Ty::List(_) | Ty::User(_) | Ty::Array(_) | Ty::Map(..))
+    matches!(t, Ty::List(_) | Ty::User(_) | Ty::Array(_) | Ty::Map(..) | Ty::Set(_))
 }
 
 /// Collect the names of parts USED AS A FIRST-CLASS VALUE — a bare `Expr::Var`
@@ -1380,6 +1386,31 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     format!("(**{m}).contains_key(&({k}))")
                 }
                 _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+            }
+        }
+        Expr::Call(name, args)
+            if is_set_builtin(name)
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            // verified set = thin layer on the map (DEC-LLL-043 §5): `Map<T, ()>`.
+            // `add` inserts the unit value; `member` is a borrowing key test.
+            match name.as_str() {
+                "emptyset" => "Rc::new(BTreeMap::new())".to_string(),
+                "add" => {
+                    let s = expr(&args[0], cx, res)?;
+                    let x = expr(&args[1], cx, res)?;
+                    format!(
+                        "{{ let mut __sadd = {s}; Rc::make_mut(&mut __sadd).insert({x}, ()); __sadd }}"
+                    )
+                }
+                "member" => {
+                    let s = borrowed(&args[0], cx, res)?;
+                    let x = expr(&args[1], cx, res)?;
+                    format!("(**{s}).contains_key(&({x}))")
+                }
+                _ => unreachable!("is_set_builtin covers emptyset/add/member"),
             }
         }
         Expr::Call(name, args) => {

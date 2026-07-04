@@ -97,6 +97,10 @@ pub enum Ty {
     /// (Maybe V))`; runtime `Rc<BTreeMap<K, V>>` + make_mut). v1 intrinsics —
     /// `map()` literal, `insert(m, k, v)`, `lookup(m, k)`, `haskey(m, k)`.
     Map(Box<Ty>, Box<Ty>),
+    /// A verified persistent set `Set[T]` (REQ-LLL-037, DEC-LLL-043 §5): a thin
+    /// layer on the map — same underlying machinery (a `Map[T, Unit]`), NOT a third
+    /// structure. v1 intrinsics — `emptyset()`, `add(s, x)`, `member(s, x)`.
+    Set(Box<Ty>),
     /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
     /// v1: parameter and result types are concrete (monomorphic HOF).
     Fun(Vec<Ty>, Box<Ty>),
@@ -129,6 +133,10 @@ impl Ty {
     pub fn map(key: Ty, val: Ty) -> Ty {
         Ty::Map(Box::new(key), Box::new(val))
     }
+    /// `Set[elem]` (REQ-LLL-037, DEC-LLL-043 §5).
+    pub fn set(elem: Ty) -> Ty {
+        Ty::Set(Box::new(elem))
+    }
     /// The concrete `List[Int]` — the v1 monomorphic list, now a special case.
     pub fn list_int() -> Ty {
         Ty::list(Ty::Int)
@@ -140,6 +148,7 @@ impl Ty {
             Ty::Var(_) => false,
             Ty::List(e) | Ty::Array(e) => e.is_concrete(),
             Ty::Map(k, v) => k.is_concrete() && v.is_concrete(),
+            Ty::Set(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
             Ty::Tuple(cs) => cs.iter().all(|c| c.is_concrete()),
         }
@@ -155,6 +164,7 @@ impl std::fmt::Display for Ty {
             Ty::List(e) => write!(f, "List[{e}]"),
             Ty::Array(e) => write!(f, "Array[{e}]"),
             Ty::Map(k, v) => write!(f, "Map[{k}, {v}]"),
+            Ty::Set(e) => write!(f, "Set[{e}]"),
             Ty::Fun(ps, r) => {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
                 write!(f, "({}) -> {r}", ps.join(", "))
@@ -277,6 +287,20 @@ pub fn is_map_builtin(name: &str) -> bool {
 /// op (like `set`), NOT a spec term; `map()` is a value literal.
 pub fn is_map_spec_term(name: &str) -> bool {
     matches!(name, "lookup" | "haskey")
+}
+
+/// Reserved builtin names for the verified set (REQ-LLL-037, DEC-LLL-043 §5).
+/// A set is a thin layer on the map, so these lower to the map ops over a
+/// `Map[T, Unit]`. `emptyset` is the empty-set literal; `add`/`member` are v1.
+pub fn is_set_builtin(name: &str) -> bool {
+    matches!(name, "emptyset" | "add" | "member")
+}
+
+/// The subset of set builtins admitted as SPEC TERMS inside contracts: `member`
+/// is a decidable select-based test (like `haskey`). `add` is a value op; an
+/// empty `emptyset()` is a value literal.
+pub fn is_set_spec_term(name: &str) -> bool {
+    matches!(name, "member")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

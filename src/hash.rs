@@ -477,7 +477,7 @@ impl<'a> Norm<'a> {
                 }
             }
             Expr::Call(n, args)
-                if (is_array_builtin(n) || is_map_builtin(n))
+                if (is_array_builtin(n) || is_map_builtin(n) || is_set_builtin(n))
                     && n != self.self_name
                     && !self.peers.contains_key(n)
                     && !self.dep_hashes.contains_key(n)
@@ -540,6 +540,7 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
             collect_tyvars(k, acc);
             collect_tyvars(v, acc);
         }
+        Ty::Set(e) => collect_tyvars(e, acc),
         Ty::Fun(ps, r) => {
             for p in ps {
                 collect_tyvars(p, acc);
@@ -565,6 +566,7 @@ fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
         Ty::List(e) => format!("List[{}]", canon_ty(e, rename)),
         Ty::Array(e) => format!("Array[{}]", canon_ty(e, rename)),
         Ty::Map(k, v) => format!("Map[{}, {}]", canon_ty(k, rename), canon_ty(v, rename)),
+        Ty::Set(e) => format!("Set[{}]", canon_ty(e, rename)),
         Ty::Fun(ps, r) => format!(
             "({}) -> {}",
             ps.iter()

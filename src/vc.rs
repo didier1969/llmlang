@@ -253,6 +253,9 @@ fn smt_ty(t: &Ty) -> String {
         // and `Maybe` makes an absent key `none` so map equality is extensional
         // (order-independent) by construction (REQ-LLL-037, DEC-LLL-043).
         Ty::Map(k, v) => format!("(Array {} (Maybe {}))", smt_ty(k), smt_ty(v)),
+        // a set is a thin layer on the map (DEC-LLL-043 §5): the SAME representation
+        // as `Map[T, Unit]`, so membership reuses the map's select/none machinery.
+        Ty::Set(e) => format!("(Array {} (Maybe Unit))", smt_ty(e)),
         // functions are declared as uninterpreted functions (declare-fun), never
         // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
@@ -710,6 +713,45 @@ impl<'a> Emit<'a> {
                         format!("(not (= (select {m} {k}) none))")
                     }
                     _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+                }
+            }
+            Expr::Call(name, args)
+                if is_set_builtin(name)
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                // verified set = thin layer on the map (DEC-LLL-043 §5): a `Map[T,
+                // Unit]`. `add` stores `(some unit)`, `member` tests "not none" — no
+                // key-present obligation (membership is a total, always-valid query).
+                match name.as_str() {
+                    "emptyset" => match expected {
+                        Some(Ty::Set(e)) => {
+                            let esort = smt_ty(e);
+                            format!(
+                                "((as const (Array {esort} (Maybe Unit))) (as none (Maybe Unit)))"
+                            )
+                        }
+                        _ => {
+                            return Err(format!(
+                                "part `{}`: cannot infer the element type of the empty `emptyset()` \
+                                 here — it needs an expected `Set[T]` from context (a `yield`, \
+                                 a call argument, or a typed field)",
+                                self.part.name
+                            ))
+                        }
+                    },
+                    "add" => {
+                        let s = self.tr(&args[0], env, expected)?;
+                        let x = self.tr(&args[1], env, None)?;
+                        format!("(store {s} {x} (some unit))")
+                    }
+                    "member" => {
+                        let s = self.tr(&args[0], env, None)?;
+                        let x = self.tr(&args[1], env, None)?;
+                        format!("(not (= (select {s} {x}) none))")
+                    }
+                    _ => unreachable!("is_set_builtin covers emptyset/add/member"),
                 }
             }
             Expr::Call(name, args) => {

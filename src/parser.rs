@@ -564,6 +564,13 @@ impl Parser {
                 self.eat(Tok::RBracket)?;
                 Ok(Ty::map(key, val))
             }
+            Tok::Ident(s) if s == "Set" => {
+                // verified set `Set[T]` (REQ-LLL-037, DEC-LLL-043 §5) — grammar as List
+                self.eat(Tok::LBracket)?;
+                let elem = self.ty()?;
+                self.eat(Tok::RBracket)?;
+                Ok(Ty::set(elem))
+            }
             // a lowercase-initial bareword is a parametric type variable
             // (REQ-LLL-007). Constructors (Int/Bool/List) are capitalized.
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {

@@ -1463,6 +1463,29 @@ fn verified_map_is_polymorphic() {
 }
 
 #[test]
+fn verified_set_add_member() {
+    // REQ-LLL-037 slice 4 (DEC-LLL-043 §5): a verified Set as a THIN LAYER on the map
+    // — `Set[T]` is a `Map[T, Unit]`, so `add` stores unit and `member` tests "not
+    // none". Membership is total (no obligation). Runtime `Rc<BTreeMap<T, ()>>`.
+    let src = "module SetTest:\n\n  part empty() -> Set[Int]:\n    yield emptyset()\n\n  part has(s: Set[Int], x: Int) -> Int:\n    match member(s, x):\n      true  -> yield 1\n      false -> yield 0\n\n  part needs(s: Set[Int], x: Int) -> Int:\n    requires member(s, x)\n    yield 42\n\n  part main() -> Int via IO:\n    let s0 = empty()\n    let s1 = add(s0, 7)\n    let s2 = add(s1, 9)\n    let a = IO.print(has(s2, 7))\n    let b = IO.print(has(s2, 5))\n    let c = IO.print(needs(add(s2, 3), 3))\n    yield IO.print(has(add(s2, 100), 100))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "verified set must check: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("1\n0\n42\n1"), "expected 1,0,42,1; got: {out}");
+}
+
+#[test]
+fn verified_set_is_polymorphic() {
+    // DEC-LLL-043 §5: `Set[a]` is generic; the element is a BTreeMap key so the tvar
+    // `Ta` gains the selective `+ Ord` bound. `present` is monomorphized to Int.
+    let src = "module SetGen:\n\n  part present(s: Set[a], x: a) -> Int:\n    requires member(s, x)\n    yield 1\n\n  part seed() -> Set[Int]:\n    ensures member(result, 5)\n    yield add(emptyset(), 5)\n\n  part main() -> Int via IO:\n    yield IO.print(present(seed(), 5))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a polymorphic set must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains('1'), "present(seed(), 5) must be 1, got: {out}");
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`
