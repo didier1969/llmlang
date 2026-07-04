@@ -15,7 +15,7 @@
 //!             from inputs + recorded effect results).
 
 use crate::ast::*;
-use crate::types::CheckedModule;
+use crate::types::{subst_tyvar, CheckedModule};
 
 /// The op-anchored typed FFI shim name for a dotted op key `Eff.op` (REQ-LLL-041,
 /// slice 038b): `Eff.op` → `__lll_ffi_Eff_op`. A perform of an `= extern` op lowers
@@ -298,9 +298,26 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         abort_effects: &abort_effects,
         generic_fn_pos: &generic_fn_pos,
         part_row: &part_row,
+        classes: &cm.module.classes,
     };
     for td in &cm.module.types {
         emit_enum(&mut out, td);
+    }
+    // typeclasses (REQ-LLL-039): a class → a Rust trait, an instance → an `impl`.
+    // Rust's OWN trait system IS the dictionary — rustc resolves the right method
+    // per concrete type and monomorphizes it, so no manual dictionary-passing is
+    // built here (GUI-PRO-020: pull complexity downward into the host language).
+    for class in &cm.module.classes {
+        emit_class_trait(&mut out, class);
+    }
+    for inst in &cm.module.instances {
+        let class = cm
+            .module
+            .classes
+            .iter()
+            .find(|c| c.name == inst.class)
+            .ok_or_else(|| format!("codegen: instance for unknown class `{}`", inst.class))?;
+        emit_instance_impl(&mut out, class, inst)?;
     }
     for part in &cm.module.parts {
         // an effect-generic part is emitted only as its per-row specializations
@@ -372,6 +389,168 @@ fn rs_ty(t: &Ty) -> String {
 /// Rust generic-parameter name for a type variable (`a` -> `Ta`).
 fn tv_param(a: &str) -> String {
     format!("T{a}")
+}
+
+/// Build the `<...>` Rust generics clause for a part's type variables, adding a
+/// typeclass trait bound per `given Class[a]` constraint (REQ-LLL-039). Rust's
+/// OWN trait system becomes the dictionary — rustc resolves and monomorphizes it
+/// like any other trait bound; no manual dictionary-passing is built (GUI-PRO-020:
+/// pull complexity downward into the host language). Shared by `emit_part` and
+/// `emit_specialized_part` (previously duplicated inline).
+fn generics_clause(tvars: &[String], key_tvars: &[String], given: &[(String, String)]) -> String {
+    if tvars.is_empty() {
+        return String::new();
+    }
+    let bounds: Vec<String> = tvars
+        .iter()
+        .map(|a| {
+            let ord = if key_tvars.contains(a) { " + Ord" } else { "" };
+            let classes: String =
+                given.iter().filter(|(_, tv)| tv == a).map(|(cn, _)| format!(" + {cn}")).collect();
+            format!("{}: Clone + PartialEq{ord}{classes}", tv_param(a))
+        })
+        .collect();
+    format!("<{}>", bounds.join(", "))
+}
+
+/// method name → (trait/class name, Rust generic type param) for every method
+/// required by a part's `given` clauses (REQ-LLL-039 inc.4) — used to emit a
+/// fully-qualified trait call `<T as Class>::method(args)` at each use site.
+fn given_methods_map(
+    given: &[(String, String)],
+    classes: &[Class],
+) -> std::collections::HashMap<String, (String, String)> {
+    let mut out = std::collections::HashMap::new();
+    for (cname, tv) in given {
+        if let Some(class) = classes.iter().find(|c| c.name == *cname) {
+            for (mn, _, _) in &class.methods {
+                out.insert(mn.clone(), (cname.clone(), tv_param(tv)));
+            }
+        }
+    }
+    out
+}
+
+/// Render a type for a typeclass TRAIT signature: the class's own type variable
+/// becomes Rust's `Self` (REQ-LLL-039) — otherwise identical to `rs_ty`.
+fn rs_ty_self(t: &Ty, self_var: &str) -> String {
+    match t {
+        Ty::Var(a) if a == self_var => "Self".to_string(),
+        Ty::Var(a) => tv_param(a),
+        Ty::List(e) => format!("Lst<{}>", rs_ty_self(e, self_var)),
+        Ty::Array(e) => format!("Arr<{}>", rs_ty_self(e, self_var)),
+        Ty::Map(k, v) => format!("Map<{}, {}>", rs_ty_self(k, self_var), rs_ty_self(v, self_var)),
+        Ty::Set(e) => format!("Map<{}, ()>", rs_ty_self(e, self_var)),
+        Ty::Fun(ps, r) => {
+            let a: Vec<String> = ps.iter().map(|p| rs_ty_self(p, self_var)).collect();
+            format!("fn({}) -> {}", a.join(", "), rs_ty_self(r, self_var))
+        }
+        Ty::User(n) => n.clone(),
+        Ty::Never => "!".to_string(),
+        Ty::Unit => "()".to_string(),
+        Ty::Tuple(cs) => {
+            let inner: Vec<String> = cs.iter().map(|c| rs_ty_self(c, self_var)).collect();
+            format!("({})", inner.join(", "))
+        }
+        Ty::Int => "i64".to_string(),
+        Ty::Bool => "bool".to_string(),
+    }
+}
+
+/// A typeclass `class Eq[a]:` → a Rust `trait Eq { fn eq(__a0: Self, …) -> …; }`
+/// (REQ-LLL-039). v1 class methods take their abstract values BY VALUE — matches
+/// how scalar types (Int/Bool, the only class-constrained types in this slice)
+/// already codegen with no borrow (DEC-LLL-031 only borrows heap types).
+fn emit_class_trait(out: &mut String, class: &Class) {
+    out.push_str(&format!("\npub trait {} {{\n", class.name));
+    for (mn, mparams, mret) in &class.methods {
+        let ps: Vec<String> = mparams
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("__a{i}: {}", rs_ty_self(t, &class.tyvar)))
+            .collect();
+        out.push_str(&format!(
+            "    fn {mn}({}) -> {};\n",
+            ps.join(", "),
+            rs_ty_self(mret, &class.tyvar)
+        ));
+    }
+    out.push_str("}\n");
+}
+
+/// An `instance Eq[Int]: eq = \(x,y) -> …` → `impl Eq for i64 { fn eq(...) {...} }`
+/// (REQ-LLL-039). The lambda's OWN param types are already the concrete
+/// (ground-substituted) types — type-check (slice A inc.2) verified the lambda's
+/// signature against the class method instantiated at `inst.ty`, so they're used
+/// as-is; only the return type is re-derived (a lambda has no return annotation).
+fn emit_instance_impl(out: &mut String, class: &Class, inst: &Instance) -> Result<(), String> {
+    out.push_str(&format!("\nimpl {} for {} {{\n", class.name, rs_ty(&inst.ty)));
+    let empty_names: Names = std::collections::HashSet::new();
+    let empty_smap: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let empty_bmask: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+    let empty_ops: std::collections::HashMap<String, Vec<OpSig>> = std::collections::HashMap::new();
+    let empty_caps: PartCaps = std::collections::HashMap::new();
+    let empty_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let empty_rows: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let empty_gm: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    for (mn, body) in &inst.defs {
+        let (_, _, mret) = class
+            .methods
+            .iter()
+            .find(|(cmn, _, _)| cmn == mn)
+            .ok_or_else(|| format!("codegen: `{mn}` is not a method of class `{}`", class.name))?;
+        let ret_ty = subst_tyvar(mret, &class.tyvar, &inst.ty);
+        let (params, lambda_body) = match body {
+            Expr::Lambda(ps, b) => (ps, b.as_ref()),
+            _ => {
+                return Err(format!(
+                    "codegen: instance method `{mn}` must be a lambda (v1, enforced at check)"
+                ))
+            }
+        };
+        let ps: Vec<String> =
+            params.iter().map(|(n, t)| format!("{}: {}", local(n), rs_ty(t))).collect();
+        // a minimal, mostly-empty Cx: v1 instance method bodies are simple pure
+        // expressions over concrete scalar params — no HOF/effects/nested `given`
+        // consumption inside an instance body in this slice.
+        let cx = Cx {
+            fns: &empty_names,
+            ctors: &empty_names,
+            ctor_ei: &empty_smap,
+            parts: &empty_names,
+            borrows: &empty_names,
+            borrow_mask: &empty_bmask,
+            refs: std::collections::HashSet::new(),
+            abort: &empty_names,
+            extern_ops: &empty_smap,
+            abort_ops: &empty_names,
+            stateful: &empty_names,
+            readerful: &empty_names,
+            state_ev: None,
+            reader_ev: None,
+            caps: std::collections::HashMap::new(),
+            user_tail: &empty_names,
+            user_tail_ops: &empty_ops,
+            part_caps: &empty_caps,
+            effect_generic: &empty_smap,
+            abort_effects: &empty_names,
+            generic_fn_pos: &empty_pos,
+            part_row: &empty_rows,
+            given_methods: &empty_gm,
+            row_fn: None,
+            row_ev: Vec::new(),
+            row_abort: false,
+            row: Vec::new(),
+        };
+        out.push_str(&format!(
+            "    fn {mn}({}) -> {} {{ {} }}\n",
+            ps.join(", "),
+            rs_ty(&ret_ty),
+            expr(lambda_body, &cx, false)?
+        ));
+    }
+    out.push_str("}\n");
+    Ok(())
 }
 
 /// Collect type variables that appear in a KEY position of some `Map[K, _]`
@@ -617,18 +796,8 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         collect_key_tvars(t, &mut key_tvars);
     }
     collect_key_tvars(&part.ret, &mut key_tvars);
-    let generics = if tvars.is_empty() {
-        String::new()
-    } else {
-        let bounds: Vec<String> = tvars
-            .iter()
-            .map(|a| {
-                let ord = if key_tvars.contains(a) { " + Ord" } else { "" };
-                format!("{}: Clone + PartialEq{ord}", tv_param(a))
-            })
-            .collect();
-        format!("<{}>", bounds.join(", "))
-    };
+    let generics = generics_clause(&tvars, &key_tvars, &part.given);
+    let given_methods = given_methods_map(&part.given, g.classes);
     // borrow model (DEC-LLL-031): if this part is not used as a first-class value,
     // its List/ADT parameters are taken by reference (`&Rc<…>`) — a read-only
     // traversal then costs no per-node refcount. Those names are the seed `refs`.
@@ -720,6 +889,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         abort_effects: g.abort_effects,
         generic_fn_pos: g.generic_fn_pos,
         part_row: g.part_row,
+        given_methods: &given_methods,
         row_fn: None,
         row_ev: Vec::new(),
         row_abort: false,
@@ -757,18 +927,8 @@ fn emit_specialized_part(
         collect_key_tvars(t, &mut key_tvars);
     }
     collect_key_tvars(&part.ret, &mut key_tvars);
-    let generics = if tvars.is_empty() {
-        String::new()
-    } else {
-        let bounds: Vec<String> = tvars
-            .iter()
-            .map(|a| {
-                let ord = if key_tvars.contains(a) { " + Ord" } else { "" };
-                format!("{}: Clone + PartialEq{ord}", tv_param(a))
-            })
-            .collect();
-        format!("<{}>", bounds.join(", "))
-    };
+    let generics = generics_clause(&tvars, &key_tvars, &part.given);
+    let given_methods = given_methods_map(&part.given, g.classes);
     let fn_param_name = part
         .params
         .iter()
@@ -861,6 +1021,7 @@ fn emit_specialized_part(
         abort_effects: g.abort_effects,
         generic_fn_pos: g.generic_fn_pos,
         part_row: g.part_row,
+        given_methods: &given_methods,
         row_fn: Some(fn_param_name),
         row_ev,
         row_abort: has_abort,
@@ -918,6 +1079,9 @@ struct Globals<'a> {
     generic_fn_pos: &'a std::collections::HashMap<String, usize>,
     /// part name → its concrete effect row (sorted) — for instantiating a generic call
     part_row: &'a std::collections::HashMap<String, Vec<String>>,
+    /// typeclasses in the module (REQ-LLL-039) — for building a part's per-call
+    /// `given_methods` map (method name → trait + Rust generic param).
+    classes: &'a [Class],
 }
 
 #[derive(Clone)]
@@ -969,6 +1133,10 @@ struct Cx<'a> {
     generic_fn_pos: &'a std::collections::HashMap<String, usize>,
     /// part name → its concrete effect row (sorted)
     part_row: &'a std::collections::HashMap<String, Vec<String>>,
+    /// method name → (trait/class name, Rust generic type param) for every method
+    /// required by this part's OWN `given` clauses (REQ-LLL-039 inc.4) — a call
+    /// translates to a fully-qualified trait dispatch `<T as Class>::method(args)`.
+    given_methods: &'a std::collections::HashMap<String, (String, String)>,
     /// inside a specialized (effect-monomorphized) body: the row-carrying function
     /// parameter's name; applying it forwards `row_ev` (+ `?` if `row_abort`).
     row_fn: Option<String>,
@@ -1073,6 +1241,7 @@ fn emit_body(
                     abort_effects: cx.abort_effects,
                     generic_fn_pos: cx.generic_fn_pos,
                     part_row: cx.part_row,
+                    given_methods: cx.given_methods,
                     row_fn: cx.row_fn.clone(),
                     row_ev: cx.row_ev.clone(),
                     row_abort: cx.row_abort,
@@ -1149,6 +1318,7 @@ fn emit_body(
                         abort_effects: cx.abort_effects,
                         generic_fn_pos: cx.generic_fn_pos,
                         part_row: cx.part_row,
+                        given_methods: cx.given_methods,
                         row_fn: None,
                         row_ev: Vec::new(),
                         row_abort: false,
@@ -1181,6 +1351,7 @@ fn emit_body(
                     abort_effects: cx.abort_effects,
                     generic_fn_pos: cx.generic_fn_pos,
                     part_row: cx.part_row,
+                    given_methods: cx.given_methods,
                     row_fn: cx.row_fn.clone(),
                     row_ev: cx.row_ev.clone(),
                     row_abort: cx.row_abort,
@@ -1575,7 +1746,12 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             // (DEC-LLL-031); a constructor / fn-valued-param name has no mask, so
             // every argument stays owned (retention into `Rc::new` / a fn pointer).
             let mut xs: Vec<String> = part_call_args(name, args, cx, res)?;
-            if cx.ctors.contains(name) {
+            if let Some((class_name, typaram)) = cx.given_methods.get(name) {
+                // typeclass method call (REQ-LLL-039): fully-qualified trait
+                // dispatch — Rust's trait system IS the dictionary; rustc resolves
+                // + monomorphizes per concrete instantiation (GUI-PRO-020).
+                format!("<{typaram} as {class_name}>::{name}({})", xs.join(", "))
+            } else if cx.ctors.contains(name) {
                 // ADT constructor application → Rc-wrapped variant, fully-qualified
                 // so an Ok/Err ctor cannot shadow Rust's `Result` (REQ-LLL-011).
                 let ei = cx.ctor_ei.get(name).map(String::as_str).unwrap_or("");

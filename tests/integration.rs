@@ -676,6 +676,36 @@ fn typeclass_given_call_site_resolves_concrete_instance_and_verifies() {
 }
 
 #[test]
+fn typeclass_codegen_compiles_and_runs() {
+    // REQ-LLL-039 slice B inc.4 — end-to-end: a class → Rust trait, an instance →
+    // `impl`, `given` → a trait bound rustc resolves and monomorphizes. No manual
+    // dictionary is built; Rust's own trait system IS the dictionary.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n\n  part main() -> Int via IO:\n    match same(1, 1):\n      true -> yield IO.print(1)\n      false -> yield IO.print(0)\n";
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    assert!(rust.contains("pub trait Eq"), "expected an emitted `Eq` trait, got:\n{rust}");
+    assert!(rust.contains("impl Eq for i64"), "expected `impl Eq for i64`, got:\n{rust}");
+    let dir = tempdir();
+    let rs = dir.join("tc.rs");
+    let bin = dir.join("tc_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "typeclass Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('1'), "expected 1 (Eq[Int].eq(1,1) = true), got: {stdout}");
+}
+
+#[test]
 fn typeclass_given_call_site_missing_instance_rejected() {
     // Calling a `given`-constrained part with a concrete type that has NO instance
     // must be rejected precisely at check-time (like a missing trait impl).
