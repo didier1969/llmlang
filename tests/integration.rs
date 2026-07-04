@@ -2668,3 +2668,33 @@ fn example_clause_surface_parses() {
     assert_eq!(m.parts.len(), 1);
     assert_eq!(m.parts[0].examples.len(), 2, "two example clauses");
 }
+
+#[test]
+fn example_clause_type_checks_a_call_unlike_ensures() {
+    // REQ-LLL-049 inc.2: unlike requires/ensures/measure (call-free, DEC-LLL-017),
+    // an example's whole point is to call the part it documents — check_examples
+    // (check_expr, module-aware) must accept it where check_contracts (no_calls,
+    // type_of_pure) would reject the identical call in an ensures clause.
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3) == 5\n    yield x + y\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert!(types::check_module(m).is_ok(), "a ground example calling its own part type-checks");
+}
+
+#[test]
+fn example_referencing_a_param_is_rejected() {
+    // Ground-only scope decision (design-twice REQ-LLL-049): an example may not
+    // read the part's own parameters — it states a claim about CONCRETE values,
+    // never something generic over the arguments.
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(x, 3) == x + 3\n    yield x + y\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("example may not reference `x`"), "wrong error: {err}");
+}
+
+#[test]
+fn non_bool_example_is_rejected() {
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3)\n    yield x + y\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("example clause must be Bool"), "wrong error: {err}");
+}

@@ -564,6 +564,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         // is validated against ctx.effect_allowed (the part's `via` row ∪ any effect
         // discharged by an enclosing `handle`), so no ambient "effectful" flag.
         check_body(&mut ctx, &part.body, &part.ret)?;
+        check_examples(&mut ctx, part)?;
         let in_multi = scc_multi.contains(&part.name);
         let rec = if in_multi {
             // mutual recursion: every SCC member must carry a measure
@@ -1384,6 +1385,50 @@ fn check_signature(part: &Part) -> Result<(), String> {
                 "part `{}`: `result` is reserved for ensures clauses",
                 part.name
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Ground examples (REQ-LLL-049): unlike requires/ensures/measure, an `example`
+/// MUST be able to call a part — so it is checked with the full `check_expr`
+/// (module-aware, calls resolved), never `type_of_pure`/`no_calls`. What it
+/// forbids instead is a free variable (the part's own params/locals): an
+/// example states a GROUND claim, never something generic over the part's
+/// arguments (scope decision, design-twice REQ-LLL-049).
+fn check_examples(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
+    // an example's call to its own part is NOT control flow (never executed as
+    // part of the body) and must not count toward the part's OWN termination
+    // classification — check_expr records a self-call into `ctx.rec_calls`
+    // unconditionally, so save/restore around the example check (DEC-LLL-016
+    // recursion classification stays scoped to `part.body`).
+    let rec_calls_before = ctx.rec_calls.len();
+    let result = check_examples_inner(ctx, part);
+    ctx.rec_calls.truncate(rec_calls_before);
+    result
+}
+
+fn check_examples_inner(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
+    for ex in &part.examples {
+        let mut bad = None;
+        ex.walk(&mut |x| {
+            if let Expr::Var(n) = x {
+                if !ctx.ctors.contains_key(n) && bad.is_none() {
+                    bad = Some(n.clone());
+                }
+            }
+        });
+        if let Some(n) = bad {
+            return Err(format!(
+                "part `{}`: example may not reference `{n}` — examples are ground \
+                 (literal values and calls only, no parameters or locals, REQ-LLL-049)",
+                part.name
+            ));
+        }
+        let t = check_expr(ctx, ex, Some(&Ty::Bool))
+            .map_err(|e| format!("part `{}` example: {e}", part.name))?;
+        if t != Ty::Bool {
+            return Err(format!("part `{}`: example clause must be Bool", part.name));
         }
     }
     Ok(())
