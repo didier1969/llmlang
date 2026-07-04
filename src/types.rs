@@ -452,6 +452,20 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             }
             for t in mparams.iter().chain(std::iter::once(mret)) {
                 check_user_ty_declared(t, &type_names)?;
+                // DEC-LLL-047: ground-instantiation only ever substitutes the
+                // class's OWN tyvar. A method signature that mentions a DIFFERENT
+                // free type variable could never be discharged by any instance
+                // (its ground params can never structurally equal a bare `Var`) —
+                // reject at class-registration time rather than let it surface as
+                // an uncompilable trait generic at codegen (REQ-LLL-050).
+                if !ty_uses_only_var(t, &c.tyvar) {
+                    return Err(format!(
+                        "class `{}`: method `{mn}` may only use the class's own type variable \
+                         `{}` — a second free type variable can never be ground-instantiated by \
+                         an instance",
+                        c.name, c.tyvar
+                    ));
+                }
             }
         }
         if class_map.insert(c.name.clone(), c).is_some() {
@@ -651,6 +665,19 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     inst.class, inst.ty, inst.class
                 )
             })?;
+            // v1: every instance method body must be a lambda (REQ-LLL-050 fix) —
+            // enforced HERE, uniformly, whether or not the class has a law. Before
+            // this, the only lambda-form check lived in `inline_methods` (vc.rs),
+            // reached per-method only when a LAW calls it — a class with zero laws
+            // let a non-lambda body (e.g. a bare part reference) slip through to
+            // codegen, which enforces the same rule far too late.
+            if !matches!(body, Expr::Lambda(..)) {
+                return Err(format!(
+                    "instance `{}[{}]`: method `{mn}` must be a lambda `\\(…) -> …` (v1) — a bare \
+                     part reference or other expression is not yet supported",
+                    inst.class, inst.ty
+                ));
+            }
             // ground-instantiate the method signature (DEC-LLL-047: instantiate,
             // never quantify) and require the concrete body to have exactly that type.
             let gparams: Vec<Ty> =
@@ -740,6 +767,20 @@ fn ty_mentions_var(t: &Ty, v: &str) -> bool {
         Ty::Fun(ps, r) => ps.iter().any(|p| ty_mentions_var(p, v)) || ty_mentions_var(r, v),
         Ty::Tuple(cs) => cs.iter().any(|c| ty_mentions_var(c, v)),
         Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => false,
+    }
+}
+
+/// Does every `Ty::Var` in `t` equal `only` (REQ-LLL-050)? Used to reject a class
+/// method signature that references a SECOND free type variable — see the call
+/// site in the class-registration loop for why that can never be instantiated.
+fn ty_uses_only_var(t: &Ty, only: &str) -> bool {
+    match t {
+        Ty::Var(v) => v == only,
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => ty_uses_only_var(e, only),
+        Ty::Map(k, v) => ty_uses_only_var(k, only) && ty_uses_only_var(v, only),
+        Ty::Fun(ps, r) => ps.iter().all(|p| ty_uses_only_var(p, only)) && ty_uses_only_var(r, only),
+        Ty::Tuple(cs) => cs.iter().all(|c| ty_uses_only_var(c, only)),
+        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => true,
     }
 }
 

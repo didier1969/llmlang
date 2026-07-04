@@ -422,10 +422,18 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
                             params.len()
                         ));
                     }
-                    let mut b = (**body).clone();
-                    for ((pn, _), arg) in params.iter().zip(&inl_args) {
-                        b = subst_var(&b, pn, arg);
-                    }
+                    // SIMULTANEOUS substitution (REQ-LLL-050 fix): a sequential
+                    // subst_var-per-param loop is UNSOUND here — the instance
+                    // lambda's OWN parameter names (e.g. `x`, `y`) routinely collide
+                    // with the CALLER's argument variable names (e.g. a law's own
+                    // binders, also conventionally `x`/`y`), so substituting param 1
+                    // first can inject a bare `Var("y")` that the very next
+                    // iteration (substituting param `y`) then wrongly re-captures.
+                    // e.g. `lte(y, x)` inlining `\(x, y) -> x <= y` sequentially
+                    // produced `law_x <= law_x` instead of `law_y <= law_x`.
+                    let map: HashMap<&str, &Expr> =
+                        params.iter().map(|(pn, _)| pn.as_str()).zip(inl_args.iter()).collect();
+                    let b = subst_vars(body, &map);
                     inline_methods(&b, class, inst)?
                 }
                 _ => {
@@ -480,36 +488,41 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
 /// Substitute every free occurrence of `name` in `e` with `val` (capture-avoiding
 /// against nested lambda binders) — beta-reduces an instance method's lambda body
 /// at a law's call arguments.
-fn subst_var(e: &Expr, name: &str, val: &Expr) -> Expr {
+/// Substitute every name in `map` for its value, in ONE simultaneous pass — never
+/// sequential per-name substitution (REQ-LLL-050: sequential substitution captures
+/// a freshly-injected `Var` whose name coincides with a LATER param, see
+/// `inline_methods`). A name absent from `map` is left as-is; a `Lambda` that
+/// re-binds one of `map`'s names shadows it for its own body (standard capture-
+/// avoidance — this codebase's lambdas are the only binder form substituted here).
+fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
     match e {
-        Expr::Var(n) if n == name => val.clone(),
-        Expr::Var(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
-        Expr::Bin(op, a, b) => Expr::Bin(
-            *op,
-            Box::new(subst_var(a, name, val)),
-            Box::new(subst_var(b, name, val)),
-        ),
-        Expr::Not(a) => Expr::Not(Box::new(subst_var(a, name, val))),
-        Expr::Neg(a) => Expr::Neg(Box::new(subst_var(a, name, val))),
-        Expr::Cons(h, t) => Expr::Cons(
-            Box::new(subst_var(h, name, val)),
-            Box::new(subst_var(t, name, val)),
-        ),
-        Expr::ListLit(xs) => Expr::ListLit(xs.iter().map(|x| subst_var(x, name, val)).collect()),
-        Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| subst_var(x, name, val)).collect()),
-        Expr::Call(n, args) => Expr::Call(
-            n.clone(),
-            args.iter().map(|a| subst_var(a, name, val)).collect(),
-        ),
-        Expr::EffCall(n, args) => Expr::EffCall(
-            n.clone(),
-            args.iter().map(|a| subst_var(a, name, val)).collect(),
-        ),
+        Expr::Var(n) => map.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
+        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
+        Expr::Bin(op, a, b) => {
+            Expr::Bin(*op, Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map)))
+        }
+        Expr::Not(a) => Expr::Not(Box::new(subst_vars(a, map))),
+        Expr::Neg(a) => Expr::Neg(Box::new(subst_vars(a, map))),
+        Expr::Cons(h, t) => {
+            Expr::Cons(Box::new(subst_vars(h, map)), Box::new(subst_vars(t, map)))
+        }
+        Expr::ListLit(xs) => Expr::ListLit(xs.iter().map(|x| subst_vars(x, map)).collect()),
+        Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| subst_vars(x, map)).collect()),
+        Expr::Call(n, args) => {
+            Expr::Call(n.clone(), args.iter().map(|a| subst_vars(a, map)).collect())
+        }
+        Expr::EffCall(n, args) => {
+            Expr::EffCall(n.clone(), args.iter().map(|a| subst_vars(a, map)).collect())
+        }
         Expr::Lambda(ps, body) => {
-            if ps.iter().any(|(pn, _)| pn == name) {
-                e.clone()
+            if ps.iter().any(|(pn, _)| map.contains_key(pn.as_str())) {
+                let mut inner = map.clone();
+                for (pn, _) in ps {
+                    inner.remove(pn.as_str());
+                }
+                Expr::Lambda(ps.clone(), Box::new(subst_vars(body, &inner)))
             } else {
-                Expr::Lambda(ps.clone(), Box::new(subst_var(body, name, val)))
+                Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
         }
     }

@@ -317,7 +317,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             .iter()
             .find(|c| c.name == inst.class)
             .ok_or_else(|| format!("codegen: instance for unknown class `{}`", inst.class))?;
-        emit_instance_impl(&mut out, class, inst)?;
+        emit_instance_impl(&mut out, class, inst, &ctors, &ctor_ei)?;
     }
     for part in &cm.module.parts {
         // an effect-generic part is emitted only as its per-row specializations
@@ -461,8 +461,14 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
 /// (REQ-LLL-039). v1 class methods take their abstract values BY VALUE — matches
 /// how scalar types (Int/Bool, the only class-constrained types in this slice)
 /// already codegen with no borrow (DEC-LLL-031 only borrows heap types).
+/// `Self: Sized` (REQ-LLL-050): every llmlang instance type is Sized (Int/Bool/
+/// user ADT/heap container, never a dyn-style unsized value), so this loses no
+/// instance — but it's required the moment a method's signature nests `Self`
+/// inside ANOTHER generic (e.g. `List[a]`), because instantiating a foreign
+/// generic with `Self` is checked at trait-declaration time, unlike a bare
+/// by-value `Self` parameter (whose Sized requirement is deferred to `impl`).
 fn emit_class_trait(out: &mut String, class: &Class) {
-    out.push_str(&format!("\npub trait {} {{\n", class.name));
+    out.push_str(&format!("\npub trait {}: Sized {{\n", class.name));
     for (mn, mparams, mret) in &class.methods {
         let ps: Vec<String> = mparams
             .iter()
@@ -483,8 +489,19 @@ fn emit_class_trait(out: &mut String, class: &Class) {
 /// (ground-substituted) types — type-check (slice A inc.2) verified the lambda's
 /// signature against the class method instantiated at `inst.ty`, so they're used
 /// as-is; only the return type is re-derived (a lambda has no return annotation).
-fn emit_instance_impl(out: &mut String, class: &Class, inst: &Instance) -> Result<(), String> {
+fn emit_instance_impl(
+    out: &mut String,
+    class: &Class,
+    inst: &Instance,
+    ctors: &Names,
+    ctor_ei: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
     out.push_str(&format!("\nimpl {} for {} {{\n", class.name, rs_ty(&inst.ty)));
+    // REQ-LLL-050: `ctors`/`ctor_ei` are the REAL module maps (needed the moment an
+    // instance method body constructs a user ADT value, e.g. `Mk(x, x)` — an empty
+    // placeholder here left `Mk` unresolved at Rust-compile time). Everything else
+    // stays empty/restricted: v1 instance bodies are simple pure expressions with
+    // no HOF/effects/nested `given` consumption in this slice.
     let empty_names: Names = std::collections::HashSet::new();
     let empty_smap: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let empty_bmask: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
@@ -515,8 +532,8 @@ fn emit_instance_impl(out: &mut String, class: &Class, inst: &Instance) -> Resul
         // consumption inside an instance body in this slice.
         let cx = Cx {
             fns: &empty_names,
-            ctors: &empty_names,
-            ctor_ei: &empty_smap,
+            ctors,
+            ctor_ei,
             parts: &empty_names,
             borrows: &empty_names,
             borrow_mask: &empty_bmask,

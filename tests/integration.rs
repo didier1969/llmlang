@@ -749,6 +749,248 @@ fn typeclass_given_ambiguous_method_across_classes_rejected() {
 }
 
 #[test]
+fn typeclass_instance_non_lambda_rejected_uniformly_at_typecheck() {
+    // REQ-LLL-050 (confirmed bug, audit 2026-07-04): a non-lambda instance
+    // method body (here a bare reference to a top-level part of the right
+    // ground type, REQ-LLL-009 first-class function values) must be rejected
+    // AT TYPE-CHECK time, uniformly whether or not the class carries a law.
+    // Before the fix, the only lambda-form enforcement lived in `inline_methods`
+    // (vc.rs), reached per-method only when a LAW calls that method — a class
+    // with zero laws let the bad instance sail through check_module all the way
+    // to codegen, where it failed late and inconsistently ("must be a lambda").
+    let no_law = "module T:\n\n  part eqInt(x: Int, y: Int) -> Bool:\n    yield x == y\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = eqInt\n";
+    let m = parser::parse_module(no_law).expect("parse");
+    let err = types::check_module(m)
+        .expect_err("non-lambda instance method must be rejected at check-time, law or no law");
+    assert!(
+        err.contains("eq") && err.contains("lambda"),
+        "expected a lambda-form error at check-time, got: {err}"
+    );
+
+    // same shape, but the class DOES have a law — must be rejected identically
+    // at check-time too, not deferred to the law-check fork's `inline_methods`.
+    let with_law = "module T:\n\n  part eqInt(x: Int, y: Int) -> Bool:\n    yield x == y\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = eqInt\n";
+    let m2 = parser::parse_module(with_law).expect("parse");
+    let err2 = types::check_module(m2)
+        .expect_err("non-lambda instance method must be rejected at check-time even with a law");
+    assert!(err2.contains("lambda"), "expected a lambda-form error, got: {err2}");
+}
+
+#[test]
+fn typeclass_class_tyvar_must_be_lowercase_rejected() {
+    // REQ-LLL-050: untested branch — class type variable naming convention.
+    let src = "module T:\n\n  class Eq[A]:\n    eq(Int, Int) -> Bool\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("uppercase class tyvar must be rejected");
+    assert!(err.contains("lowercase"), "expected a lowercase-tyvar error, got: {err}");
+}
+
+#[test]
+fn typeclass_class_duplicate_method_rejected() {
+    // REQ-LLL-050: untested branch — two methods of the same name in one class.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    eq(a, a) -> Bool\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("duplicate method in a class must be rejected");
+    assert!(err.contains("duplicate method"), "expected a duplicate-method error, got: {err}");
+}
+
+#[test]
+fn typeclass_duplicate_class_name_rejected() {
+    // REQ-LLL-050: untested branch — two `class` declarations with the same name.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("duplicate class name must be rejected");
+    assert!(err.contains("duplicate class"), "expected a duplicate-class error, got: {err}");
+}
+
+#[test]
+fn typeclass_instance_for_unknown_class_rejected() {
+    // REQ-LLL-050: untested branch — `instance Nope[Int]:` where `Nope` is never
+    // declared with `class`. Distinct code path from the `given Nope[a]` rejection
+    // (already covered by typeclass_given_unknown_class_rejected).
+    let src = "module T:\n\n  instance Nope[Int]:\n    m = \\(x: Int) -> x\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("instance of an unknown class must be rejected");
+    assert!(err.contains("unknown class"), "expected an unknown-class error, got: {err}");
+}
+
+#[test]
+fn typeclass_instance_non_ground_type_rejected() {
+    // REQ-LLL-050: untested branch — DEC-LLL-047, an instance cannot itself be
+    // generic: `instance Eq[b]:` where `b` is a (still abstract) type variable.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[b]:\n    eq = \\(x: b, y: b) -> true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a generic instance type must be rejected");
+    assert!(err.contains("concrete (ground)"), "expected a ground-type error, got: {err}");
+}
+
+#[test]
+fn typeclass_instance_duplicate_method_def_rejected() {
+    // REQ-LLL-050: untested branch — the SAME method defined twice inside one
+    // instance body (distinct from typeclass_duplicate_instance_rejected_coherence,
+    // which is two whole instances for the same (class, type)).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> true\n    eq = \\(x: Int, y: Int) -> false\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a method defined twice in one instance must be rejected");
+    assert!(err.contains("more than once"), "expected a duplicate-definition error, got: {err}");
+}
+
+#[test]
+fn typeclass_instance_method_type_mismatch_without_arity_change_rejected() {
+    // REQ-LLL-050: untested branch — a type mismatch that is NOT an arity mismatch
+    // (typeclass_instance_signature_is_checked_ground already covers wrong arity;
+    // here arity is correct but the param TYPE is wrong).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Bool, y: Bool) -> true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a same-arity type mismatch must be rejected");
+    assert!(
+        err.contains("has type") && err.contains("requires"),
+        "expected a precise method-type error, got: {err}"
+    );
+}
+
+#[test]
+fn typeclass_given_partially_generic_bound_rejected() {
+    // REQ-LLL-050: untested branch — check_given_satisfied's catch-all (types.rs).
+    // `wrap`'s abstract param unifies with a List[b] argument (b itself abstract):
+    // the resolved bound is neither a bare caller type-var (propagation) nor fully
+    // concrete (instance lookup) — a compound type that still MENTIONS a variable.
+    // Not supported in v1: rejected precisely rather than silently mishandled.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part wrap(x: a) -> Bool given Eq[a]:\n    yield eq(x, x)\n\n  part outer(xs: List[b]) -> Bool given Eq[b]:\n    yield wrap(xs)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a partially-generic given bound must be rejected");
+    assert!(
+        err.contains("partially-generic") && err.contains("not supported"),
+        "expected a partially-generic-bound error, got: {err}"
+    );
+}
+
+#[test]
+fn typeclass_class_method_list_signature_verifies_and_runs() {
+    // REQ-LLL-050: untested branches — `subst_tyvar`/`ty_mentions_var` only ever
+    // ran on a BARE `Ty::Var`; here the class tyvar is nested inside `List[a]`,
+    // both in a class method's return type (ground-ish instantiation, instance
+    // side) and in a `given`-part's OWN parameter type (must-appear-in-a-param
+    // check, propagation side). Also a 0-law class/instance (empty `gen_instance_
+    // law_obligations` loop) proven end-to-end, and `rs_ty_self`'s `List` branch
+    // in the emitted trait.
+    let src = "module T:\n\n  class Wrap[a]:\n    wrap(a) -> List[a]\n\n  instance Wrap[Int]:\n    wrap = \\(x: Int) -> [x]\n\n  part first_or(dflt: a, xs: List[a]) -> a given Wrap[a]:\n    match xs:\n      h :: t -> yield h\n      []     -> yield dflt\n\n  part make_and_get(x: a, dflt: a) -> a given Wrap[a]:\n    yield first_or(dflt, wrap(x))\n\n  part main() -> Int via IO:\n    yield IO.print(make_and_get(5, 0))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a List[a]-shaped class method must verify");
+
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    assert!(rust.contains("pub trait Wrap"), "expected an emitted `Wrap` trait, got:\n{rust}");
+    assert!(rust.contains("Lst<Self>"), "expected rs_ty_self's List branch (`Lst<Self>`), got:\n{rust}");
+    let dir = tempdir();
+    let rs = dir.join("wrap.rs");
+    let bin = dir.join("wrap_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "List-signature typeclass Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('5'), "expected 5 (wrap(5) singleton's head), got: {stdout}");
+}
+
+#[test]
+fn typeclass_multi_law_multi_binder_composite_body_verifies() {
+    // REQ-LLL-050: untested variety in `gen_instance_law_obligations`/
+    // `inline_methods` — a class with TWO laws (only single-law classes were
+    // exercised before), the second law with TWO binders and a COMPOSITE body
+    // (`not (… and …) or …`, inlining calls to BOTH class methods across
+    // Not/Bin(And)/Bin(Or)), proven for a real lawful instance.
+    let src = "module T:\n\n  class Ord[a]:\n    lte(a, a) -> Bool\n    eq(a, a) -> Bool\n    law reflexive_lte(x: a): lte(x, x)\n    law antisymmetry(x: a, y: a): not (lte(x, y) and lte(y, x)) or eq(x, y)\n\n  instance Ord[Int]:\n    lte = \\(x: Int, y: Int) -> x <= y\n    eq  = \\(x: Int, y: Int) -> x == y\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a real lawful multi-law instance must verify");
+}
+
+#[test]
+fn typeclass_multi_law_instance_violating_second_law_rejected() {
+    // The multi-law/composite-body machinery must still be LOAD-BEARING per law:
+    // an instance lawful in its FIRST law but violating its SECOND must fail.
+    let src = "module T:\n\n  class Ord[a]:\n    lte(a, a) -> Bool\n    eq(a, a) -> Bool\n    law reflexive_lte(x: a): lte(x, x)\n    law antisymmetry(x: a, y: a): not (lte(x, y) and lte(y, x)) or eq(x, y)\n\n  instance Ord[Int]:\n    lte = \\(x: Int, y: Int) -> true\n    eq  = \\(x: Int, y: Int) -> false\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "violating the second (composite, multi-binder) law must be rejected");
+}
+
+#[test]
+fn typeclass_class_method_second_free_tyvar_rejected() {
+    // REQ-LLL-050 (bug found while covering rs_ty_self's Var-branches): a method
+    // signature that references a SECOND free type variable (here `b`, distinct
+    // from the class's own `a`) can never be ground-instantiated by any instance
+    // — its ground params can never structurally equal a bare `Var("b")`. Before
+    // this fix, such a class registered fine and only failed much later, as
+    // uncompilable Rust (`rs_ty_self`'s `Var(other)` branch emits an undeclared
+    // generic on the trait) — now rejected uniformly at class-registration time.
+    let src = "module T:\n\n  class Konst[a]:\n    konst(a, b) -> a\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a second free type variable must be rejected");
+    assert!(
+        err.contains("konst") && err.contains("own type variable"),
+        "expected a second-tyvar error, got: {err}"
+    );
+}
+
+#[test]
+fn typeclass_class_methods_tuple_unit_user_signatures_verify_and_run() {
+    // REQ-LLL-050: untested `rs_ty_self` branches — Tuple, Unit, and User (only
+    // Var(self) and Bool were exercised before; List already covered above).
+    // Three class methods, each returning a different shape, all consumed
+    // through one `given`-constrained part (also untested: multiple distinct
+    // given-methods called from the SAME generic body).
+    let src = "module T:\n\n  type Pair = Mk(Int, Int)\n\n  class Describe[a]:\n    describe(a) -> Pair\n    touch(a) -> Unit\n    twin(a) -> (a, a)\n\n  instance Describe[Int]:\n    describe = \\(x: Int) -> Mk(x, x)\n    touch    = \\(x: Int) -> ()\n    twin     = \\(x: Int) -> (x, x)\n\n  part sum_pair(p: Pair) -> Int:\n    match p:\n      Mk(a, b) -> yield a + b\n\n  part run(x: a) -> Int given Describe[a]:\n    let _ = touch(x)\n    match twin(x):\n      (u, v) -> yield sum_pair(describe(u)) + sum_pair(describe(v))\n\n  part main() -> Int via IO:\n    yield IO.print(run(5))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "Tuple/Unit/User-shaped class methods must verify");
+
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    assert!(rust.contains("pub trait Describe"), "expected an emitted `Describe` trait, got:\n{rust}");
+    let dir = tempdir();
+    let rs = dir.join("describe.rs");
+    let bin = dir.join("describe_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "Tuple/Unit/User-signature typeclass Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("20"), "expected 20 (2 * sum_pair(Mk(5,5))), got: {stdout}");
+}
+
+#[test]
+fn typeclass_given_and_effect_generic_combine_and_run() {
+    // REQ-LLL-050: ZERO execution coverage before — a part that is BOTH
+    // effect-generic (`via e`, DEC-LLL-038 monomorphized specialization) AND
+    // `given`-constrained (typeclass, REQ-LLL-039) on its OWN abstract type var.
+    // Exercises `emit_specialized_part` in combination with the given-methods
+    // opaque-UF machinery, not just each independently.
+    let src = "module H:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n\n  part apply_checked(f: (Int) -> Int, x: Int, y: a) -> Int via e given Eq[a]:\n    match eq(y, y):\n      true  -> yield f(x)\n      false -> yield 0\n\n  part double(n: Int) -> Int:\n    yield n * 2\n\n  part main() -> Int:\n    yield apply_checked(double, 21, 5)\n";
+    assert!(verify_src(src).ok(), "a given+effect-generic part must verify");
+    assert!(
+        build_run(src).contains("=> 42"),
+        "given+effect-generic pure instantiation wrong"
+    );
+}
+
+#[test]
 fn typeclass_duplicate_instance_rejected_coherence() {
     // Coherence (REQ-LLL-048): two instances for the same (class, type) is
     // ambiguous for a future `given` resolution site — rejected precisely.
