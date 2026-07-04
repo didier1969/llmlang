@@ -991,6 +991,16 @@ fn typeclass_given_and_effect_generic_combine_and_run() {
 }
 
 #[test]
+fn typeclass_instance_missing_method_rejected() {
+    // REQ-LLL-050: untested branch — an instance that omits a method the class
+    // requires (distinct from `eq` not being a class member at all).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    neq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an instance missing a required method must be rejected");
+    assert!(err.contains("missing method"), "expected a missing-method error, got: {err}");
+}
+
+#[test]
 fn typeclass_duplicate_instance_rejected_coherence() {
     // Coherence (REQ-LLL-048): two instances for the same (class, type) is
     // ambiguous for a future `given` resolution site — rejected precisely.
