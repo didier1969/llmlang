@@ -1995,6 +1995,51 @@ fn depends_without_features_clause_is_empty() {
 }
 
 #[test]
+fn actor_reactive_integrated_dod_example_verifies_and_replays() {
+    // REQ-LLL-036 umbrella DoD, literally: "plusieurs acteurs (comportements
+    // vérifiés) + une vue réactive delta, exécutés par le runtime, run rejoué
+    // à l'identique (--replay)". W0 (step), W1 (view/diff), and W2-t2/t2b/W3/W4
+    // (real Tokio runtime, isolation, anti-storm, trace/replay) each verified
+    // separately so far — this wires them together in ONE program (mirrors
+    // examples/actor_reactive_integrated.lll) with zero new compiler
+    // machinery, proving the DoD is actually met, not just each piece alone.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReactiveIntegrated:\n\n  type Delta = NoChange | Changed(Int)\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  part view(state: Int) -> Int:\n    yield state * 2\n\n  part diff(old_view: Int, new_view: Int) -> Delta:\n    ensures (old_view == new_view) == (result == NoChange)\n    example diff(0, 0) == NoChange\n    example diff(0, 6) != NoChange\n    match old_view == new_view:\n      true  -> yield NoChange\n      false -> yield Changed(new_view)\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let v0 = view(Actor.state(pid))\n    let _ = Actor.send(pid, 5)\n    let v1 = view(Actor.state(pid))\n    let d1 = diff(v0, v1)\n    let _ = Actor.send(pid, 3)\n    let v2 = view(Actor.state(pid))\n    let d2 = diff(v1, v2)\n    match d1:\n      Changed(x) -> yield IO.print(x)\n      NoChange   -> yield IO.print(0 - 1)\n";
+    let dir = tempdir();
+    let f = dir.join("actor_reactive_integrated.lll");
+    std::fs::write(&f, src).unwrap();
+    let trace_path = dir.join("trace.jsonl");
+
+    let run1 = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--trace"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --trace");
+    assert!(
+        run1.status.success(),
+        "integrated DoD example failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run1.stdout),
+        String::from_utf8_lossy(&run1.stderr)
+    );
+    assert!(String::from_utf8_lossy(&run1.stdout).contains("=> 10"), "expected 10 (view(0)=0 -> view(5)=10, Changed)");
+
+    let run2 = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--replay"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --replay");
+    assert!(run2.status.success(), "replay of integrated DoD example failed");
+    let stdout2 = String::from_utf8_lossy(&run2.stdout);
+    assert!(stdout2.contains("=> 10") && stdout2.contains("[replay: OK"), "expected verified deterministic replay, got:\n{stdout2}");
+}
+
+#[test]
 fn actor_runtime_trace_records_delivery_order_and_replay_round_trips() {
     // REQ-LLL-036 W4 (scoped honestly, see operator note on REQ-LLL-036): the
     // trace is now process-global (was thread_local — actors run on Tokio

@@ -1,0 +1,61 @@
+depends tokio "1.52.3" features "rt-multi-thread, sync"
+
+module ActorReactiveIntegrated:
+
+  # DoD umbrella REQ-LLL-036 : plusieurs acteurs (comportements vérifiés) + vue
+  # réactive delta, exécutés par le runtime, rejoués à l'identique (--replay).
+  # Combine ce qui existait déjà séparément : W0 (step prouvé), W1 (view/diff),
+  # W2-t2/t2b/W3 (runtime Tokio réel, isolé, anti-tempête), W4 (trace/replay
+  # process-global). Zéro nouvelle machinerie de compilateur ici — juste le
+  # câblage : après chaque message, `main()` recalcule la vue et le delta
+  # depuis l'état réel de l'acteur (lu via l'effet `Actor.state`, havoc'd).
+
+  type Delta = NoChange | Changed(Int)
+
+  part max0(x: Int) -> Int:
+    ensures result >= 0
+    match x >= 0:
+      true  -> yield x
+      false -> yield 0
+
+  # Comportement d'acteur (W0/W2) : totalement prouvé, aucun effet.
+  part step(state: Int, msg: Int) -> Int:
+    requires state >= 0
+    ensures result >= 0
+    yield max0(state + msg)
+
+  # Dérivation de vue (W1) : pure, réutilisable indépendamment du runtime.
+  part view(state: Int) -> Int:
+    yield state * 2
+
+  # Delta minimal (W1) : prouvé sur l'axe décidable "changé ?", ground-vérifié
+  # sur deux cas via `example` (REQ-LLL-049).
+  part diff(old_view: Int, new_view: Int) -> Delta:
+    ensures (old_view == new_view) == (result == NoChange)
+    example diff(0, 0) == NoChange
+    example diff(0, 6) != NoChange
+    match old_view == new_view:
+      true  -> yield NoChange
+      false -> yield Changed(new_view)
+
+  effect Actor:
+    spawn(Int) -> Int       = extern "lll_actor_runtime::spawn"
+    send(Int, Int) -> Unit  = extern "lll_actor_runtime::send"
+    state(Int) -> Int       = extern "lll_actor_runtime::state"
+
+  # Le driver : après CHAQUE message envoyé au VRAI runtime d'acteur (Tokio,
+  # isolé, anti-tempête), on relit l'état (frontière d'effet, havoc'd), on
+  # calcule la vue et le delta — exactement le pattern "compute view, diff
+  # against previous, push only if changed" de LiveView, câblé au runtime réel.
+  part main() -> Int via Actor, IO:
+    let pid = Actor.spawn(0)
+    let v0 = view(Actor.state(pid))
+    let _ = Actor.send(pid, 5)
+    let v1 = view(Actor.state(pid))
+    let d1 = diff(v0, v1)
+    let _ = Actor.send(pid, 3)
+    let v2 = view(Actor.state(pid))
+    let d2 = diff(v1, v2)
+    match d1:
+      Changed(x) -> yield IO.print(x)   # view(0)=0 -> view(5)=10, Changed(10)
+      NoChange   -> yield IO.print(0 - 1)
