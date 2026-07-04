@@ -2207,6 +2207,41 @@ fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
 }
 
 #[test]
+fn ffi_two_direct_crates_link_together_via_cargo() {
+    // REQ-LLL-053 (1): declaring 2+ DIRECT `depends` crates in one module was
+    // structurally already supported (parser loops at parser.rs, cargo_manifest
+    // loops at main.rs) but had ZERO test coverage — the cheapest win in the
+    // REQ. Uses two independent repo-local fixtures (ffi_leaf, ffi_deep/ffi_base)
+    // bound to two DIFFERENT effects in the SAME module, both offline.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let leaf = format!("{repo}/tests/fixtures/ffi_leaf");
+    let base = format!("{repo}/tests/fixtures/ffi_deep/ffi_base");
+    let src = format!(
+        "depends ffi_leaf \"1.0.0\" from \"{leaf}\"\ndepends ffi_base \"1.0.0\" from \"{base}\"\n\nmodule TwoCrates:\n\n  effect Scale:\n    scale(Int) -> Int = extern \"ffi_leaf::scale\"\n\n  effect Base:\n    base(Int) -> Int = extern \"ffi_base::base\"\n\n  part main() -> Int via IO, Scale, Base:\n    yield IO.print(Scale.scale(5) + Base.base(5))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("two_crates.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "two direct crates (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 21"),
+        "expected 21 (scale(5)=15 + base(5)=6), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn ffi_external_crate_links_via_cargo() {
     // REQ-LLL-038 slice 038a: a module that `depends` on an external crate is built
     // as a generated Cargo project (not single-file rustc), so the extern binding
