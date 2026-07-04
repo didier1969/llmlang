@@ -11,7 +11,7 @@
 //! definition and the duplicate is silently dropped (cross-file dedup,
 //! DEC-LLL-019 made visible).
 
-use crate::ast::{Dep, EffectDecl, Module, Part, TypeDecl};
+use crate::ast::{Class, Dep, EffectDecl, Instance, Module, Part, TypeDecl};
 use crate::hash::blind_normal_form;
 use crate::parser;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +24,8 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let mut parts: Vec<Part> = Vec::new();
     let mut types: Vec<TypeDecl> = Vec::new();
     let mut effects: Vec<EffectDecl> = Vec::new();
+    let mut classes: Vec<Class> = Vec::new();
+    let mut instances: Vec<Instance> = Vec::new();
     let mut deps: Vec<Dep> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let (src, name) = load_rec(
@@ -35,6 +37,8 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
         &mut parts,
         &mut types,
         &mut effects,
+        &mut classes,
+        &mut instances,
         &mut deps,
     )?;
     // dedup merged `depends` by crate (a diamond import may re-declare one); a
@@ -64,10 +68,8 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
             deps: merged_deps,
             types,
             effects,
-            // typeclasses never reach here in slice A inc.1 — load_rec rejects any
-            // file that declares them (REQ-LLL-048); empty until inc.2 threads them.
-            classes: Vec::new(),
-            instances: Vec::new(),
+            classes,
+            instances,
             parts,
         },
     ))
@@ -118,6 +120,8 @@ fn load_rec(
     parts: &mut Vec<Part>,
     types: &mut Vec<TypeDecl>,
     effects: &mut Vec<EffectDecl>,
+    classes: &mut Vec<Class>,
+    instances: &mut Vec<Instance>,
     deps: &mut Vec<Dep>,
 ) -> Result<(String, String), String> {
     let canon_path = canon(path)?;
@@ -135,17 +139,6 @@ fn load_rec(
     let src =
         std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let module = parser::parse_module(&src)?;
-    // typeclasses (REQ-LLL-048 slice A): the surface parses, but the loader does
-    // not yet merge classes/instances across files, and `check` does not yet
-    // discharge the ground law-check. Reject here rather than silently drop them
-    // (unsound-by-omission) — full support lands in inc.2/3.
-    if !module.classes.is_empty() || !module.instances.is_empty() {
-        return Err(format!(
-            "{}: typeclasses parse but are not yet supported past the surface \
-             (REQ-LLL-048 slice A, inc.2+)",
-            path.display()
-        ));
-    }
     // imports first (depth-first), relative to THIS file
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for imp in &module.imports {
@@ -159,12 +152,18 @@ fn load_rec(
             parts,
             types,
             effects,
+            classes,
+            instances,
             deps,
         )?;
     }
-    // merge this file's user types, effects and crate deps (visited once each)
+    // merge this file's user types, effects, typeclasses and crate deps (visited
+    // once each — the `visited` guard above makes diamond imports safe: a class or
+    // instance declared in a diamond-imported file is merged exactly once).
     types.extend(module.types.iter().cloned());
     effects.extend(module.effects.iter().cloned());
+    classes.extend(module.classes.iter().cloned());
+    instances.extend(module.instances.iter().cloned());
     deps.extend(module.deps.iter().cloned());
     // merge this file's parts
     let origin = if is_root {

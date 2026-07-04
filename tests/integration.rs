@@ -589,6 +589,44 @@ fn cross_file_rename_repoints_call_sites_and_preserves_identity() {
 }
 
 #[test]
+fn typeclass_class_and_instance_merge_across_imports() {
+    // REQ-LLL-048 slice A: the loader merges classes/instances declared in an
+    // imported file into the root module — `check` sees them and the lawful
+    // instance verifies (inc.3).
+    let dir = std::env::temp_dir().join(format!("lll-xclass-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let helper = dir.join("eq.lll");
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &helper,
+        "module H:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &root,
+        "import \"eq.lll\"\n\nmodule M:\n\n  part main() -> Bool:\n    yield true\n",
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(root.to_str().unwrap()).unwrap();
+    assert_eq!(m.classes.len(), 1, "class merged from imported file");
+    assert_eq!(m.instances.len(), 1, "instance merged from imported file");
+    let cm = types::check_module(m).expect("merged typeclass must type-check");
+    let hm = hash::hash_module(&cm).unwrap();
+    let report = vc::verify(&cm, &hm, &dir.join("cache"), false).expect("verify");
+    assert!(report.ok(), "lawful cross-file instance must verify");
+}
+
+#[test]
+fn typeclass_duplicate_instance_rejected_coherence() {
+    // Coherence (REQ-LLL-048): two instances for the same (class, type) is
+    // ambiguous for a future `given` resolution site — rejected precisely.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("duplicate instance must be rejected");
+    assert!(err.contains("duplicate instance"), "expected coherence error, got: {err}");
+}
+
+#[test]
 fn ackermann_terminates_by_lexicographic_measure() {
     // REQ-LLL-012 / DEC-LLL-016: Ackermann is the canonical non-primitive-
     // recursive function — it needs a LEXICOGRAPHIC measure (m, n). Neither m

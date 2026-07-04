@@ -531,6 +531,19 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate class `{}`", c.name));
         }
     }
+    // coherence (REQ-LLL-048): at most one instance per (class, ground type) — a
+    // future generic `given` resolution site must find a UNIQUE dictionary, so an
+    // ambiguous second instance is rejected here rather than silently picking one.
+    let mut instance_keys: HashSet<(String, String)> = HashSet::new();
+    for inst in &module.instances {
+        if !instance_keys.insert((inst.class.clone(), inst.ty.to_string())) {
+            return Err(format!(
+                "duplicate instance `{}[{}]` — a class may have at most one instance per type \
+                 (coherence, REQ-LLL-048)",
+                inst.class, inst.ty
+            ));
+        }
+    }
     for inst in &module.instances {
         let class: &Class = class_map.get(&inst.class).copied().ok_or_else(|| {
             format!(
