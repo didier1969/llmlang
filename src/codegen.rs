@@ -42,6 +42,12 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // user ADTs → Rust enums (REQ-LLL-011); constructor names are globally unique
     // so `use Name::*` lets variants be referenced bare (as in the .lll source).
     let ctors: std::collections::HashSet<String> = cm.ctors.keys().cloned().collect();
+    // ctor name → its inner-enum name `{Type}I` (REQ-LLL-011). Every ctor reference is
+    // emitted FULLY-QUALIFIED (`{Type}I::Ctor`) rather than bare via `use {Type}I::*`,
+    // so a user ADT whose ctors are named `Ok`/`Err` can never shadow Rust's own
+    // `Result` in the generated runtime / abort-part code (REQ-LLL-045 follow-up).
+    let ctor_ei: std::collections::HashMap<String, String> =
+        cm.ctors.iter().map(|(cn, (ty, _))| (cn.clone(), format!("{ty}I"))).collect();
     let parts: std::collections::HashSet<String> =
         cm.module.parts.iter().map(|p| p.name.clone()).collect();
     // effects carrying an abort op (a `Never`-returning operation); a part whose
@@ -241,6 +247,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     }
     let g = Globals {
         ctors: &ctors,
+        ctor_ei: &ctor_ei,
         parts: &parts,
         borrows: &borrows,
         borrow_mask: &borrow_mask,
@@ -556,7 +563,8 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
     }
     out.push_str("}\n");
     out.push_str(&format!("pub type {} = Rc<{ei}>;\n", td.name));
-    out.push_str(&format!("pub use {ei}::*;\n"));
+    // NB: no `pub use {ei}::*;` — every ctor reference is emitted fully-qualified
+    // (`{ei}::Ctor`) so a user ctor named `Ok`/`Err` cannot shadow Rust's `Result`.
 }
 
 fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
@@ -657,6 +665,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     let cx = Cx {
         fns: &fns,
         ctors: g.ctors,
+        ctor_ei: g.ctor_ei,
         parts: g.parts,
         borrows: g.borrows,
         borrow_mask: g.borrow_mask,
@@ -797,6 +806,7 @@ fn emit_specialized_part(
     let cx = Cx {
         fns: &fns,
         ctors: g.ctors,
+        ctor_ei: g.ctor_ei,
         parts: g.parts,
         borrows: g.borrows,
         borrow_mask: g.borrow_mask,
@@ -845,6 +855,8 @@ type PartCaps = std::collections::HashMap<String, Vec<CapSig>>;
 /// bundled so `emit_part` takes a single reference instead of many arguments.
 struct Globals<'a> {
     ctors: &'a Names,
+    /// ctor name → inner-enum name `{Type}I`, for fully-qualified ctor emission
+    ctor_ei: &'a std::collections::HashMap<String, String>,
     parts: &'a Names,
     /// parts that BORROW their List/ADT parameters (not used as a value) — DEC-LLL-031
     borrows: &'a Names,
@@ -877,6 +889,8 @@ struct Globals<'a> {
 struct Cx<'a> {
     fns: &'a Names,
     ctors: &'a Names,
+    /// ctor name → inner-enum name `{Type}I`, for fully-qualified ctor emission
+    ctor_ei: &'a std::collections::HashMap<String, String>,
     parts: &'a Names,
     /// parts that borrow their List/ADT parameters (DEC-LLL-031)
     borrows: &'a Names,
@@ -1004,6 +1018,7 @@ fn emit_body(
                 let cx2 = Cx {
                     fns: cx.fns,
                     ctors: cx.ctors,
+                    ctor_ei: cx.ctor_ei,
                     parts: cx.parts,
                     borrows: cx.borrows,
                     borrow_mask: cx.borrow_mask,
@@ -1079,6 +1094,7 @@ fn emit_body(
                     let clause_cx = Cx {
                         fns: cx.fns,
                         ctors: cx.ctors,
+                        ctor_ei: cx.ctor_ei,
                         parts: cx.parts,
                         borrows: cx.borrows,
                         borrow_mask: cx.borrow_mask,
@@ -1110,6 +1126,7 @@ fn emit_body(
                 let cx2 = Cx {
                     fns: cx.fns,
                     ctors: cx.ctors,
+                    ctor_ei: cx.ctor_ei,
                     parts: cx.parts,
                     borrows: cx.borrows,
                     borrow_mask: cx.borrow_mask,
@@ -1231,13 +1248,15 @@ fn emit_match(
             Pattern::Var(v) => local(v),
             Pattern::Nil => "LstI::Nil".into(),
             Pattern::Cons(h, t) => format!("LstI::Cons({}, {})", local(h), local(t)),
-            // user ADT constructor: variant is bare-nameable via `use Name::*`
+            // user ADT constructor: fully-qualified `{Type}I::Ctor` (never bare) so a
+            // ctor named Ok/Err cannot shadow Rust's `Result` (REQ-LLL-011).
             Pattern::Ctor(cn, binders) => {
+                let ei = cx.ctor_ei.get(cn).map(String::as_str).unwrap_or("");
                 if binders.is_empty() {
-                    cn.clone()
+                    format!("{ei}::{cn}")
                 } else {
                     let bs: Vec<String> = binders.iter().map(|b| local(b)).collect();
-                    format!("{cn}({})", bs.join(", "))
+                    format!("{ei}::{cn}({})", bs.join(", "))
                 }
             }
             // tuple destructuring: an owned native tuple, binders moved out
@@ -1327,8 +1346,9 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         Expr::BoolLit(v) => format!("{v}"),
         Expr::Var(n) => {
             if cx.ctors.contains(n) {
-                // nullary ADT constructor value → Rc-wrapped (REQ-LLL-011)
-                format!("Rc::new({n})")
+                // nullary ADT constructor value → Rc-wrapped, fully-qualified (REQ-LLL-011)
+                let ei = cx.ctor_ei.get(n).map(String::as_str).unwrap_or("");
+                format!("Rc::new({ei}::{n})")
             } else if cx.parts.contains(n) {
                 // a bare part name as a first-class function value → the fn item
                 // (coerces to the fn-pointer parameter type) (REQ-LLL-009)
@@ -1521,8 +1541,10 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             // every argument stays owned (retention into `Rc::new` / a fn pointer).
             let mut xs: Vec<String> = part_call_args(name, args, cx, res)?;
             if cx.ctors.contains(name) {
-                // ADT constructor application → Rc-wrapped variant (REQ-LLL-011)
-                format!("Rc::new({name}({}))", xs.join(", "))
+                // ADT constructor application → Rc-wrapped variant, fully-qualified
+                // so an Ok/Err ctor cannot shadow Rust's `Result` (REQ-LLL-011).
+                let ei = cx.ctor_ei.get(name).map(String::as_str).unwrap_or("");
+                format!("Rc::new({ei}::{name}({}))", xs.join(", "))
             } else if cx.fns.contains(name) {
                 // application of a function-valued parameter (REQ-LLL-009). If it is
                 // the row-carrying parameter of an effect-monomorphized part, forward

@@ -1686,6 +1686,40 @@ fn ffi_unsupported_foreign_types_are_rejected() {
 }
 
 #[test]
+fn adt_ctors_named_ok_err_do_not_clash_with_rust_result() {
+    // REQ-LLL-011 / REQ-LLL-045 follow-up: a user ADT whose constructors are literally
+    // named Ok/Err (which shadow Rust's own `Result`) now lowers with FULLY-QUALIFIED
+    // ctors (`ResI::Ok`), so it compiles and runs. Previously `use ResI::*` shadowed the
+    // prelude and broke the generated runtime / abort-part `Result<_, i64>` code.
+    let src = "module M:\n\n  type Res = Ok(Int) | Err(Int)\n\n  part unwrapOr(r: Res, d: Int) -> Int:\n    match r:\n      Ok(v)  -> yield v\n      Err(e) -> yield d\n\n  part main() -> Int via IO:\n    let a = unwrapOr(Ok(42), 0)\n    let b = unwrapOr(Err(7), 99)\n    yield IO.print(a + b)\n";
+    assert!(verify_src(src).ok(), "the ADT program must verify");
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("okerr.rs");
+    let bin = dir.join("okerr_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "an ADT with Ok/Err ctors must compile (no clash with std Result):\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    // unwrapOr(Ok(42),0)=42, unwrapOr(Err(7),99)=99 → 141
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("141"),
+        "Ok/Err ADT must run correctly, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn ffi_result_v1_constraints_are_enforced() {
     // REQ-LLL-038 slice 038e / DEC-LLL-046: v1 marshals a foreign `Result` error as a
     // String message and requires a 2-constructor ADT (success arm, error arm). A typed
