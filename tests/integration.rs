@@ -3047,3 +3047,48 @@ fn weak_contract_fails_to_discharge_the_example() {
     );
     assert!(!report.ok(), "a weak contract must not let the example through");
 }
+
+// ===================================================================
+// REQ-LLL-036 W1 — reactive view/delta (voie 2a, CPT-LLL-014): pure `view`
+// derivation + a minimal, ground-example-proven `diff`. Surfaced a real gap
+// while building it: `type_of_pure` (the requires/ensures typer) didn't know
+// about NULLARY constructors at all — only `check_contracts`'s `no_calls`
+// walker (correctly) distinguished "reference a zero-arg ctor" (a bare `Var`,
+// allowed) from "construct one with arguments" (a `Call`, DEC-LLL-017
+// forbidden). Fixed in types.rs: `type_of_pure`'s `Var` branch now falls back
+// to the ctors map for a zero-field constructor.
+// ===================================================================
+
+#[test]
+fn ensures_may_reference_a_nullary_constructor() {
+    // REQ-LLL-036 W1 fix: `result == NoChange` in an `ensures` clause is a bare
+    // Var reference to a zero-arg constructor — no construction, so DEC-LLL-017
+    // does not bar it. Before the fix this failed type-checking entirely with
+    // "unknown variable `NoChange`" (type_of_pure had no ctors lookup).
+    let src = "module T:\n\n  type Delta = NoChange | Changed(Int)\n\n  part diff(old: Int, new: Int) -> Delta:\n    ensures (old == new) == (result == NoChange)\n    match old == new:\n      true  -> yield NoChange\n      false -> yield Changed(new)\n";
+    let m = parser::parse_module(src).expect("parse");
+    assert!(types::check_module(m).is_ok(), "a bare nullary-ctor reference must type-check in ensures");
+}
+
+#[test]
+fn ensures_construction_with_arguments_still_rejected() {
+    // Guard against overshooting the fix above: DEC-LLL-017 must still bar
+    // CONSTRUCTING an ADT value (a real `Call`, e.g. `Changed(new)`) inside
+    // `ensures` — only bare zero-arg constructor reference was ever intended.
+    let src = "module T:\n\n  type Delta = NoChange | Changed(Int)\n\n  part diff(old: Int, new: Int) -> Delta:\n    ensures result == Changed(new)\n    match old == new:\n      true  -> yield NoChange\n      false -> yield Changed(new)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("constructing an ADT value in ensures must be rejected");
+    assert!(err.contains("calls are not allowed"), "expected the DEC-LLL-017 error, got: {err}");
+}
+
+#[test]
+fn reactive_view_delta_verifies_and_runs() {
+    // REQ-LLL-036 W1 end-to-end: a pure `view(state) -> V` derivation + a
+    // minimal `diff` proven on the decidable "changed?" axis via `ensures`,
+    // ground-checked on two cases via `example` (REQ-LLL-049), driven over a
+    // state list and compiled+run for real (mirrors examples/reactive_view.lll).
+    let src = "module Reactive:\n\n  type Delta = NoChange | Changed(Int)\n\n  part view(state: Int) -> Int:\n    yield state * 2\n\n  part diff(old_view: Int, new_view: Int) -> Delta:\n    ensures (old_view == new_view) == (result == NoChange)\n    example diff(0, 0) == NoChange\n    example diff(0, 6) != NoChange\n    match old_view == new_view:\n      true  -> yield NoChange\n      false -> yield Changed(new_view)\n\n  part drive(states: List[Int]) -> List[Delta]:\n    match states:\n      []     -> yield []\n      s :: t ->\n        match t:\n          []       -> yield []\n          s2 :: t2 -> yield diff(view(s), view(s2)) :: drive(t)\n\n  part main() -> Int via IO:\n    let states = 0 :: 3 :: 3 :: 5 :: []\n    let deltas = drive(states)\n    match deltas:\n      []        -> yield IO.print(-2)\n      d :: rest ->\n        match d:\n          Changed(v) -> yield IO.print(v)\n          NoChange   -> yield IO.print(-1)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "the reactive view/delta pattern must verify");
+    assert!(build_run(src).contains("=> 6"), "expected 6 (view(0)=0 -> view(3)=6, Changed), got wrong output");
+}

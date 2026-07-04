@@ -479,7 +479,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     let mut recursion = HashMap::new();
     for part in &module.parts {
         check_signature(part)?;
-        check_contracts(part, &callables)?;
+        check_contracts(part, &callables, &ctors)?;
         // no local may shadow a part or constructor name, so a bare `Var` that
         // names a part is unambiguously a first-class function value (REQ-LLL-009)
         let mut locals: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1494,7 +1494,11 @@ fn check_examples_inner(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
     Ok(())
 }
 
-fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), String> {
+fn check_contracts(
+    part: &Part,
+    callables: &HashSet<String>,
+    ctors: &HashMap<String, (String, Vec<Ty>)>,
+) -> Result<(), String> {
     let params: HashMap<String, Ty> = part.params.iter().cloned().collect();
     let no_calls = |e: &Expr, clause: &str| -> Result<(), String> {
         let mut bad = None;
@@ -1525,7 +1529,7 @@ fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), Strin
     };
     for r in &part.requires {
         no_calls(r, "requires")?;
-        let t = type_of_pure(r, &params, None)
+        let t = type_of_pure(r, &params, None, ctors)
             .map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: requires clause must be Bool", part.name));
@@ -1533,7 +1537,7 @@ fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), Strin
     }
     for r in &part.ensures {
         no_calls(r, "ensures")?;
-        let t = type_of_pure(r, &params, Some(part.ret.clone()))
+        let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors)
             .map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: ensures clause must be Bool", part.name));
@@ -1541,7 +1545,7 @@ fn check_contracts(part: &Part, callables: &HashSet<String>) -> Result<(), Strin
     }
     for m in &part.measure {
         no_calls(m, "measure")?;
-        let t = type_of_pure(m, &params, None)
+        let t = type_of_pure(m, &params, None, ctors)
             .map_err(|e| format!("part `{}` measure: {e}", part.name))?;
         if t != Ty::Int {
             return Err(format!(
@@ -1574,6 +1578,7 @@ fn type_of_pure(
     e: &Expr,
     vars: &HashMap<String, Ty>,
     result: Option<Ty>,
+    ctors: &HashMap<String, (String, Vec<Ty>)>,
 ) -> Result<Ty, String> {
     Ok(match e {
         Expr::Unit => Ty::Unit,
@@ -1584,7 +1589,7 @@ fn type_of_pure(
             // requires/ensures — SMT datatype equality, DEC-LLL-036)
             let mut cs = Vec::with_capacity(items.len());
             for it in items {
-                cs.push(type_of_pure(it, vars, result.clone())?);
+                cs.push(type_of_pure(it, vars, result.clone(), ctors)?);
             }
             Ty::Tuple(cs)
         }
@@ -1592,9 +1597,9 @@ fn type_of_pure(
             if items.is_empty() {
                 return Err("empty list literal `[]` is not allowed in contracts (v1)".into());
             }
-            let elem = type_of_pure(&items[0], vars, result.clone())?;
+            let elem = type_of_pure(&items[0], vars, result.clone(), ctors)?;
             for i in &items[1..] {
-                if type_of_pure(i, vars, result.clone())? != elem {
+                if type_of_pure(i, vars, result.clone(), ctors)? != elem {
                     return Err("list literal elements must share one type".into());
                 }
             }
@@ -1603,30 +1608,36 @@ fn type_of_pure(
         Expr::Var(n) if n == "result" => {
             result.ok_or_else(|| "`result` only valid in ensures".to_string())?
         }
-        Expr::Var(n) => vars
-            .get(n)
-            .cloned()
-            .ok_or_else(|| format!("unknown variable `{n}`"))?,
+        // a NULLARY constructor reference (e.g. `NoChange`) is a bare Var, not a
+        // Call — DEC-LLL-017 forbids CONSTRUCTION (`Changed(v)`) in contracts,
+        // not reference to an already-total, argument-free constructor value
+        // (REQ-LLL-036 W1: needed to state ANY property of an ADT-shaped result
+        // in `ensures`, e.g. `result == NoChange`).
+        Expr::Var(n) => vars.get(n).cloned().or_else(|| {
+            ctors.get(n).and_then(|(ty_name, fields)| {
+                fields.is_empty().then(|| Ty::User(ty_name.clone()))
+            })
+        }).ok_or_else(|| format!("unknown variable `{n}`"))?,
         Expr::Neg(a) => {
-            if type_of_pure(a, vars, result)? != Ty::Int {
+            if type_of_pure(a, vars, result, ctors)? != Ty::Int {
                 return Err("negation needs Int".into());
             }
             Ty::Int
         }
         Expr::Not(a) => {
-            if type_of_pure(a, vars, result)? != Ty::Bool {
+            if type_of_pure(a, vars, result, ctors)? != Ty::Bool {
                 return Err("`not` needs Bool".into());
             }
             Ty::Bool
         }
         Expr::Bin(op, a, b) => {
-            let ta = type_of_pure(a, vars, result.clone())?;
-            let tb = type_of_pure(b, vars, result)?;
+            let ta = type_of_pure(a, vars, result.clone(), ctors)?;
+            let tb = type_of_pure(b, vars, result, ctors)?;
             bin_type(*op, ta, tb)?
         }
         Expr::Cons(h, t) => {
-            let th = type_of_pure(h, vars, result.clone())?;
-            let tt = type_of_pure(t, vars, result)?;
+            let th = type_of_pure(h, vars, result.clone(), ctors)?;
+            let tt = type_of_pure(t, vars, result, ctors)?;
             if tt != Ty::list(th.clone()) {
                 return Err(format!(
                     "`::` needs T on the left and List[T] on the right, got {th} :: {tt}"
@@ -1641,7 +1652,7 @@ fn type_of_pure(
                 if args.len() != 1 {
                     return Err("`length` takes 1 argument".into());
                 }
-                if !matches!(type_of_pure(&args[0], vars, result.clone())?, Ty::Array(_)) {
+                if !matches!(type_of_pure(&args[0], vars, result.clone(), ctors)?, Ty::Array(_)) {
                     return Err("`length` needs an Array".into());
                 }
                 Ty::Int
@@ -1650,20 +1661,20 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`get` takes 2 arguments (array, index)".into());
                 }
-                let elem = match type_of_pure(&args[0], vars, result.clone())? {
+                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
                     Ty::Array(e) => *e,
                     _ => return Err("`get` needs an Array".into()),
                 };
-                if type_of_pure(&args[1], vars, result)? != Ty::Int {
+                if type_of_pure(&args[1], vars, result, ctors)? != Ty::Int {
                     return Err("`get` index must be Int".into());
                 }
                 elem
             }
             "array" => {
                 if let Some(first) = args.first() {
-                    let elem = type_of_pure(first, vars, result.clone())?;
+                    let elem = type_of_pure(first, vars, result.clone(), ctors)?;
                     for a in &args[1..] {
-                        if type_of_pure(a, vars, result.clone())? != elem {
+                        if type_of_pure(a, vars, result.clone(), ctors)? != elem {
                             return Err("array literal elements must share one type".into());
                         }
                     }
@@ -1676,11 +1687,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`contains` takes 2 arguments (array, value)".into());
                 }
-                let elem = match type_of_pure(&args[0], vars, result.clone())? {
+                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
                     Ty::Array(e) => *e,
                     _ => return Err("`contains` needs an Array".into()),
                 };
-                if type_of_pure(&args[1], vars, result)? != elem {
+                if type_of_pure(&args[1], vars, result, ctors)? != elem {
                     return Err("`contains` value type mismatch".into());
                 }
                 Ty::Bool
@@ -1695,11 +1706,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`lookup` takes 2 arguments (map, key)".into());
                 }
-                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone())? {
+                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
                     Ty::Map(k, v) => (*k, *v),
                     _ => return Err("`lookup` needs a Map".into()),
                 };
-                if type_of_pure(&args[1], vars, result)? != mk {
+                if type_of_pure(&args[1], vars, result, ctors)? != mk {
                     return Err("`lookup` key type mismatch".into());
                 }
                 mv
@@ -1708,11 +1719,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`haskey` takes 2 arguments (map, key)".into());
                 }
-                let mk = match type_of_pure(&args[0], vars, result.clone())? {
+                let mk = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
                     Ty::Map(k, _) => *k,
                     _ => return Err("`haskey` needs a Map".into()),
                 };
-                if type_of_pure(&args[1], vars, result)? != mk {
+                if type_of_pure(&args[1], vars, result, ctors)? != mk {
                     return Err("`haskey` key type mismatch".into());
                 }
                 Ty::Bool
@@ -1727,11 +1738,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`member` takes 2 arguments (set, element)".into());
                 }
-                let se = match type_of_pure(&args[0], vars, result.clone())? {
+                let se = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
                     Ty::Set(e) => *e,
                     _ => return Err("`member` needs a Set".into()),
                 };
-                if type_of_pure(&args[1], vars, result)? != se {
+                if type_of_pure(&args[1], vars, result, ctors)? != se {
                     return Err("`member` element type mismatch".into());
                 }
                 Ty::Bool
