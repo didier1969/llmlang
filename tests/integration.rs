@@ -666,6 +666,49 @@ fn typeclass_given_param_name_collision_rejected() {
 }
 
 #[test]
+fn typeclass_given_call_site_resolves_concrete_instance_and_verifies() {
+    // REQ-LLL-039 inc.3 — a NON-generic caller invokes a `given`-constrained part
+    // with a concrete argument type; the concrete instance is found and the whole
+    // module type-checks AND verifies.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n\n  part use_same() -> Bool:\n    yield same(1, 1)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "concrete call site with a matching instance must verify");
+}
+
+#[test]
+fn typeclass_given_call_site_missing_instance_rejected() {
+    // Calling a `given`-constrained part with a concrete type that has NO instance
+    // must be rejected precisely at check-time (like a missing trait impl).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n\n  part use_same() -> Bool:\n    yield same(1, 1)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("missing instance must be rejected");
+    assert!(err.contains("requires an instance"), "expected a missing-instance error, got: {err}");
+}
+
+#[test]
+fn typeclass_given_constraint_propagates_across_generic_calls() {
+    // Composability (REQ-LLL-039): a generic part with `given Eq[a]` calling
+    // ANOTHER `given Eq[a]`-part on its OWN (still abstract) type variable needs
+    // NO concrete instance yet — the constraint is satisfied by propagation, and
+    // BOTH parts are verified once, generically.
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n\n  part same_twice(x: a, y: a) -> Bool given Eq[a]:\n    yield same(x, y)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a propagated given constraint must verify with no instance needed");
+}
+
+#[test]
+fn typeclass_given_constraint_not_propagated_rejected() {
+    // A generic caller that does NOT declare `given Eq[a]` itself cannot call a
+    // `given Eq[a]`-part on its own abstract variable — rejected precisely,
+    // pointing at the missing constraint (not a missing-instance error, since
+    // there's no concrete type here to look an instance up for).
+    let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n\n  part bad_caller(x: a, y: a) -> Bool:\n    yield same(x, y)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("unpropagated constraint must be rejected");
+    assert!(err.contains("requires `given"), "expected a propagation error, got: {err}");
+}
+
+#[test]
 fn typeclass_given_ambiguous_method_across_classes_rejected() {
     // Two given classes requiring a method of the SAME name is ambiguous in v1
     // (no qualified method calls) — rejected precisely, not silently resolved.

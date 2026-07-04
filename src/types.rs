@@ -492,6 +492,17 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     part.name
                 )
             })?;
+            // `tv` must appear in a PARAMETER (not just the return type) — call-site
+            // resolution (REQ-LLL-039 inc.3) unifies `tv` from the argument types via
+            // the existing `unify_arg` machinery, exactly like an ordinary generic
+            // part (REQ-LLL-007); a var seen only in the return type is never bound.
+            if !part.params.iter().any(|(_, t)| ty_mentions_var(t, tv)) {
+                return Err(format!(
+                    "part `{}`: `given {cname}[{tv}]` constrains `{tv}`, but no parameter \
+                     mentions it — nothing at a call site can bind it",
+                    part.name
+                ));
+            }
             for (mn, mparams, mret) in &class.methods {
                 let gparams: Vec<Ty> = mparams
                     .iter()
@@ -718,6 +729,68 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
 /// variable `var` with the concrete instance type `with` (REQ-LLL-048,
 /// DEC-LLL-047 — a class is instantiated GROUND, never left quantified). Shared
 /// with the vc fork's law-check (`gen_instance_law_obligations`).
+/// Does `t` mention the type variable `v` anywhere in its structure (REQ-LLL-039)?
+fn ty_mentions_var(t: &Ty, v: &str) -> bool {
+    match t {
+        Ty::Var(a) => a == v,
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => ty_mentions_var(e, v),
+        Ty::Map(k, val) => ty_mentions_var(k, v) || ty_mentions_var(val, v),
+        Ty::Fun(ps, r) => ps.iter().any(|p| ty_mentions_var(p, v)) || ty_mentions_var(r, v),
+        Ty::Tuple(cs) => cs.iter().any(|c| ty_mentions_var(c, v)),
+        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => false,
+    }
+}
+
+/// Call-site `given` resolution (REQ-LLL-039 inc.3): after unifying the callee's
+/// (possibly generic) signature against the call's arguments (`subst`), verify
+/// every constraint the callee requires is DISCHARGED — either:
+/// - the substituted type is still the CALLER's own abstract type variable, and
+///   the caller's OWN `given` list carries the SAME (class, var) constraint
+///   (propagation: composing generic code needs no concrete instance yet), or
+/// - the substituted type is concrete, and a matching `instance` exists
+///   (coherence already guarantees at most one, slice A).
+pub(crate) fn check_given_satisfied(
+    caller: &Part,
+    module: &Module,
+    callee_name: &str,
+    callee_given: &[(String, String)],
+    subst: &HashMap<String, Ty>,
+) -> Result<(), String> {
+    for (cname, tv) in callee_given {
+        let bound = subst.get(tv).cloned().unwrap_or_else(|| Ty::Var(tv.clone()));
+        match &bound {
+            Ty::Var(caller_var) => {
+                if !caller.given.iter().any(|(cn, ctv)| cn == cname && ctv == caller_var) {
+                    return Err(format!(
+                        "part `{}`: calling `{callee_name}` requires `given {cname}[{caller_var}]` \
+                         — add it to `{}`'s own signature to propagate the constraint",
+                        caller.name, caller.name
+                    ));
+                }
+            }
+            _ if bound.is_concrete() => {
+                let has_instance =
+                    module.instances.iter().any(|inst| &inst.class == cname && inst.ty == bound);
+                if !has_instance {
+                    return Err(format!(
+                        "part `{}`: calling `{callee_name}` requires an instance `{cname}[{bound}]`, \
+                         but none exists — declare `instance {cname}[{bound}]:`",
+                        caller.name
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "part `{}`: calling `{callee_name}`: constraint `{cname}[{tv}]` resolves to \
+                     the partially-generic type `{bound}` — not supported (v1)",
+                    caller.name
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
     match t {
         Ty::Var(a) if a == var => with.clone(),
@@ -2646,6 +2719,10 @@ fn check_expr(
                 });
                 ctx.rec_calls.push(structural);
             }
+            // `given` resolution (REQ-LLL-039 inc.3): the effect-generic callee may
+            // ALSO carry typeclass constraints on its (now-substituted) type variables.
+            let callee_given = ctx.module.parts[ctx.index[name]].given.clone();
+            check_given_satisfied(ctx.part, ctx.module, name, &callee_given, &subst)?;
             subst_ty(&callee_ret, &subst)
         }
         Expr::Call(name, args) => {
@@ -2658,6 +2735,7 @@ fn check_expr(
             let callee_params = callee.params.clone();
             let callee_ret = callee.ret.clone();
             let callee_effects = callee.effects.clone();
+            let callee_given = callee.given.clone();
             // effect propagation (REQ-LLL-018): the caller's row must cover every
             // effect the callee declares, unless discharged by an enclosing handle.
             for e in &callee_effects {
@@ -2704,6 +2782,7 @@ fn check_expr(
                     });
                 ctx.rec_calls.push(structural);
             }
+            check_given_satisfied(ctx.part, ctx.module, name, &callee_given, &subst)?;
             subst_ty(&callee_ret, &subst)
         }
         Expr::Lambda(params, body) => {
