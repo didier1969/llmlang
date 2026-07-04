@@ -85,16 +85,23 @@ pub enum Foreign {
     Bool,
     RString,
     RStr,
+    /// A fallible foreign return `Result<T, E>` (REQ-LLL-038 slice 038e, DEC-LLL-046).
+    /// Only valid in RETURN position: the shim marshals `Ok(v)`→the success arm and
+    /// `Err(e)`→the error arm (message) of a 2-constructor llmlang ADT (errors-as-values,
+    /// no abort machinery). v1: the error `E` is always marshalled to a `String` message
+    /// via `to_string()` — lossy of the error STRUCTURE, never of the information.
+    Result(Box<Foreign>, Box<Foreign>),
 }
 
 impl Foreign {
-    /// The surface token (also the canonical hash token): `i64`/`bool`/`String`/`str`.
-    pub fn token(&self) -> &'static str {
+    /// The canonical token (surface + hash): `i64`/`bool`/`String`/`str`/`Result<T,E>`.
+    pub fn canon(&self) -> String {
         match self {
-            Foreign::I64 => "i64",
-            Foreign::Bool => "bool",
-            Foreign::RString => "String",
-            Foreign::RStr => "str",
+            Foreign::I64 => "i64".to_string(),
+            Foreign::Bool => "bool".to_string(),
+            Foreign::RString => "String".to_string(),
+            Foreign::RStr => "str".to_string(),
+            Foreign::Result(t, e) => format!("Result<{},{}>", t.canon(), e.canon()),
         }
     }
 }

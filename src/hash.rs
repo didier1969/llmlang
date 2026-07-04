@@ -278,14 +278,16 @@ fn build_op_tokens(
                 .extern_foreign
                 .as_ref()
                 .filter(|fs| {
+                    // non-identity iff any position is a real conversion (not the
+                    // llmlang-native i64/bool) — a string, or a `Result` sum.
                     fs.params
                         .iter()
                         .chain(std::iter::once(&fs.ret))
-                        .any(|f| matches!(f, Foreign::RString | Foreign::RStr))
+                        .any(|f| !matches!(f, Foreign::I64 | Foreign::Bool))
                 })
                 .map(|fs| {
-                    let ps: Vec<&str> = fs.params.iter().map(|f| f.token()).collect();
-                    format!(" as ({})->{}", ps.join(","), fs.ret.token())
+                    let ps: Vec<String> = fs.params.iter().map(|f| f.canon()).collect();
+                    format!(" as ({})->{}", ps.join(","), fs.ret.canon())
                 })
                 .unwrap_or_default();
             let with_bind = format!("{sig}|{bind}{ver}{foreign}");

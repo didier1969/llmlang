@@ -140,6 +140,31 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                 // codepoint list; identity (i64/bool or no clause) passes through.
                 let body = match op.extern_foreign.as_ref().map(|fs| &fs.ret) {
                     Some(Foreign::RString) => format!("__lll_str_of_rust(&{call})"),
+                    // fallible foreign `Result<T, E>` → errors-as-values (REQ-LLL-038
+                    // slice 038e, DEC-LLL-046): `Ok` → the ADT's success (1st) ctor with
+                    // T marshalled, `Err` → its error (2nd) ctor carrying the message.
+                    // Fully-qualified std patterns + qualified ctor construction so a user
+                    // ADT whose ctors are named Ok/Err (which shadow std `Result`) still
+                    // lowers unambiguously.
+                    Some(Foreign::Result(ft, _)) => {
+                        let td = match &op.ret {
+                            Ty::User(n) => cm.module.types.iter().find(|td| &td.name == n),
+                            _ => None,
+                        }
+                        .expect("checker guarantees a 2-ctor ADT return for a `Result` foreign");
+                        let ei = format!("{}I", td.name);
+                        let ok = match &**ft {
+                            Foreign::RString => "__lll_str_of_rust(&__ok)",
+                            _ => "__ok",
+                        };
+                        format!(
+                            "match {call} {{ \
+                             ::core::result::Result::Ok(__ok) => Rc::new({ei}::{}({ok})), \
+                             ::core::result::Result::Err(__er) => \
+                             Rc::new({ei}::{}(__lll_str_of_rust(&__er.to_string()))) }}",
+                            td.ctors[0].0, td.ctors[1].0
+                        )
+                    }
                     _ => call,
                 };
                 let key = format!("{}.{}", ed.name, op.name);

@@ -193,9 +193,20 @@ impl Parser {
                 "bool" => Ok(Foreign::Bool),
                 "String" => Ok(Foreign::RString),
                 "str" => Ok(Foreign::RStr),
+                // a fallible foreign return `Result<T, E>` (REQ-LLL-038 slice 038e) —
+                // marshalled to a 2-ctor ADT (errors-as-values). `<` / `>` lex as the
+                // comparison tokens Lt / Gt.
+                "Result" => {
+                    self.eat(Tok::Lt)?;
+                    let t = self.foreign_ty()?;
+                    self.eat(Tok::Comma)?;
+                    let e = self.foreign_ty()?;
+                    self.eat(Tok::Gt)?;
+                    Ok(Foreign::Result(Box::new(t), Box::new(e)))
+                }
                 other => Err(self.err(&format!(
                     "unsupported foreign type `{other}` in an `as` clause — v1 supports `i64`, \
-                     `bool`, `String`, `str`. Rich foreign types (`Result<_, _>`, `Vec<u8>`, sized \
+                     `bool`, `String`, `str`, `Result<T, E>`. Richer types (`Vec<u8>`, sized \
                      ints) are a later slice (REQ-LLL-038 / 038e)"
                 ))),
             },

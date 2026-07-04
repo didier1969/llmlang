@@ -217,26 +217,98 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                              List[Int]↔String/str)",
                             ed.name,
                             op.name,
-                            f.token()
+                            f.canon()
                         ));
                     }
                 }
-                if matches!(fs.ret, Foreign::RStr) {
-                    return Err(format!(
-                        "effect `{}` op `{}`: a foreign `&str` return is unsupported in v1 (a \
-                         borrowed return needs a lifetime; use `String` — REQ-LLL-038 / 038e)",
-                        ed.name, op.name
-                    ));
-                }
-                if !foreign_marshal_ok(&op.ret, &fs.ret) {
-                    return Err(format!(
-                        "effect `{}` op `{}`: return of llmlang type `{}` cannot marshal from \
-                         foreign `{}`",
-                        ed.name,
-                        op.name,
-                        op.ret,
-                        fs.ret.token()
-                    ));
+                match &fs.ret {
+                    Foreign::RStr => {
+                        return Err(format!(
+                            "effect `{}` op `{}`: a foreign `&str` return is unsupported in v1 (a \
+                             borrowed return needs a lifetime; use `String` — REQ-LLL-038 / 038e)",
+                            ed.name, op.name
+                        ));
+                    }
+                    // a fallible foreign `Result<T, E>` return (REQ-LLL-038 slice 038e,
+                    // DEC-LLL-046) → a 2-constructor ADT (errors-as-values). v1: E is
+                    // always a String message; the ADT's FIRST constructor is the success
+                    // arm (its field marshals from T), the SECOND is the error arm (its
+                    // field is the `List[Int]` message).
+                    Foreign::Result(ft, fe) => {
+                        if !matches!(**fe, Foreign::RString) {
+                            return Err(format!(
+                                "effect `{}` op `{}`: v1 marshals a foreign `Result` error as a \
+                                 `String` message — the `E` position must be `String` (a typed `E` \
+                                 is a later slice, REQ-LLL-038 / 038e)",
+                                ed.name, op.name
+                            ));
+                        }
+                        if matches!(**ft, Foreign::Result(..) | Foreign::RStr) {
+                            return Err(format!(
+                                "effect `{}` op `{}`: the `Ok` type of a foreign `Result` must be \
+                                 `i64`/`bool`/`String` in v1, found `{}`",
+                                ed.name,
+                                op.name,
+                                ft.canon()
+                            ));
+                        }
+                        let td = match &op.ret {
+                            Ty::User(n) => module.types.iter().find(|td| &td.name == n),
+                            _ => None,
+                        }
+                        .ok_or_else(|| {
+                            format!(
+                                "effect `{}` op `{}`: a foreign `Result` return must map to a \
+                                 2-constructor ADT (success arm, error arm), but the operation \
+                                 returns `{}`",
+                                ed.name, op.name, op.ret
+                            )
+                        })?;
+                        if td.ctors.len() != 2
+                            || td.ctors[0].1.len() != 1
+                            || td.ctors[1].1.len() != 1
+                        {
+                            return Err(format!(
+                                "effect `{}` op `{}`: the ADT `{}` for a foreign `Result` must have \
+                                 exactly two single-field constructors — the first is the success \
+                                 arm, the second the error arm",
+                                ed.name, op.name, td.name
+                            ));
+                        }
+                        if !foreign_marshal_ok(&td.ctors[0].1[0], ft) {
+                            return Err(format!(
+                                "effect `{}` op `{}`: the success constructor `{}` field (`{}`) \
+                                 cannot marshal from the foreign `Ok` type `{}`",
+                                ed.name,
+                                op.name,
+                                td.ctors[0].0,
+                                td.ctors[0].1[0],
+                                ft.canon()
+                            ));
+                        }
+                        if td.ctors[1].1[0] != Ty::list(Ty::Int) {
+                            return Err(format!(
+                                "effect `{}` op `{}`: the error constructor `{}` field must be \
+                                 `List[Int]` (the String message), found `{}`",
+                                ed.name,
+                                op.name,
+                                td.ctors[1].0,
+                                td.ctors[1].1[0]
+                            ));
+                        }
+                    }
+                    _ => {
+                        if !foreign_marshal_ok(&op.ret, &fs.ret) {
+                            return Err(format!(
+                                "effect `{}` op `{}`: return of llmlang type `{}` cannot marshal \
+                                 from foreign `{}`",
+                                ed.name,
+                                op.name,
+                                op.ret,
+                                fs.ret.canon()
+                            ));
+                        }
+                    }
                 }
             }
             // op kinds (REQ-LLL-022 + REQ-LLL-026 item 2): an ABORT op (`-> Never`,

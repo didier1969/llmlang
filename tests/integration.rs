@@ -1666,14 +1666,15 @@ fn ffi_foreign_sig_folds_into_def_hash_not_proof() {
 
 #[test]
 fn ffi_unsupported_foreign_types_are_rejected() {
-    // REQ-LLL-042 / DEC-LLL-045: v1 rejects rich foreign types with a clear message —
-    // no silent unwrap. `Result<_,_>` (the ident `Result`) is refused at PARSE; a
-    // borrowed `&str` RETURN is refused at CHECK (needs a lifetime — 038e).
-    let res = "module R:\n\n  effect E:\n    f(List[Int]) -> List[Int] = extern \"c::f\" as (str) -> Result\n\n  part g(s: List[Int]) -> List[Int] via E:\n    yield E.f(s)\n";
+    // REQ-LLL-042 / DEC-LLL-045: v1 rejects still-unsupported foreign types with a clear
+    // message. A sized int like `u8` is refused at PARSE (a later slice, 038e); a
+    // borrowed `&str` RETURN is refused at CHECK (needs a lifetime). (`Result<T,E>` is
+    // now supported — REQ-LLL-038 slice 038e.)
+    let res = "module R:\n\n  effect E:\n    f(List[Int]) -> List[Int] = extern \"c::f\" as (str) -> u8\n\n  part g(s: List[Int]) -> List[Int] via E:\n    yield E.f(s)\n";
     let err = parser::parse_module(res).unwrap_err();
     assert!(
-        err.contains("unsupported foreign type") && err.contains("Result"),
-        "a `Result` foreign return must be rejected at parse: {err}"
+        err.contains("unsupported foreign type") && err.contains("u8"),
+        "a `u8` foreign type must be rejected at parse: {err}"
     );
     let ret_str = "depends ffi_leaf \"1.0.0\" from \"tests/fixtures/ffi_leaf\"\n\nmodule R2:\n\n  effect E:\n    f(List[Int]) -> List[Int] = extern \"ffi_leaf::shout\" as (str) -> str\n\n  part g(s: List[Int]) -> List[Int] via E:\n    yield E.f(s)\n";
     let m = parser::parse_module(ret_str).unwrap();
@@ -1682,6 +1683,67 @@ fn ffi_unsupported_foreign_types_are_rejected() {
         err2.contains("&str` return"),
         "a foreign `&str` return must be rejected at check: {err2}"
     );
+}
+
+#[test]
+fn ffi_result_v1_constraints_are_enforced() {
+    // REQ-LLL-038 slice 038e / DEC-LLL-046: v1 marshals a foreign `Result` error as a
+    // String message and requires a 2-constructor ADT (success arm, error arm). A typed
+    // `E` and a mis-shaped ADT are rejected at CHECK with a clear message.
+    let e_typed = "module M:\n\n  type R = Ok2(List[Int]) | Er(List[Int])\n\n  effect Io:\n    f(List[Int]) -> R = extern \"std::fs::read_to_string\" as (str) -> Result<String, str>\n\n  part g(p: List[Int]) -> R via Io:\n    yield Io.f(p)\n";
+    let m = parser::parse_module(e_typed).unwrap();
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("`E` position must be `String`"), "typed E must be rejected: {err}");
+    // error arm field must be List[Int] (the message), not Int
+    let bad_adt = "module M:\n\n  type R = Ok2(List[Int]) | Er(Int)\n\n  effect Io:\n    f(List[Int]) -> R = extern \"std::fs::read_to_string\" as (str) -> Result<String, String>\n\n  part g(p: List[Int]) -> R via Io:\n    yield Io.f(p)\n";
+    let m2 = parser::parse_module(bad_adt).unwrap();
+    let err2 = types::check_module(m2).unwrap_err();
+    assert!(
+        err2.contains("error constructor") && err2.contains("List[Int]"),
+        "a non-message error arm must be rejected: {err2}"
+    );
+}
+
+#[test]
+fn ffi_result_marshals_recoverable_file_io() {
+    // REQ-LLL-038 slice 038e / DEC-LLL-046: a fallible foreign `Result<String, E>`
+    // (std::fs::read_to_string) marshals to a 2-constructor ADT — errors-as-values, NO
+    // abort machinery. A real file → Ok(content); a missing file → Err(message), both
+    // MATCHABLE in pure llmlang (recoverable I/O, Vision "pas à 60%"). Single-file (std
+    // path, offline). The mapping is POSITIONAL — the ADT's first ctor is the success
+    // arm, the second the error arm — so the names are free (here Loaded/Failed; `Ok`
+    // /`Err` are avoided because `use <Adt>I::*` would shadow Rust's own `Result` in the
+    // generated runtime, a pre-existing ADT-codegen constraint).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let data = dir.join("hello.txt");
+    std::fs::write(&data, "hi").unwrap(); // "hi" = codepoints [104, 105]
+    let present = data.to_str().unwrap().to_string();
+    let absent = dir.join("nope.txt").to_str().unwrap().to_string();
+    let src = |path: &str| {
+        format!(
+            "module Fs:\n\n  type FileResult = Loaded(List[Int]) | Failed(List[Int])\n\n  effect Io:\n    read(List[Int]) -> FileResult = extern \"std::fs::read_to_string\" as (str) -> Result<String, String>\n\n  part firstOr(xs: List[Int], d: Int) -> Int:\n    match xs:\n      []     -> yield d\n      h :: t -> yield h\n\n  part probe(p: List[Int]) -> Int via Io:\n    match Io.read(p):\n      Loaded(c) -> yield firstOr(c, 0)\n      Failed(m) -> yield 0 - firstOr(m, 1)\n\n  part main() -> Int via IO, Io:\n    yield IO.print(probe(\"{path}\"))\n"
+        )
+    };
+    let run = |path: &str| {
+        let f = dir.join("p.lll");
+        std::fs::write(&f, src(path)).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .arg("run")
+            .arg(&f)
+            .current_dir(repo)
+            .output()
+            .expect("run lll");
+        assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    // present file → Ok("hi") → firstOr = 104 ('h'): the returned String came back as a
+    // codepoint list inside the success arm.
+    assert!(run(&present).contains("104"), "present file must marshal Ok(content) → 104 ('h')");
+    // missing file → Err(message): probe MATCHES the error arm and yields a negative
+    // number, proving the I/O error was recovered as a value — not a fatal panic.
+    let miss = run(&absent);
+    assert!(miss.contains('-'), "missing file must marshal a matchable Err(message), got: {miss}");
 }
 
 #[test]
