@@ -1995,6 +1995,69 @@ fn depends_without_features_clause_is_empty() {
 }
 
 #[test]
+fn actor_runtime_trace_records_delivery_order_and_replay_round_trips() {
+    // REQ-LLL-036 W4 (scoped honestly, see operator note on REQ-LLL-036): the
+    // trace is now process-global (was thread_local — actors run on Tokio
+    // worker threads, not main()'s), and every message DELIVERY (the moment
+    // `step` is actually applied inside `actor_loop`) is recorded as
+    // `{"seq":N,"pid":P,"msg":M}`, interleaved with the existing `{"eff":..}`
+    // records. This slice does NOT enforce that order back under `--replay`
+    // (no gate) — today's programs drive `send` from one sequential `main()`
+    // with pure (effect-free) `step` bodies, so there's no OBSERVABLE
+    // non-deterministic interleaving yet to force; building an enforcement
+    // gate now would be unfalsifiable. What this test proves: (a) delivery
+    // records appear in the trace in the right global order, (b) replay of
+    // an ACTOR program still round-trips correctly (the effect-replay queue
+    // correctly skips the interleaved delivery records, proving the format
+    // extension didn't break existing replay).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorTrace:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, 7)\n    let _ = Actor.send(pid, 3)\n    yield IO.print(Actor.state(pid))\n";
+    let dir = tempdir();
+    let f = dir.join("actor_trace.lll");
+    std::fs::write(&f, src).unwrap();
+    let trace_path = dir.join("trace.jsonl");
+
+    let run1 = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--trace"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --trace");
+    assert!(
+        run1.status.success(),
+        "trace run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run1.stdout),
+        String::from_utf8_lossy(&run1.stderr)
+    );
+    let trace = std::fs::read_to_string(&trace_path).expect("read trace");
+    assert!(trace.contains("\"seq\":0,\"pid\":0,\"msg\":7"), "expected first delivery recorded, got:\n{trace}");
+    assert!(trace.contains("\"seq\":1,\"pid\":0,\"msg\":3"), "expected second delivery recorded, got:\n{trace}");
+
+    let run2 = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--replay"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --replay");
+    assert!(
+        run2.status.success(),
+        "replay run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&run2.stdout),
+        String::from_utf8_lossy(&run2.stderr)
+    );
+    let stdout2 = String::from_utf8_lossy(&run2.stdout);
+    assert!(stdout2.contains("=> 10"), "expected 10 (0+7+3), got:\n{stdout2}");
+    assert!(
+        stdout2.contains("[replay: OK"),
+        "expected a verified deterministic replay, got:\n{stdout2}"
+    );
+}
+
+#[test]
 fn actor_runtime_anti_storm_stops_crash_looping_actor() {
     // REQ-LLL-036 W3 (anti-storm, CPT-LLL-015 §8 — scoped to this ONE piece:
     // restart-fresh stays the only policy, no configurability yet). An actor

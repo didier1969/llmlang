@@ -74,12 +74,13 @@ fn emit_actor_runtime(out: &mut String) {
          \x20\x20\x20\x20const MAX_RESTARTS: usize = 5;\n\
          \x20\x20\x20\x20const RESTART_WINDOW_MS: u64 = 1000;\n\
          \n\
-         \x20\x20\x20\x20async fn actor_loop(initial: i64, mut rx: mpsc::Receiver<ActorMsg>) {\n\
+         \x20\x20\x20\x20async fn actor_loop(pid: i64, initial: i64, mut rx: mpsc::Receiver<ActorMsg>) {\n\
          \x20\x20\x20\x20\x20\x20\x20\x20let mut state = initial;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20let mut restarts: Vec<std::time::Instant> = Vec::new();\n\
          \x20\x20\x20\x20\x20\x20\x20\x20while let Some(msg) = rx.recv().await {\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20match msg {\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ActorMsg::Step(m) => {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20super::trace_delivery(pid, m);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let outcome = std::panic::catch_unwind(\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20std::panic::AssertUnwindSafe(|| super::lll_step(state, m)));\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20match outcome {\n\
@@ -105,8 +106,8 @@ fn emit_actor_runtime(out: &mut String) {
          \n\
          \x20\x20\x20\x20pub fn spawn(initial: i64) -> i64 {\n\
          \x20\x20\x20\x20\x20\x20\x20\x20let (tx, rx) = mpsc::channel(64);\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20runtime().spawn(actor_loop(initial, rx));\n\
          \x20\x20\x20\x20\x20\x20\x20\x20let pid = NEXT_PID.fetch_add(1, Ordering::SeqCst);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20runtime().spawn(actor_loop(pid, initial, rx));\n\
          \x20\x20\x20\x20\x20\x20\x20\x20TABLE.lock().unwrap().get_or_insert_with(HashMap::new).insert(pid, tx);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20pid\n\
          \x20\x20\x20\x20}\n\
@@ -2039,54 +2040,105 @@ use std::collections::BTreeMap;
 pub type Map<K, V> = Rc<BTreeMap<K, V>>;
 
 // ---- effect runtime: normal / trace ($LLL_TRACE) / replay ($LLL_REPLAY) ----
-use std::cell::RefCell;
 use std::io::{BufRead, Write};
+use std::sync::Mutex;
 
-thread_local! {
-    static TRACE: RefCell<Option<std::fs::File>> = RefCell::new(
-        std::env::var("LLL_TRACE").ok().map(|p| std::fs::File::create(p).expect("open trace")));
-    static REPLAY: RefCell<Option<Vec<(String, i64)>>> = RefCell::new(
-        std::env::var("LLL_REPLAY").ok().map(|p| match std::fs::File::open(&p) {
-            Ok(f) => std::io::BufReader::new(f).lines().map(|l| {
-                let l = l.unwrap();
-                let eff = l.split("\"eff\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
-                let v: i64 = l.split("\"v\":").nth(1).unwrap().trim_end_matches('}').trim().parse().unwrap();
-                (eff, v)
-            }).collect::<Vec<_>>().into_iter().rev().collect(), // pop from the back
+// REQ-LLL-036 W4: process-global (not thread_local) — the actor runtime
+// (emit_actor_runtime) runs `step` on Tokio worker threads, not `main()`'s own
+// thread, so any future effectful actor body needs a trace/replay that's safe
+// to reach from multiple threads. Lazy-init under the lock on first access
+// (no separate `Once`: re-checking `is_none()` when there's truly no
+// $LLL_TRACE/$LLL_REPLAY is a harmless redundant env lookup, not a bug).
+static TRACE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+static REPLAY: Mutex<Option<Vec<(String, i64)>>> = Mutex::new(None);
+// REQ-LLL-036 W4: a global, monotonic delivery sequence — stamped the moment
+// an actor actually APPLIES a message (see `emit_actor_runtime`'s
+// `trace_delivery`), recording the real order messages were delivered in this
+// run. Recording alone (not enforcing this order back under `--replay`) is
+// this slice's honest scope: today's programs drive `send` from a single
+// sequential `main()` with no side-effecting step bodies, so there is no
+// OBSERVABLE non-deterministic interleaving yet to force-replay — see the
+// operator note on REQ-LLL-036 for why the enforcement gate is deferred, not
+// built speculatively against a capability that doesn't exist yet.
+static DELIVERY_SEQ: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn trace_file() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
+    let mut g = TRACE.lock().unwrap();
+    if g.is_none() {
+        *g = std::env::var("LLL_TRACE").ok().map(|p| std::fs::File::create(p).expect("open trace"));
+    }
+    g
+}
+
+fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, i64)>>> {
+    let mut g = REPLAY.lock().unwrap();
+    if g.is_none() {
+        *g = std::env::var("LLL_REPLAY").ok().map(|p| match std::fs::File::open(&p) {
+            Ok(f) => std::io::BufReader::new(f)
+                .lines()
+                .map(|l| l.unwrap())
+                // delivery records (`"seq":..`) share the trace file but carry no
+                // `"eff"` field — skip them here, they're not part of the
+                // effect-replay queue (REQ-LLL-036 W4).
+                .filter(|l| l.contains("\"eff\":"))
+                .map(|l| {
+                    let eff =
+                        l.split("\"eff\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+                    let v: i64 =
+                        l.split("\"v\":").nth(1).unwrap().trim_end_matches('}').trim().parse().unwrap();
+                    (eff, v)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect(), // pop from the back
             // a missing trace file = an IO-free run recorded nothing → nothing to
             // replay. A run that DOES perform IO will still fail-fast at replay_next
             // ("trace exhausted"), preserving divergence detection (REQ-LLL-028).
             Err(_) => Vec::new(),
-        }));
+        });
+    }
+    g
 }
 
-// Force the trace thread-local so `--trace` always yields a file (empty for an
+// Force the trace lazy-init so `--trace` always yields a file (empty for an
 // IO-free run), keeping the trace/replay round-trip total (REQ-LLL-028).
 pub fn __lll_trace_init() {
-    TRACE.with(|_| {});
+    drop(trace_file());
 }
 
 fn trace_write(eff: &str, v: i64) {
-    TRACE.with(|t| {
-        if let Some(f) = t.borrow_mut().as_mut() {
-            writeln!(f, "{{\"eff\":\"{eff}\",\"v\":{v}}}").unwrap();
-        }
-    });
+    let mut g = trace_file();
+    if let Some(f) = g.as_mut() {
+        writeln!(f, "{{\"eff\":\"{eff}\",\"v\":{v}}}").unwrap();
+    }
+}
+
+// REQ-LLL-036 W4: record the delivery order (global seq, Pid, message) at the
+// moment an actor applies a message — called from `emit_actor_runtime`'s
+// `actor_loop`, potentially from a Tokio worker thread (why TRACE had to
+// become process-global above). Recording only under `--trace`; a no-op
+// otherwise (no seq allocated needlessly on the hot path in normal mode... it
+// still allocates one via `fetch_add`, cheap, but writes nothing to disk).
+fn trace_delivery(pid: i64, msg: i64) {
+    let seq = DELIVERY_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut g = trace_file();
+    if let Some(f) = g.as_mut() {
+        writeln!(f, "{{\"seq\":{seq},\"pid\":{pid},\"msg\":{msg}}}").unwrap();
+    }
 }
 
 fn replay_next(expected_eff: &str) -> Option<i64> {
-    REPLAY.with(|r| {
-        let mut b = r.borrow_mut();
-        match b.as_mut() {
-            None => None,
-            Some(entries) => match entries.pop() {
-                Some((eff, v)) if eff == expected_eff => Some(v),
-                Some((eff, _)) => panic!(
-                    "replay divergence: expected {expected_eff}, trace has {eff}"),
-                None => panic!("replay divergence: trace exhausted at {expected_eff}"),
-            },
-        }
-    })
+    let mut g = replay_entries();
+    match g.as_mut() {
+        None => None,
+        Some(entries) => match entries.pop() {
+            Some((eff, v)) if eff == expected_eff => Some(v),
+            Some((eff, _)) => panic!(
+                "replay divergence: expected {expected_eff}, trace has {eff}"),
+            None => panic!("replay divergence: trace exhausted at {expected_eff}"),
+        },
+    }
 }
 
 pub fn __lll_io_print(v: i64) -> i64 {
@@ -2115,13 +2167,12 @@ pub fn __lll_io_read() -> i64 {
 }
 
 pub fn __lll_replay_finish() {
-    REPLAY.with(|r| {
-        if let Some(entries) = r.borrow().as_ref() {
-            if !entries.is_empty() {
-                panic!("replay divergence: {} unconsumed trace entr(ies)", entries.len());
-            }
-            println!("[replay: OK — run reproduced deterministically]");
+    let g = replay_entries();
+    if let Some(entries) = g.as_ref() {
+        if !entries.is_empty() {
+            panic!("replay divergence: {} unconsumed trace entr(ies)", entries.len());
         }
-    });
+        println!("[replay: OK — run reproduced deterministically]");
+    }
 }
 "#;
