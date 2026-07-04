@@ -897,6 +897,24 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     };
     emit_body(out, &part.body, 1, &cx, res)?;
     out.push_str("}\n");
+    // DYNAMIC half of REQ-LLL-049: a native `#[test]` per example, reusing the
+    // SAME `cx` built above for this part's own body — sound because every
+    // example call target is checked pure (types.rs::check_examples), so the
+    // translated call needs none of `cx`'s State/Reader/caps evidence. Catches
+    // a codegen bug the STATIC ground obligation (vc.rs, inc.3) cannot see
+    // (Z3's model vs the compiled Rust). v1 scope: an effect-generic part is
+    // skipped above (DEC-LLL-038 specializations only) — an `example` on one
+    // is statically checked (vc.rs) but has no dynamic `#[test]` (deferred,
+    // no stated need).
+    for (i, ex) in part.examples.iter().enumerate() {
+        let translated = expr(ex, &cx, false)?;
+        out.push_str(&format!(
+            "\n#[test]\nfn {}_example_{}() {{\n    assert!({});\n}}\n",
+            mangle(&part.name),
+            i + 1,
+            translated
+        ));
+    }
     Ok(())
 }
 

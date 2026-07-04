@@ -2718,6 +2718,37 @@ fn false_example_is_rejected_statically() {
 }
 
 #[test]
+fn example_codegen_emits_a_native_test_that_passes() {
+    // REQ-LLL-049 inc.4 — DYNAMIC half: codegen emits a `#[test]` per example,
+    // reusing rustc's own test harness (DRY, GUI-PRO-013) rather than a bespoke
+    // one. A build only reaches codegen once the STATIC obligation (inc.3)
+    // already discharged, so a true example's generated test must pass.
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3) == 5\n    example add(0, 0) == 0\n    yield x + y\n\n  part main() -> Int:\n    yield add(1, 2)\n";
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    assert!(rust.contains("#[test]"), "expected emitted `#[test]`, got:\n{rust}");
+    let dir = tempdir();
+    let rs = dir.join("ex.rs");
+    let bin = dir.join("ex_test_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["--test", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "example test harness failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "generated example tests did not pass:\n{stdout}");
+    assert!(stdout.contains("2 passed"), "expected 2 example tests to pass, got: {stdout}");
+}
+
+#[test]
 fn weak_contract_fails_to_discharge_the_example() {
     // The operator's own problem statement (REQ-LLL-049 body): `ensures result
     // >= 0` lets a buggy `yield 0` pass the NORMAL ensures obligation. The

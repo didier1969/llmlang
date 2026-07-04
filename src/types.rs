@@ -1410,18 +1410,37 @@ fn check_examples(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
 
 fn check_examples_inner(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
     for ex in &part.examples {
-        let mut bad = None;
+        let mut bad_var = None;
+        let mut bad_effect = None;
         ex.walk(&mut |x| {
             if let Expr::Var(n) = x {
-                if !ctx.ctors.contains_key(n) && bad.is_none() {
-                    bad = Some(n.clone());
+                if !ctx.ctors.contains_key(n) && bad_var.is_none() {
+                    bad_var = Some(n.clone());
+                }
+            }
+            // codegen's dynamic check (inc.4) emits a bare `#[test]` — no State/
+            // Reader/IO evidence to forward — so an example may only call PURE
+            // parts (v1 scope decision: a side-effecting "ground value" is not a
+            // coherent notion anyway; composition/effects deferred, YAGNI).
+            if let Expr::Call(n, _) = x {
+                if let Some(&idx) = ctx.index.get(n) {
+                    if !ctx.module.parts[idx].effects.is_empty() && bad_effect.is_none() {
+                        bad_effect = Some(n.clone());
+                    }
                 }
             }
         });
-        if let Some(n) = bad {
+        if let Some(n) = bad_var {
             return Err(format!(
                 "part `{}`: example may not reference `{n}` — examples are ground \
                  (literal values and calls only, no parameters or locals, REQ-LLL-049)",
+                part.name
+            ));
+        }
+        if let Some(n) = bad_effect {
+            return Err(format!(
+                "part `{}`: example calls `{n}`, which has effects — examples may only call \
+                 pure (effect-free) parts (v1 scope, REQ-LLL-049)",
                 part.name
             ));
         }

@@ -380,12 +380,18 @@ fn normalize_part(
         .map(|e| n.expr(e))
         .collect::<Vec<_>>()
         .join(" ");
+    // examples are ground (no param/result de Bruijn binder, REQ-LLL-049) — a
+    // change to an example is a behavior-defining edit like requires/ensures/
+    // measure, so it must fold into the identity (DEC-LLL-020: the text is the
+    // single source of truth, everything that defines behavior is hashed).
+    let examples: Vec<String> = part.examples.iter().map(|e| n.expr(e)).collect();
     let mut s = format!(
-        "(part (params {}) (ret {}) (eff {effects}) (req {}) (ens {}) (meas {measure})",
+        "(part (params {}) (ret {}) (eff {effects}) (req {}) (ens {}) (meas {measure}) (ex {})",
         params.join(" "),
         canon_ty(&part.ret, &ty_rename),
         requires.join(" "),
         ensures.join(" "),
+        examples.join(" "),
     );
     if with_body {
         s.push_str(&format!(" (body {})", n.body(&part.body)));
