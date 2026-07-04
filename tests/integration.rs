@@ -3092,3 +3092,49 @@ fn reactive_view_delta_verifies_and_runs() {
     assert!(report.ok(), "the reactive view/delta pattern must verify");
     assert!(build_run(src).contains("=> 6"), "expected 6 (view(0)=0 -> view(3)=6, Changed), got wrong output");
 }
+
+// ===================================================================
+// REQ-LLL-036 W2 (tracer-bullet slice 1) — actor state behind a built-in
+// `lll_actor_runtime` effect boundary: multiple independent Pids, a fixed
+// module-level `step: (Int, Int) -> Int` behavior, synchronous mailbox. v1
+// deliberately restricted (one behavior per module, no real scheduler yet).
+// ===================================================================
+
+#[test]
+fn actor_runtime_spawn_send_state_verifies_and_runs() {
+    let src = "module ActorRuntime:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid1 = Actor.spawn(0)\n    let pid2 = Actor.spawn(100)\n    let _ = Actor.send(pid1, 5)\n    let _ = Actor.send(pid1, 3)\n    let _ = Actor.send(pid2, 0 - 50)\n    let s1 = Actor.state(pid1)\n    let s2 = Actor.state(pid2)\n    yield IO.print(s1 + s2)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "the actor-runtime program must verify");
+    assert!(
+        build_run(src).contains("=> 58"),
+        "expected 58 (pid1: 0->5->8, pid2: 100->50, 8+50=58), got wrong output"
+    );
+}
+
+#[test]
+fn actor_runtime_missing_step_part_rejected() {
+    // types.rs must catch the missing `step` at check-time, not let it become a
+    // confusing rustc error inside the generated `lll_actor_runtime` module.
+    let src = "module M:\n\n  effect Actor:\n    spawn(Int) -> Int = extern \"lll_actor_runtime::spawn\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a missing `step` part must be rejected");
+    assert!(err.contains("no part `step`"), "expected a missing-step error, got: {err}");
+}
+
+#[test]
+fn actor_runtime_wrong_step_signature_rejected() {
+    let src = "module M:\n\n  part step(x: Bool) -> Int:\n    yield 0\n\n  effect Actor:\n    spawn(Int) -> Int = extern \"lll_actor_runtime::spawn\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a wrong-shaped `step` must be rejected");
+    assert!(err.contains("(Int, Int) -> Int"), "expected a step-signature error, got: {err}");
+}
+
+#[test]
+fn actor_runtime_unrecognized_path_rejected() {
+    // the `lll_actor_runtime` root is NOT a general escape hatch — only the 3
+    // built-in paths are recognized; anything else under that root is rejected.
+    let src = "module M:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state\n\n  effect Actor:\n    frobnicate(Int) -> Int = extern \"lll_actor_runtime::frobnicate\"\n\n  part main() -> Int via Actor:\n    yield Actor.frobnicate(0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an unrecognized lll_actor_runtime path must be rejected");
+    assert!(err.contains("not a recognized"), "expected an unrecognized-path error, got: {err}");
+}

@@ -172,6 +172,14 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // under the generated Cargo project, so the REQ-027 guard admits their root.
     let declared_crates: HashSet<&str> =
         module.deps.iter().map(|d| d.crate_name.as_str()).collect();
+    // REQ-LLL-036 W2 (tracer-bullet slice 1): the built-in actor-runtime glue
+    // (spawn/send/state, src/codegen.rs `emit_actor_runtime`) hardcodes a call to
+    // a part named `step` — a fixed v1 convention (ONE behavior per module, no
+    // behavior-as-value yet, since a `Ty::Fun` cannot marshal across the extern
+    // boundary today). Enforced here so a missing/mistyped `step` fails cleanly
+    // at check-time instead of a confusing rustc error inside the generated
+    // `lll_actor_runtime` module.
+    let mut uses_actor_runtime = false;
     for ed in &module.effects {
         if !effect_names.insert(ed.name.clone()) {
             return Err(format!("duplicate effect `{}`", ed.name));
@@ -195,6 +203,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             // pass `check` and fail with a cryptic rustc error at `build`.
             if let Some(path) = &op.extern_path {
                 validate_extern_path(&ed.name, &op.name, path, &declared_crates)?;
+                if path.starts_with("lll_actor_runtime::") {
+                    uses_actor_runtime = true;
+                }
             }
             // foreign-signature guard (REQ-LLL-042, DEC-LLL-045): an `as (T,…) -> R`
             // clause must be positional (arity match) and every (llmlang, foreign)
@@ -383,6 +394,30 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         } else if has_extern {
             // all-extern (no abort, no user-tail) → ambient, performed globally
             ambient_effects.insert(ed.name.clone());
+        }
+    }
+    if uses_actor_runtime {
+        let step = module
+            .parts
+            .iter()
+            .find(|p| p.name == "step")
+            .ok_or_else(|| {
+                "an `lll_actor_runtime` extern op is used but no part `step` is declared — the \
+                 built-in actor runtime hardcodes a call to `step(state, msg) -> state'` \
+                 (REQ-LLL-036 W2, v1: one behavior per module)"
+                    .to_string()
+            })?;
+        if step.params.len() != 2
+            || step.params[0].1 != Ty::Int
+            || step.params[1].1 != Ty::Int
+            || step.ret != Ty::Int
+        {
+            return Err(format!(
+                "part `step`: an `lll_actor_runtime` extern op requires `step` to be exactly \
+                 `(Int, Int) -> Int`, found `({}) -> {}` (REQ-LLL-036 W2)",
+                step.params.iter().map(|(_, t)| t.to_string()).collect::<Vec<_>>().join(", "),
+                step.ret
+            ));
         }
     }
     // classify `via` rows (REQ-LLL-026 item 3, DEC-LLL-038): an UPPERCASE name is
@@ -906,6 +941,26 @@ fn validate_extern_path(
         ));
     }
     let root = segs[0];
+    // REQ-LLL-036 W2 (tracer-bullet slice): a fixed set of reserved paths under
+    // `lll_actor_runtime` name the ONLY built-in actor-runtime glue codegen emits
+    // (mailbox spawn/send/state, src/codegen.rs `emit_actor_runtime`). This is
+    // deliberately NOT a general "any runtime::path resolves" escape hatch — only
+    // these three exact paths are recognized; anything else under the root is
+    // rejected precisely so the surface stays narrow and intentional.
+    const ACTOR_RUNTIME_PATHS: &[&str] = &[
+        "lll_actor_runtime::spawn",
+        "lll_actor_runtime::send",
+        "lll_actor_runtime::state",
+    ];
+    if root == "lll_actor_runtime" {
+        if ACTOR_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_actor_runtime` path \
+             — only {ACTOR_RUNTIME_PATHS:?} are built in (REQ-LLL-036 W2)"
+        ));
+    }
     if !RESOLVABLE_ROOTS.contains(&root) && !declared_crates.contains(root) {
         return Err(format!(
             "effect `{effect}` op `{op}`: extern path \"{path}\" targets external crate `{root}`, \

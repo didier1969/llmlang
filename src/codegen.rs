@@ -17,6 +17,40 @@
 use crate::ast::*;
 use crate::types::{subst_tyvar, CheckedModule};
 
+/// REQ-LLL-036 W2 (tracer-bullet slice 1): the built-in actor runtime. Multiple
+/// independent actor states live in a process-global mailbox vector, indexed by
+/// `Pid` (its position) — `spawn` pushes an initial state and returns its Pid,
+/// `send` applies the module's (single, fixed-name) `step(state, msg) -> state'`
+/// part to update an actor's state, `state` reads it back. This is intentionally
+/// NOT a generic scheduler: one hardcoded behavior per module (a `Ty::Fun` cannot
+/// yet marshal across the extern boundary — a later W2 increment), synchronous
+/// (no real concurrency/threading yet — `send` runs `step` inline under a lock).
+/// `types.rs` enforces that `step: (Int, Int) -> Int` exists whenever this is used
+/// (`uses_actor_runtime`), and `validate_extern_path` only ever recognizes these
+/// three exact paths — never a general `lll_actor_runtime::*` escape hatch.
+fn emit_actor_runtime(out: &mut String) {
+    out.push_str(
+        "\nmod lll_actor_runtime {\n\
+         \x20\x20\x20\x20use std::sync::Mutex;\n\
+         \x20\x20\x20\x20static ACTORS: Mutex<Vec<i64>> = Mutex::new(Vec::new());\n\
+         \x20\x20\x20\x20pub fn spawn(initial: i64) -> i64 {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let mut a = ACTORS.lock().unwrap();\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20a.push(initial);\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20(a.len() - 1) as i64\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20pub fn send(pid: i64, msg: i64) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let mut a = ACTORS.lock().unwrap();\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let idx = pid as usize;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20a[idx] = super::lll_step(a[idx], msg);\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20pub fn state(pid: i64) -> i64 {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let a = ACTORS.lock().unwrap();\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20a[pid as usize]\n\
+         \x20\x20\x20\x20}\n\
+         }\n",
+    );
+}
+
 /// The op-anchored typed FFI shim name for a dotted op key `Eff.op` (REQ-LLL-041,
 /// slice 038b): `Eff.op` → `__lll_ffi_Eff_op`. A perform of an `= extern` op lowers
 /// to a call of this uniquely-named adapter, so a boundary signature/arity mismatch
@@ -117,6 +151,11 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                 None => {}
             }
         }
+    }
+    // REQ-LLL-036 W2: emit the built-in actor runtime iff any op binds to it
+    // (types.rs already guaranteed a matching `step` part exists when so).
+    if extern_ops.values().any(|p| p.starts_with("lll_actor_runtime::")) {
+        emit_actor_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

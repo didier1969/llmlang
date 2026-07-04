@@ -1,0 +1,43 @@
+module ActorRuntime:
+
+  # REQ-LLL-036 W2 (tracer-bullet slice 1, voie 2a CPT-LLL-014) : le
+  # comportement d'acteur (step, prouvé en W0 — examples/actor_reactive.lll)
+  # vit maintenant DERRIÈRE une frontière d'effet : plusieurs instances
+  # INDÉPENDANTES (Pid distincts), état géré par le runtime Rust (mailbox
+  # globale, src/codegen.rs `emit_actor_runtime`), jamais par le cœur vérifié
+  # (havoc à la frontière, DEC-LLL-017 — Z3 ne voit jamais ce que `spawn`/
+  # `send`/`state` font réellement, seulement leur signature).
+  #
+  # v1 délibérément restreint : UN SEUL comportement fixe par module (une part
+  # nommée `step`, signature imposée `(Int, Int) -> Int`) — passer un
+  # comportement EN VALEUR à `spawn` nécessiterait de marshaller une fonction à
+  # la frontière FFI, ce qui n'existe pas encore (increment futur de W2). De
+  # même, `send` est SYNCHRONE ici (pas de vraie boucle non-bornée/scheduler
+  # encore) : la généricité du comportement et l'ordonnancement réel restent
+  # des incréments séparés, dans l'esprit tracer-bullet de REQ-LLL-038.
+
+  part max0(x: Int) -> Int:
+    ensures result >= 0
+    match x >= 0:
+      true  -> yield x
+      false -> yield 0
+
+  part step(state: Int, msg: Int) -> Int:
+    requires state >= 0
+    ensures result >= 0
+    yield max0(state + msg)
+
+  effect Actor:
+    spawn(Int) -> Int       = extern "lll_actor_runtime::spawn"
+    send(Int, Int) -> Unit  = extern "lll_actor_runtime::send"
+    state(Int) -> Int       = extern "lll_actor_runtime::state"
+
+  part main() -> Int via Actor, IO:
+    let pid1 = Actor.spawn(0)
+    let pid2 = Actor.spawn(100)
+    let _ = Actor.send(pid1, 5)
+    let _ = Actor.send(pid1, 3)
+    let _ = Actor.send(pid2, 0 - 50)
+    let s1 = Actor.state(pid1)   # 0 -> +5=5 -> +3=8
+    let s2 = Actor.state(pid2)   # 100 -> +(-50)=50
+    yield IO.print(s1 + s2)      # 8 + 50 = 58
