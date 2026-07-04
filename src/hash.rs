@@ -42,7 +42,7 @@ pub fn hash_module(cm: &CheckedModule) -> Result<HashedModule, String> {
     // significant) into the DEF hash; `op_proof` folds only the signature into the
     // PROOF hash (the extern result is havoc'd → it changes no VC, so binding it
     // would over-invalidate the proof cache — DEC-LLL-025 asymmetry).
-    let (op_def, op_proof) = build_op_tokens(&cm.module.effects);
+    let (op_def, op_proof) = build_op_tokens(&cm.module.effects, &cm.module.deps);
     let no_tok: HashMap<String, String> = HashMap::new();
     // pass 1: contract hashes (contracts contain no calls — no dependencies)
     let mut contract_hash = HashMap::new();
@@ -239,8 +239,18 @@ pub fn blind_normal_form(part: &crate::ast::Part) -> String {
 /// and every existing hash that performs one is preserved byte-for-byte.
 fn build_op_tokens(
     effects: &[EffectDecl],
+    deps: &[Dep],
 ) -> (HashMap<String, String>, HashMap<String, String>) {
     let empty: HashMap<String, String> = HashMap::new();
+    // crate root → declared version (REQ-LLL-038): a crate's version is
+    // behaviourally significant (serde 1 vs 2), so it folds into the DEF hash of
+    // every op bound to it — the same class as the extern path (DEC-LLL-041). The
+    // `path` (vendored location) is NOT included: it is a resolution hint, not
+    // identity. std/core/alloc roots have no dep ⇒ no `@version` ⇒ hashes unchanged.
+    let dep_version: HashMap<&str, &str> = deps
+        .iter()
+        .map(|d| (d.crate_name.as_str(), d.version.as_str()))
+        .collect();
     let mut op_def = HashMap::new();
     let mut op_proof = HashMap::new();
     for ed in effects {
@@ -249,7 +259,17 @@ fn build_op_tokens(
             let params: Vec<String> = op.params.iter().map(|t| canon_ty(t, &empty)).collect();
             let sig = format!("{key}({})->{}", params.join(","), canon_ty(&op.ret, &empty));
             op_proof.insert(key.clone(), blake3::hash(sig.as_bytes()).to_hex().to_string());
-            let with_bind = format!("{sig}|{}", op.extern_path.as_deref().unwrap_or(""));
+            // append `@version` when the extern path's root is a declared crate,
+            // so linking crate v1 vs v2 yields distinct def-hashes.
+            let bind = op.extern_path.as_deref().unwrap_or("");
+            let ver = op
+                .extern_path
+                .as_deref()
+                .and_then(|p| p.strip_prefix("::").unwrap_or(p).split("::").next())
+                .and_then(|root| dep_version.get(root))
+                .map(|v| format!("@{v}"))
+                .unwrap_or_default();
+            let with_bind = format!("{sig}|{bind}{ver}");
             op_def.insert(key, blake3::hash(with_bind.as_bytes()).to_hex().to_string());
         }
     }

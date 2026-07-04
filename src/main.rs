@@ -124,6 +124,114 @@ fn ffi_import(file: &str, effect: &str, prefix: &str) -> Result<String, String> 
     Ok(out)
 }
 
+/// The path of the compiled binary for a module (REQ-LLL-038): a bare file under
+/// `build/` for the single-file rustc path, or the Cargo project's release binary
+/// when the module declares external `depends`. `build` and `run` agree via this.
+fn built_binary(module: &ast::Module) -> PathBuf {
+    let modfile = module.name.replace('.', "_");
+    if module.deps.is_empty() {
+        Path::new("build").join(modfile)
+    } else {
+        Path::new("build")
+            .join(&modfile)
+            .join("target/release")
+            .join(cargo_pkg_name(&module.name))
+    }
+}
+
+/// Cargo package/binary name for a module — lowercase, dots→underscores (a Cargo
+/// package name may not contain a dot or an uppercase letter).
+fn cargo_pkg_name(module_name: &str) -> String {
+    module_name.replace('.', "_").to_lowercase()
+}
+
+/// The fast path (no external deps): compile the single generated Rust file with
+/// rustc directly (unchanged behaviour, REQ-LLL-022).
+fn build_single_file(module: &ast::Module, rust: &str, unchecked: bool) -> Result<PathBuf, String> {
+    let rs = Path::new("build").join(format!("{}.rs", module.name.replace('.', "_")));
+    std::fs::write(&rs, rust).map_err(|e| e.to_string())?;
+    let bin = built_binary(module);
+    let overflow = if unchecked {
+        "overflow-checks=off"
+    } else {
+        "overflow-checks=on"
+    };
+    let st = Command::new("rustc")
+        .args([
+            "-C", "opt-level=3", "-C", "codegen-units=1", "-C", overflow, "--edition", "2021", "-o",
+        ])
+        .arg(&bin)
+        .arg(&rs)
+        .status()
+        .map_err(|e| format!("rustc: {e}"))?;
+    if !st.success() {
+        return Err(
+            "rustc failed on generated code (this is a compiler bug — the vc fork accepted it)".into(),
+        );
+    }
+    Ok(bin)
+}
+
+/// The Cargo path (REQ-LLL-038): a module that `depends` on external crates is
+/// built as a generated Cargo project so `[dependencies]` link. The generated
+/// `src/main.rs` is the SAME `emit_rust` output; only the build wrapper changes.
+fn build_cargo_project(module: &ast::Module, rust: &str, unchecked: bool) -> Result<PathBuf, String> {
+    let modfile = module.name.replace('.', "_");
+    let dir = Path::new("build").join(&modfile);
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).map_err(|e| e.to_string())?;
+    std::fs::write(src.join("main.rs"), rust).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("Cargo.toml"), cargo_manifest(module, unchecked)?)
+        .map_err(|e| e.to_string())?;
+    // `--offline` keeps the build deterministic and network-free (DEC-LLL-026): a
+    // path/vendored dep or a pre-cached registry crate. Online fetch is a later
+    // slice. A mistyped binding fails HERE at compile — fail-stop, no binary
+    // (DEC-LLL-026/015); rustc is the boundary type judge for v1.
+    let st = Command::new("cargo")
+        .args(["build", "--release", "--offline"])
+        .current_dir(&dir)
+        .status()
+        .map_err(|e| format!("cargo: {e}"))?;
+    if !st.success() {
+        return Err(format!(
+            "cargo build failed for the generated project `{}` (REQ-LLL-038) — check the \
+             `depends` versions and `extern` binding signatures",
+            dir.display()
+        ));
+    }
+    Ok(built_binary(module))
+}
+
+/// Generate the `Cargo.toml` for a module's external `depends` (REQ-LLL-038). The
+/// version is pinned exactly (`=x.y.z`) so the build matches the version folded
+/// into the def-hash (DEC-LLL-041 extended). A `from` path becomes a Cargo path
+/// dependency (vendored/local); otherwise a crates.io registry dependency.
+fn cargo_manifest(module: &ast::Module, unchecked: bool) -> Result<String, String> {
+    let mut deps = String::new();
+    for d in &module.deps {
+        match &d.path {
+            Some(p) => {
+                let abs = std::fs::canonicalize(p)
+                    .map_err(|e| format!("depends {} from \"{p}\": {e}", d.crate_name))?;
+                deps.push_str(&format!(
+                    "{} = {{ path = \"{}\", version = \"={}\" }}\n",
+                    d.crate_name,
+                    abs.display(),
+                    d.version
+                ));
+            }
+            None => deps.push_str(&format!("{} = \"={}\"\n", d.crate_name, d.version)),
+        }
+    }
+    let overflow_checks = !unchecked;
+    Ok(format!(
+        "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\n{deps}\n\
+         [profile.release]\nopt-level = 3\ncodegen-units = 1\noverflow-checks = {overflow_checks}\n",
+        cargo_pkg_name(&module.name)
+    ))
+}
+
 /// Export the module as Axon's `ExtractionResult` JSON (REQ-LLL-021): every
 /// `part` → a function Symbol carrying content-hash + purity + contract counts;
 /// every intra-module call → a `calls` Relation; user types → `type` Symbols.
@@ -300,35 +408,23 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 return Err("verification failed — refusing to emit code".into());
             }
             let rust = codegen::emit_rust(&cm)?;
-            let out_dir = Path::new("build");
-            std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
-            let rs = out_dir.join(format!("{}.rs", cm.module.name.replace('.', "_")));
-            std::fs::write(&rs, rust).map_err(|e| e.to_string())?;
-            let bin = out_dir.join(cm.module.name.replace('.', "_"));
-            let overflow = if unchecked {
-                "overflow-checks=off"
+            std::fs::create_dir_all("build").map_err(|e| e.to_string())?;
+            // no external deps → the fast single-file rustc path (unchanged);
+            // `depends` present → a generated Cargo project links the crates
+            // (REQ-LLL-038). The vc fork ran first and never saw the deps, so the
+            // soundness of the pure core is untouched (DEC-LLL-017).
+            let bin = if cm.module.deps.is_empty() {
+                build_single_file(&cm.module, &rust, unchecked)?
             } else {
-                "overflow-checks=on"
+                build_cargo_project(&cm.module, &rust, unchecked)?
             };
-            let st = Command::new("rustc")
-                .args([
-                    "-C", "opt-level=3", "-C", "codegen-units=1", "-C", overflow,
-                    "--edition", "2021", "-o",
-                ])
-                .arg(&bin)
-                .arg(&rs)
-                .status()
-                .map_err(|e| format!("rustc: {e}"))?;
-            if !st.success() {
-                return Err("rustc failed on generated code (this is a compiler bug — the vc fork accepted it)".into());
-            }
             println!("✔ built {}", bin.display());
             Ok(())
         }
         ["run", file, rest @ ..] => {
             dispatch(&["build".to_string(), file.to_string()])?;
             let (_, cm, _) = load(file)?;
-            let bin = Path::new("build").join(cm.module.name.replace('.', "_"));
+            let bin = built_binary(&cm.module);
             let mut cmd = Command::new(bin);
             match rest {
                 ["--trace", f] => {

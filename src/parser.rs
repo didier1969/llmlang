@@ -75,6 +75,41 @@ impl Parser {
             self.eat(Tok::Newline)?;
             self.skip_newlines();
         }
+        // `depends <crate> "<version>" [from "<path>"]` (REQ-LLL-038) — external
+        // Cargo crate dependencies, in the module preamble alongside `import`.
+        let mut deps = Vec::new();
+        while matches!(self.peek(), Tok::Ident(s) if s == "depends") {
+            self.pos += 1;
+            let crate_name = self.ident()?;
+            let version = match self.bump() {
+                Tok::Str(v) => v,
+                other => {
+                    return Err(self.err(&format!(
+                        "expected a quoted version after `depends {crate_name}`, found {other:?}"
+                    )))
+                }
+            };
+            let path = if self.peek() == &Tok::From {
+                self.pos += 1;
+                match self.bump() {
+                    Tok::Str(p) => Some(p),
+                    other => {
+                        return Err(self.err(&format!(
+                            "expected a quoted path after `from`, found {other:?}"
+                        )))
+                    }
+                }
+            } else {
+                None
+            };
+            deps.push(Dep {
+                crate_name,
+                version,
+                path,
+            });
+            self.eat(Tok::Newline)?;
+            self.skip_newlines();
+        }
         self.eat(Tok::Module)?;
         let name = match self.bump() {
             Tok::Ident(s) | Tok::Dotted(s) => s,
@@ -107,6 +142,7 @@ impl Parser {
         Ok(Module {
             name,
             imports,
+            deps,
             types,
             effects,
             parts,

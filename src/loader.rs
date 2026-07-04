@@ -11,7 +11,7 @@
 //! definition and the duplicate is silently dropped (cross-file dedup,
 //! DEC-LLL-019 made visible).
 
-use crate::ast::{EffectDecl, Module, Part, TypeDecl};
+use crate::ast::{Dep, EffectDecl, Module, Part, TypeDecl};
 use crate::hash::blind_normal_form;
 use crate::parser;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +24,7 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let mut parts: Vec<Part> = Vec::new();
     let mut types: Vec<TypeDecl> = Vec::new();
     let mut effects: Vec<EffectDecl> = Vec::new();
+    let mut deps: Vec<Dep> = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let (src, name) = load_rec(
         &root,
@@ -34,12 +35,33 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
         &mut parts,
         &mut types,
         &mut effects,
+        &mut deps,
     )?;
+    // dedup merged `depends` by crate (a diamond import may re-declare one); a
+    // same-crate version conflict across files is a hard error (REQ-LLL-038).
+    let mut seen: HashMap<String, String> = HashMap::new();
+    let mut merged_deps: Vec<Dep> = Vec::new();
+    for d in deps {
+        match seen.get(&d.crate_name) {
+            Some(v) if *v != d.version => {
+                return Err(format!(
+                    "crate `{}` is declared at conflicting versions ({v} and {}) across imports",
+                    d.crate_name, d.version
+                ))
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(d.crate_name.clone(), d.version.clone());
+                merged_deps.push(d);
+            }
+        }
+    }
     Ok((
         src,
         Module {
             name,
             imports: Vec::new(), // resolved
+            deps: merged_deps,
             types,
             effects,
             parts,
@@ -92,6 +114,7 @@ fn load_rec(
     parts: &mut Vec<Part>,
     types: &mut Vec<TypeDecl>,
     effects: &mut Vec<EffectDecl>,
+    deps: &mut Vec<Dep>,
 ) -> Result<(String, String), String> {
     let canon_path = canon(path)?;
     if in_stack.contains(&canon_path) {
@@ -121,11 +144,13 @@ fn load_rec(
             parts,
             types,
             effects,
+            deps,
         )?;
     }
-    // merge this file's user types and effects (each file is visited once)
+    // merge this file's user types, effects and crate deps (visited once each)
     types.extend(module.types.iter().cloned());
     effects.extend(module.effects.iter().cloned());
+    deps.extend(module.deps.iter().cloned());
     // merge this file's parts
     let origin = if is_root {
         None

@@ -10,6 +10,11 @@ pub struct Module {
     /// `import "relative/path.lll"` clauses (resolved by the loader)
     #[serde(default)]
     pub imports: Vec<String>,
+    /// `depends <crate> "<version>" [from "<path>"]` — external Cargo crate
+    /// dependencies (REQ-LLL-038). A non-empty list switches `lll build` from the
+    /// single-file rustc path to a generated Cargo project.
+    #[serde(default)]
+    pub deps: Vec<Dep>,
     /// user-defined algebraic data types (REQ-LLL-011)
     #[serde(default)]
     pub types: Vec<TypeDecl>,
@@ -17,6 +22,23 @@ pub struct Module {
     #[serde(default)]
     pub effects: Vec<EffectDecl>,
     pub parts: Vec<Part>,
+}
+
+/// An external Cargo crate dependency (REQ-LLL-038, DEC-LLL-041 extended). The
+/// `version` is behaviourally significant (a program linking serde 1 vs 2 differs)
+/// and is folded into the def-hash of every op bound to the crate — never the
+/// proof-hash (the binding is havoc'd, DEC-LLL-017). `path` is a build-resolution
+/// hint (a repo-relative vendored crate, like the vendored Z3), NOT part of
+/// identity: `depends c "1.0" from "vendor/c"` and `depends c "1.0"` are the same
+/// definition, resolved differently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dep {
+    pub crate_name: String,
+    pub version: String,
+    /// `from "<repo-relative-path>"` → a Cargo path dependency (vendored/local),
+    /// else a crates.io registry dependency.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// A user-declared algebraic effect `effect Name` with a set of typed operations

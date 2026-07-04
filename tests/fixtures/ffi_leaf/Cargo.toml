@@ -1,0 +1,12 @@
+# Test fixture crate for REQ-LLL-038 (verified Cargo/FFI linking). A leaf crate
+# (no transitive deps) with one plain function, linked by a .lll via `depends …
+# from "…"`. The empty [workspace] isolates it from the parent lllc build.
+[package]
+name = "ffi_leaf"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

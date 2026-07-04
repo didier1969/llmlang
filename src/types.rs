@@ -166,6 +166,10 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     let mut ambient_effects: HashSet<String> = HashSet::new();
     ambient_effects.insert("IO".to_string());
     let mut user_tail_effects: HashSet<String> = HashSet::new();
+    // crates declared via `depends` (REQ-LLL-038) — their extern paths now link
+    // under the generated Cargo project, so the REQ-027 guard admits their root.
+    let declared_crates: HashSet<&str> =
+        module.deps.iter().map(|d| d.crate_name.as_str()).collect();
     for ed in &module.effects {
         if !effect_names.insert(ed.name.clone()) {
             return Err(format!("duplicate effect `{}`", ed.name));
@@ -188,7 +192,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             // cannot link in v1's single-file rustc build, here, instead of letting it
             // pass `check` and fail with a cryptic rustc error at `build`.
             if let Some(path) = &op.extern_path {
-                validate_extern_path(&ed.name, &op.name, path)?;
+                validate_extern_path(&ed.name, &op.name, path, &declared_crates)?;
             }
             // op kinds (REQ-LLL-022 + REQ-LLL-026 item 2): an ABORT op (`-> Never`,
             // no binding), an EXTERN op (`= extern "path"`, value return), or a
@@ -385,7 +389,12 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
 /// Any other root is an external crate that cannot link in v1 — caught here with a
 /// clear message rather than a cryptic rustc failure at build. Signature/arity
 /// compatibility stays a build-time concern until Cargo linking (future REQ-LLL-022).
-fn validate_extern_path(effect: &str, op: &str, path: &str) -> Result<(), String> {
+fn validate_extern_path(
+    effect: &str,
+    op: &str,
+    path: &str,
+    declared_crates: &HashSet<&str>,
+) -> Result<(), String> {
     // primitive-type roots whose associated fns resolve without any crate
     const RESOLVABLE_ROOTS: &[&str] = &[
         "std", "core", "alloc", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
@@ -405,12 +414,11 @@ fn validate_extern_path(effect: &str, op: &str, path: &str) -> Result<(), String
         ));
     }
     let root = segs[0];
-    if !RESOLVABLE_ROOTS.contains(&root) {
+    if !RESOLVABLE_ROOTS.contains(&root) && !declared_crates.contains(root) {
         return Err(format!(
             "effect `{effect}` op `{op}`: extern path \"{path}\" targets external crate `{root}`, \
-             which cannot link in v1 — `lll build` compiles a single file with rustc, so only \
-             std/core/alloc and primitive-type paths resolve. External-crate FFI needs Cargo \
-             linking (future REQ-LLL-022); bind a std equivalent or remove the operation"
+             which is not declared — add `depends {root} \"<version>\"` to the module preamble so \
+             it links under the generated Cargo project (REQ-LLL-038), or bind a std equivalent"
         ));
     }
     Ok(())

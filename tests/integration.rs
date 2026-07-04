@@ -1486,6 +1486,64 @@ fn verified_set_is_polymorphic() {
 }
 
 #[test]
+fn ffi_external_crate_links_via_cargo() {
+    // REQ-LLL-038 slice 038a: a module that `depends` on an external crate is built
+    // as a generated Cargo project (not single-file rustc), so the extern binding
+    // links. Uses a repo-local leaf fixture via `from "…"` → 100% offline. The vc
+    // proves the wrapper contract while the foreign result stays havoc'd (soundness).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_leaf");
+    let src = format!(
+        "depends ffi_leaf \"1.0.0\" from \"{fixture}\"\n\nmodule FfiExt:\n\n  effect Scale:\n    scale(Int) -> Int = extern \"ffi_leaf::scale\"\n\n  part tripled(x: Int) -> Int via Scale:\n    requires x >= 0\n    yield Scale.scale(x)\n\n  part main() -> Int via IO, Scale:\n    yield IO.print(tripled(14))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("ffi_ext.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "lll run (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("42"),
+        "tripled(14) via the external crate must print 42; got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn dep_version_folds_into_def_hash_not_proof_hash() {
+    // REQ-LLL-038 / DEC-LLL-041 extended: a crate's declared version is behaviourally
+    // significant, so it changes the DEF hash of an op-performing part (linking v1 vs
+    // v2 differs) but NEVER the PROOF hash (the binding is havoc'd — same obligations).
+    let hashed = |ver: &str| {
+        let src = format!(
+            "depends ffi_leaf \"{ver}\" from \"tests/fixtures/ffi_leaf\"\n\nmodule Hh:\n\n  effect Scale:\n    scale(Int) -> Int = extern \"ffi_leaf::scale\"\n\n  part f(x: Int) -> Int via Scale:\n    yield Scale.scale(x)\n"
+        );
+        let m = parser::parse_module(&src).expect("parse");
+        let cm = types::check_module(m).expect("check");
+        hash::hash_module(&cm).expect("hash")
+    };
+    let h1 = hashed("1.0.0");
+    let h2 = hashed("2.0.0");
+    assert_ne!(
+        h1.def_hash["f"], h2.def_hash["f"],
+        "the declared crate version must change the def-hash"
+    );
+    assert_eq!(
+        h1.proof_hash["f"], h2.proof_hash["f"],
+        "the crate version must NOT change the proof-hash (binding is havoc'd)"
+    );
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`
