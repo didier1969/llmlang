@@ -1550,6 +1550,42 @@ fn dep_version_folds_into_def_hash_not_proof_hash() {
 }
 
 #[test]
+fn ffi_transitive_closure_links_offline_deterministically() {
+    // REQ-LLL-043 (slice 038c): linking a crate WITH a transitive dependency
+    // (ffi_mid → ffi_base, both vendored) resolves the FULL closure offline. Cargo
+    // handles the recursion; `--offline` + exact pins make it deterministic — two runs
+    // agree (GUI-PRO-006). The transitive version is a build detail, NOT identity
+    // (DEC-LLL-020): only the DIRECT `depends` version folds into the hash.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let mid = format!("{repo}/tests/fixtures/ffi_deep/ffi_mid");
+    let src = format!(
+        "depends ffi_mid \"1.0.0\" from \"{mid}\"\n\nmodule Deep:\n\n  effect M:\n    plus2(Int) -> Int = extern \"ffi_mid::plus_two\"\n\n  part bumped(x: Int) -> Int via M:\n    requires x >= 0\n    yield M.plus2(x)\n\n  part main() -> Int via IO, M:\n    yield IO.print(bumped(40))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("deep.lll");
+    std::fs::write(&f, &src).unwrap();
+    let run = || {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .arg("run")
+            .arg(&f)
+            .current_dir(repo)
+            .output()
+            .expect("run lll");
+        assert!(
+            out.status.success(),
+            "transitive-closure link failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).contains("42")
+    };
+    // plus_two(40) = base(base(40)) = 42, through the full ffi_mid → ffi_base closure;
+    // deterministic across two offline builds.
+    assert!(run(), "first run must link the closure and print 42");
+    assert!(run(), "second run must be deterministic and also print 42");
+}
+
+#[test]
 fn ffi_string_marshalling_links_via_cargo() {
     // REQ-LLL-042 / DEC-LLL-045 (slice 038d): an op bound to a Rust fn taking `&str`
     // and returning `String` marshals a llmlang codepoint `List[Int]` across the

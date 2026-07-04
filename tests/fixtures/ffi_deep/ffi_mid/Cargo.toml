@@ -1,0 +1,16 @@
+# Transitive-closure fixture mid crate (REQ-LLL-038 slice 038c). Depends on
+# `ffi_base` via a relative path (vendored, 100% offline) — so the generated Cargo
+# project for an llmlang module that `depends ffi_mid` must resolve the FULL closure
+# (ffi_mid → ffi_base) deterministically. Empty [workspace] isolates it.
+[package]
+name = "ffi_mid"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ffi_base = { path = "../ffi_base", version = "=1.0.0" }
+
+[workspace]

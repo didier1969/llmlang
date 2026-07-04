@@ -1,0 +1,12 @@
+# Transitive-closure fixture base crate (REQ-LLL-038 slice 038c). A leaf that
+# `ffi_mid` depends on, so an llmlang `depends ffi_mid …` links a crate WITH its own
+# transitive dependency — offline, deterministically. Empty [workspace] isolates it.
+[package]
+name = "ffi_base"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

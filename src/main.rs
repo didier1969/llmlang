@@ -248,6 +248,15 @@ fn build_single_file(module: &ast::Module, rust: &str, unchecked: bool) -> Resul
 /// The Cargo path (REQ-LLL-038): a module that `depends` on external crates is
 /// built as a generated Cargo project so `[dependencies]` link. The generated
 /// `src/main.rs` is the SAME `emit_rust` output; only the build wrapper changes.
+///
+/// Transitive closure (slice 038c): Cargo resolves each direct dep's OWN dependencies
+/// too, so a crate WITH transitive deps links here without extra machinery — as long
+/// as the whole closure is reachable offline (vendored `from` paths or a pre-cached
+/// registry). `--offline` + exact `=x.y.z` pinning of the DIRECT deps make this
+/// deterministic per-machine. The identity boundary (DEC-LLL-020, DEC-LLL-041): only
+/// the DIRECT `depends` versions — the text of the `.lll` — fold into the def-hash;
+/// transitive versions are a build-resolution detail, NOT identity (like the `from`
+/// path). Cross-machine SHA reproducibility via a pinned lock is a later slice (038e).
 fn build_cargo_project(module: &ast::Module, rust: &str, unchecked: bool) -> Result<PathBuf, String> {
     let modfile = module.name.replace('.', "_");
     let dir = Path::new("build").join(&modfile);
