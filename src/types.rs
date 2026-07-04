@@ -982,7 +982,16 @@ fn validate_extern_path(
              — only {ACTOR_RUNTIME_PATHS:?} are built in (REQ-LLL-036 W2)"
         ));
     }
-    if !RESOLVABLE_ROOTS.contains(&root) && !declared_crates.contains(root) {
+    // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends
+    // my-crate "1.0"`), but Rust always exposes it as an UNDERSCORED module
+    // path (`extern "my_crate::func"`, never `my-crate::func` — hyphens are
+    // not valid in a Rust path). Compare hyphen/underscore-insensitively so a
+    // hyphenated `depends` still matches the (necessarily underscored) extern
+    // path root, instead of a spurious "not declared" rejection.
+    let root_declared = declared_crates
+        .iter()
+        .any(|c| c.replace('-', "_") == root.replace('-', "_"));
+    if !RESOLVABLE_ROOTS.contains(&root) && !root_declared {
         return Err(format!(
             "effect `{effect}` op `{op}`: extern path \"{path}\" targets external crate `{root}`, \
              which is not declared — add `depends {root} \"<version>\"` to the module preamble so \

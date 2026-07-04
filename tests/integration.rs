@@ -17,7 +17,17 @@ fn verify_src(src: &str) -> vc::VerifyReport {
 }
 
 fn tempdir() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("lll-test-{}", std::process::id()));
+    // Root-cause fix: `std::process::id()` alone is the SAME for every test in
+    // this binary (all tests run as threads within one process, not separate
+    // processes) — two tests calling `tempdir()` got the SAME shared directory.
+    // Harmless as long as every test used distinct filenames inside it, but
+    // two tests using the same filename (e.g. both naming their trace file
+    // "trace.jsonl") raced and cross-contaminated each other's file under
+    // parallel execution. A monotonic per-call counter guarantees a genuinely
+    // unique directory every call, regardless of filename choices downstream.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("lll-test-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -2204,6 +2214,45 @@ fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     // p0: 0+1+1=2, p1: 10+1+1=12, p2: 20+1=21, p3: 30+1=31, p4: 40+1=41 -> 107
     assert!(stdout.contains("=> 107"), "expected 107 (5 independent actors, no cross-contamination), got:\n{stdout}");
+}
+
+#[test]
+fn depends_hyphenated_crate_name_parses_and_links() {
+    // REQ-LLL-053 (4): a hyphenated crate name (common on crates.io, e.g.
+    // `wasm-bindgen`) used to tokenize as `Ident Minus Ident` and fail with a
+    // confusing "expected a quoted version ... found Minus" — reassembled at
+    // the `depends` clause now. Cargo.toml keeps the TRUE hyphenated package
+    // name; the `extern` path (always underscored in real Rust) still
+    // resolves against it via hyphen/underscore-insensitive matching in
+    // `validate_extern_path`.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_hyphen");
+    let src = format!(
+        "depends ffi-hyphen-fixture \"1.0.0\" from \"{fixture}\"\n\nmodule HyphenTest:\n\n  effect Dbl:\n    double(Int) -> Int = extern \"ffi_hyphen_fixture::double\"\n\n  part main() -> Int via IO, Dbl:\n    yield IO.print(Dbl.double(21))\n"
+    );
+    let m = parser::parse_module(&src).expect("hyphenated crate name must parse");
+    assert_eq!(m.deps[0].crate_name, "ffi-hyphen-fixture", "must preserve the true hyphenated package name");
+
+    let dir = tempdir();
+    let f = dir.join("hyphen_test.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "hyphenated crate (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 42"),
+        "expected 42 (double(21)), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 #[test]

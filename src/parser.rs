@@ -80,7 +80,22 @@ impl Parser {
         let mut deps = Vec::new();
         while matches!(self.peek(), Tok::Ident(s) if s == "depends") {
             self.pos += 1;
-            let crate_name = self.ident()?;
+            // REQ-LLL-053 (4): a hyphenated crate name (common on crates.io, e.g.
+            // `wasm-bindgen`) is NOT a valid identifier in this lexer (`-` isn't an
+            // ident character — it would collide with the subtraction operator if
+            // it were), so `my-crate` tokenizes as `Ident("my") Minus Ident("crate")`
+            // — reassemble it here, scoped to JUST this position, rather than
+            // relaxing the lexer's identifier rule everywhere. The hyphenated form
+            // is preserved (Cargo.toml's `[dependencies]` needs the TRUE package
+            // name); `validate_extern_path` normalizes hyphen/underscore when
+            // matching against an `extern` path's root, since Rust always exposes a
+            // hyphenated package as an underscored module path.
+            let mut crate_name = self.ident()?;
+            while self.peek() == &Tok::Minus {
+                self.pos += 1;
+                crate_name.push('-');
+                crate_name.push_str(&self.ident()?);
+            }
             let version = match self.bump() {
                 Tok::Str(v) => v,
                 other => {
