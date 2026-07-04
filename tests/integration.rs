@@ -2700,6 +2700,41 @@ fn non_bool_example_is_rejected() {
 }
 
 #[test]
+fn example_calling_an_effectful_part_is_rejected() {
+    // v1 scope decision (design-twice REQ-LLL-049): codegen's dynamic `#[test]`
+    // has no State/Reader/IO evidence to forward, so an example may only call
+    // PURE parts.
+    let src = "module M:\n\n  part noisy(x: Int) -> Int via IO:\n    yield IO.print(x)\n\n  part check() -> Bool:\n    example noisy(1) == 1\n    yield true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).unwrap_err();
+    assert!(err.contains("has effects"), "wrong error: {err}");
+}
+
+#[test]
+fn example_calling_a_different_part_verifies_and_runs() {
+    // Generality beyond self-reference: an example may pin the behavior of ANY
+    // already-checked pure part, not just the one it is declared inside.
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    yield x + y\n\n  part uses_add() -> Bool:\n    example add(2, 3) == 5\n    yield true\n\n  part main() -> Int:\n    yield add(1, 2)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "example calling a sibling part must verify");
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("ex2.rs");
+    let bin = dir.join("ex2_test_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["--test", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(out.status.success(), "cross-part example test did not pass");
+}
+
+#[test]
 fn true_example_verifies_statically() {
     // REQ-LLL-049 inc.3: an exact contract entails the ground example — Z3
     // discharges it via the same contract-firewall as any call site.
