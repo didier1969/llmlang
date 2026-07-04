@@ -260,8 +260,14 @@ fn ffi_import_derives_extern_block_from_rust_signatures() {
     assert!(block.contains("  effect Cmp:"), "effect at module-body indent");
     assert!(block.contains("max(Int, Int) -> Int = extern \"std::cmp::max\""), "max mapped: {block}");
     assert!(block.contains("is_even(Int) -> Bool = extern \"std::cmp::is_even\""), "bool ret mapped: {block}");
-    // non-mappable (&str/String) is skipped, private fn ignored
-    assert!(block.contains("skipped") && block.contains("name"), "name skipped: {block}");
+    // a &str→String signature now maps to a codepoint List[Int] op carrying an
+    // explicit `as` clause (REQ-LLL-042, DEC-LLL-045) — no longer skipped.
+    assert!(
+        block.contains(
+            "name(List[Int]) -> List[Int] = extern \"std::cmp::name\" as (str) -> String"
+        ),
+        "&str→String maps with an `as` clause: {block}"
+    );
     assert!(!block.contains("priv_fn"), "private fn must be ignored");
     // and the derived block, pasted into a module, is valid llmlang source
     let src = format!("module T:\n\n{}\n  part hi(x: Int) -> Int via Cmp:\n    yield Cmp.max(x, 0)\n", block);
@@ -1540,6 +1546,105 @@ fn dep_version_folds_into_def_hash_not_proof_hash() {
     assert_eq!(
         h1.proof_hash["f"], h2.proof_hash["f"],
         "the crate version must NOT change the proof-hash (binding is havoc'd)"
+    );
+}
+
+#[test]
+fn ffi_string_marshalling_links_via_cargo() {
+    // REQ-LLL-042 / DEC-LLL-045 (slice 038d): an op bound to a Rust fn taking `&str`
+    // and returning `String` marshals a llmlang codepoint `List[Int]` across the
+    // boundary. `ffi_leaf::shout(&str)->String` uppercases; `first("hi") → 104` but
+    // `first(shout("hi")) → 72` ('H'), proving the param went out as a string AND the
+    // returned String came back as a codepoint list. Real link via Cargo, 100% offline.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_leaf");
+    let src = format!(
+        "depends ffi_leaf \"1.0.0\" from \"{fixture}\"\n\nmodule Shout:\n\n  effect Sh:\n    shout(List[Int]) -> List[Int] = extern \"ffi_leaf::shout\" as (str) -> String\n\n  part first(xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield 0\n      h :: t -> yield h\n\n  part loud(s: List[Int]) -> List[Int] via Sh:\n    yield Sh.shout(s)\n\n  part main() -> Int via IO, Sh:\n    let r = loud(\"hi\")\n    yield IO.print(first(r))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("shout.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "lll run (string FFI) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("72"),
+        "first(shout(\"hi\")) must be 72 ('H' — uppercased + marshalled both ways); got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_foreign_sig_folds_into_def_hash_not_proof() {
+    // REQ-LLL-042 / DEC-LLL-045 #3: the NORMALIZED `as` plan is behaviourally
+    // significant (a `(&str)->String` binding differs from `(String)->String`), so it
+    // folds into the DEF hash but never the PROOF hash (the result is havoc'd). An
+    // all-identity clause (`(i64)->i64`) normalizes to empty ⇒ identical to no clause.
+    let hashed = |clause: &str| {
+        let src = format!(
+            "depends ffi_leaf \"1.0.0\" from \"tests/fixtures/ffi_leaf\"\n\nmodule Hh:\n\n  effect Sh:\n    f(List[Int]) -> List[Int] = extern \"ffi_leaf::shout\"{clause}\n\n  part g(s: List[Int]) -> List[Int] via Sh:\n    yield Sh.f(s)\n"
+        );
+        let m = parser::parse_module(&src).expect("parse");
+        let cm = types::check_module(m).expect("check");
+        hash::hash_module(&cm).expect("hash")
+    };
+    let none = hashed("");
+    let as_str = hashed(" as (str) -> String");
+    let as_string = hashed(" as (String) -> String");
+    assert_ne!(
+        none.def_hash["g"], as_str.def_hash["g"],
+        "a string `as` clause must change the def-hash"
+    );
+    assert_ne!(
+        as_str.def_hash["g"], as_string.def_hash["g"],
+        "`&str` vs `String` foreign param must yield distinct def-hashes"
+    );
+    assert_eq!(
+        none.proof_hash["g"], as_str.proof_hash["g"],
+        "the `as` clause must NOT change the proof-hash (result havoc'd)"
+    );
+    // an all-identity clause on an Int op ≡ no clause (no over-discrimination).
+    let id = |clause: &str| {
+        let src = format!(
+            "module Hi:\n\n  effect Sh:\n    f(Int) -> Int = extern \"i64::abs\"{clause}\n\n  part g(x: Int) -> Int via Sh:\n    yield Sh.f(x)\n"
+        );
+        let m = parser::parse_module(&src).expect("parse");
+        let cm = types::check_module(m).expect("check");
+        hash::hash_module(&cm).expect("hash")
+    };
+    assert_eq!(
+        id("").def_hash["g"],
+        id(" as (i64) -> i64").def_hash["g"],
+        "an all-identity `as` clause must be identical to no clause"
+    );
+}
+
+#[test]
+fn ffi_unsupported_foreign_types_are_rejected() {
+    // REQ-LLL-042 / DEC-LLL-045: v1 rejects rich foreign types with a clear message —
+    // no silent unwrap. `Result<_,_>` (the ident `Result`) is refused at PARSE; a
+    // borrowed `&str` RETURN is refused at CHECK (needs a lifetime — 038e).
+    let res = "module R:\n\n  effect E:\n    f(List[Int]) -> List[Int] = extern \"c::f\" as (str) -> Result\n\n  part g(s: List[Int]) -> List[Int] via E:\n    yield E.f(s)\n";
+    let err = parser::parse_module(res).unwrap_err();
+    assert!(
+        err.contains("unsupported foreign type") && err.contains("Result"),
+        "a `Result` foreign return must be rejected at parse: {err}"
+    );
+    let ret_str = "depends ffi_leaf \"1.0.0\" from \"tests/fixtures/ffi_leaf\"\n\nmodule R2:\n\n  effect E:\n    f(List[Int]) -> List[Int] = extern \"ffi_leaf::shout\" as (str) -> str\n\n  part g(s: List[Int]) -> List[Int] via E:\n    yield E.f(s)\n";
+    let m = parser::parse_module(ret_str).unwrap();
+    let err2 = types::check_module(m).unwrap_err();
+    assert!(
+        err2.contains("&str` return"),
+        "a foreign `&str` return must be rejected at check: {err2}"
     );
 }
 

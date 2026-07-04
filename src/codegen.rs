@@ -25,6 +25,17 @@ fn ffi_shim(dotted_op: &str) -> String {
     format!("__lll_ffi_{}", dotted_op.replace('.', "_"))
 }
 
+/// Marshal the i-th shim argument from its llmlang value `__a{i}` to the foreign Rust
+/// type (REQ-LLL-042, DEC-LLL-045): a `List[Int]` codepoint list becomes an owned
+/// `String` (or a borrowed `&str`); `Int`/`Bool` (or no `as` clause) pass through.
+fn marshal_arg(i: usize, f: Option<&Foreign>) -> String {
+    match f {
+        Some(Foreign::RString) => format!("__lll_str_to_rust(&__a{i})"),
+        Some(Foreign::RStr) => format!("&__lll_str_to_rust(&__a{i})"),
+        _ => format!("__a{i}"),
+    }
+}
+
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
@@ -112,19 +123,30 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     for ed in &cm.module.effects {
         for op in &ed.ops {
             if let Some(path) = &op.extern_path {
+                // the shim's OWN signature stays llmlang-typed (it is called from
+                // llmlang code); its BODY marshals each position to/from the foreign
+                // Rust type when an `as` clause is present (REQ-LLL-042, DEC-LLL-045).
                 let params: Vec<String> = op
                     .params
                     .iter()
                     .enumerate()
                     .map(|(i, t)| format!("__a{i}: {}", rs_ty(t)))
                     .collect();
-                let args: Vec<String> = (0..op.params.len()).map(|i| format!("__a{i}")).collect();
+                let args: Vec<String> = (0..op.params.len())
+                    .map(|i| marshal_arg(i, op.extern_foreign.as_ref().map(|fs| &fs.params[i])))
+                    .collect();
+                let call = format!("{path}({})", args.join(", "));
+                // marshal the return foreign→llmlang: a Rust `String` becomes a
+                // codepoint list; identity (i64/bool or no clause) passes through.
+                let body = match op.extern_foreign.as_ref().map(|fs| &fs.ret) {
+                    Some(Foreign::RString) => format!("__lll_str_of_rust(&{call})"),
+                    _ => call,
+                };
                 out.push_str(&format!(
-                    "#[inline] fn {}({}) -> {} {{ {path}({}) }}\n",
+                    "#[inline] fn {}({}) -> {} {{ {body} }}\n",
                     ffi_shim(&format!("{}.{}", ed.name, op.name)),
                     params.join(", "),
                     rs_ty(&op.ret),
-                    args.join(", "),
                 ));
             }
         }
@@ -1546,6 +1568,34 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LstI<T> { Nil, Cons(T, Lst<T>) }
 pub type Lst<T> = Rc<LstI<T>>;
+
+// FFI string marshalling (REQ-LLL-042, DEC-LLL-045): a llmlang string is a List[Int]
+// of Unicode codepoints (DEC-LLL-030); an `= extern … as …` shim crosses it to/from
+// Rust `String`/`&str`. Return (Rust→llmlang) is total. The param path fail-stops on
+// a non-scalar codepoint — a boundary backstop, provably dead when the input is a real
+// string (literal or FFI-returned), mirroring verified array bounds under FFI.
+fn __lll_str_to_rust(xs: &Lst<i64>) -> String {
+    let mut s = String::new();
+    let mut cur = xs.clone();
+    loop {
+        match &*cur {
+            LstI::Nil => break,
+            LstI::Cons(c, t) => {
+                s.push(char::from_u32(*c as u32)
+                    .expect("FFI boundary: List[Int]->String has a non-Unicode-scalar codepoint"));
+                cur = t.clone();
+            }
+        }
+    }
+    s
+}
+fn __lll_str_of_rust(s: &str) -> Lst<i64> {
+    let mut acc: Lst<i64> = Rc::new(LstI::Nil);
+    for c in s.chars().rev() {
+        acc = Rc::new(LstI::Cons(c as i64, acc));
+    }
+    acc
+}
 
 // Verified array (REQ-LLL-037): an Rc-shared Vec — O(1) indexing, structural
 // sharing on read; `set` (a later slice) uses Rc::make_mut for in-place-if-unique.

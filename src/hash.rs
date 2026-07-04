@@ -269,7 +269,26 @@ fn build_op_tokens(
                 .and_then(|root| dep_version.get(root))
                 .map(|v| format!("@{v}"))
                 .unwrap_or_default();
-            let with_bind = format!("{sig}|{bind}{ver}");
+            // an explicit foreign signature `as (…) -> …` is behaviourally significant
+            // (a `(&str)->String` binding emits different machine code than
+            // `(String)->String`), so its NORMALIZED plan folds into the def-hash too
+            // (REQ-LLL-042, DEC-LLL-045 #3). An all-identity clause (only i64/bool)
+            // normalizes to empty ⇒ identical to no clause — no over-discrimination.
+            let foreign = op
+                .extern_foreign
+                .as_ref()
+                .filter(|fs| {
+                    fs.params
+                        .iter()
+                        .chain(std::iter::once(&fs.ret))
+                        .any(|f| matches!(f, Foreign::RString | Foreign::RStr))
+                })
+                .map(|fs| {
+                    let ps: Vec<&str> = fs.params.iter().map(|f| f.token()).collect();
+                    format!(" as ({})->{}", ps.join(","), fs.ret.token())
+                })
+                .unwrap_or_default();
+            let with_bind = format!("{sig}|{bind}{ver}{foreign}");
             op_def.insert(key, blake3::hash(with_bind.as_bytes()).to_hex().to_string());
         }
     }

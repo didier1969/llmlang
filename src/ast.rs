@@ -65,6 +65,45 @@ pub struct OpSig {
     /// = an abort op (return type `Never`) or a builtin-interpreted op.
     #[serde(default)]
     pub extern_path: Option<String>,
+    /// Explicit foreign Rust signature `as (T,…) -> R` on an `= extern` op
+    /// (REQ-LLL-042, DEC-LLL-045). `None` = the identity mapping (Int↔i64, Bool↔bool,
+    /// List[Int]↔`Lst<i64>` as-is). When present, the typed shim marshals each
+    /// position (e.g. `List[Int]` ↔ Rust `String`/`&str`); the NORMALIZED plan folds
+    /// into the def-hash (a `(&str)->String` binding differs from `(String)->String`).
+    #[serde(default)]
+    pub extern_foreign: Option<ForeignSig>,
+}
+
+/// A foreign Rust type at the FFI boundary (REQ-LLL-042, DEC-LLL-045). v1 set: the
+/// identity scalars (`i64`/`bool`) and the string pair (owned `String` / borrowed
+/// `&str`), which marshal to/from a llmlang `List[Int]` of Unicode codepoints
+/// (DEC-LLL-030). Richer foreign types (`Result<_,_>`, `Vec<u8>`, sized ints) are a
+/// later slice (038e) and are rejected at check with a clear message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Foreign {
+    I64,
+    Bool,
+    RString,
+    RStr,
+}
+
+impl Foreign {
+    /// The surface token (also the canonical hash token): `i64`/`bool`/`String`/`str`.
+    pub fn token(&self) -> &'static str {
+        match self {
+            Foreign::I64 => "i64",
+            Foreign::Bool => "bool",
+            Foreign::RString => "String",
+            Foreign::RStr => "str",
+        }
+    }
+}
+
+/// The foreign Rust signature declared by an `as (T,…) -> R` clause (REQ-LLL-042).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignSig {
+    pub params: Vec<Foreign>,
+    pub ret: Foreign,
 }
 
 /// A user algebraic data type `type Name = C1(T…) | C2 | …` (REQ-LLL-011).

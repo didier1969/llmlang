@@ -194,6 +194,51 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             if let Some(path) = &op.extern_path {
                 validate_extern_path(&ed.name, &op.name, path, &declared_crates)?;
             }
+            // foreign-signature guard (REQ-LLL-042, DEC-LLL-045): an `as (T,…) -> R`
+            // clause must be positional (arity match) and every (llmlang, foreign)
+            // pair must be a v1 marshalling pair; a foreign `&str` return is rejected
+            // (a borrowed return needs a lifetime — 038e).
+            if let Some(fs) = &op.extern_foreign {
+                if fs.params.len() != op.params.len() {
+                    return Err(format!(
+                        "effect `{}` op `{}`: the `as` clause declares {} foreign parameter(s) but \
+                         the operation has {} — the foreign signature is positional",
+                        ed.name,
+                        op.name,
+                        fs.params.len(),
+                        op.params.len()
+                    ));
+                }
+                for (i, (llt, f)) in op.params.iter().zip(&fs.params).enumerate() {
+                    if !foreign_marshal_ok(llt, f) {
+                        return Err(format!(
+                            "effect `{}` op `{}`: parameter {i} of llmlang type `{llt}` cannot \
+                             marshal to foreign `{}` (v1 pairs: Int↔i64, Bool↔bool, \
+                             List[Int]↔String/str)",
+                            ed.name,
+                            op.name,
+                            f.token()
+                        ));
+                    }
+                }
+                if matches!(fs.ret, Foreign::RStr) {
+                    return Err(format!(
+                        "effect `{}` op `{}`: a foreign `&str` return is unsupported in v1 (a \
+                         borrowed return needs a lifetime; use `String` — REQ-LLL-038 / 038e)",
+                        ed.name, op.name
+                    ));
+                }
+                if !foreign_marshal_ok(&op.ret, &fs.ret) {
+                    return Err(format!(
+                        "effect `{}` op `{}`: return of llmlang type `{}` cannot marshal from \
+                         foreign `{}`",
+                        ed.name,
+                        op.name,
+                        op.ret,
+                        fs.ret.token()
+                    ));
+                }
+            }
             // op kinds (REQ-LLL-022 + REQ-LLL-026 item 2): an ABORT op (`-> Never`,
             // no binding), an EXTERN op (`= extern "path"`, value return), or a
             // USER TAIL-RESUMPTIVE op (value return, no binding — DEC-LLL-037).
@@ -379,6 +424,19 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
         Ty::Int | Ty::Bool => true,
         Ty::List(e) => valid_field_ty(e, types),
         Ty::User(n) => types.contains(n),
+        _ => false,
+    }
+}
+
+/// v1 FFI marshalling pairs (REQ-LLL-042, DEC-LLL-045): which llmlang type a foreign
+/// Rust type may cross the boundary as. `List[Int]` is the codepoint string of
+/// DEC-LLL-030 (so only a list OF `Int` marshals to a Rust `String`/`&str`); `Int`
+/// and `Bool` are the identity scalars.
+fn foreign_marshal_ok(llt: &Ty, f: &Foreign) -> bool {
+    match (llt, f) {
+        (Ty::Int, Foreign::I64) => true,
+        (Ty::Bool, Foreign::Bool) => true,
+        (Ty::List(e), Foreign::RString | Foreign::RStr) => **e == Ty::Int,
         _ => false,
     }
 }

@@ -25,10 +25,25 @@ fn main() {
 /// parts that wrap these calls (the trust guard).
 fn ffi_import(file: &str, effect: &str, prefix: &str) -> Result<String, String> {
     let src = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
-    let map_ty = |t: &str| -> Option<&'static str> {
+    // Rust type → (llmlang type, foreign token) — REQ-LLL-042. A string type carries a
+    // real foreign token, which forces an explicit `as` clause; i64/bool/() are
+    // llmlang-native (empty token). `&str`/`String` map to the codepoint `List[Int]`.
+    let map_param = |t: &str| -> Option<(&'static str, &'static str)> {
         match t.trim() {
-            "i64" => Some("Int"),
-            "bool" => Some("Bool"),
+            "i64" => Some(("Int", "i64")),
+            "bool" => Some(("Bool", "bool")),
+            "&str" => Some(("List[Int]", "str")),
+            "String" => Some(("List[Int]", "String")),
+            _ => None,
+        }
+    };
+    let map_ret = |t: &str| -> Option<(&'static str, &'static str)> {
+        match t.trim() {
+            "()" => Some(("Unit", "")),
+            "i64" => Some(("Int", "i64")),
+            "bool" => Some(("Bool", "bool")),
+            "String" => Some(("List[Int]", "String")),
+            // a `&str` return (lifetime) or a richer type is a later slice (038e)
             _ => None,
         }
     };
@@ -70,12 +85,16 @@ fn ffi_import(file: &str, effect: &str, prefix: &str) -> Result<String, String> 
         } else {
             "()".to_string()
         };
-        let mut llt_params: Vec<&str> = Vec::new();
+        let mut ll_params: Vec<&str> = Vec::new();
+        let mut fpar: Vec<&str> = Vec::new();
         let mut ok = true;
         if !params_str.is_empty() {
             for p in params_str.split(',') {
-                match p.split_once(':').and_then(|(_, t)| map_ty(t)) {
-                    Some(m) => llt_params.push(m),
+                match p.split_once(':').and_then(|(_, t)| map_param(t)) {
+                    Some((ll, f)) => {
+                        ll_params.push(ll);
+                        fpar.push(f);
+                    }
                     None => {
                         ok = false;
                         break;
@@ -83,22 +102,35 @@ fn ffi_import(file: &str, effect: &str, prefix: &str) -> Result<String, String> 
                 }
             }
         }
-        let llt_ret = if ret_ty == "()" {
-            Some("Unit")
-        } else {
-            map_ty(&ret_ty)
-        };
-        match (ok, llt_ret) {
-            (true, Some(r)) => ops.push(format!(
-                "    {name}({}) -> {r} = extern \"{prefix}::{name}\"",
-                llt_params.join(", ")
-            )), // 4-space indent = op level inside a module-body effect block
+        match (ok, map_ret(&ret_ty)) {
+            (true, Some((llret, fret))) => {
+                // a string type anywhere forces an `as` clause covering EVERY position
+                // (REQ-LLL-042). A Unit return has no Foreign to name, so a
+                // string-param fn returning `()` is inexpressible in v1 → skip (038e).
+                let needs_as =
+                    fpar.iter().any(|f| *f == "str" || *f == "String") || fret == "String";
+                if needs_as && fret.is_empty() {
+                    skipped.push(name.to_string());
+                } else if needs_as {
+                    ops.push(format!(
+                        "    {name}({}) -> {llret} = extern \"{prefix}::{name}\" as ({}) -> {fret}",
+                        ll_params.join(", "),
+                        fpar.join(", ")
+                    ));
+                } else {
+                    ops.push(format!(
+                        "    {name}({}) -> {llret} = extern \"{prefix}::{name}\"",
+                        ll_params.join(", ")
+                    )); // 4-space indent = op level inside a module-body effect block
+                }
+            }
             _ => skipped.push(name.to_string()),
         }
     }
     if ops.is_empty() {
         return Err(format!(
-            "no mappable `pub fn` signatures in {file} (mappable: i64→Int, bool→Bool, ()→Unit)"
+            "no mappable `pub fn` signatures in {file} (mappable: i64→Int, bool→Bool, ()→Unit, \
+             &str/String→List[Int])"
         ));
     }
     // Emitted at module-body indentation (effect at 2 spaces, ops at 4) so it

@@ -181,6 +181,30 @@ impl Parser {
     }
 
     /// `effect Name:` + one `op(T, …) -> Ret` per indented line (REQ-LLL-018).
+    /// A foreign Rust type inside an `as (…) -> …` clause (REQ-LLL-042, DEC-LLL-045).
+    /// v1 accepts the bare idents `i64`, `bool`, `String`, `str` (no `&` token in the
+    /// lexer → `str` means `&str`). Anything else — notably `Result<_,_>`, whose ident
+    /// `Result` lands here — is rejected with a clear v1 message (guards against a
+    /// silent unwrap that would drop an I/O error, the 038e sum-marshalling gap).
+    fn foreign_ty(&mut self) -> Result<Foreign, String> {
+        match self.bump() {
+            Tok::Ident(k) => match k.as_str() {
+                "i64" => Ok(Foreign::I64),
+                "bool" => Ok(Foreign::Bool),
+                "String" => Ok(Foreign::RString),
+                "str" => Ok(Foreign::RStr),
+                other => Err(self.err(&format!(
+                    "unsupported foreign type `{other}` in an `as` clause — v1 supports `i64`, \
+                     `bool`, `String`, `str`. Rich foreign types (`Result<_, _>`, `Vec<u8>`, sized \
+                     ints) are a later slice (REQ-LLL-038 / 038e)"
+                ))),
+            },
+            other => Err(self.err(&format!(
+                "expected a foreign Rust type in the `as` clause, found {other:?}"
+            ))),
+        }
+    }
+
     fn effect_decl(&mut self) -> Result<EffectDecl, String> {
         self.eat(Tok::Effect)?;
         let name = self.ident()?;
@@ -227,8 +251,30 @@ impl Parser {
             } else {
                 None
             };
+            // optional explicit foreign Rust signature `as (T,…) -> R` (REQ-LLL-042,
+            // DEC-LLL-045) — declares the boundary marshalling for rich types.
+            let extern_foreign = if extern_path.is_some()
+                && matches!(self.peek(), Tok::Ident(k) if k == "as")
+            {
+                self.pos += 1;
+                self.eat(Tok::LParen)?;
+                let mut fparams = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    fparams.push(self.foreign_ty()?);
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        fparams.push(self.foreign_ty()?);
+                    }
+                }
+                self.eat(Tok::RParen)?;
+                self.eat(Tok::Arrow)?;
+                let fret = self.foreign_ty()?;
+                Some(ForeignSig { params: fparams, ret: fret })
+            } else {
+                None
+            };
             self.eat(Tok::Newline)?;
-            ops.push(OpSig { name: opname, params, ret, extern_path });
+            ops.push(OpSig { name: opname, params, ret, extern_path, extern_foreign });
         }
         if ops.is_empty() {
             return Err(self.err("effect with no operations"));
