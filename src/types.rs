@@ -101,17 +101,8 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate part `{}`", p.name));
         }
     }
-    // typeclasses (REQ-LLL-048, DEC-LLL-047): the surface parses (slice A inc.1),
-    // but instance type-checking and the GROUND law-check VC land in the next
-    // increments. Until then reject rather than silently accept an unchecked
-    // instance — an unsound instance must never pass `check` (GUI-LLL-001).
-    if !module.classes.is_empty() || !module.instances.is_empty() {
-        return Err(
-            "typeclasses parse but are not yet checked past the surface (REQ-LLL-048 slice A, \
-             inc.2+): instance type-checking and the ground law-check are not implemented yet"
-                .to_string(),
-        );
-    }
+    // typeclasses are registered and their instances type-checked lower down, just
+    // before CheckedModule is returned (REQ-LLL-048 slice A inc.2).
     // user ADTs (REQ-LLL-011): register types + constructors, then validate
     let mut type_names: HashSet<String> = HashSet::new();
     for td in &module.types {
@@ -515,6 +506,122 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         recursion.insert(part.name.clone(), rec);
     }
+    // typeclasses (REQ-LLL-048, DEC-LLL-047): register classes, then type-check each
+    // instance's methods at its GROUND type (the class variable substituted by the
+    // instance type). The ground law-check VC is inc.3 — so a well-typed instance is
+    // still not accepted yet, but a MIS-typed one is now rejected precisely.
+    let mut class_map: HashMap<String, &Class> = HashMap::new();
+    for c in &module.classes {
+        if !c.tyvar.chars().next().is_some_and(|ch| ch.is_lowercase()) {
+            return Err(format!(
+                "class `{}`: the class type variable `{}` must be a lowercase name",
+                c.name, c.tyvar
+            ));
+        }
+        let mut mnames: HashSet<&str> = HashSet::new();
+        for (mn, mparams, mret) in &c.methods {
+            if !mnames.insert(mn.as_str()) {
+                return Err(format!("class `{}`: duplicate method `{mn}`", c.name));
+            }
+            for t in mparams.iter().chain(std::iter::once(mret)) {
+                check_user_ty_declared(t, &type_names)?;
+            }
+        }
+        if class_map.insert(c.name.clone(), c).is_some() {
+            return Err(format!("duplicate class `{}`", c.name));
+        }
+    }
+    for inst in &module.instances {
+        let class: &Class = class_map.get(&inst.class).copied().ok_or_else(|| {
+            format!(
+                "instance for `{}`: unknown class — declare it with `class {}[a]:`",
+                inst.class, inst.class
+            )
+        })?;
+        if !inst.ty.is_concrete() {
+            return Err(format!(
+                "instance `{}[{}]`: the instantiation type must be concrete (ground) — an \
+                 instance cannot itself be generic (DEC-LLL-047)",
+                inst.class, inst.ty
+            ));
+        }
+        check_user_ty_declared(&inst.ty, &type_names)?;
+        let provided: HashSet<&str> = inst.defs.iter().map(|(n, _)| n.as_str()).collect();
+        if provided.len() != inst.defs.len() {
+            return Err(format!(
+                "instance `{}[{}]`: a method is defined more than once",
+                inst.class, inst.ty
+            ));
+        }
+        for (mn, _, _) in &class.methods {
+            if !provided.contains(mn.as_str()) {
+                return Err(format!(
+                    "instance `{}[{}]`: missing method `{mn}` required by class `{}`",
+                    inst.class, inst.ty, inst.class
+                ));
+            }
+        }
+        for (mn, body) in &inst.defs {
+            let method = class.methods.iter().find(|(cmn, _, _)| cmn == mn).ok_or_else(|| {
+                format!(
+                    "instance `{}[{}]`: `{mn}` is not a method of class `{}`",
+                    inst.class, inst.ty, inst.class
+                )
+            })?;
+            // ground-instantiate the method signature (DEC-LLL-047: instantiate,
+            // never quantify) and require the concrete body to have exactly that type.
+            let gparams: Vec<Ty> =
+                method.1.iter().map(|t| subst_tyvar(t, &class.tyvar, &inst.ty)).collect();
+            let gret = subst_tyvar(&method.2, &class.tyvar, &inst.ty);
+            let want = Ty::Fun(gparams, Box::new(gret));
+            let synth = Part {
+                name: format!("<instance {}[{}].{mn}>", inst.class, inst.ty),
+                params: Vec::new(),
+                ret: Ty::Unit,
+                effects: Vec::new(),
+                requires: Vec::new(),
+                ensures: Vec::new(),
+                measure: Vec::new(),
+                body: Vec::new(),
+                line: inst.line,
+                origin: None,
+            };
+            let mut ctx = Ctx {
+                module: &module,
+                index: &index,
+                ctors: &ctors,
+                part: &synth,
+                all_binders: HashSet::new(),
+                vars: vec![HashMap::new()],
+                smaller: vec![HashMap::new()],
+                rec_calls: Vec::new(),
+                effect_ops: &effect_ops,
+                handled: Vec::new(),
+                effect_generic: &effect_generic,
+                user_tail_effects: &user_tail_effects,
+                ambient_effects: &ambient_effects,
+                captureless: false,
+            };
+            let got = check_expr(&mut ctx, body, None)?;
+            if got != want {
+                return Err(format!(
+                    "instance `{}[{}]`: method `{mn}` has type `{got}` but the class requires `{want}`",
+                    inst.class, inst.ty
+                ));
+            }
+        }
+    }
+    // the ground law-check VC (REQ-LLL-048 slice A inc.3, DEC-LLL-047) is not emitted
+    // yet — a well-typed instance is not accepted until its laws are proven at the
+    // ground type. Reject here (soundly) rather than pass an unproven instance.
+    if !module.classes.is_empty() || !module.instances.is_empty() {
+        return Err(
+            "typeclasses type-check but the ground law-check is not implemented yet \
+             (REQ-LLL-048 slice A inc.3) — instances are not accepted until their laws are proven"
+                .to_string(),
+        );
+    }
+
     // effect-monomorphization worklist (DEC-LLL-038): collected after checking,
     // when every call site is known valid.
     let instantiations = collect_instantiations(&module, &index, &effect_generic);
@@ -539,6 +646,28 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
         Ty::List(e) => valid_field_ty(e, types),
         Ty::User(n) => types.contains(n),
         _ => false,
+    }
+}
+
+/// Ground-instantiate a class method signature by replacing the class type
+/// variable `var` with the concrete instance type `with` (REQ-LLL-048,
+/// DEC-LLL-047 — a class is instantiated GROUND, never left quantified).
+fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
+    match t {
+        Ty::Var(a) if a == var => with.clone(),
+        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => t.clone(),
+        Ty::List(e) => Ty::List(Box::new(subst_tyvar(e, var, with))),
+        Ty::Array(e) => Ty::Array(Box::new(subst_tyvar(e, var, with))),
+        Ty::Set(e) => Ty::Set(Box::new(subst_tyvar(e, var, with))),
+        Ty::Map(k, v) => Ty::Map(
+            Box::new(subst_tyvar(k, var, with)),
+            Box::new(subst_tyvar(v, var, with)),
+        ),
+        Ty::Fun(ps, r) => Ty::Fun(
+            ps.iter().map(|p| subst_tyvar(p, var, with)).collect(),
+            Box::new(subst_tyvar(r, var, with)),
+        ),
+        Ty::Tuple(cs) => Ty::Tuple(cs.iter().map(|c| subst_tyvar(c, var, with)).collect()),
     }
 }
 

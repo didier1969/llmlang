@@ -52,6 +52,26 @@ fn typeclass_surface_parses_class_instance_law() {
     assert!(types::check_module(m2).is_err(), "typeclasses must not pass check yet");
 }
 
+#[test]
+fn typeclass_instance_signature_is_checked_ground() {
+    // N1 (REQ-LLL-048 slice A inc.2) — an instance method whose type does not match
+    // the class method at the GROUND type (here wrong arity) is rejected precisely.
+    let bad = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int) -> true\n";
+    let m = parser::parse_module(bad).expect("parse");
+    let err = types::check_module(m).expect_err("mistyped instance must be rejected");
+    assert!(
+        err.contains("eq") && err.contains("requires"),
+        "expected a precise method-type error, got: {err}"
+    );
+
+    // a well-typed instance passes type-checking but is still not accepted until the
+    // ground law-check exists (inc.3) — the reject names that, not a type error.
+    let ok = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n";
+    let m2 = parser::parse_module(ok).expect("parse");
+    let err2 = types::check_module(m2).expect_err("no law-check yet");
+    assert!(err2.contains("law-check"), "expected the law-check-pending reject, got: {err2}");
+}
+
 // ---- determinism & identity (target 3) ----
 
 #[test]
