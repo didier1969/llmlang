@@ -1386,6 +1386,34 @@ fn verified_array_push_and_contains() {
 }
 
 #[test]
+fn empty_verified_array_infers_sort_from_context() {
+    // REQ-LLL-037 slice 3 prerequisite: an empty `array()` carries no element to read
+    // its type from, so the element sort is taken from the EXPECTED type threaded by
+    // the checker — the part return type at a `yield`, or a receiving parameter. The
+    // vc emits `(as seq.empty (Seq T))`; codegen emits an untyped `Rc::new(vec![])`
+    // that the target type coerces. Unblocks the empty-array literal and the Map slice.
+    let src = "module EmptyArr:\n\n  part empty() -> Array[Int]:\n    ensures length(result) == 0\n    yield array()\n\n  part sized(a: Array[Int]) -> Int:\n    yield length(a)\n\n  part main() -> Int via IO:\n    let a = empty()\n    let b = push(a, 7)\n    let x = IO.print(length(a))\n    let y = IO.print(sized(array()))\n    yield IO.print(get(b, 0))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "empty array with inferred sort must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("0\n0\n7"), "expected len(a)=0, sized(array())=0, get(b,0)=7; got: {out}");
+}
+
+#[test]
+fn empty_array_without_expected_type_is_a_compile_error() {
+    // Soundness of the inference: with nothing to fix the element sort (a bare `let`
+    // has no annotation), `array()` is rejected at type-check — never handed an
+    // arbitrary sort. Mirrors the empty list `[]` rule (REQ-LLL-007).
+    let src = "module NoCtx:\n\n  part main() -> Int via IO:\n    let a = array()\n    yield IO.print(length(a))\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).unwrap_err();
+    assert!(
+        err.contains("empty `array()`") && err.contains("expected"),
+        "empty array() with no expected type must be a compile error: {err}"
+    );
+}
+
+#[test]
 fn efficient_verified_isqrt_bisection_is_log_n() {
     // REQ-LLL-016 followup: a proof obligation does NOT force a slow algorithm. An
     // O(log n) bisection isqrt verifies — the loop invariant `lo*lo <= n < hi*hi`

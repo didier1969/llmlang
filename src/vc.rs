@@ -227,7 +227,7 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
     }
     // requires as hypotheses
     for r in &part.requires {
-        let t = em.tr(r, &env)?;
+        let t = em.tr(r, &env, None)?;
         em.hyps.push(t);
     }
     em.walk_body(&part.body, env)?;
@@ -300,7 +300,7 @@ impl<'a> Emit<'a> {
         for s in body {
             match s {
                 Stmt::Let(name, e) => {
-                    let t = self.tr(e, &env)?;
+                    let t = self.tr(e, &env, None)?;
                     if name != "_" {
                         env.insert(name.clone(), t);
                     }
@@ -312,16 +312,19 @@ impl<'a> Emit<'a> {
                     if let Expr::EffCall(name, args) = e {
                         if self.is_abort_op(name) {
                             for a in args {
-                                self.tr(a, &env)?;
+                                self.tr(a, &env, None)?;
                             }
                             continue;
                         }
                     }
-                    let t = self.tr(e, &env)?;
+                    // the return type is the expected type — an empty `array()` in
+                    // yield position reads its element sort off it (REQ-LLL-037).
+                    let ret = self.part.ret.clone();
+                    let t = self.tr(e, &env, Some(&ret))?;
                     let mut env2 = env.clone();
                     env2.insert("result".into(), t);
                     for (i, ens) in self.part.ensures.clone().iter().enumerate() {
-                        let goal = self.tr(ens, &env2)?;
+                        let goal = self.tr(ens, &env2, None)?;
                         self.oblige(
                             format!("ensures #{} holds at yield", i + 1),
                             goal,
@@ -329,7 +332,7 @@ impl<'a> Emit<'a> {
                     }
                 }
                 Stmt::Match(scrut, arms) => {
-                    let s_t = self.tr(scrut, &env)?;
+                    let s_t = self.tr(scrut, &env, None)?;
                     // element sort of a list scrutinee (to disambiguate `nil`)
                     let scrut_sort: Option<String> = self.sorts.get(&s_t).cloned();
                     let list_elem: Option<String> = scrut_sort
@@ -376,7 +379,7 @@ impl<'a> Emit<'a> {
                             let saved = self.hyps.len();
                             self.hyps.extend(prev_negs.iter().cloned());
                             self.hyps.push(cond.clone());
-                            let gt = self.tr(g, &env2)?;
+                            let gt = self.tr(g, &env2, None)?;
                             self.hyps.truncate(saved);
                             format!("(and {cond} {gt})")
                         } else {
@@ -398,7 +401,7 @@ impl<'a> Emit<'a> {
                     // result is havoc'd, so a handler choice can't affect the proof
                     // (REQ-LLL-018, DEC-LLL-017). The `return` binder takes the Ok-path
                     // result of the call; each op clause binder is a fresh symbolic.
-                    let call_term = self.tr(&h.call, &env)?;
+                    let call_term = self.tr(&h.call, &env, None)?;
                     for c in &h.clauses {
                         let mut env2 = env.clone();
                         if c.op == "return" {
@@ -438,7 +441,17 @@ impl<'a> Emit<'a> {
     /// Translate an expression to an SMT term, emitting side-condition
     /// obligations (div-by-zero, callee requires, measure decrease) and
     /// assumptions (callee ensures) along the way.
-    fn tr(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
+    /// `expected` threads the type demanded by the surrounding context (a `yield`
+    /// return type, a call-argument parameter, a constructor field, a tuple
+    /// component). It exists so an empty `array()` — which has no element to read
+    /// its sort from — emits `(as seq.empty (Seq T))` with the T fixed by context
+    /// (REQ-LLL-037), mirroring how the checker fixes the element type of `[]`.
+    fn tr(
+        &mut self,
+        e: &Expr,
+        env: &HashMap<String, String>,
+        expected: Option<&Ty>,
+    ) -> Result<String, String> {
         Ok(match e {
             Expr::Unit => "unit".to_string(),
             Expr::IntLit(v) => {
@@ -458,29 +471,35 @@ impl<'a> Emit<'a> {
             Expr::ListLit(items) => {
                 let mut t = "nil".to_string();
                 for i in items.iter().rev() {
-                    let it = self.tr(i, env)?;
+                    let it = self.tr(i, env, None)?;
                     t = format!("(cons {it} {t})");
                 }
                 t
             }
             Expr::Cons(h, t) => {
-                let hh = self.tr(h, env)?;
-                let tt = self.tr(t, env)?;
+                let hh = self.tr(h, env, None)?;
+                let tt = self.tr(t, env, None)?;
                 format!("(cons {hh} {tt})")
             }
             Expr::Tuple(items) => {
-                // `(tupN e0 … e{n-1})` — the free product constructor (DEC-LLL-036)
+                // `(tupN e0 … e{n-1})` — the free product constructor (DEC-LLL-036).
+                // Thread each expected component so an empty `array()` in a tuple slot
+                // fixes its element sort from the expected tuple type (REQ-LLL-037).
+                let comps: Option<&Vec<Ty>> = match expected {
+                    Some(Ty::Tuple(cs)) if cs.len() == items.len() => Some(cs),
+                    _ => None,
+                };
                 let mut ts = Vec::with_capacity(items.len());
-                for it in items {
-                    ts.push(self.tr(it, env)?);
+                for (i, it) in items.iter().enumerate() {
+                    ts.push(self.tr(it, env, comps.map(|cs| &cs[i]))?);
                 }
                 format!("(tup{} {})", items.len(), ts.join(" "))
             }
-            Expr::Neg(a) => format!("(- {})", self.tr(a, env)?),
-            Expr::Not(a) => format!("(not {})", self.tr(a, env)?),
+            Expr::Neg(a) => format!("(- {})", self.tr(a, env, None)?),
+            Expr::Not(a) => format!("(not {})", self.tr(a, env, None)?),
             Expr::Bin(op, a, b) => {
-                let ta = self.tr(a, env)?;
-                let tb = self.tr(b, env)?;
+                let ta = self.tr(a, env, None)?;
+                let tb = self.tr(b, env, None)?;
                 let f = crate::opsem::form(*op);
                 if f.nonzero_divisor {
                     // only div/mod set this flag (opsem is the single source)
@@ -493,9 +512,11 @@ impl<'a> Emit<'a> {
                 f.smt(&ta, &tb)
             }
             Expr::EffCall(name, args) => {
-                // IO.print returns its argument (deterministic value semantics)
+                // IO.print returns its argument (deterministic value semantics), so
+                // it passes the surrounding expected type straight through — an empty
+                // `array()` printed in a typed position keeps its sort (REQ-LLL-037).
                 if name == "IO.print" {
-                    self.tr(&args[0], env)?
+                    self.tr(&args[0], env, expected)?
                 } else if name == "IO.read" {
                     // IO.read: arbitrary Int from the world — havoc
                     self.fresh("Int")
@@ -504,7 +525,7 @@ impl<'a> Emit<'a> {
                     // cell / environment value is invisible to the pure-core proof, so
                     // havoc the result.
                     for a in args {
-                        self.tr(a, env)?;
+                        self.tr(a, env, None)?;
                     }
                     self.fresh("Int")
                 } else if let Some(op) = self.find_op(name) {
@@ -520,7 +541,7 @@ impl<'a> Emit<'a> {
                     // tail-resumptive: translate args (side-conditions), havoc result
                     let sort = smt_ty(&op.ret);
                     for a in args {
-                        self.tr(a, env)?;
+                        self.tr(a, env, None)?;
                     }
                     self.fresh(&sort)
                 } else {
@@ -536,23 +557,43 @@ impl<'a> Emit<'a> {
                 // verified array primitives via Z3 Seq (REQ-LLL-037, DEC-LLL-043)
                 match name.as_str() {
                     "array" => {
-                        let mut units = Vec::with_capacity(args.len());
-                        for a in args {
-                            units.push(format!("(seq.unit {})", self.tr(a, env)?));
-                        }
-                        match units.len() {
-                            0 => return Err("vcgen: empty array() has no element sort".into()),
-                            1 => units.into_iter().next().unwrap(),
-                            _ => format!("(seq.++ {})", units.join(" ")),
+                        if args.is_empty() {
+                            // empty array: the element sort comes from context, not
+                            // from an element. `(as seq.empty (Seq T))` is Z3's typed
+                            // empty sequence (REQ-LLL-037). The checker only lets an
+                            // empty `array()` reach a position with a fixed `Array[T]`,
+                            // so a missing expected here is an internal invariant break.
+                            match expected {
+                                Some(Ty::Array(el)) => {
+                                    format!("(as seq.empty (Seq {}))", smt_ty(el))
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "part `{}`: cannot infer the element type of the empty `array()` \
+                                         here — it needs an expected `Array[T]` from context (a `yield`, \
+                                         a call argument, or a typed field)",
+                                        self.part.name
+                                    ))
+                                }
+                            }
+                        } else {
+                            let mut units = Vec::with_capacity(args.len());
+                            for a in args {
+                                units.push(format!("(seq.unit {})", self.tr(a, env, None)?));
+                            }
+                            match units.len() {
+                                1 => units.into_iter().next().unwrap(),
+                                _ => format!("(seq.++ {})", units.join(" ")),
+                            }
                         }
                     }
                     "length" => {
-                        let a = self.tr(&args[0], env)?;
+                        let a = self.tr(&args[0], env, None)?;
                         format!("(seq.len {a})")
                     }
                     "get" => {
-                        let a = self.tr(&args[0], env)?;
-                        let i = self.tr(&args[1], env)?;
+                        let a = self.tr(&args[0], env, None)?;
+                        let i = self.tr(&args[1], env, None)?;
                         // BOUNDS obligation: 0 <= i < length(a). Discharged here → the
                         // panic branch of `a[i]` in codegen is provably dead in
                         // verified code (mirrors the div-by-zero obligation).
@@ -563,9 +604,16 @@ impl<'a> Emit<'a> {
                         format!("(seq.nth {a} {i})")
                     }
                     "set" => {
-                        let a = self.tr(&args[0], env)?;
-                        let i = self.tr(&args[1], env)?;
-                        let v = self.tr(&args[2], env)?;
+                        // set/push return the array type, so the whole call's expected
+                        // (`Array[elem]`) fixes the sort of an empty-array VALUE argument
+                        // pushed into an array of arrays (REQ-LLL-037).
+                        let elem = match expected {
+                            Some(Ty::Array(el)) => Some(el.as_ref()),
+                            _ => None,
+                        };
+                        let a = self.tr(&args[0], env, None)?;
+                        let i = self.tr(&args[1], env, None)?;
+                        let v = self.tr(&args[2], env, elem)?;
                         self.oblige(
                             "array index in bounds".into(),
                             format!("(and (<= 0 {i}) (< {i} (seq.len {a})))"),
@@ -579,13 +627,17 @@ impl<'a> Emit<'a> {
                         )
                     }
                     "push" => {
-                        let a = self.tr(&args[0], env)?;
-                        let v = self.tr(&args[1], env)?;
+                        let elem = match expected {
+                            Some(Ty::Array(el)) => Some(el.as_ref()),
+                            _ => None,
+                        };
+                        let a = self.tr(&args[0], env, None)?;
+                        let v = self.tr(&args[1], env, elem)?;
                         format!("(seq.++ {a} (seq.unit {v}))")
                     }
                     "contains" => {
-                        let a = self.tr(&args[0], env)?;
-                        let v = self.tr(&args[1], env)?;
+                        let a = self.tr(&args[0], env, None)?;
+                        let v = self.tr(&args[1], env, None)?;
                         format!("(seq.contains {a} (seq.unit {v}))")
                     }
                     _ => unreachable!("is_array_builtin covers array/length/get/set/push/contains"),
@@ -597,15 +649,17 @@ impl<'a> Emit<'a> {
                 if let Some(fsym) = env.get(name).cloned() {
                     let mut ts = Vec::new();
                     for a in args {
-                        ts.push(self.tr(a, env)?);
+                        ts.push(self.tr(a, env, None)?);
                     }
                     return Ok(format!("({fsym} {})", ts.join(" ")));
                 }
-                // ADT constructor application `(Ctor arg …)` (REQ-LLL-011)
-                if self.cm.ctors.contains_key(name) {
+                // ADT constructor application `(Ctor arg …)` (REQ-LLL-011) — thread
+                // each field type so an empty `array()` in a typed field fixes its
+                // element sort from the constructor signature (REQ-LLL-037).
+                if let Some((_, fields)) = self.cm.ctors.get(name).cloned() {
                     let mut ts = Vec::new();
-                    for a in args {
-                        ts.push(self.tr(a, env)?);
+                    for (i, a) in args.iter().enumerate() {
+                        ts.push(self.tr(a, env, fields.get(i))?);
                     }
                     return Ok(format!("({name} {})", ts.join(" ")));
                 }
@@ -623,7 +677,10 @@ impl<'a> Emit<'a> {
                             cenv.insert(pn.clone(), f);
                         }
                         _ => {
-                            let at = self.tr(a, env)?;
+                            // thread the parameter type so an empty `array()` passed
+                            // as a call argument takes its element sort from the
+                            // callee signature (REQ-LLL-037).
+                            let at = self.tr(a, env, Some(pt))?;
                             cenv.insert(pn.clone(), at);
                         }
                     }
@@ -712,7 +769,7 @@ impl<'a> Emit<'a> {
 
     /// Contracts contain no calls/effects (enforced by the checker) — pure translation.
     fn tr_contract(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
-        self.tr(e, env)
+        self.tr(e, env, None)
     }
 }
 

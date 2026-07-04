@@ -1744,13 +1744,22 @@ fn check_expr(
                         }
                         Ty::array(elem)
                     } else {
-                        // slice 1: array literals are non-empty (empty needs a sort the
-                        // vc/codegen can't infer without an expected type — deferred).
-                        return Err(format!(
-                            "part `{}`: empty `array()` is not supported yet (v1 slice 1) \
-                             — an array literal needs at least one element",
-                            ctx.part.name
-                        ));
+                        // empty array: element type comes from context (REQ-LLL-037),
+                        // exactly like the empty list `[]` (REQ-LLL-007). The checker
+                        // threads the expected type at yield / call-arg / field / tuple
+                        // positions; the vc reads the sort off it, so a bare `array()`
+                        // with nothing to fix the element type is a compile error.
+                        match expected {
+                            Some(Ty::Array(el)) => Ty::array((**el).clone()),
+                            _ => {
+                                return Err(format!(
+                                    "part `{}`: cannot infer the element type of the empty `array()` here \
+                                     — it must appear where its type is fixed (an expected `Array[T]`, \
+                                     e.g. a `yield`, a call argument, or a typed field)",
+                                    ctx.part.name
+                                ))
+                            }
+                        }
                     }
                 }
                 "length" => {
