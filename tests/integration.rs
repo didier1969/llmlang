@@ -2698,3 +2698,34 @@ fn non_bool_example_is_rejected() {
     let err = types::check_module(m).unwrap_err();
     assert!(err.contains("example clause must be Bool"), "wrong error: {err}");
 }
+
+#[test]
+fn true_example_verifies_statically() {
+    // REQ-LLL-049 inc.3: an exact contract entails the ground example — Z3
+    // discharges it via the same contract-firewall as any call site.
+    let report = verify_src(
+        "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3) == 5\n    example add(0, 0) == 0\n    yield x + y\n",
+    );
+    assert!(report.ok(), "true examples under an exact contract must verify");
+}
+
+#[test]
+fn false_example_is_rejected_statically() {
+    let report = verify_src(
+        "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3) == 6\n    yield x + y\n",
+    );
+    assert!(!report.ok(), "a false example must fail verification");
+}
+
+#[test]
+fn weak_contract_fails_to_discharge_the_example() {
+    // The operator's own problem statement (REQ-LLL-049 body): `ensures result
+    // >= 0` lets a buggy `yield 0` pass the NORMAL ensures obligation. The
+    // example is the fix — Z3 cannot derive `result == 5` from `result >= 0`
+    // alone, so the STATIC example obligation is undischarged (a weak contract
+    // is a compile error here, DEC-LLL-015: never a silent runtime downgrade).
+    let report = verify_src(
+        "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result >= 0\n    example add(2, 3) == 5\n    yield 0\n",
+    );
+    assert!(!report.ok(), "a weak contract must not let the example through");
+}

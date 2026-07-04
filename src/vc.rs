@@ -105,7 +105,8 @@ pub fn verify(
                 }
             }
         }
-        let obligations = gen_part_obligations(cm, part)?;
+        let mut obligations = gen_part_obligations(cm, part)?;
+        obligations.extend(gen_part_example_obligations(cm, part)?);
         let n = obligations.len();
         let t0 = std::time::Instant::now();
         let failures = discharge(&z3, &obligations, &dt_decls)?;
@@ -214,7 +215,18 @@ struct Emit<'a> {
     sorts: HashMap<String, String>,
 }
 
-pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Obligation>, String> {
+/// Shared preamble: declare the part's params (and `given` methods) as fresh
+/// symbolic SMT symbols, and push `requires` as hypotheses. Used both for the
+/// normal per-part obligations (body proof) and for ground `example` obligations
+/// (REQ-LLL-049 inc.3) — an example only needs this setup because its call to
+/// the part it documents goes through the SAME contract-firewall `Expr::Call`
+/// path as any other call site (declare-consts must exist for that call's
+/// `requires`/measure bookkeeping even though the example never reads `env`
+/// directly, since its arguments are literals, not the symbolic params).
+fn setup_part_emit<'a>(
+    cm: &'a CheckedModule,
+    part: &'a Part,
+) -> Result<(Emit<'a>, HashMap<String, String>), String> {
     let mut em = Emit {
         cm,
         part,
@@ -277,7 +289,40 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
         let t = em.tr(r, &env, None)?;
         em.hyps.push(t);
     }
+    Ok((em, env))
+}
+
+pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Obligation>, String> {
+    let (mut em, env) = setup_part_emit(cm, part)?;
     em.walk_body(&part.body, env)?;
+    Ok(em.obls)
+}
+
+/// Ground obligations for `example` clauses (REQ-LLL-049 inc.3). Each example
+/// is a self-contained ground Bool expression (checked ground-only by
+/// `check_examples`, types.rs) — translating it with `Emit::tr` reuses the
+/// EXACT SAME `Expr::Call` machinery as any other call site (prove `requires`,
+/// havoc the result, assume `ensures` — contract firewall). This is why a
+/// WEAK contract fails to compile here (the example's expected value is not
+/// entailed by a loose `ensures`) while a strong, exact contract lets Z3
+/// discharge it trivially — the STATIC half of the two checks REQ-LLL-049
+/// asks for; the DYNAMIC half (catching a codegen bug the contract can't see)
+/// is the `#[test]` emitted by codegen.rs (inc.4).
+pub fn gen_part_example_obligations(
+    cm: &CheckedModule,
+    part: &Part,
+) -> Result<Vec<Obligation>, String> {
+    let (mut em, env) = setup_part_emit(cm, part)?;
+    for (i, ex) in part.examples.iter().enumerate() {
+        let goal = em.tr(ex, &env, Some(&Ty::Bool))?;
+        em.obls.push(Obligation {
+            part: part.name.clone(),
+            descr: format!("example #{} holds for `{}`", i + 1, part.name),
+            decls: em.decls.clone(),
+            hyps: em.hyps.clone(),
+            goal,
+        });
+    }
     Ok(em.obls)
 }
 
