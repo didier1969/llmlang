@@ -3758,3 +3758,176 @@ fn optimizer_cse_shares_pure_alloc_subterm_and_preserves_semantics() {
     // hot(50) = sum(build 50) + len(build 50) = 1275 + 50.
     assert!(base_out.contains("1325"), "unexpected program result: {base_out:?}");
 }
+
+// ---- Token Sugar: implicit tail `yield` (REQ-LLL-057, CPT-LLL-003) ----
+// The `->` in a match arm / handle clause, and the tail statement of a block,
+// already mark a RESULT position, so the `yield` keyword is redundant surface.
+// Omitting it is a reversible shorthand: the parser inserts the identical
+// `Stmt::Yield`, so the compact and explicit texts build the SAME AST and hence
+// the SAME content-hash. Identity is on the canonical form (the AST), never the
+// surface text (DEC-LLL-020/001) — the non-negotiable REQ-LLL-057 invariant.
+
+/// Identity oracle: two sources are the SAME definition iff every def/contract/
+/// proof hash matches. This is what `lll hash` prints and what the proof cache
+/// keys on — strictly stronger than an AST `PartialEq` for the invariant.
+fn assert_same_identity(compact: &str, explicit: &str) {
+    let (_, hc) = full(compact);
+    let (_, he) = full(explicit);
+    assert_eq!(hc.def_hash, he.def_hash, "def-hash diverged (identity broken)");
+    assert_eq!(hc.contract_hash, he.contract_hash, "contract-hash diverged");
+    assert_eq!(hc.proof_hash, he.proof_hash, "proof-hash diverged");
+}
+
+#[test]
+fn token_sugar_implicit_yield_match_arm_same_identity_and_verifies() {
+    let explicit = "module T:\n\n  part fact(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= 1\n    measure n\n    match n:\n      0 -> yield 1\n      _ -> yield n * fact(n - 1)\n\n  part main() -> Int via IO:\n    yield IO.print(fact(10))\n";
+    let compact = "module T:\n\n  part fact(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= 1\n    measure n\n    match n:\n      0 -> 1\n      _ -> n * fact(n - 1)\n\n  part main() -> Int via IO:\n    IO.print(fact(10))\n";
+    // same AST (line structure is unchanged — only the `yield ` prefix is dropped)
+    assert_eq!(
+        parser::parse_module(compact).expect("parse compact"),
+        parser::parse_module(explicit).expect("parse explicit"),
+        "compact and explicit must build the identical AST"
+    );
+    assert_same_identity(compact, explicit);
+    // full Z3 verification (the bench oracle: `lll check` exit 0) on the compact form
+    let rep = verify_src(compact);
+    assert!(rep.ok(), "compact form must fully verify (all obligations discharged)");
+}
+
+#[test]
+fn token_sugar_implicit_yield_block_tail_same_identity() {
+    // a block whose tail statement is a bare expression = implicit `yield`
+    let explicit = "module T:\n\n  part inc(x: Int) -> Int:\n    let y = x + 1\n    yield y\n";
+    let compact = "module T:\n\n  part inc(x: Int) -> Int:\n    let y = x + 1\n    y\n";
+    assert_eq!(
+        parser::parse_module(compact).expect("parse compact"),
+        parser::parse_module(explicit).expect("parse explicit"),
+    );
+    assert_same_identity(compact, explicit);
+    assert!(verify_src(compact).ok());
+}
+
+#[test]
+fn token_sugar_implicit_yield_handle_clause_same_identity_and_verifies() {
+    let explicit = "module T:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part safeDiv(a: Int, b: Int) -> Int via Exc:\n    match b == 0:\n      true -> yield Exc.raise(a)\n      false -> yield a div b\n\n  part run(a: Int, b: Int) -> Int:\n    handle safeDiv(a, b) with Exc:\n      raise(m) -> yield 0 - m\n      return r -> yield r\n\n  part main() -> Int via IO:\n    let x = run(10, 2)\n    let y = run(10, 0)\n    yield IO.print(x + y)\n";
+    let compact = "module T:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part safeDiv(a: Int, b: Int) -> Int via Exc:\n    match b == 0:\n      true -> Exc.raise(a)\n      false -> a div b\n\n  part run(a: Int, b: Int) -> Int:\n    handle safeDiv(a, b) with Exc:\n      raise(m) -> 0 - m\n      return r -> r\n\n  part main() -> Int via IO:\n    let x = run(10, 2)\n    let y = run(10, 0)\n    IO.print(x + y)\n";
+    assert_eq!(
+        parser::parse_module(compact).expect("parse compact"),
+        parser::parse_module(explicit).expect("parse explicit"),
+    );
+    assert_same_identity(compact, explicit);
+    assert!(verify_src(compact).ok());
+}
+
+#[test]
+fn token_sugar_explicit_yield_still_parses_unchanged() {
+    // additive superset: every existing explicit-yield program is untouched.
+    let (_, h_gcd) = full(GCD);
+    assert!(h_gcd.def_hash.contains_key("gcd"));
+}
+
+#[test]
+fn token_sugar_compact_body_survives_structural_edit_locators() {
+    // Load-bearing for the yield-only tranche: implicit `yield` touches only part
+    // BODIES, never the `part <name>` header, so the textual structural-edit
+    // locators (rename / move / dedup) must still locate AND preserve a compact
+    // definition. This converts that justification from claim to fact.
+    let compact = "module T:\n\n  part fact(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= 1\n    measure n\n    match n:\n      0 -> 1\n      _ -> n * fact(n - 1)\n\n  part main() -> Int via IO:\n    IO.print(fact(5))\n";
+    let (_, hm0) = full(compact);
+    let fact0 = hm0.def_hash["fact"].clone();
+
+    // (1) `rename` (used by lll rename) is a token-boundary name rewrite: renaming
+    //     `fact` -> `factorial` (def, recursive self-call, and the call in main) on
+    //     the COMPACT text must preserve identity.
+    let renamed = hash::rename_part_in_source(compact, "fact", "factorial").expect("rename");
+    let (_, hm1) = full(&renamed);
+    assert_eq!(
+        hm1.def_hash["factorial"], fact0,
+        "rename changed identity on a compact (yield-less) file"
+    );
+
+    // (2) `extract_part_block` (used by lll move / dedup --merge) bounds a def by its
+    //     `part <name>` header + indentation — the yield-elided body leaves that
+    //     intact, so it must still locate the block and keep the compact body verbatim.
+    let (block, stripped) = hash::extract_part_block(compact, "fact").expect("locate compact def");
+    assert!(block.contains("part fact"), "extracted block must be the fact definition");
+    assert!(block.contains("_ -> n * fact"), "block keeps the compact (yield-less) body verbatim");
+    assert!(!stripped.contains("part fact"), "stripped source no longer defines fact");
+}
+
+#[test]
+fn rational_arithmetic_proves_over_z3_real_and_reduces_at_runtime() {
+    // REQ-LLL-054 (DEC-LLL-051/042): the exact `Rational` type. Add/sub/mul contracts
+    // are discharged by Z3's NATIVE `Real` theory (LRA, exact) — no new SMT theory —
+    // and the SAME canonical value is produced by the runtime `Rat` reducer, so the
+    // verified model and the compiled binary agree (model≡binary, DEC-LLL-020).
+    let (cm, _hm) = full(
+        "module Rat.Ex:\n\n  \
+         part dbl(x: Rational) -> Rational:\n    \
+         ensures result == x + x\n    \
+         example dbl(0.5) == 1.0\n    \
+         yield 2.0 * x\n\n  \
+         part diff(x: Rational, y: Rational) -> Rational:\n    \
+         ensures result == x - y\n    \
+         example diff(0.5, 1.0) == -0.5\n    \
+         yield x - y\n\n  \
+         part main() -> Int:\n    yield 0\n",
+    );
+    // PROOF SIDE: Z3 `Real` discharges `2*x == x+x` (distributivity) and the ground
+    // examples — a real theorem, not a syntactic identity.
+    let dir = tempdir();
+    let hm = hash::hash_module(&cm).expect("hash");
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "Rational contracts must verify over Z3 Real: {:?}", failures(&report));
+    // the SMT sort is the native Real (no invented theory)
+    // BINARY SIDE: compile the emitted crate as tests and run the example `#[test]`s.
+    // `dbl(0.5)` computes 2/1 * 1/2 = 2/2, which MUST reduce to 1/1 to match `1.0`;
+    // `diff(0.5, 1.0)` yields -1/2 with the sign on the numerator (den > 0). This is
+    // the reducer exercise the proof alone cannot cover.
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    assert!(rust.contains("pub struct Rat"), "runtime Rat type must be emitted");
+    let rs = dir.join("rat.rs");
+    let bin = dir.join("rat_test");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["--test", "--edition", "2021", "-C", "overflow-checks=on", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "Rational codegen failed:\n{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "runtime example tests failed:\n{so}\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(so.contains("2 passed") && so.contains("0 failed"), "both reducer examples must pass: {so}");
+}
+
+#[test]
+fn rational_has_no_implicit_coercion_and_defers_division() {
+    // DEC-LLL-051: conversion Int↔Rational is EXPLICIT, never implicit. Mixed-type
+    // arithmetic is a type error (not a silent widen), and division/modulo on
+    // Rational is a later slice — rejected now with a clear message (v1: + - * only).
+    let mixed = "module M:\n\n  part f(x: Rational, n: Int) -> Rational:\n    yield x + n\n";
+    let err = types::check_module(parser::parse_module(mixed).expect("parse"))
+        .expect_err("mixed Int/Rational arithmetic must be a type error");
+    assert!(err.contains("two Int or two Rational"), "no implicit coercion: {err}");
+
+    let divr = "module M:\n\n  part g(x: Rational, y: Rational) -> Rational:\n    yield x div y\n";
+    let err = types::check_module(parser::parse_module(divr).expect("parse"))
+        .expect_err("Rational division is deferred");
+    assert!(err.contains("not supported yet"), "division deferred with a clear message: {err}");
+}
+
+#[test]
+fn rational_literals_are_canonical_by_value() {
+    // REQ-LLL-054: a decimal literal parses straight to a REDUCED fraction (never a
+    // float), so two surface spellings of the same value are the SAME definition —
+    // identity by content-hash (DEC-LLL-020). `3.5`, `3.50` and `7/2` all hash alike.
+    let mk = |lit: &str| {
+        let src = format!("module M:\n\n  part c() -> Rational:\n    yield {lit}\n");
+        let (cm, _) = full(&src);
+        hash::hash_module(&cm).unwrap().def_hash["c"].clone()
+    };
+    assert_eq!(mk("3.5"), mk("3.50"), "3.5 and 3.50 reduce to the same 7/2 → same hash");
+    assert_ne!(mk("3.5"), mk("3.6"), "distinct values must hash differently");
+}

@@ -481,7 +481,9 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         Expr::Lambda(ps, body) => {
             Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
         }
-        Expr::Var(_) | Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
+        Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit => {
+            e.clone()
+        }
     })
 }
 
@@ -497,7 +499,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
 fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
     match e {
         Expr::Var(n) => map.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
-        Expr::IntLit(_) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
         Expr::Bin(op, a, b) => {
             Expr::Bin(*op, Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map)))
         }
@@ -537,6 +539,11 @@ fn smt_ty(t: &Ty) -> String {
     match t {
         Ty::Int => "Int".to_string(),
         Ty::Bool => "Bool".to_string(),
+        // an exact rational proves over Z3's native `Real` theory (LRA, exact) —
+        // NO new SMT theory invented (REQ-LLL-054, DEC-LLL-042/051). `+ - * =` are
+        // already overloaded across Int/Real in SMT-LIB, so the operator forms in
+        // opsem.rs render correctly for both with no per-type branching.
+        Ty::Rational => "Real".to_string(),
         Ty::Var(a) => format!("Tv_{a}"),
         Ty::List(e) => format!("(Lst {})", smt_ty(e)),
         // a verified array uses Z3's Seq theory: `seq.len` is the native length the
@@ -761,6 +768,23 @@ impl<'a> Emit<'a> {
                     format!("(- {})", -v)
                 } else {
                     format!("{v}")
+                }
+            }
+            // an exact rational literal as a Z3 `Real`: `(/ num.0 den.0)`, or `num.0`
+            // when den == 1 (REQ-LLL-054). Already gcd-reduced (den ≥ 1); the SMT
+            // value is exact (LRA), matching the canonical runtime `Rat` (DEC-LLL-020).
+            Expr::RatLit(num, den) => {
+                let real = |k: i64| {
+                    if k < 0 {
+                        format!("(- {}.0)", k.unsigned_abs())
+                    } else {
+                        format!("{k}.0")
+                    }
+                };
+                if *den == 1 {
+                    real(*num)
+                } else {
+                    format!("(/ {} {})", real(*num), real(*den))
                 }
             }
             Expr::BoolLit(v) => format!("{v}"),

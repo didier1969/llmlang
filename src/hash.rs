@@ -486,6 +486,9 @@ impl<'a> Norm<'a> {
         match e {
             Expr::Unit => "(unit)".to_string(),
             Expr::IntLit(v) => format!("{v}"),
+            // canonical (reduced) fraction → identity by value: `3.5` and `3.50`
+            // hash the same (REQ-LLL-054, DEC-LLL-020). Distinct shape from IntLit.
+            Expr::RatLit(n, d) => format!("(rat {n} {d})"),
             Expr::BoolLit(v) => format!("{v}"),
             Expr::Var(n) => match self.db(n) {
                 Some(i) => format!("%{i}"),
@@ -599,7 +602,7 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tyvars(c, acc);
             }
         }
-        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -609,6 +612,7 @@ fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
     match t {
         Ty::Int => "Int".to_string(),
         Ty::Bool => "Bool".to_string(),
+        Ty::Rational => "Rational".to_string(),
         Ty::Var(a) => rename.get(a).cloned().unwrap_or_else(|| a.clone()),
         Ty::List(e) => format!("List[{}]", canon_ty(e, rename)),
         Ty::Array(e) => format!("Array[{}]", canon_ty(e, rename)),

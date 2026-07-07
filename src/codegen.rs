@@ -542,6 +542,9 @@ fn rs_ty(t: &Ty) -> String {
     match t {
         Ty::Int => "i64".to_string(),
         Ty::Bool => "bool".to_string(),
+        // exact rational → the runtime `Rat` i64-pair (REQ-LLL-054): a Copy value
+        // type (by-value like Int/Bool, not heap), so borrow/clone handling is uniform.
+        Ty::Rational => "Rat".to_string(),
         // a type variable becomes a Rust generic parameter — rustc monomorphizes
         // each instantiation into static-dispatch code (DEC-LLL-018: C speed).
         Ty::Var(a) => tv_param(a),
@@ -646,6 +649,7 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
         }
         Ty::Int => "i64".to_string(),
         Ty::Bool => "bool".to_string(),
+        Ty::Rational => "Rat".to_string(),
     }
 }
 
@@ -788,7 +792,7 @@ fn collect_key_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_key_tvars(c, acc);
             }
         }
-        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
+        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -817,7 +821,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tvars(c, acc);
             }
         }
-        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => {}
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -1776,6 +1780,10 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
     Ok(match e {
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => format!("{v}i64"),
+        // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already
+        // gcd-reduced at parse; `Rat::new` re-normalizes idempotently so the runtime
+        // form is byte-identical to the Z3 `Real` value (model≡binary, DEC-LLL-020).
+        Expr::RatLit(n, d) => format!("Rat::new({n}i64, {d}i64)"),
         Expr::BoolLit(v) => format!("{v}"),
         Expr::Var(n) => {
             if cx.ctors.contains(n) {
@@ -2071,6 +2079,46 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LstI<T> { Nil, Cons(T, Lst<T>) }
 pub type Lst<T> = Rc<LstI<T>>;
+
+// Exact rational number `Rational` (REQ-LLL-054, DEC-LLL-051/042): a Copy i64 pair
+// kept in CANONICAL form — gcd-reduced with `den > 0` — so equality is structural
+// (`derive(PartialEq)`) and agrees exactly with Z3's `Real` value equality (the
+// model≡binary invariant, DEC-LLL-020). `Ord`/`PartialOrd` are intentionally NOT
+// derived: lexicographic (num,den) order is NOT the value order, and comparisons are
+// a later slice. Arithmetic uses plain `+ - *`, so it fail-stops on i64 overflow
+// under the same `overflow-checks` discipline as Int (DEC-LLL-026) — never wraps.
+fn __lll_gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 { let t = b; b = a % b; a = t; }
+    a
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rat { pub num: i64, pub den: i64 }
+impl Rat {
+    // Reduce to canonical form. Mirrors `ast::reduce_rat` in the compiler EXACTLY so a
+    // literal and its runtime value coincide; `den` is non-zero by construction.
+    pub fn new(num: i64, den: i64) -> Rat {
+        let (mut n, mut d) = (num, den);
+        if d < 0 { n = -n; d = -d; }
+        let g = __lll_gcd(n.unsigned_abs(), d.unsigned_abs()).max(1) as i64;
+        Rat { num: n / g, den: d / g }
+    }
+}
+impl std::ops::Add for Rat {
+    type Output = Rat;
+    fn add(self, o: Rat) -> Rat { Rat::new(self.num * o.den + o.num * self.den, self.den * o.den) }
+}
+impl std::ops::Sub for Rat {
+    type Output = Rat;
+    fn sub(self, o: Rat) -> Rat { Rat::new(self.num * o.den - o.num * self.den, self.den * o.den) }
+}
+impl std::ops::Mul for Rat {
+    type Output = Rat;
+    fn mul(self, o: Rat) -> Rat { Rat::new(self.num * o.num, self.den * o.den) }
+}
+impl std::ops::Neg for Rat {
+    type Output = Rat;
+    fn neg(self) -> Rat { Rat { num: -self.num, den: self.den } } // canonical preserved
+}
 
 // FFI string marshalling (REQ-LLL-042, DEC-LLL-045): a llmlang string is a List[Int]
 // of Unicode codepoints (DEC-LLL-030); an `= extern … as …` shim crosses it to/from

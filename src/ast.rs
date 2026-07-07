@@ -262,6 +262,13 @@ pub struct Part {
 pub enum Ty {
     Int,
     Bool,
+    /// An exact rational number `Rational` (REQ-LLL-054, DEC-LLL-051/042): a pair of
+    /// integers num/den, always kept in canonical form (gcd-reduced, den > 0), so a
+    /// value has a unique representation. Proven via Z3's native `Real` theory (LRA,
+    /// exact — NO new SMT theory invented), runtime as a `Rat{num,den}` i64 pair with
+    /// the SAME fail-stop overflow discipline as `Int` (DEC-LLL-026). Distinct from a
+    /// future `Float` (REQ-LLL-055) — no implicit coercion to/from `Int` ever.
+    Rational,
     Var(String),
     List(Box<Ty>),
     /// A verified array `Array[T]` (REQ-LLL-037, DEC-LLL-043): O(1) indexed access
@@ -320,7 +327,7 @@ impl Ty {
     /// True when the type mentions no type variable (fully concrete).
     pub fn is_concrete(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => true,
+            Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => true,
             Ty::Var(_) => false,
             Ty::List(e) | Ty::Array(e) => e.is_concrete(),
             Ty::Map(k, v) => k.is_concrete() && v.is_concrete(),
@@ -336,6 +343,7 @@ impl std::fmt::Display for Ty {
         match self {
             Ty::Int => write!(f, "Int"),
             Ty::Bool => write!(f, "Bool"),
+            Ty::Rational => write!(f, "Rational"),
             Ty::Var(a) => write!(f, "{a}"),
             Ty::List(e) => write!(f, "List[{e}]"),
             Ty::Array(e) => write!(f, "Array[{e}]"),
@@ -482,6 +490,12 @@ pub fn is_set_spec_term(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     IntLit(i64),
+    /// A rational literal `num/den` in canonical form (REQ-LLL-054): always built
+    /// via [`reduce_rat`] so `num`/`den` are gcd-reduced with `den > 0`. Surface form
+    /// is a decimal literal (`3.5` ⇒ `7/2`) parsed straight to a reduced fraction —
+    /// NEVER via a float intermediate (DEC-LLL-051). Two decimals denoting the same
+    /// value (`3.50`, `3.5`) reduce to the SAME pair, hence the same content-hash.
+    RatLit(i64, i64),
     BoolLit(bool),
     Var(String),
     ListLit(Vec<Expr>),
@@ -522,5 +536,52 @@ impl Expr {
             Expr::Lambda(_, body) => body.walk(f),
             _ => {}
         }
+    }
+}
+
+/// Euclid's gcd on unsigned magnitudes. `gcd(0, d) = d`, so a zero numerator
+/// reduces to `0/1`. Total.
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Reduce a rational to canonical form: gcd-reduced with denominator `> 0`, so a
+/// value has a unique `(num, den)` (REQ-LLL-054, DEC-LLL-051). This is the SINGLE
+/// definition of the reduction rule — the same algorithm is emitted into generated
+/// Rust (`Rat::new`) so the verified model (Z3 `Real`, inherently canonical) and the
+/// compiled binary agree on equality (the model≡binary invariant, DEC-LLL-020).
+///
+/// `den` must be non-zero — a decimal literal has `den = 10^k ≥ 1` by construction,
+/// and any future explicit `rational(n, d)` constructor carries a `d ≠ 0` proof
+/// obligation before it reaches here.
+pub fn reduce_rat(num: i64, den: i64) -> (i64, i64) {
+    debug_assert!(den != 0, "reduce_rat: zero denominator");
+    let (mut n, mut d) = (num, den);
+    if d < 0 {
+        // normalize the sign onto the numerator so `den > 0` is the canonical form
+        n = -n;
+        d = -d;
+    }
+    let g = gcd_u64(n.unsigned_abs(), d.unsigned_abs()).max(1) as i64;
+    (n / g, d / g)
+}
+
+#[cfg(test)]
+mod rat_tests {
+    use super::reduce_rat;
+
+    #[test]
+    fn reduces_and_normalizes_sign() {
+        assert_eq!(reduce_rat(35, 10), (7, 2)); // 3.5
+        assert_eq!(reduce_rat(4, 4), (1, 1)); // 2/1 * 1/2 intermediate
+        assert_eq!(reduce_rat(0, 7), (0, 1)); // zero → 0/1
+        assert_eq!(reduce_rat(3, -6), (-1, 2)); // sign onto numerator, den > 0
+        assert_eq!(reduce_rat(-3, -6), (1, 2));
+        assert_eq!(reduce_rat(6, 3), (2, 1));
     }
 }

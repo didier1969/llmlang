@@ -9,6 +9,10 @@ pub enum Tok {
     Dedent,
     // literals & names
     Int(i64),
+    /// Decimal literal `3.5`, already reduced to a canonical fraction `(num, den)`
+    /// (REQ-LLL-054, DEC-LLL-051): parsed straight to an exact rational, never via a
+    /// float. `den` is always `≥ 1` (a power of ten, gcd-reduced against the digits).
+    Dec(i64, i64),
     /// double-quoted string (imports only in v1.2; no escapes)
     Str(String),
     Ident(String),
@@ -231,10 +235,32 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                 while i < b.len() && b[i].is_ascii_digit() {
                     i += 1;
                 }
-                let n: i64 = s[start..i]
-                    .parse()
-                    .map_err(|_| format!("line {line}: integer literal out of range"))?;
-                push(out, Tok::Int(n));
+                // A decimal literal `<digits>.<digits>` (REQ-LLL-054, DEC-LLL-051):
+                // only when a DIGIT follows the dot, so a qualified name (`IO.print`,
+                // letter after dot — handled in `lex_word`) and a bare `.` stay
+                // untouched. Parsed to an exact, gcd-reduced fraction — never a float.
+                if i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
+                    let int_part = &s[start..i];
+                    let frac_start = i + 1;
+                    i += 1;
+                    while i < b.len() && b[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    let frac_part = &s[frac_start..i];
+                    let num: i64 = format!("{int_part}{frac_part}")
+                        .parse()
+                        .map_err(|_| format!("line {line}: decimal literal out of range"))?;
+                    let den: i64 = 10i64.checked_pow(frac_part.len() as u32).ok_or_else(|| {
+                        format!("line {line}: decimal literal too precise (denominator exceeds i64)")
+                    })?;
+                    let (rn, rd) = crate::ast::reduce_rat(num, den);
+                    push(out, Tok::Dec(rn, rd));
+                } else {
+                    let n: i64 = s[start..i]
+                        .parse()
+                        .map_err(|_| format!("line {line}: integer literal out of range"))?;
+                    push(out, Tok::Int(n));
+                }
             }
             '_' => {
                 // bare underscore = wildcard; _foo = identifier

@@ -1,0 +1,30 @@
+module Rational.Demo:
+
+  # Exact rational arithmetic (REQ-LLL-054, DEC-LLL-051/042). The `Rational` type
+  # is fractions num/den kept in canonical form (gcd-reduced, den > 0), proven via
+  # Z3's NATIVE `Real` theory (LRA, exact) — no new SMT theory invented. Decimal
+  # literals parse straight to a reduced fraction (`3.5` ⇒ 7/2), never via a float.
+
+  # Distributivity over ℚ: doubling equals self-addition. Z3 `Real` discharges
+  # `2 * x == x + x` — a real theorem, not a syntactic identity. The `example`
+  # re-checks it at runtime (2/1 * 1/2 = 2/2, which the reducer must fold to 1/1),
+  # so proof and binary are pinned to the SAME canonical value (DEC-LLL-020).
+  part dbl(x: Rational) -> Rational:
+    ensures result == x + x
+    example dbl(0.5) == 1.0
+    yield 2.0 * x
+
+  # Associativity over ℚ, discharged by Z3 `Real` (a genuine rearrangement).
+  part assoc3(a: Rational, b: Rational, c: Rational) -> Rational:
+    ensures result == a + (b + c)
+    example assoc3(0.25, 0.5, 0.25) == 1.0
+    yield (a + b) + c
+
+  # Subtraction with sign normalization: 1/2 - 1 reduces to -1/2 (den > 0).
+  part diff(x: Rational, y: Rational) -> Rational:
+    ensures result == x - y
+    example diff(0.5, 1.0) == -0.5
+    yield x - y
+
+  part main() -> Int:
+    yield 0

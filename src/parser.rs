@@ -11,6 +11,29 @@
 use crate::ast::*;
 use crate::lexer::{lex, Sp, Tok};
 
+/// True when `t` can begin an expression — the leading tokens accepted by
+/// `atom`/`unary_expr`/`not_expr`. Used to recognize an implicit tail `yield`
+/// (Token Sugar, REQ-LLL-057): after `->`, or as a block's tail statement, a bare
+/// expression is shorthand for `yield <expr>`. This set is disjoint from the
+/// statement keywords (`let`/`match`/`handle`/`yield`) and every layout token, so
+/// the shorthand is unambiguous — a bare expression can only mean an implicit yield.
+fn starts_expr(t: &Tok) -> bool {
+    matches!(
+        t,
+        Tok::Int(_)
+            | Tok::True
+            | Tok::False
+            | Tok::Str(_)
+            | Tok::Backslash
+            | Tok::LParen
+            | Tok::LBracket
+            | Tok::Dotted(_)
+            | Tok::Ident(_)
+            | Tok::Minus
+            | Tok::KwNot
+    )
+}
+
 pub struct Parser {
     toks: Vec<Sp>,
     pos: usize,
@@ -701,6 +724,19 @@ impl Parser {
                         clauses,
                     }));
                 }
+                // Token Sugar (REQ-LLL-057, CPT-LLL-003): a bare tail expression is
+                // shorthand for `yield <expr>`. The block's result position makes the
+                // `yield` keyword redundant; the parser reinstates the identical
+                // `Stmt::Yield`, so the compact and explicit texts build the SAME AST
+                // and hence the SAME content-hash (identity is on the canonical form,
+                // never the surface text — DEC-LLL-020/001).
+                t if starts_expr(t) => {
+                    let e = self.expr()?;
+                    if self.peek() == &Tok::Newline {
+                        self.pos += 1;
+                    }
+                    out.push(Stmt::Yield(e));
+                }
                 _ => break,
             }
         }
@@ -710,8 +746,36 @@ impl Parser {
         Ok(out)
     }
 
+    /// The body after a `->` in a match arm or handle clause: an indented block,
+    /// or an inline result. The inline result is explicit `yield <expr>` OR — Token
+    /// Sugar, REQ-LLL-057 — a bare `<expr>` whose elided `yield` the parser
+    /// reinstates. Both spellings build the identical `Stmt::Yield`.
+    fn arrow_body(&mut self) -> Result<Vec<Stmt>, String> {
+        if self.peek() == &Tok::Newline {
+            self.pos += 1;
+            self.eat(Tok::Indent)?;
+            let b = self.block_stmts()?;
+            self.eat(Tok::Dedent)?;
+            return Ok(b);
+        }
+        if self.peek() == &Tok::Yield {
+            self.pos += 1;
+        } else if !starts_expr(self.peek()) {
+            return Err(self.err(&format!(
+                "expected `yield`, an inline expression, or an indented block after `->`, found {:?}",
+                self.peek()
+            )));
+        }
+        let e = self.expr()?;
+        if self.peek() == &Tok::Newline {
+            self.pos += 1;
+        }
+        Ok(vec![Stmt::Yield(e)])
+    }
+
     /// One clause of a `handle`: `op(b1, …) -> body`, or `return r -> body`
-    /// (the mandatory value clause). Body is inline `yield e` or an indented block.
+    /// (the mandatory value clause). Body is inline `yield e`, an inline bare
+    /// expression (implicit `yield`, REQ-LLL-057), or an indented block.
     fn handle_clause(&mut self) -> Result<HandleClause, String> {
         let op = if self.peek() == &Tok::Return {
             self.pos += 1;
@@ -735,28 +799,7 @@ impl Parser {
             params.push(self.ident()?);
         }
         self.eat(Tok::Arrow)?;
-        let body = match self.peek() {
-            Tok::Yield => {
-                self.pos += 1;
-                let e = self.expr()?;
-                if self.peek() == &Tok::Newline {
-                    self.pos += 1;
-                }
-                vec![Stmt::Yield(e)]
-            }
-            Tok::Newline => {
-                self.pos += 1;
-                self.eat(Tok::Indent)?;
-                let b = self.block_stmts()?;
-                self.eat(Tok::Dedent)?;
-                b
-            }
-            other => {
-                return Err(self.err(&format!(
-                    "expected `yield` or indented block after `->`, found {other:?}"
-                )))
-            }
-        };
+        let body = self.arrow_body()?;
         Ok(HandleClause { op, params, body })
     }
 
@@ -769,25 +812,7 @@ impl Parser {
             None
         };
         self.eat(Tok::Arrow)?;
-        // inline single statement or indented block
-        let body = match self.peek() {
-            Tok::Yield => {
-                self.pos += 1;
-                let e = self.expr()?;
-                if self.peek() == &Tok::Newline {
-                    self.pos += 1;
-                }
-                vec![Stmt::Yield(e)]
-            }
-            Tok::Newline => {
-                self.pos += 1;
-                self.eat(Tok::Indent)?;
-                let b = self.block_stmts()?;
-                self.eat(Tok::Dedent)?;
-                b
-            }
-            other => return Err(self.err(&format!("expected `yield` or indented block after `->`, found {other:?}"))),
-        };
+        let body = self.arrow_body()?;
         Ok(Arm {
             pattern,
             guard,
@@ -873,6 +898,7 @@ impl Parser {
         match self.bump() {
             Tok::Ident(s) if s == "Int" => Ok(Ty::Int),
             Tok::Ident(s) if s == "Bool" => Ok(Ty::Bool),
+            Tok::Ident(s) if s == "Rational" => Ok(Ty::Rational),
             Tok::Ident(s) if s == "Never" => Ok(Ty::Never),
             Tok::Ident(s) if s == "Unit" => Ok(Ty::Unit),
             Tok::Ident(s) if s == "List" => {
@@ -1069,6 +1095,8 @@ impl Parser {
     fn atom(&mut self) -> Result<Expr, String> {
         match self.bump() {
             Tok::Int(n) => Ok(Expr::IntLit(n)),
+            // decimal literal already reduced by the lexer to a canonical fraction
+            Tok::Dec(num, den) => Ok(Expr::RatLit(num, den)),
             Tok::True => Ok(Expr::BoolLit(true)),
             Tok::False => Ok(Expr::BoolLit(false)),
             // string literal → list of Unicode scalar codepoints (REQ-LLL-010,

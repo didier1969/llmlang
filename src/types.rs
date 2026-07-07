@@ -833,7 +833,7 @@ fn ty_mentions_var(t: &Ty, v: &str) -> bool {
         Ty::Map(k, val) => ty_mentions_var(k, v) || ty_mentions_var(val, v),
         Ty::Fun(ps, r) => ps.iter().any(|p| ty_mentions_var(p, v)) || ty_mentions_var(r, v),
         Ty::Tuple(cs) => cs.iter().any(|c| ty_mentions_var(c, v)),
-        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => false,
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => false,
     }
 }
 
@@ -847,7 +847,7 @@ fn ty_uses_only_var(t: &Ty, only: &str) -> bool {
         Ty::Map(k, v) => ty_uses_only_var(k, only) && ty_uses_only_var(v, only),
         Ty::Fun(ps, r) => ps.iter().all(|p| ty_uses_only_var(p, only)) && ty_uses_only_var(r, only),
         Ty::Tuple(cs) => cs.iter().all(|c| ty_uses_only_var(c, only)),
-        Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => true,
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => true,
     }
 }
 
@@ -904,7 +904,9 @@ pub(crate) fn check_given_satisfied(
 pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
     match t {
         Ty::Var(a) if a == var => with.clone(),
-        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::User(_) | Ty::Never | Ty::Unit => t.clone(),
+        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {
+            t.clone()
+        }
         Ty::List(e) => Ty::List(Box::new(subst_tyvar(e, var, with))),
         Ty::Array(e) => Ty::Array(Box::new(subst_tyvar(e, var, with))),
         Ty::Set(e) => Ty::Set(Box::new(subst_tyvar(e, var, with))),
@@ -1780,6 +1782,7 @@ fn type_of_pure(
     Ok(match e {
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
+        Expr::RatLit(..) => Ty::Rational,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::Tuple(items) => {
             // a tuple in a contract: component-wise (enables tuple equality in
@@ -1816,10 +1819,12 @@ fn type_of_pure(
             })
         }).ok_or_else(|| format!("unknown variable `{n}`"))?,
         Expr::Neg(a) => {
-            if type_of_pure(a, vars, result, ctors)? != Ty::Int {
-                return Err("negation needs Int".into());
+            // negation preserves the numeric type — Int or Rational (REQ-LLL-054)
+            match type_of_pure(a, vars, result, ctors)? {
+                Ty::Int => Ty::Int,
+                Ty::Rational => Ty::Rational,
+                other => return Err(format!("negation needs Int or Rational, got {other}")),
             }
-            Ty::Int
         }
         Expr::Not(a) => {
             if type_of_pure(a, vars, result, ctors)? != Ty::Bool {
@@ -1959,8 +1964,21 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
         OpClass::IntArith => {
             if ta == Ty::Int && tb == Ty::Int {
                 Ok(Ty::Int)
+            } else if ta == Ty::Rational && tb == Ty::Rational {
+                // Rational arithmetic (REQ-LLL-054): `+ - *` in this slice. Division /
+                // modulo on rationals is a later increment, so reject them here via
+                // opsem's SINGLE-SOURCE divisor flag (true only for div/mod) — no
+                // duplicated operator knowledge. Mixed Int/Rational is NOT allowed:
+                // there is no implicit coercion (DEC-LLL-051, "explicit, never inferred").
+                if crate::opsem::form(op).nonzero_divisor {
+                    Err("division/modulo on Rational is not supported yet (v1 Rational: + - * only)".into())
+                } else {
+                    Ok(Ty::Rational)
+                }
             } else {
-                Err(format!("arithmetic needs Int operands, got {ta} and {tb}"))
+                Err(format!(
+                    "arithmetic needs two Int or two Rational operands, got {ta} and {tb}"
+                ))
             }
         }
         OpClass::IntCmp => {
@@ -1995,7 +2013,7 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
 /// are flexible; the argument's own type variables (the caller's) are rigid.
 fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), String> {
     match (pat, arg) {
-        (Ty::Int, Ty::Int) | (Ty::Bool, Ty::Bool) => Ok(()),
+        (Ty::Int, Ty::Int) | (Ty::Bool, Ty::Bool) | (Ty::Rational, Ty::Rational) => Ok(()),
         (Ty::Var(v), _) => match subst.get(v) {
             Some(bound) if bound == arg => Ok(()),
             Some(bound) => Err(format!(
@@ -2035,6 +2053,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
     match t {
         Ty::Int => Ty::Int,
         Ty::Bool => Ty::Bool,
+        Ty::Rational => Ty::Rational,
         Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
         Ty::User(n) => Ty::User(n.clone()),
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
@@ -2412,6 +2431,7 @@ fn check_expr(
     Ok(match e {
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
+        Expr::RatLit(..) => Ty::Rational,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::Tuple(items) => {
             // propagate an expected tuple type component-wise so an empty list
@@ -2484,10 +2504,17 @@ fn check_expr(
             }
         },
         Expr::Neg(a) => {
-            if check_expr(ctx, a, None)? != Ty::Int {
-                return Err(format!("part `{}`: negation needs Int", ctx.part.name));
+            // negation preserves the numeric type — Int or Rational (REQ-LLL-054)
+            match check_expr(ctx, a, None)? {
+                Ty::Int => Ty::Int,
+                Ty::Rational => Ty::Rational,
+                other => {
+                    return Err(format!(
+                        "part `{}`: negation needs Int or Rational, got {other}",
+                        ctx.part.name
+                    ))
+                }
             }
-            Ty::Int
         }
         Expr::Not(a) => {
             if check_expr(ctx, a, None)? != Ty::Bool {
