@@ -978,7 +978,7 @@ pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
 /// Validate a named foreign-enum `as` clause (REQ-LLL-056, umbrella REQ-LLL-052).
 /// v1 (tranche-1) gates `serde_json::Value` and its 4 simple variants {Null, Bool,
 /// String, Number}, mapped BY NAME to the constructors of a user ADT. Any other path,
-/// an Array/Object (DEFERRED), an unknown variant, a wrong ctor payload shape, a
+/// an Object (DEFERRED), an unknown variant, a wrong ctor payload shape, a
 /// duplicate mapping, or an ADT constructor left unmapped is a COMPILE error — never a
 /// silent mis-mapping (DEC-LLL-015). Full coverage (every ADT ctor mapped) keeps the
 /// generated IN match exhaustive, so a value round-trips both ways.
@@ -1040,11 +1040,23 @@ fn check_json_enum(
                 (fields.len() == 1 && fields[0] == Ty::list(Ty::Int), "one `List[Int]` field")
             }
             "Number" => (fields.len() == 1 && fields[0] == Ty::Int, "one `Int` field"),
-            "Array" | "Object" => {
+            // Array (REQ-LLL-060 tranche-1): a JSON array round-trips as a `List[Self]`
+            // — the ctor carries exactly one field of the SAME ADT wrapped in a list, so
+            // each element recurses through the same by-name marshaller. A different
+            // element type would have no marshalling arm, so `List[Self]` is required.
+            "Array" => (
+                fields.len() == 1 && fields[0] == Ty::list(Ty::User(td.name.clone())),
+                "one `List[Self]` field (a list of the same JSON ADT)",
+            ),
+            // Object stays DEFERRED: a JSON object needs Map-typed ctor fields, which
+            // `valid_field_ty` forbids today. Relaxing it broadens the language surface
+            // (every ADT would gain Map fields), so it is a DISTINCT decision + child REQ,
+            // never folded into this slice (REQ-LLL-056, umbrella REQ-LLL-052).
+            "Object" => {
                 return Err(format!(
-                    "effect `{eff}` op `{op}`: serde_json::Value variant `{rustv}` is DEFERRED in \
-                     v1 — Array/Object need a recursive List/Map marshaller at the boundary \
-                     (REQ-LLL-056, umbrella REQ-LLL-052)"
+                    "effect `{eff}` op `{op}`: serde_json::Value variant `Object` is DEFERRED in \
+                     v1 — a JSON object needs Map-typed constructor fields (a `valid_field_ty` \
+                     relaxation tracked as its own decision), REQ-LLL-056 umbrella REQ-LLL-052"
                 ))
             }
             other => {

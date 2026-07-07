@@ -186,7 +186,17 @@ fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
              panic!(\"FFI boundary: serde_json Number `{{__n}}` is not an integer (Float is \
              unsupported in v1 — DEC-LLL-051)\")))), "
         ),
-        _ => unreachable!("checker restricts a serde_json::Value arm to Null/Bool/String/Number"),
+        // Array (REQ-LLL-060): each element recurses through the enclosing `__json_out`
+        // local fn, building a `List[Self]` in source order (cons the reversed Vec).
+        "Array" => format!(
+            "{path}::Array(__arr) => Rc::new({ei}::{ctor}({{ \
+             let mut __acc: Lst<Rc<{ei}>> = Rc::new(LstI::Nil); \
+             for __e in __arr.into_iter().rev() {{ \
+             __acc = Rc::new(LstI::Cons(__json_out(__e), __acc)); }} __acc }})), "
+        ),
+        _ => unreachable!(
+            "checker restricts a serde_json::Value arm to Null/Bool/String/Number/Array"
+        ),
     }
 }
 
@@ -200,7 +210,20 @@ fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
         "Bool" => format!("{ei}::{ctor}(__b) => {path}::Bool(*__b), "),
         "String" => format!("{ei}::{ctor}(__s) => {path}::String(__lll_str_to_rust(__s)), "),
         "Number" => format!("{ei}::{ctor}(__x) => {path}::from(*__x), "),
-        _ => unreachable!("checker restricts a serde_json::Value arm to Null/Bool/String/Number"),
+        // Array (REQ-LLL-060): walk the `List[Self]`, recursing each element through the
+        // enclosing `__json_in` local fn, collecting into a `Vec<Value>` in source order.
+        "Array" => format!(
+            "{ei}::{ctor}(__lst) => {path}::Array({{ \
+             let mut __v: Vec<{path}> = Vec::new(); \
+             let mut __cur = __lst.clone(); \
+             loop {{ match &*__cur {{ \
+             LstI::Nil => break, \
+             LstI::Cons(__h, __t) => {{ __v.push(__json_in(&**__h)); __cur = __t.clone(); }} }} }} \
+             __v }}), "
+        ),
+        _ => unreachable!(
+            "checker restricts a serde_json::Value arm to Null/Bool/String/Number/Array"
+        ),
     }
 }
 
@@ -326,7 +349,12 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                             let ei = format!("{n}I");
                             let marms: String =
                                 arms.iter().map(|(r, c)| json_in_arm(path, r, &ei, c)).collect();
-                            format!("match &*__a{i} {{ {marms}}}")
+                            // a local recursive fn so an Array arm can recurse into itself
+                            // (REQ-LLL-060); the ADT ctors are fully covered → exhaustive.
+                            format!(
+                                "{{ fn __json_in(__j: &{ei}) -> {path} {{ match __j {{ {marms}}} }} \
+                                 __json_in(&*__a{i}) }}"
+                            )
                         }
                         other => marshal_arg(i, other),
                     })
@@ -392,10 +420,13 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                         let ei = format!("{n}I");
                         let marms: String =
                             arms.iter().map(|(r, c)| json_out_arm(path, r, &ei, c)).collect();
+                        // a local recursive fn so an Array arm can recurse into itself
+                        // (REQ-LLL-060); an UNDECLARED variant (e.g. Object) fail-stops.
                         format!(
-                            "match {call} {{ {marms}__other => panic!(\"FFI boundary: \
-                             serde_json::Value variant {{__other:?}} is unsupported in v1 \
-                             (Array/Object deferred — REQ-LLL-056)\") }}"
+                            "{{ fn __json_out(__v: {path}) -> Rc<{ei}> {{ match __v {{ {marms}\
+                             __other => panic!(\"FFI boundary: serde_json::Value variant \
+                             {{__other:?}} is unsupported in v1 (Object deferred — REQ-LLL-056)\") \
+                             }} }} __json_out({call}) }}"
                         )
                     }
                     _ => call,

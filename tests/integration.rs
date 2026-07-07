@@ -3593,6 +3593,43 @@ fn ffi_json_round_trips_all_four_variants_via_cargo() {
 }
 
 #[test]
+fn ffi_json_nested_array_round_trips_via_cargo() {
+    // REQ-LLL-060: the RECURSIVE marshaller round-trips a NESTED JSON array through real
+    // serde_json (`echo`, identity). `Json` is self-recursive (`JArr` carries `List[Json]`).
+    // A value [[1, 2], 3] crosses OUT (llmlang→serde, the IN marshaller builds a nested
+    // `Vec<Value>`) and back IN (serde→llmlang, the OUT marshaller rebuilds a nested
+    // `List[Json]`), proving the local recursive fn walks arbitrary depth in BOTH
+    // directions. Extraction is fixed-depth (non-recursive helpers) so no measure is needed.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_json");
+    let map = "enum serde_json::Value [ Null -> JNull, Number -> JNum, Array -> JArr ]";
+    let src = format!(
+        "depends ffi_json \"1.0.0\" from \"{fixture}\"\ndepends serde_json \"1.0.150\"\n\nmodule JsonNested:\n\n  type Json = JNull | JNum(Int) | JArr(List[Json])\n\n  effect J:\n    echo(Json) -> Json = extern \"ffi_json::echo\" as ({map}) -> {map}\n\n  part unarr(j: Json) -> List[Json]:\n    match j:\n      JArr(xs) -> yield xs\n      JNull    -> yield []\n      JNum(n)  -> yield []\n\n  part unnum(j: Json) -> Int:\n    match j:\n      JNum(n)  -> yield n\n      JNull    -> yield 0 - 1\n      JArr(xs) -> yield 0 - 2\n\n  part hd(xs: List[Json]) -> Json:\n    match xs:\n      []     -> yield JNull\n      h :: t -> yield h\n\n  part tl(xs: List[Json]) -> List[Json]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield t\n\n  part main() -> Int via IO, J:\n    let inner = JArr(JNum(1) :: JNum(2) :: [])\n    let outer = JArr(inner :: JNum(3) :: [])\n    let back = J.echo(outer)\n    let elems = unarr(back)\n    let e0 = hd(elems)\n    let e1 = hd(tl(elems))\n    let inner_back = unarr(e0)\n    let a = unnum(hd(inner_back))\n    let b = unnum(hd(tl(inner_back)))\n    let c = unnum(e1)\n    yield IO.print(a * 100 + b * 10 + c)\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("json_nested.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "nested-array round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // [[1, 2], 3] survives OUT+IN: a=1, b=2, c=3  =>  1*100 + 2*10 + 3 = 123
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 123"),
+        "expected 123 (nested array round-tripped both ways), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn ffi_json_real_parse_and_serialize_round_trips_via_cargo() {
     // REQ-LLL-056: the STRONGEST round-trip — real serde_json serialize (`dump`, IN
     // marshalling) composed with real parse (`parse`, OUT marshalling). `dump(JNum(9))`
@@ -3655,15 +3692,30 @@ fn ffi_json_non_integer_number_fails_stop_not_silently_truncated() {
 }
 
 #[test]
-fn ffi_json_array_variant_is_deferred_compile_error() {
-    // REQ-LLL-056: Array/Object are DEFERRED (they need a recursive List/Map marshaller
-    // that does not exist yet). Mapping one is a COMPILE error — never a silent partial.
+fn ffi_json_object_variant_is_deferred_compile_error() {
+    // REQ-LLL-060: Array is now supported (List[Self], see the recursive round-trip test);
+    // Object stays DEFERRED — it needs Map-typed ctor fields, a `valid_field_ty` relaxation
+    // tracked as its own decision. Mapping Object is a COMPILE error — never a silent partial.
+    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadObj:\n\n  type Json = JNull | JObj\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull, Object -> JObj ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an Object mapping must be rejected");
+    assert!(
+        err.contains("DEFERRED") && err.contains("Object"),
+        "expected an Object-deferred error, got: {err}"
+    );
+}
+
+#[test]
+fn ffi_json_array_mapping_requires_list_self_field() {
+    // REQ-LLL-060: an `Array` ctor must carry exactly one `List[Self]` field (a list of the
+    // SAME JSON ADT), so each element recurses through the same by-name marshaller. A ctor
+    // with the wrong payload (here: no field) is a COMPILE error — never a silent mis-mapping.
     let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadArr:\n\n  type Json = JNull | JArr\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull, Array -> JArr ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
     let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("an Array mapping must be rejected");
+    let err = types::check_module(m).expect_err("an ill-shaped Array ctor must be rejected");
     assert!(
-        err.contains("DEFERRED") && err.contains("Array"),
-        "expected an Array-deferred error, got: {err}"
+        err.contains("List[Self]"),
+        "expected a List[Self]-shape error, got: {err}"
     );
 }
 
