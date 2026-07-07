@@ -1490,7 +1490,7 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     s
 }
 
-fn run_z3(z3: &Path, script: &str) -> Result<String, String> {
+pub(crate) fn run_z3(z3: &Path, script: &str) -> Result<String, String> {
     let mut child = Command::new(z3)
         .arg("-in")
         .stdin(Stdio::piped())

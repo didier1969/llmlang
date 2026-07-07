@@ -119,6 +119,17 @@ pub enum Foreign {
     /// Param and return position; each element fail-stops if outside 0..=255
     /// (parse-don't-validate, DEC-LLL-045) rather than silently truncating.
     Bytes,
+    /// A foreign Rust enum marshalled BY NAME (REQ-LLL-056, umbrella REQ-LLL-052):
+    /// the `as enum <path> [ RustVariant -> LllCtor, … ]` clause maps each Rust
+    /// variant NAME to a llmlang ADT constructor — NEVER positionally, so a variant
+    /// outside the mapping is a COMPILE error, never a silent mis-mapping (the worst
+    /// bug for a verified language — DEC-LLL-015, fail-stop-jamais-silencieux). v1
+    /// (tranche-1) gates `path == "serde_json::Value"` and the 4 simple variants
+    /// {Null, Bool, String, Number}; a Number marshals as an `Int` only (a non-integer
+    /// Number fail-stops at the boundary — no float in v1, DEC-LLL-051). Array/Object
+    /// are DEFERRED (they need a recursive List/Map marshaller that does not exist at
+    /// the boundary yet). Param AND return position — a full round-trip.
+    Enum { path: String, arms: Vec<(String, String)> },
 }
 
 impl Foreign {
@@ -135,6 +146,11 @@ impl Foreign {
                 format!("({})", inner.join(","))
             }
             Foreign::Bytes => "Vec<u8>".to_string(),
+            Foreign::Enum { path, arms } => {
+                let inner: Vec<String> =
+                    arms.iter().map(|(r, c)| format!("{r}->{c}")).collect();
+                format!("enum {path}[{}]", inner.join(","))
+            }
         }
     }
 }
@@ -398,7 +414,7 @@ pub enum Pattern {
     Tuple(Vec<String>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinOp {
     Add,
     Sub,

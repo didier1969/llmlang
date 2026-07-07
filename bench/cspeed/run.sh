@@ -21,3 +21,12 @@ printf "fib      llmlang=%ss  rust-ref=%ss  C=%ss\n" "$(best build/cspeed/fib_ll
 build_lll bench/cspeed/listsum.lll listsum_lll
 gcc -O2 bench/cspeed/listsum.c -o build/cspeed/listsum_c
 printf "listsum  llmlang=%ss  C=%ss\n" "$(best build/cspeed/listsum_lll)" "$(best build/cspeed/listsum_c)"
+
+# equality-saturation optimizer (REQ-LLL-058): A/B the SAME source with/without the
+# pass. `build(n)` appears twice in a pure expression → the pass shares it into one
+# `let` (halves the list allocation); rustc/LLVM cannot dedupe the two Rc-allocating
+# calls, so the win is LLVM-invisible. `lll build` compiles at -O3 either way.
+$LLL build --no-opt bench/cspeed/cse.lll >/dev/null 2>&1; cp build/Bench_Cse build/cspeed/cse_noopt
+$LLL build          bench/cspeed/cse.lll >/dev/null 2>&1; cp build/Bench_Cse build/cspeed/cse_opt
+printf "cse      opt=%ss  no-opt=%ss  (equality-saturation, REQ-LLL-058)\n" \
+  "$(best build/cspeed/cse_opt)" "$(best build/cspeed/cse_noopt)"

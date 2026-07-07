@@ -223,6 +223,12 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     ));
                 }
                 for (i, (llt, f)) in op.params.iter().zip(&fs.params).enumerate() {
+                    // a named foreign-enum param (REQ-LLL-056) is validated by NAME
+                    // against the ADT's constructors, not the positional pair table.
+                    if let Foreign::Enum { path, arms } = f {
+                        check_json_enum(&module, &ed.name, &op.name, llt, path, arms)?;
+                        continue;
+                    }
                     if !foreign_marshal_ok(llt, f) {
                         return Err(format!(
                             "effect `{}` op `{}`: parameter {i} of llmlang type `{llt}` cannot \
@@ -241,6 +247,11 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                              borrowed return needs a lifetime; use `String` — REQ-LLL-038 / 038e)",
                             ed.name, op.name
                         ));
+                    }
+                    // a named foreign-enum return (REQ-LLL-056) → a llmlang ADT, mapped
+                    // BY NAME to the Rust variants (serde_json::Value in v1).
+                    Foreign::Enum { path, arms } => {
+                        check_json_enum(&module, &ed.name, &op.name, &op.ret, path, arms)?;
                     }
                     // a fallible foreign `Result<T, E>` return (REQ-LLL-038 slice 038e,
                     // DEC-LLL-046) → a 2-constructor ADT (errors-as-values). v1: E is
@@ -907,6 +918,107 @@ pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
         ),
         Ty::Tuple(cs) => Ty::Tuple(cs.iter().map(|c| subst_tyvar(c, var, with)).collect()),
     }
+}
+
+/// Validate a named foreign-enum `as` clause (REQ-LLL-056, umbrella REQ-LLL-052).
+/// v1 (tranche-1) gates `serde_json::Value` and its 4 simple variants {Null, Bool,
+/// String, Number}, mapped BY NAME to the constructors of a user ADT. Any other path,
+/// an Array/Object (DEFERRED), an unknown variant, a wrong ctor payload shape, a
+/// duplicate mapping, or an ADT constructor left unmapped is a COMPILE error — never a
+/// silent mis-mapping (DEC-LLL-015). Full coverage (every ADT ctor mapped) keeps the
+/// generated IN match exhaustive, so a value round-trips both ways.
+fn check_json_enum(
+    module: &Module,
+    eff: &str,
+    op: &str,
+    llt: &Ty,
+    path: &str,
+    arms: &[(String, String)],
+) -> Result<(), String> {
+    if path != "serde_json::Value" {
+        return Err(format!(
+            "effect `{eff}` op `{op}`: a foreign `enum` clause supports only `serde_json::Value` \
+             in v1, found `{path}` (REQ-LLL-056)"
+        ));
+    }
+    let td = match llt {
+        Ty::User(n) => module.types.iter().find(|td| &td.name == n),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        format!(
+            "effect `{eff}` op `{op}`: a foreign `serde_json::Value` enum must map to a user ADT, \
+             but the operation type is `{llt}`"
+        )
+    })?;
+    let mut seen_rust: HashSet<&str> = HashSet::new();
+    let mut seen_ctor: HashSet<&str> = HashSet::new();
+    for (rustv, ctor) in arms {
+        if !seen_rust.insert(rustv.as_str()) {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: serde_json::Value variant `{rustv}` is mapped twice"
+            ));
+        }
+        if !seen_ctor.insert(ctor.as_str()) {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: constructor `{ctor}` is mapped twice"
+            ));
+        }
+        let fields = &td
+            .ctors
+            .iter()
+            .find(|(cn, _)| cn == ctor)
+            .ok_or_else(|| {
+                format!(
+                    "effect `{eff}` op `{op}`: constructor `{ctor}` (mapped from `{rustv}`) does \
+                     not exist in ADT `{}`",
+                    td.name
+                )
+            })?
+            .1;
+        // the expected llmlang payload for each supported serde_json::Value variant.
+        // Number carries an Int only (a non-integer fail-stops at runtime, DEC-LLL-051).
+        let (ok, want) = match rustv.as_str() {
+            "Null" => (fields.is_empty(), "no field"),
+            "Bool" => (fields.len() == 1 && fields[0] == Ty::Bool, "one `Bool` field"),
+            "String" => {
+                (fields.len() == 1 && fields[0] == Ty::list(Ty::Int), "one `List[Int]` field")
+            }
+            "Number" => (fields.len() == 1 && fields[0] == Ty::Int, "one `Int` field"),
+            "Array" | "Object" => {
+                return Err(format!(
+                    "effect `{eff}` op `{op}`: serde_json::Value variant `{rustv}` is DEFERRED in \
+                     v1 — Array/Object need a recursive List/Map marshaller at the boundary \
+                     (REQ-LLL-056, umbrella REQ-LLL-052)"
+                ))
+            }
+            other => {
+                return Err(format!(
+                    "effect `{eff}` op `{op}`: `{other}` is not a serde_json::Value variant \
+                     (v1: Null, Bool, String, Number)"
+                ))
+            }
+        };
+        if !ok {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: constructor `{ctor}` (from serde_json::Value::{rustv}) \
+                 must have {want} (REQ-LLL-056)"
+            ));
+        }
+    }
+    // full coverage: an unmapped ADT ctor would make the IN (llmlang→Rust) match
+    // non-exhaustive — require every constructor to be mapped so a value round-trips.
+    for (cn, _) in &td.ctors {
+        if !seen_ctor.contains(cn.as_str()) {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: constructor `{cn}` of `{}` is not mapped to any \
+                 serde_json::Value variant — every constructor must be mapped (round-trip, \
+                 REQ-LLL-056)",
+                td.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// v1 FFI marshalling pairs (REQ-LLL-042, DEC-LLL-045): which llmlang type a foreign

@@ -1,0 +1,14 @@
+# Test fixture for REQ-LLL-056: named marshalling of `serde_json::Value` (the 4 simple
+# variants Null/Bool/String/Number) at the FFI boundary. Depends on the REAL serde_json.
+[package]
+name = "ffi_json"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "=1.0.150"
+
+[workspace]

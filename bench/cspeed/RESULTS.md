@@ -32,6 +32,24 @@ refcount=1) was measured NOT to help the shared-read case and is écartée on th
 Rust-Rc backend (DEC-LLL-031). Clones (Rc inc) survive only at real retention points:
 `cons` operands, list literals, constructor fields, returning a borrowed value.
 
+## cse — equality-saturation optimizer (REQ-LLL-058 tranche-1), opt vs `--no-opt`
+Same `bench/cspeed/cse.lll` source; `hot(n) = sum(build(n)) + len(build(n))` builds
+the list twice. `loop(30000, 300, 0)`. Binaries from `lll build` (opt-level=3).
+| binary                    | time  | note |
+|---------------------------|-------|------|
+| llmlang `--no-opt`        | 0.57s | `build(n)` allocated twice per `hot` |
+| llmlang opt (default)     | 0.29s | equality-saturation shares it → one allocation — **1.97x** |
+
+**Finding:** the pass hoists the repeated pure allocating sub-term into a single
+`let` (structural CSE via e-class sharing), halving list allocation on the hot path.
+The win is **LLVM-invisible**: `rustc -O3` does not dedupe the two `Rc`-allocating
+`build(n)` calls across the call boundary — the gain comes from llmlang's high-level
+knowledge that `build` is pure (referentially transparent). Same observable result
+(`1363500000`), and `lll check` yields identical Z3 verdicts with or without the
+pass — the proof fork consumes the ORIGINAL core, so soundness is untouched
+(DEC-LLL-008/017). This is the falsifiable DoD of REQ-LLL-058 tranche-1: a case
+where the optimized binary BEATS the un-optimized one, measured — not "the pass runs".
+
 ## Verdict (VIS-LLL-001 non-negotiable "as fast as C", now MEASURED not asserted)
 - **Compute / Int fragment: C-competitive** — identical to idiomatic Rust; residual
   gap is the rustc backend, closeable independently of llmlang.

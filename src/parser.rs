@@ -278,15 +278,53 @@ impl Parser {
                     self.eat(Tok::Gt)?;
                     Ok(Foreign::Bytes)
                 }
+                // a named foreign-enum mapping (REQ-LLL-056): `enum <path> [ RustVariant
+                // -> LllCtor, … ]`. The path is a `::`-separated Rust type path (e.g.
+                // `serde_json::Value`); each arm maps a Rust variant NAME to a llmlang
+                // constructor — BY NAME, never positionally (fail-stop-jamais-silencieux).
+                "enum" => {
+                    let mut path = self.foreign_enum_ident("a Rust enum path after `enum`")?;
+                    while self.peek() == &Tok::ColonColon {
+                        self.pos += 1;
+                        let seg = self.foreign_enum_ident("an identifier after `::`")?;
+                        path.push_str("::");
+                        path.push_str(&seg);
+                    }
+                    self.eat(Tok::LBracket)?;
+                    let mut arms = Vec::new();
+                    while self.peek() != &Tok::RBracket {
+                        let rustv = self.foreign_enum_ident("a Rust variant name")?;
+                        self.eat(Tok::Arrow)?;
+                        let ctor = self.foreign_enum_ident("a llmlang constructor after `->`")?;
+                        arms.push((rustv, ctor));
+                        if self.peek() == &Tok::Comma {
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    self.eat(Tok::RBracket)?;
+                    Ok(Foreign::Enum { path, arms })
+                }
                 other => Err(self.err(&format!(
                     "unsupported foreign type `{other}` in an `as` clause — v1 supports `i64`, \
-                     `bool`, `String`, `str`, `Result<T, E>`, `Vec<u8>`. Sized ints beyond `u8` \
-                     are a later slice (REQ-LLL-038 / 038e)"
+                     `bool`, `String`, `str`, `Result<T, E>`, `Vec<u8>`, `enum <path> [..]`. \
+                     Sized ints beyond `u8` are a later slice (REQ-LLL-038 / 038e / 056)"
                 ))),
             },
             other => Err(self.err(&format!(
                 "expected a foreign Rust type in the `as` clause, found {other:?}"
             ))),
+        }
+    }
+
+    /// One bare identifier inside a foreign-enum `as` clause (REQ-LLL-056): a path
+    /// segment, a Rust variant name, or a llmlang constructor. `what` names what was
+    /// expected, so a malformed mapping fails with a precise, actionable message.
+    fn foreign_enum_ident(&mut self, what: &str) -> Result<String, String> {
+        match self.bump() {
+            Tok::Ident(s) => Ok(s),
+            other => Err(self.err(&format!("expected {what}, found {other:?}"))),
         }
     }
 

@@ -3528,3 +3528,233 @@ fn actor_runtime_unrecognized_path_rejected() {
     let err = types::check_module(m).expect_err("an unrecognized lll_actor_runtime path must be rejected");
     assert!(err.contains("not a recognized"), "expected an unrecognized-path error, got: {err}");
 }
+
+// ---- REQ-LLL-056: named marshalling of serde_json::Value (4 simple variants) ----
+
+#[test]
+fn ffi_json_enum_clause_parses_by_name() {
+    // REQ-LLL-056: the `as enum <path> [ RustVariant -> LllCtor, … ]` surface parses to
+    // a `Foreign::Enum` carrying the BY-NAME mapping (never a positional list), in both
+    // parameter and return position.
+    let src = "module M:\n\n  effect J:\n    echo(List[Int]) -> List[Int] = extern \"m::echo\" as (enum serde_json::Value [ Null -> JNull, Number -> JNum ]) -> enum serde_json::Value [ Bool -> JBool ]\n\n  part g(s: List[Int]) -> List[Int] via J:\n    yield J.echo(s)\n";
+    let m = parser::parse_module(src).expect("the enum `as` clause must parse");
+    let fs = m.effects[0].ops[0].extern_foreign.as_ref().expect("a foreign signature");
+    match &fs.params[0] {
+        ast::Foreign::Enum { path, arms } => {
+            assert_eq!(path, "serde_json::Value");
+            assert_eq!(
+                arms,
+                &vec![("Null".to_string(), "JNull".to_string()), ("Number".to_string(), "JNum".to_string())]
+            );
+        }
+        other => panic!("param must be a Foreign::Enum, got {other:?}"),
+    }
+    match &fs.ret {
+        ast::Foreign::Enum { path, arms } => {
+            assert_eq!(path, "serde_json::Value");
+            assert_eq!(arms, &vec![("Bool".to_string(), "JBool".to_string())]);
+        }
+        other => panic!("return must be a Foreign::Enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn ffi_json_round_trips_all_four_variants_via_cargo() {
+    // REQ-LLL-056: a `serde_json::Value` marshals BY NAME to a llmlang ADT in BOTH
+    // directions. `echo` (real serde_json identity) sends each of the 4 simple variants
+    // OUT of llmlang and back IN — the round-trip the umbrella REQ-LLL-052 asks for.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_json");
+    let map = "enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum ]";
+    let src = format!(
+        "depends ffi_json \"1.0.0\" from \"{fixture}\"\ndepends serde_json \"1.0.150\"\n\nmodule JsonRoundTrip:\n\n  type Json = JNull | JBool(Bool) | JStr(List[Int]) | JNum(Int)\n\n  effect J:\n    echo(Json) -> Json = extern \"ffi_json::echo\" as ({map}) -> {map}\n\n  part code(j: Json) -> Int:\n    match j:\n      JNull    -> yield 1\n      JBool(b) -> yield 2\n      JStr(s)  -> yield 4\n      JNum(n)  -> yield n\n\n  part main() -> Int via IO, J:\n    let a = code(J.echo(JNull))\n    let b = code(J.echo(JBool(true)))\n    let c = code(J.echo(JStr(104 :: [])))\n    let d = code(J.echo(JNum(7)))\n    yield IO.print(a * 1000 + b * 100 + c * 10 + d)\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("json_round_trip.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "serde_json::Value round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // JNull->1, JBool(true)->2, JStr(non-empty)->4, JNum(7)->7  =>  1*1000+2*100+4*10+7
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 1247"),
+        "expected 1247 (all four variants round-tripped), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_json_real_parse_and_serialize_round_trips_via_cargo() {
+    // REQ-LLL-056: the STRONGEST round-trip — real serde_json serialize (`dump`, IN
+    // marshalling) composed with real parse (`parse`, OUT marshalling). `dump(JNum(9))`
+    // yields the text "9"; `parse("9")` yields `JNum(9)` again — a Number value survives
+    // both crossings, proving the Number↔Int marshalling is faithful.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_json");
+    let map = "enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum ]";
+    let src = format!(
+        "depends ffi_json \"1.0.0\" from \"{fixture}\"\ndepends serde_json \"1.0.150\"\n\nmodule JsonReparse:\n\n  type Json = JNull | JBool(Bool) | JStr(List[Int]) | JNum(Int)\n\n  effect J:\n    parse(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> {map}\n    dump(Json) -> List[Int] = extern \"ffi_json::dump\" as ({map}) -> String\n\n  part num(j: Json) -> Int:\n    match j:\n      JNum(n)  -> yield n\n      JNull    -> yield 0 - 1\n      JBool(b) -> yield 0 - 2\n      JStr(s)  -> yield 0 - 3\n\n  part main() -> Int via IO, J:\n    let text = J.dump(JNum(9))\n    let back = J.parse(text)\n    yield IO.print(num(back))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("json_reparse.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "serde_json parse∘dump round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 9"),
+        "expected 9 (Number survived serialize+parse), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_json_non_integer_number_fails_stop_not_silently_truncated() {
+    // REQ-LLL-056 / DEC-LLL-051: a `Number` that is NOT an integer (a float) must
+    // fail-stop at the boundary — never silently truncate to an Int. `parse("1.5")`
+    // produces a real float `Value::Number`; marshalling it OUT (`as_i64` = None) panics.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_json");
+    let map = "enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum ]";
+    let src = format!(
+        "depends ffi_json \"1.0.0\" from \"{fixture}\"\ndepends serde_json \"1.0.150\"\n\nmodule JsonFloat:\n\n  type Json = JNull | JBool(Bool) | JStr(List[Int]) | JNum(Int)\n\n  effect J:\n    parse(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> {map}\n\n  part num(j: Json) -> Int:\n    match j:\n      JNum(n)  -> yield n\n      JNull    -> yield 0\n      JBool(b) -> yield 0\n      JStr(s)  -> yield 0\n\n  part main() -> Int via IO, J:\n    yield IO.print(num(J.parse(\"1.5\")))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("json_float.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(!out.status.success(), "a non-integer Number must fail-stop, not run to completion");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not an integer"),
+        "expected a clear non-integer fail-stop message, got:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn ffi_json_array_variant_is_deferred_compile_error() {
+    // REQ-LLL-056: Array/Object are DEFERRED (they need a recursive List/Map marshaller
+    // that does not exist yet). Mapping one is a COMPILE error — never a silent partial.
+    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadArr:\n\n  type Json = JNull | JArr\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull, Array -> JArr ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an Array mapping must be rejected");
+    assert!(
+        err.contains("DEFERRED") && err.contains("Array"),
+        "expected an Array-deferred error, got: {err}"
+    );
+}
+
+#[test]
+fn ffi_json_unknown_ctor_is_compile_error() {
+    // REQ-LLL-056: a variant mapped to a llmlang constructor that does not exist in the
+    // ADT is a COMPILE error (the fail-stop-jamais-silencieux invariant, DEC-LLL-015).
+    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadCtor:\n\n  type Json = JNull | JNum(Int)\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull, Number -> JMissing ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an unknown constructor must be rejected");
+    assert!(
+        err.contains("JMissing") && err.contains("does not exist"),
+        "expected an unknown-constructor error, got: {err}"
+    );
+}
+
+#[test]
+fn ffi_json_unmapped_constructor_is_compile_error() {
+    // REQ-LLL-056: every ADT constructor must be mapped, so the IN (llmlang→Rust) match
+    // is exhaustive and a value round-trips. An unmapped ctor is a COMPILE error.
+    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule Partial:\n\n  type Json = JNull | JNum(Int)\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an unmapped constructor must be rejected");
+    assert!(
+        err.contains("JNum") && err.contains("not mapped"),
+        "expected an unmapped-constructor error, got: {err}"
+    );
+}
+
+#[test]
+fn ffi_json_non_json_enum_path_is_compile_error() {
+    // REQ-LLL-056: v1 (tranche-1) gates `serde_json::Value` only. Any other enum path is
+    // a clear COMPILE error rather than a silent mis-marshalling of an unknown enum.
+    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadPath:\n\n  type Json = JNull\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum std::cmp::Ordering [ Null -> JNull ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a non-serde_json enum path must be rejected");
+    assert!(
+        err.contains("serde_json::Value") && err.contains("std::cmp::Ordering"),
+        "expected a path-gating error, got: {err}"
+    );
+}
+
+// ---- equality-saturation optimizer (REQ-LLL-058 tranche-1) ----
+
+#[test]
+fn optimizer_cse_shares_pure_alloc_subterm_and_preserves_semantics() {
+    // REQ-LLL-058 tranche-1 DoD (câblé bout-en-bout): `build(n)` occurs twice in a
+    // single pure expression; equality-saturation shares its e-class and
+    // linearization hoists it to ONE `let` (halving the list allocation). The
+    // optimizer runs on a FRESH module (exec fork) — the checked `cm` (proof fork)
+    // is untouched — and the optimized binary computes the SAME result as --no-opt.
+    let src = "module T:\n\n  part build(n: Int) -> List[Int]:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield []\n      _ -> yield n :: build(n - 1)\n\n  part sum(xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield 0\n      h :: t -> yield h + sum(t)\n\n  part len(xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + len(t)\n\n  part hot(n: Int) -> Int:\n    requires n >= 0\n    yield sum(build(n)) + len(build(n))\n\n  part main() -> Int via IO:\n    yield IO.print(hot(50))\n";
+    let m = parser::parse_module(src).expect("parse");
+    let cm = types::check_module(m).expect("check");
+    let opt = optimize::optimize(&cm);
+
+    let base_rs = codegen::emit_rust(&cm).expect("codegen base");
+    let opt_rs = codegen::emit_rust(&opt).expect("codegen opt");
+    // the pass FIRED only in the optimized output.
+    assert!(!base_rs.contains("__lll_cse_"), "the --no-opt output must not introduce a CSE binding");
+    assert!(opt_rs.contains("__lll_cse_0 = lll_build("), "the optimizer must hoist build(n) to one shared let");
+    // build(n) is emitted twice without opt, once with opt.
+    assert_eq!(base_rs.matches("lll_build(").count(), opt_rs.matches("lll_build(").count() + 1);
+    // the exec-fork rewrite does not touch the proof-fork view: same parts/signatures.
+    assert_eq!(cm.module.parts.len(), opt.module.parts.len());
+    for (a, b) in cm.module.parts.iter().zip(&opt.module.parts) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.requires, b.requires, "contracts must be untouched (vc fork)");
+        assert_eq!(a.ensures, b.ensures, "contracts must be untouched (vc fork)");
+    }
+
+    // compile + run both; the observable result must be identical (sum=1275, len=50).
+    let run = |rust: &str, tag: &str| -> String {
+        let dir = tempdir();
+        let rs = dir.join("f.rs");
+        let bin = dir.join(format!("f_{tag}"));
+        std::fs::write(&rs, rust).unwrap();
+        let st = std::process::Command::new("rustc")
+            .args(["-O", "--edition", "2021", "-o"])
+            .arg(&bin)
+            .arg(&rs)
+            .output()
+            .expect("rustc");
+        assert!(st.status.success(), "{tag} codegen failed to compile:\n{}", String::from_utf8_lossy(&st.stderr));
+        String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout)
+            .trim()
+            .to_string()
+    };
+    let base_out = run(&base_rs, "base");
+    let opt_out = run(&opt_rs, "opt");
+    assert_eq!(base_out, opt_out, "the optimizer changed the observable result");
+    // hot(50) = sum(build 50) + len(build 50) = 1275 + 50.
+    assert!(base_out.contains("1325"), "unexpected program result: {base_out:?}");
+}

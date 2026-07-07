@@ -169,6 +169,41 @@ fn marshal_out(f: &Foreign, val: &str) -> String {
     }
 }
 
+/// One arm of the OUT (Rust `serde_json::Value` → llmlang ADT) match, mapped BY NAME
+/// (REQ-LLL-056): the Rust variant `rustv` builds the llmlang ctor `ctor` of the inner
+/// enum `ei`. A `Number` that is not an integer fail-stops at the boundary (no float in
+/// v1 — DEC-LLL-051), mirroring the `Vec<u8>` out-of-range fail-stop. The checker has
+/// already proven `rustv ∈ {Null, Bool, String, Number}` with a shape-matching ctor.
+fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
+    match rustv {
+        "Null" => format!("{path}::Null => Rc::new({ei}::{ctor}), "),
+        "Bool" => format!("{path}::Bool(__b) => Rc::new({ei}::{ctor}(__b)), "),
+        "String" => {
+            format!("{path}::String(__s) => Rc::new({ei}::{ctor}(__lll_str_of_rust(&__s))), ")
+        }
+        "Number" => format!(
+            "{path}::Number(__n) => Rc::new({ei}::{ctor}(__n.as_i64().unwrap_or_else(|| \
+             panic!(\"FFI boundary: serde_json Number `{{__n}}` is not an integer (Float is \
+             unsupported in v1 — DEC-LLL-051)\")))), "
+        ),
+        _ => unreachable!("checker restricts a serde_json::Value arm to Null/Bool/String/Number"),
+    }
+}
+
+/// One arm of the IN (llmlang ADT → Rust `serde_json::Value`) match, mapped BY NAME
+/// (REQ-LLL-056): the llmlang ctor `ctor` of inner enum `ei` builds the Rust variant
+/// `rustv`. Every conversion is total (any `Int` is a valid JSON number), so IN never
+/// fail-stops. The checker guarantees the ADT's ctors are fully covered → exhaustive.
+fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
+    match rustv {
+        "Null" => format!("{ei}::{ctor} => {path}::Null, "),
+        "Bool" => format!("{ei}::{ctor}(__b) => {path}::Bool(*__b), "),
+        "String" => format!("{ei}::{ctor}(__s) => {path}::String(__lll_str_to_rust(__s)), "),
+        "Number" => format!("{ei}::{ctor}(__x) => {path}::from(*__x), "),
+        _ => unreachable!("checker restricts a serde_json::Value arm to Null/Bool/String/Number"),
+    }
+}
+
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
@@ -277,7 +312,24 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                     .map(|(i, t)| format!("__a{i}: {}", rs_ty(t)))
                     .collect();
                 let args: Vec<String> = (0..op.params.len())
-                    .map(|i| marshal_arg(i, op.extern_foreign.as_ref().map(|fs| &fs.params[i])))
+                    .map(|i| match op.extern_foreign.as_ref().map(|fs| &fs.params[i]) {
+                        // a named foreign-enum PARAM (REQ-LLL-056): match the llmlang ADT
+                        // and build the Rust `serde_json::Value` BY NAME. Exhaustive over
+                        // the ADT's ctors (checker enforces full coverage) → no `_` arm.
+                        Some(Foreign::Enum { path, arms }) => {
+                            let n = match &op.params[i] {
+                                Ty::User(n) => n.clone(),
+                                _ => unreachable!(
+                                    "checker guarantees an ADT param for a foreign enum"
+                                ),
+                            };
+                            let ei = format!("{n}I");
+                            let marms: String =
+                                arms.iter().map(|(r, c)| json_in_arm(path, r, &ei, c)).collect();
+                            format!("match &*__a{i} {{ {marms}}}")
+                        }
+                        other => marshal_arg(i, other),
+                    })
                     .collect();
                 let call = format!("{path}({})", args.join(", "));
                 // marshal the return foreign→llmlang: a Rust `String` becomes a
@@ -327,6 +379,23 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                              ::core::result::Result::Err(__er) => \
                              Rc::new({ei}::{}(__lll_str_of_rust(&__er.to_string()))) }}",
                             td.ctors[0].0, td.ctors[1].0
+                        )
+                    }
+                    // a named foreign enum → a llmlang ADT, mapped BY NAME (REQ-LLL-056):
+                    // one match arm per declared variant; any UNDECLARED variant (incl. the
+                    // DEFERRED Array/Object) fail-stops — never a silent mis-mapping.
+                    Some(Foreign::Enum { path, arms }) => {
+                        let n = match &op.ret {
+                            Ty::User(n) => n.clone(),
+                            _ => unreachable!("checker guarantees an ADT return for a foreign enum"),
+                        };
+                        let ei = format!("{n}I");
+                        let marms: String =
+                            arms.iter().map(|(r, c)| json_out_arm(path, r, &ei, c)).collect();
+                        format!(
+                            "match {call} {{ {marms}__other => panic!(\"FFI boundary: \
+                             serde_json::Value variant {{__other:?}} is unsupported in v1 \
+                             (Array/Object deferred — REQ-LLL-056)\") }}"
                         )
                     }
                     _ => call,

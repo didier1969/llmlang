@@ -1,0 +1,37 @@
+module Bench.Cse:
+
+  part build(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield []
+      _ -> yield n :: build(n - 1)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part len(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + len(t)
+
+  # The optimizer's target: `build(n)` occurs twice in a single pure expression.
+  # Equality-saturation shares the e-class; extraction + linearization hoists it
+  # to one `let`, halving the list allocation. rustc/LLVM cannot dedupe the two
+  # calls (fresh Rc allocations across a call boundary) — the win is LLVM-invisible.
+  part hot(n: Int) -> Int:
+    requires n >= 0
+    yield sum(build(n)) + len(build(n))
+
+  part loop(k: Int, n: Int, acc: Int) -> Int:
+    requires k >= 0
+    requires n >= 0
+    measure k
+    match k:
+      0 -> yield acc
+      _ -> yield loop(k - 1, n, acc + hot(n))
+
+  part main() -> Int via IO:
+    yield IO.print(loop(30000, 300, 0))

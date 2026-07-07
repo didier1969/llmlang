@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] <file>  check, emit Rust + compile (fail-stop overflow by default)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -502,18 +502,37 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             // proven contract either holds or the program traps — it is never
             // silently violated by wrap-around (DEC-LLL-015: no silent
             // downgrade). `--unchecked` opts out for measured hot kernels.
-            let (unchecked, file) = match rest {
-                ["--unchecked", f] => (true, *f),
-                [f] => (false, *f),
-                _ => return Err(usage()),
-            };
+            // flags in any order: --unchecked (overflow policy), --no-opt (skip the
+            // equality-saturation pass so the harness can A/B the same source,
+            // REQ-LLL-058). The vc fork runs on the ORIGINAL core either way.
+            let mut unchecked = false;
+            let mut no_opt = false;
+            let mut file: Option<&str> = None;
+            for &t in rest {
+                match t {
+                    "--unchecked" => unchecked = true,
+                    "--no-opt" => no_opt = true,
+                    f if !f.starts_with("--") => file = Some(f),
+                    _ => return Err(usage()),
+                }
+            }
+            let file = file.ok_or_else(usage)?;
             let (_, cm, hm) = load(file)?;
             let report = vc::verify(&cm, &hm, &cache_dir(), true)?;
             print_report(&report);
             if !report.ok() {
                 return Err("verification failed — refusing to emit code".into());
             }
-            let rust = codegen::emit_rust(&cm)?;
+            // EXEC fork only (DEC-LLL-008/017): optimize a FRESH module; the `cm`
+            // just verified is left untouched. `--no-opt` bypasses the pass.
+            let optimized;
+            let exec_cm: &types::CheckedModule = if no_opt {
+                &cm
+            } else {
+                optimized = optimize::optimize(&cm);
+                &optimized
+            };
+            let rust = codegen::emit_rust(exec_cm)?;
             std::fs::create_dir_all("build").map_err(|e| e.to_string())?;
             // no external deps → the fast single-file rustc path (unchanged);
             // `depends` present → a generated Cargo project links the crates
