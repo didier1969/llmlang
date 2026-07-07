@@ -41,6 +41,13 @@ pub struct Diagnostic {
     pub fix: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub counterexample: Vec<Assignment>,
+    /// For a typed-hole diagnostic (DEC-LLL-052): the type the completion must have.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_type: Option<String>,
+    /// For a typed-hole diagnostic: the in-scope binders (name → type) at the hole —
+    /// the LLM's completion menu (`var` = name, `value` = type).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<Assignment>,
 }
 
 /// The `lll check --format=json` payload: the overall verdict plus every
@@ -48,6 +55,11 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub ok: bool,
+    /// Overall verdict category for an agent to branch on (DEC-LLL-052): `"incomplete"`
+    /// (holes present, not a proof candidate) vs `"failed"` (undischarged obligations).
+    /// Absent when `ok` (everything verified).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
@@ -82,6 +94,40 @@ impl Diagnostic {
             part,
             fix,
             counterexample: Vec::new(),
+            expected_type: None,
+            scope: Vec::new(),
+        }
+    }
+
+    /// Build a diagnostic for a typed hole (DEC-LLL-052): its expected type + the
+    /// in-scope binders — the LLM's completion menu. Severity `hole` and status
+    /// `incomplete` mark it as NOT a proof failure but an incomplete program.
+    pub fn from_hole(h: &crate::types::HoleInfo) -> Diagnostic {
+        let expected = h.expected.as_ref().map(|t| t.to_string());
+        let scope: Vec<Assignment> = h
+            .scope
+            .iter()
+            .map(|(n, t)| Assignment { var: n.clone(), value: t.to_string() })
+            .collect();
+        let message = match &expected {
+            Some(t) => format!("hole `?` in part `{}`: expected type {t}", h.part),
+            None => format!("hole `?` in part `{}`", h.part),
+        };
+        Diagnostic {
+            code: "LLL-H0001".to_string(),
+            severity: "hole".to_string(),
+            category: "hole".to_string(),
+            message,
+            line: Some(h.line),
+            part: Some(h.part.clone()),
+            fix: Some(
+                "fill this `?` with a term of the expected type; the in-scope bindings are \
+                 listed in `scope`"
+                    .to_string(),
+            ),
+            counterexample: Vec::new(),
+            expected_type: expected,
+            scope,
         }
     }
 
@@ -111,6 +157,8 @@ impl Diagnostic {
             part: Some(part.to_string()),
             fix,
             counterexample,
+            expected_type: None,
+            scope: Vec::new(),
         }
     }
 }

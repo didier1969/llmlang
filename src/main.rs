@@ -428,30 +428,33 @@ fn cache_dir() -> PathBuf {
 /// failure yields one diagnostic per undischarged obligation, with the Z3 model
 /// decoded to a named counterexample.
 fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
+    let err_report = |module: Option<String>, e: &str| diag::Report {
+        ok: false,
+        status: Some("failed".to_string()),
+        module,
+        diagnostics: vec![diag::Diagnostic::from_error(e)],
+    };
     let (module, cm) = match loader::load_program(file) {
-        Err(e) => {
-            return diag::Report { ok: false, module: None, diagnostics: vec![diag::Diagnostic::from_error(&e)] }
-        }
+        Err(e) => return err_report(None, &e),
         Ok((_, module)) => match types::check_module(module) {
-            Err(e) => {
-                return diag::Report { ok: false, module: None, diagnostics: vec![diag::Diagnostic::from_error(&e)] }
-            }
+            Err(e) => return err_report(None, &e),
             Ok(cm) => (cm.module.name.clone(), cm),
         },
     };
     let hm = match hash::hash_module(&cm) {
-        Err(e) => {
-            return diag::Report { ok: false, module: Some(module), diagnostics: vec![diag::Diagnostic::from_error(&e)] }
-        }
+        Err(e) => return err_report(Some(module), &e),
         Ok(hm) => hm,
     };
     let report = match vc::verify(&cm, &hm, &cache_dir(), !no_cache) {
-        Err(e) => {
-            return diag::Report { ok: false, module: Some(module), diagnostics: vec![diag::Diagnostic::from_error(&e)] }
-        }
+        Err(e) => return err_report(Some(module), &e),
         Ok(r) => r,
     };
     let mut diagnostics = Vec::new();
+    // Typed holes first (DEC-LLL-052): the module is INCOMPLETE, not proof-failed.
+    // Each hole carries its expected type + in-scope binders — the LLM repair menu.
+    for h in &cm.holes {
+        diagnostics.push(diag::Diagnostic::from_hole(h));
+    }
     for (part, v) in &report.parts {
         if let vc::PartVerdict::Failed { failures } = v {
             for f in failures {
@@ -459,7 +462,16 @@ fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
             }
         }
     }
-    diag::Report { ok: diagnostics.is_empty(), module: Some(module), diagnostics }
+    // status: an undischarged obligation (`failed`) dominates an incomplete hole;
+    // `incomplete` when only holes remain; absent when everything verified.
+    let status = if report.parts.iter().any(|(_, v)| matches!(v, vc::PartVerdict::Failed { .. })) {
+        Some("failed".to_string())
+    } else if !cm.holes.is_empty() {
+        Some("incomplete".to_string())
+    } else {
+        None
+    };
+    diag::Report { ok: diagnostics.is_empty(), status, module: Some(module), diagnostics }
 }
 
 fn dispatch(args: &[String]) -> Result<(), String> {
@@ -489,12 +501,31 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             let (_, cm, hm) = load(file)?;
             let report = vc::verify(&cm, &hm, &cache_dir(), !no_cache)?;
             print_report(&report);
-            if report.ok() {
-                println!("✔ {}: all parts verified", cm.module.name);
-                Ok(())
-            } else {
-                Err("verification failed — undischarged obligations are compile errors (DEC-LLL-015)".into())
+            // Precedence: a proof FAILURE (exit 1) dominates INCOMPLETE holes (exit 2)
+            // dominates VERIFIED (exit 0) — DEC-LLL-052.
+            let failed = report
+                .parts
+                .iter()
+                .any(|(_, v)| matches!(v, vc::PartVerdict::Failed { .. }));
+            if failed {
+                return Err(
+                    "verification failed — undischarged obligations are compile errors (DEC-LLL-015)"
+                        .into(),
+                );
             }
+            if report.incomplete() {
+                // The module is editable but INCOMPLETE — feedback guides completion;
+                // it is neither verified nor a proof failure (DEC-LLL-052). Exit 2.
+                print_holes(&cm);
+                println!(
+                    "◇ {}: incomplete — {} hole(s); fill every `?`, then it can be verified & built (DEC-LLL-052)",
+                    cm.module.name,
+                    cm.holes.len()
+                );
+                std::process::exit(2);
+            }
+            println!("✔ {}: all parts verified", cm.module.name);
+            Ok(())
         }
         ["build", rest @ ..] => {
             // Overflow policy: the verifier reasons over mathematical Int; the
@@ -518,6 +549,18 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             }
             let file = file.ok_or_else(usage)?;
             let (_, cm, hm) = load(file)?;
+            // A program with holes is INCOMPLETE, not buildable — refuse before any Z3
+            // or codegen. Fail-stop (DEC-LLL-052/015): a holey program is never a proof
+            // candidate and produces no binary. `run` inherits this (it calls `build`).
+            if !cm.holes.is_empty() {
+                print_holes(&cm);
+                return Err(format!(
+                    "module `{}` has {} hole(s) `?` — complete every hole before building; a \
+                     program with holes is incomplete, not buildable (DEC-LLL-052)",
+                    cm.module.name,
+                    cm.holes.len()
+                ));
+            }
             let report = vc::verify(&cm, &hm, &cache_dir(), true)?;
             print_report(&report);
             if !report.ok() {
@@ -896,6 +939,26 @@ fn print_report(report: &vc::VerifyReport) {
                     }
                 }
             }
+            vc::PartVerdict::Incomplete { holes } => {
+                println!("  {name:<16} ◇ incomplete ({holes} hole(s) — skipped Z3, DEC-LLL-052)")
+            }
+        }
+    }
+}
+
+/// Render each typed hole's completion menu (DEC-LLL-052): its part, the type the
+/// completion must have, and the in-scope binders with their types — the structured
+/// feedback that drives an LLM's generate↔verify↔repair loop (criteria #1/#3).
+fn print_holes(cm: &types::CheckedModule) {
+    for h in &cm.holes {
+        let ty = h.expected.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "?".to_string());
+        println!("  ◇ hole in part `{}` (line {}): expected type {ty}", h.part, h.line);
+        if h.scope.is_empty() {
+            println!("      in scope: (nothing)");
+        } else {
+            let binders: Vec<String> =
+                h.scope.iter().map(|(n, t)| format!("{n}: {t}")).collect();
+            println!("      in scope: {}", binders.join(", "));
         }
     }
 }

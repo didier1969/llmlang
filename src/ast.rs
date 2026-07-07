@@ -516,6 +516,16 @@ pub enum Expr {
     Unit,
     /// A tuple value `(e1, …, en)` with arity ≥ 2 (REQ-LLL-026, DEC-LLL-036).
     Tuple(Vec<Expr>),
+    /// A typed hole `?` (CPT-LLL-002, DEC-LLL-052): a deliberate placeholder for an
+    /// as-yet-unwritten TERM. The checker assigns it the context-expected type and
+    /// records its in-scope binders (structured feedback for an LLM's completion
+    /// loop), leaving the program well-typed "around" it. A hole gives a program the
+    /// third status `Incomplete` (orthogonal to Verified/VerificationFailed): a part
+    /// containing one SKIPS Z3 (never proved, never cached) and the module refuses to
+    /// `build`/`run`. Term position only — a hole is rejected in a contract
+    /// (requires/ensures/measure) so `contract_hash` never contains one. Part of
+    /// identity like any other node (DEC-LLL-020): filling it is a new definition.
+    Hole,
 }
 
 impl Expr {

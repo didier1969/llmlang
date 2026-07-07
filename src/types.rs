@@ -35,6 +35,38 @@ pub struct CheckedModule {
     /// row) instantiation reached from a call site. The concrete row is the
     /// sorted effect names of the function argument. Drives codegen (DEC-LLL-038).
     pub instantiations: Vec<(String, Vec<String>)>,
+    /// Typed holes found in part bodies (CPT-LLL-002, DEC-LLL-052). Non-empty ⇒ the
+    /// module is INCOMPLETE: every part named here SKIPS Z3 in the vc fork (never
+    /// proved, never cached) and `build`/`run` refuse. This is the SINGLE source of
+    /// "is this part incomplete" — the vc fork derives Incomplete from it, never a
+    /// second AST walk (DRY, criteria #1/#2).
+    pub holes: Vec<HoleInfo>,
+}
+
+/// One typed hole recorded during checking (CPT-LLL-002, DEC-LLL-052): its part, the
+/// context-EXPECTED type the completion must have, and the in-scope binders (with
+/// types) visible at the hole — the LLM's completion menu. `line` points at the
+/// enclosing `part` (a hole carries no span of its own in v1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HoleInfo {
+    pub part: String,
+    pub line: usize,
+    /// The type demanded by the hole's context. A hole whose type is NOT fixed by
+    /// context (e.g. a bare `let x = ?`) is a check error, so a recorded hole always
+    /// carries `Some` here in practice.
+    pub expected: Option<Ty>,
+    /// in-scope binders (params + lets + pattern binders) at the hole, with types.
+    pub scope: Vec<(String, Ty)>,
+}
+
+/// Whether a `?` in the currently-checked expression is a recordable hole (a part
+/// body / example — the incremental-editing surface) or forbidden (an instance
+/// method body in v1). Contracts are typed by `type_of_pure`, which rejects holes
+/// independently, so `contract_hash` never contains one (DEC-LLL-052).
+#[derive(Clone, Copy, PartialEq)]
+enum HolePolicy {
+    Record,
+    Reject,
 }
 
 impl CheckedModule {
@@ -80,6 +112,11 @@ struct Ctx<'a> {
     /// true while checking a user-effect handler clause body: it must be
     /// capture-free, so only ambient effects may be performed (DEC-LLL-037).
     captureless: bool,
+    /// how a `?` in this context is treated (DEC-LLL-052): `Record` in a part body /
+    /// example (the incremental-editing surface), `Reject` in an instance method body.
+    hole_policy: HolePolicy,
+    /// typed holes recorded while checking this part (drained into CheckedModule.holes).
+    holes: Vec<HoleInfo>,
 }
 
 impl Ctx<'_> {
@@ -544,6 +581,8 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // exempt from the no-calls rule only when NOT shadowed by a user definition).
     let callables: HashSet<String> = index.keys().chain(ctors.keys()).cloned().collect();
     let mut recursion = HashMap::new();
+    // typed holes (DEC-LLL-052) accumulated across every part body (SINGLE source).
+    let mut all_holes: Vec<HoleInfo> = Vec::new();
     for part in &module.parts {
         check_signature(part)?;
         check_contracts(part, &callables, &ctors)?;
@@ -640,12 +679,21 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             user_tail_effects: &user_tail_effects,
             ambient_effects: &ambient_effects,
             captureless: false,
+            hole_policy: HolePolicy::Record,
+            holes: Vec::new(),
         };
         // effect checking is row-based (REQ-LLL-018): each perform / effectful call
         // is validated against ctx.effect_allowed (the part's `via` row ∪ any effect
         // discharged by an enclosing `handle`), so no ambient "effectful" flag.
         check_body(&mut ctx, &part.body, &part.ret)?;
+        // examples are SPEC-side (like contracts), not the part body: a `?` there is
+        // rejected, not recorded — the ratified surface is "term position of a part
+        // body only" (DEC-LLL-052). Flip the policy just for the example pass.
+        ctx.hole_policy = HolePolicy::Reject;
         check_examples(&mut ctx, part)?;
+        // drain the holes found in this part BODY into the module-level record — the
+        // SINGLE source the vc fork reads to mark parts Incomplete.
+        all_holes.extend(std::mem::take(&mut ctx.holes));
         let in_multi = scc_multi.contains(&part.name);
         let rec = if in_multi {
             // mutual recursion: every SCC member must carry a measure
@@ -780,6 +828,10 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 user_tail_effects: &user_tail_effects,
                 ambient_effects: &ambient_effects,
                 captureless: false,
+                // instance method bodies must be complete in v1 (they carry class-law
+                // proof obligations) — a `?` here is rejected, not recorded (DEC-LLL-052).
+                hole_policy: HolePolicy::Reject,
+                holes: Vec::new(),
             };
             let got = check_expr(&mut ctx, body, None)?;
             if got != want {
@@ -806,6 +858,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         ctors,
         effect_generic,
         instantiations,
+        holes: all_holes,
     })
 }
 
@@ -1780,6 +1833,16 @@ fn type_of_pure(
     ctors: &HashMap<String, (String, Vec<Ty>)>,
 ) -> Result<Ty, String> {
     Ok(match e {
+        // A hole `?` is a TERM-position placeholder only — forbidden in a contract so
+        // `contract_hash` never contains one and no caller's cached proof depends on a
+        // holey `ensures` (DEC-LLL-052). Rejected here, independently of the body path.
+        Expr::Hole => {
+            return Err(
+                "holes `?` are not allowed in a contract (requires/ensures/measure) — a hole \
+                 is a term-position placeholder only (DEC-LLL-052)"
+                    .into(),
+            )
+        }
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::RatLit(..) => Ty::Rational,
@@ -2429,6 +2492,49 @@ fn check_expr(
     expected: Option<&Ty>,
 ) -> Result<Ty, String> {
     Ok(match e {
+        Expr::Hole => {
+            // A typed hole `?` (CPT-LLL-002, DEC-LLL-052). Term position only: a `?` in
+            // an instance method body carries `Reject` policy and errors here; a
+            // contract `?` never reaches this fn (typed by `type_of_pure`).
+            if ctx.hole_policy == HolePolicy::Reject {
+                return Err(format!(
+                    "part `{}`: a hole `?` is not allowed here (v1: holes live in a part \
+                     body's term position only) — DEC-LLL-052",
+                    ctx.part.name
+                ));
+            }
+            // Record the in-scope binders (inner scopes shadow outer), sorted for
+            // stable feedback — the LLM's completion menu.
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut scope: Vec<(String, Ty)> = Vec::new();
+            for frame in ctx.vars.iter().rev() {
+                for (k, v) in frame {
+                    if seen.insert(k.clone()) {
+                        scope.push((k.clone(), v.clone()));
+                    }
+                }
+            }
+            scope.sort_by(|a, b| a.0.cmp(&b.0));
+            ctx.holes.push(HoleInfo {
+                part: ctx.part.name.clone(),
+                line: ctx.part.line,
+                expected: expected.cloned(),
+                scope,
+            });
+            // Checking-position-only (LLL has no inference): a hole with no fixed
+            // type is an honest error, exactly like the empty list `[]`.
+            match expected {
+                Some(t) => t.clone(),
+                None => {
+                    return Err(format!(
+                        "part `{}`: this hole `?` has no fixed type here — put it where its \
+                         type is determined (a `yield`, a call argument, a `::`/tuple/list \
+                         element), exactly like the empty list `[]` (DEC-LLL-052)",
+                        ctx.part.name
+                    ))
+                }
+            }
+        }
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::RatLit(..) => Ty::Rational,

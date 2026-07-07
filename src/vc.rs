@@ -51,6 +51,11 @@ pub enum PartVerdict {
     CachedProved,
     Proved { obligations: usize, time_ms: u128 },
     Failed { failures: Vec<FailedObligation> },
+    /// The part contains a typed hole `?` (DEC-LLL-052): it is INCOMPLETE, a third
+    /// status orthogonal to proved/failed. It SKIPS Z3 entirely — never proved, never
+    /// cached, never emitted. `holes` is how many. Fail-stop is preserved: an
+    /// incomplete program is never a proof candidate and produces no binary.
+    Incomplete { holes: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -65,10 +70,17 @@ pub struct VerifyReport {
 }
 
 impl VerifyReport {
+    /// A module is `ok` only when every part is proved — neither Failed NOR Incomplete
+    /// (a holey module is not verified, DEC-LLL-052).
     pub fn ok(&self) -> bool {
-        self.parts
-            .iter()
-            .all(|(_, v)| !matches!(v, PartVerdict::Failed { .. }))
+        self.parts.iter().all(|(_, v)| {
+            !matches!(v, PartVerdict::Failed { .. } | PartVerdict::Incomplete { .. })
+        })
+    }
+    /// True when any part is Incomplete (contains a hole) — the module is editable but
+    /// not buildable (DEC-LLL-052).
+    pub fn incomplete(&self) -> bool {
+        self.parts.iter().any(|(_, v)| matches!(v, PartVerdict::Incomplete { .. }))
     }
 }
 
@@ -94,8 +106,20 @@ pub fn verify(
         HashMap::new()
     };
 
+    // Typed holes (DEC-LLL-052): a part with a hole is INCOMPLETE — it SKIPS Z3, is
+    // never cached, never emitted. Derived from the checker's `cm.holes` (SINGLE
+    // source — no second AST walk). Placed BEFORE the cache check so a holey part can
+    // neither hit a stale "proved" nor write one.
+    let mut holey: HashMap<&str, usize> = HashMap::new();
+    for h in &cm.holes {
+        *holey.entry(h.part.as_str()).or_insert(0) += 1;
+    }
     let mut parts = Vec::new();
     for part in &cm.module.parts {
+        if let Some(&n) = holey.get(part.name.as_str()) {
+            parts.push((part.name.clone(), PartVerdict::Incomplete { holes: n }));
+            continue;
+        }
         let key = cache_key(part, cm, hm);
         if use_cache {
             if let Some(e) = cache.get(&key) {
@@ -481,9 +505,8 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         Expr::Lambda(ps, body) => {
             Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
         }
-        Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit => {
-            e.clone()
-        }
+        Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit
+        | Expr::Hole => e.clone(),
     })
 }
 
@@ -499,7 +522,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
 fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
     match e {
         Expr::Var(n) => map.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
-        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit => e.clone(),
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => e.clone(),
         Expr::Bin(op, a, b) => {
             Expr::Bin(*op, Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map)))
         }
@@ -762,6 +785,16 @@ impl<'a> Emit<'a> {
         expected: Option<&Ty>,
     ) -> Result<String, String> {
         Ok(match e {
+            // Defensive (DEC-LLL-052): a holey part is marked Incomplete and SKIPPED
+            // before obligation generation, so the encoder must never reach a hole. If
+            // it does, fail LOUDLY — never silently encode a hole into an obligation.
+            Expr::Hole => {
+                return Err(
+                    "vcgen: reached a hole `?` — a holey part must be skipped before \
+                     obligation generation (internal invariant, DEC-LLL-052)"
+                        .into(),
+                )
+            }
             Expr::Unit => "unit".to_string(),
             Expr::IntLit(v) => {
                 if *v < 0 {

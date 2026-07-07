@@ -664,6 +664,9 @@ pub fn optimize(cm: &CheckedModule) -> CheckedModule {
         ctors: cm.ctors.clone(),
         effect_generic: cm.effect_generic.clone(),
         instantiations: cm.instantiations.clone(),
+        // the EXEC fork only ever runs on a hole-free module (`build` refuses a holey
+        // one before optimizing, DEC-LLL-052) — carried through, always empty here.
+        holes: cm.holes.clone(),
     }
 }
 

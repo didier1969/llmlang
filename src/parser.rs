@@ -1095,6 +1095,9 @@ impl Parser {
     fn atom(&mut self) -> Result<Expr, String> {
         match self.bump() {
             Tok::Int(n) => Ok(Expr::IntLit(n)),
+            // typed hole `?` — a deliberate term-position placeholder (CPT-LLL-002,
+            // DEC-LLL-052). Typed by context in the checker; makes the module Incomplete.
+            Tok::Question => Ok(Expr::Hole),
             // decimal literal already reduced by the lexer to a canonical fraction
             Tok::Dec(num, den) => Ok(Expr::RatLit(num, den)),
             Tok::True => Ok(Expr::BoolLit(true)),

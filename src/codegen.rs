@@ -1778,6 +1778,16 @@ fn part_call_args(
 
 fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
     Ok(match e {
+        // Fail-stop (DEC-LLL-052, DEC-LLL-015): a holey module refuses to build at the
+        // CLI boundary, so codegen must never reach a hole. If it does, error LOUDLY —
+        // never emit a placeholder into real code.
+        Expr::Hole => {
+            return Err(
+                "codegen: reached a hole `?` — a program with holes is incomplete and not \
+                 buildable (DEC-LLL-052)"
+                    .into(),
+            )
+        }
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => format!("{v}i64"),
         // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already

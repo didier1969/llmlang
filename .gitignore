@@ -3,3 +3,6 @@
 *.zip
 /.lll-cache
 /build
+
+# Agent worktrees / local tooling state
+.claude/

@@ -484,6 +484,10 @@ impl<'a> Norm<'a> {
     }
     fn expr(&mut self, e: &Expr) -> String {
         match e {
+            // a typed hole `?` is part of the text ⇒ part of identity (DEC-LLL-020):
+            // a distinct, stable token so a holey definition and its filled version
+            // are different definitions (different def-hash) — DEC-LLL-052.
+            Expr::Hole => "(hole)".to_string(),
             Expr::Unit => "(unit)".to_string(),
             Expr::IntLit(v) => format!("{v}"),
             // canonical (reduced) fraction → identity by value: `3.5` and `3.50`

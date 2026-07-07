@@ -70,6 +70,7 @@ pub enum Tok {
     Underscore,
     Backslash, // lambda: \(x: T) -> expr
     Pipe,      // sum-type alternative: C1 | C2
+    Question,  // typed hole `?` (CPT-LLL-002, DEC-LLL-052)
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +164,11 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
             }
             '|' => {
                 push(out, Tok::Pipe);
+                i += 1;
+            }
+            '?' => {
+                // typed hole `?` (CPT-LLL-002, DEC-LLL-052) — a first-class term
+                push(out, Tok::Question);
                 i += 1;
             }
             '-' => {

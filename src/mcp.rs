@@ -223,10 +223,15 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
                             }
                         }
                     }
+                    vc::PartVerdict::Incomplete { holes } => s.push_str(&format!(
+                        "{name:<16} ◇ incomplete ({holes} hole(s) — skipped Z3, DEC-LLL-052)\n"
+                    )),
                 }
             }
             s.push_str(if report.ok() {
                 "verdict: ALL PROVED\n"
+            } else if report.incomplete() {
+                "verdict: INCOMPLETE — holes present; complete them, then build (DEC-LLL-052)\n"
             } else {
                 "verdict: FAILED — undischarged obligations are compile errors\n"
             });

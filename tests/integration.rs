@@ -3931,3 +3931,172 @@ fn rational_literals_are_canonical_by_value() {
     assert_eq!(mk("3.5"), mk("3.50"), "3.5 and 3.50 reduce to the same 7/2 → same hash");
     assert_ne!(mk("3.5"), mk("3.6"), "distinct values must hash differently");
 }
+
+// ---- typed holes / incremental well-typedness (CPT-LLL-002, DEC-LLL-052) ----
+
+#[test]
+fn typed_hole_in_body_typechecks_and_is_recorded_with_context() {
+    // A `?` in term position (yield) does NOT error: the checker assigns it the
+    // context-expected type and records it with the in-scope binders — the program
+    // stays well-typed "around" the hole (Hazel-lite, static-only). This is the
+    // structured feedback that guides an LLM's completion (criteria #1/#3).
+    let src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+    let m = parser::parse_module(src).expect("parse");
+    let cm = types::check_module(m).expect("a body hole type-checks (it is not an error)");
+    assert_eq!(cm.holes.len(), 1, "one hole recorded");
+    let h = &cm.holes[0];
+    assert_eq!(h.part, "f");
+    assert_eq!(
+        h.expected.as_ref().map(|t| t.to_string()).as_deref(),
+        Some("Int"),
+        "the hole is typed by the yield context"
+    );
+    let scope: std::collections::HashMap<_, _> =
+        h.scope.iter().map(|(k, v)| (k.as_str(), v.to_string())).collect();
+    assert_eq!(scope.get("n").map(String::as_str), Some("Int"));
+    assert_eq!(scope.get("acc").map(String::as_str), Some("Int"));
+    // hashing a holey module is well-defined — the hole is part of identity (DEC-LLL-020)
+    assert!(hash::hash_module(&cm).is_ok(), "a holey module hashes");
+}
+
+#[test]
+fn typed_hole_makes_part_incomplete_never_proved_or_cached() {
+    // The soundness core: a holey part SKIPS Z3 entirely — it is neither Proved nor
+    // Failed, but Incomplete. No false proof, no cache entry. DEC-LLL-015 preserved:
+    // an incomplete program is never a proof candidate (fail-stop governs emitted
+    // binaries; Incomplete ≠ proof-failure).
+    let src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs on a holey module");
+    let v = &report.parts.iter().find(|(n, _)| n == "f").unwrap().1;
+    assert!(matches!(v, vc::PartVerdict::Incomplete { .. }), "holey part is Incomplete, got {v:?}");
+    assert!(!report.ok(), "an incomplete module is not ok()");
+    let cache = std::fs::read_to_string(dir.join("proofs.json")).unwrap_or_default();
+    assert!(!cache.contains("\"proved\""), "a holey part must never be cached proved: {cache}");
+}
+
+#[test]
+fn complete_part_calling_body_holed_part_still_verifies_modularly() {
+    // Modular-over-contract (DEC-LLL-021): a finished part proves against the callee's
+    // CONTRACT, independent of the callee's holey body. Only the stub is Incomplete —
+    // Incomplete is per-part, never module-wide poisoning. This is the core LLM-loop
+    // win: verify finished parts while others are still `?`-stubbed.
+    let src = "module M:\n\n  part stub(n: Int) -> Int:\n    ensures result >= 0\n    yield ?\n\n  part g(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= 0\n    yield stub(n)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    let vg = &report.parts.iter().find(|(n, _)| n == "g").unwrap().1;
+    let vs = &report.parts.iter().find(|(n, _)| n == "stub").unwrap().1;
+    assert!(
+        matches!(vg, vc::PartVerdict::Proved { .. } | vc::PartVerdict::CachedProved),
+        "g verifies against stub's contract, got {vg:?}"
+    );
+    assert!(matches!(vs, vc::PartVerdict::Incomplete { .. }), "stub is incomplete, got {vs:?}");
+}
+
+#[test]
+fn hole_in_contract_position_is_rejected() {
+    // `?` is a term-position placeholder ONLY. A hole in requires/ensures/measure would
+    // poison contract_hash (every caller assumes a holey `ensures`) — rejected at check,
+    // so by construction contract_hash never contains a hole (DEC-LLL-052).
+    let bad = "module M:\n\n  part f(n: Int) -> Int:\n    ensures result >= ?\n    yield n\n";
+    let m = parser::parse_module(bad).expect("parse");
+    let err = types::check_module(m).expect_err("a hole in ensures must be rejected");
+    assert!(err.contains("hole") || err.contains('?'), "message names the hole: {err}");
+}
+
+#[test]
+fn hole_in_instance_method_body_is_rejected() {
+    // v1: an instance method body carries class-law proof obligations, so it must be
+    // complete — a `?` there is rejected (HolePolicy::Reject), never recorded as an
+    // editable hole (DEC-LLL-052). The Reject arm fires before the no-fixed-type check.
+    let bad = "module M:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> ?\n";
+    let m = parser::parse_module(bad).expect("parse");
+    let err = types::check_module(m).expect_err("a hole in an instance method body is rejected");
+    assert!(err.contains("not allowed") || err.contains("DEC-LLL-052"), "clean reject message: {err}");
+}
+
+#[test]
+fn hole_in_example_clause_is_rejected_like_a_contract() {
+    // An `example` is spec-side (verified as a ground Z3 obligation + a runtime test),
+    // not the part body — a `?` there is rejected, consistently with contracts, so the
+    // ratified surface is exactly "term position of a part body" (DEC-LLL-052).
+    let bad = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    example add(2, ?) == 5\n    yield x + y\n";
+    let m = parser::parse_module(bad).expect("parse");
+    assert!(types::check_module(m).is_err(), "a hole in an example clause is rejected");
+}
+
+#[test]
+fn hole_with_no_fixed_type_is_rejected_like_empty_list() {
+    // Checking-position-only (LLL has no inference engine): a hole whose type is not
+    // fixed by context — a bare `let x = ?` — is an honest error, exactly like the
+    // empty list `[]` in the same position.
+    let bad = "module M:\n\n  part f(n: Int) -> Int:\n    let x = ?\n    yield n\n";
+    let m = parser::parse_module(bad).expect("parse");
+    assert!(types::check_module(m).is_err(), "a hole with no fixed type is rejected");
+}
+
+#[test]
+fn holey_module_check_exits_2_build_refuses_then_filling_verifies_and_builds() {
+    // End-to-end (CLI): a holey module — `check` exits 2 (Incomplete, distinct from 0
+    // verified / 1 failed) with structured feedback; `check --format=json` yields an
+    // incomplete status + a hole diagnostic; `build` REFUSES (no binary). Filling the
+    // `?` verifies AND builds, and the def-hash changed (the hole is part of identity:
+    // filling it is a new, now-complete definition — DEC-LLL-020).
+    let dir = tempdir().join("holes-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let holey_src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n\n  part main() -> Int:\n    yield f(1, 2)\n";
+    let filled_src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield acc\n\n  part main() -> Int:\n    yield f(1, 2)\n";
+    let holey = dir.join("holey.lll");
+    std::fs::write(&holey, holey_src).unwrap();
+
+    // check → exit 2, feedback names the expected type and an in-scope binder
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", holey.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "holey check must exit 2 (incomplete): {so}");
+    assert!(so.contains("hole") && so.contains("Int"), "feedback names the hole + expected type: {so}");
+    assert!(so.contains("acc"), "feedback lists in-scope binders: {so}");
+
+    // check --format=json → ok:false + incomplete status + a hole diagnostic w/ expected_type
+    let jout = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", holey.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&jout.stdout);
+    assert!(j.contains("\"ok\": false"), "json ok:false: {j}");
+    assert!(j.contains("incomplete"), "json status incomplete: {j}");
+    assert!(j.contains("\"expected_type\"") && j.contains("Int"), "json hole carries expected_type: {j}");
+
+    // build → refuses, no binary emitted
+    let bout = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["build", holey.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!bout.status.success(), "build must refuse a holey module: {}", String::from_utf8_lossy(&bout.stderr));
+
+    // fill the hole → verifies (exit 0) and builds
+    let filled = dir.join("filled.lll");
+    std::fs::write(&filled, filled_src).unwrap();
+    let cout = std::process::Command::new(bin)
+        .args(["check", "--no-cache", filled.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(cout.status.code(), Some(0), "filled check verifies: {}", String::from_utf8_lossy(&cout.stdout));
+    let bout2 = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["build", filled.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(bout2.status.success(), "filled module builds: {}", String::from_utf8_lossy(&bout2.stderr));
+
+    // identity: the hole is part of def-hash → holey and filled differ
+    let hh = hash::hash_module(&full(holey_src).0).unwrap().def_hash["f"].clone();
+    let fh = hash::hash_module(&full(filled_src).0).unwrap().def_hash["f"].clone();
+    assert_ne!(hh, fh, "filling a hole changes identity (DEC-LLL-020)");
+}
