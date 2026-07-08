@@ -5086,6 +5086,29 @@ fn parametric_record_constructs_and_runs() {
 }
 
 #[test]
+fn contract_nullary_ctor_on_left_of_equality_verifies() {
+    // REQ-LLL-074/080 (symmetry of the None-anchoring): the equality operands may appear
+    // in EITHER order. `ensures None == result` puts the bare nullary ctor on the LEFT, so
+    // the vc must anchor it from the RIGHT sibling's recorded sort `(Option Int)` →
+    // `(as None (Option Int))`. Proves the left/right branches of the annotation are both
+    // live and correct (the earlier tests only exercised the right-operand branch).
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part noneval() -> Option[Int]:\n    ensures None == result\n    yield None\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(verify_src(src).ok(), "ensures None == result must verify (REQ-LLL-074)");
+}
+
+#[test]
+fn contract_nullary_ctor_on_left_of_equality_is_sound() {
+    // REQ-LLL-074/080 (SOUNDNESS of the left-operand anchoring): `ensures None == result`
+    // with a body yielding `Some(5)` must be REFUTED — the left-anchored `None` is a real
+    // Z3 term, not a vacuous pass.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part noneval() -> Option[Int]:\n    ensures None == result\n    yield Some(5)\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "ensures None == result with body Some(5) must be rejected (soundness, REQ-LLL-074)"
+    );
+}
+
+#[test]
 fn named_literal_converges_with_positional() {
     // REQ-LLL-077 (named-literal construction, DEC-LLL-058 reversibility): `Point{x: 1,
     // y: 2}` is desugared at parse time to the positional ctor call `Point(1, 2)`,
