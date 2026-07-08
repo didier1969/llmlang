@@ -1535,6 +1535,77 @@ fn generic_stdlib_reused_across_element_types() {
 }
 
 #[test]
+fn erp_ledger_value_objects_verify_and_run() {
+    // REQ-LLL-065 (wave-3 slice-1, DEC-LLL-063): the verified Money + Date value-objects
+    // (std/money.lll, std/date.lll) wired into an ERP accounts-payable ledger. Proves the
+    // full pipeline — the two `import`s resolve, every part (incl. the imported std parts)
+    // discharges its Z3 obligations, and the compiled binary prints all-ones: exact money
+    // (ten 0.10 postings sum to EXACTLY 1.0 with no binary-float drift; débit=crédit nets to
+    // 0.0), currency-safe arithmetic (cross-currency add refused as errors-as-values), and
+    // valid/ordered dates (leap-day runtime validation accepts 2024-02-29, rejects 2023-02-29).
+    let (_, m) = loader::load_program("examples/erp_ledger.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "ERP ledger must verify over Z3: {:?}", failures(&report));
+
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("erp.rs");
+    let bin = dir.join("erp_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "ERP ledger Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 7, "every ERP invariant must hold at runtime (7 ones expected), got:\n{stdout}");
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no ERP invariant may fail at runtime, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn date_smart_constructor_static_gate_rejects_out_of_range_literal() {
+    // DEC-LLL-063: the LOOSE compile-time gate on `mk_date` (requires 1<=m<=12, 1<=d<=31 —
+    // inline bounds are the only fragment `requires` allows, DEC-LLL-017) makes an out-of-range
+    // date LITERAL an undischarged obligation = compile error (DEC-LLL-015), never a runtime
+    // fallback. Imports the SHIPPED std/date.lll (by absolute path) so this guards the real
+    // `mk_date` constructor: month 13 must fail `lll check` at its call site.
+    let date_lll = format!("{}/std/date.lll", env!("CARGO_MANIFEST_DIR"));
+    let src = format!(
+        "import \"{date_lll}\"\n\nmodule G:\n\n  part bad() -> Date:\n    yield mk_date(2024, 13, 1)\n\n  part main() -> Int:\n    yield 0\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("gate.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("check")
+        .arg("--no-cache")
+        .arg(&f)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run lll check");
+    assert!(!out.status.success(), "an out-of-range month literal must be a compile error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("undischarged"),
+        "expected an undischarged-obligation compile error, got:\nstderr={err}\nstdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn witness_project_verifies_and_runs() {
     // REQ-LLL-006 (criterion #2 of VIS-LLL-001): a non-trivial multi-module
     // program combining generics (length reused at List[Int] AND List[Bool]),

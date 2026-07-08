@@ -1,0 +1,62 @@
+module Std.Money:
+
+  # Money value-object, wave-3 slice-1 (DEC-LLL-063). TWO exact layers, zero float:
+  #
+  #  1. STORAGE — `Money(minor_units, currency)`: an amount as EXACT integer minor
+  #     units (cents) + an ISO-4217-style numeric currency code. Integer cents are
+  #     exact by construction — the standard, drift-free way to store money. (A v1
+  #     ADT field can only be Int/Bool/List/self, so the amount is Int here; storing
+  #     a `Rational` directly is a logged follow-up on DEC-LLL-063.)
+  #  2. COMPUTATION — `settle`/`exact_sum` over `Rational` (REQ-LLL-054): rate, split
+  #     and reconciliation math where fractions appear, PROVEN drift-free by Z3 Real.
+  type Money = Money(Int, Int)
+
+  # errors-as-values (REQ-LLL-045): a currency-mismatched operation returns an
+  # `Err` carrying a message (a string = List[Int], DEC-LLL-030) instead of
+  # silently corrupting the books.
+  type MoneyResult = MoneyOk(Money) | MoneyErr(List[Int])
+
+  part minor_units(m: Money) -> Int:
+    match m:
+      Money(u, c) -> yield u
+
+  part currency(m: Money) -> Int:
+    match m:
+      Money(u, c) -> yield c
+
+  part zero(ccy: Int) -> Money:
+    yield Money(0, ccy)
+
+  part neg(m: Money) -> Money:
+    match m:
+      Money(u, c) -> yield Money(0 - u, c)
+
+  # currency-safe addition: SAME currency -> Ok(sum); mismatch -> Err (never a
+  # silent cross-currency add). Integer minor units keep the sum exact.
+  part add(a: Money, b: Money) -> MoneyResult:
+    match currency(a) == currency(b):
+      true  -> yield MoneyOk(Money(minor_units(a) + minor_units(b), currency(a)))
+      false -> yield MoneyErr("currency mismatch")
+
+  # currency-safe subtraction (a - b).
+  part sub(a: Money, b: Money) -> MoneyResult:
+    match currency(a) == currency(b):
+      true  -> yield MoneyOk(Money(minor_units(a) - minor_units(b), currency(a)))
+      false -> yield MoneyErr("currency mismatch")
+
+  # PROVEN-EXACT settlement over scalar Rationals: `débit - crédit`, discharged by
+  # Z3's native Real theory (LRA, exact). When débit == crédit the balance is
+  # EXACTLY 0.0; `0.1 - 0.0` is EXACTLY 1/10 (no binary-float 0.1 drift). The
+  # `example`s pin proof and binary to the SAME canonical value (DEC-LLL-020).
+  part settle(debit: Rational, credit: Rational) -> Rational:
+    ensures result == debit - credit
+    example settle(100.0, 100.0) == 0.0
+    example settle(0.1, 0.0) == 0.1
+    yield debit - credit
+
+  # exact fold of a same-currency posting list (structural recursion -> terminates).
+  # Ten 0.1 postings sum to EXACTLY 1.0 here — a binary float would drift.
+  part exact_sum(postings: List[Rational], acc: Rational) -> Rational:
+    match postings:
+      []     -> yield acc
+      h :: t -> yield exact_sum(t, acc + h)

@@ -1,0 +1,78 @@
+module Std.Date:
+
+  # Verified civil dates, wave-3 slice-1 (DEC-LLL-063). A proleptic-Gregorian
+  # (year, month, day). Two construction paths, per the honest guarantee rungs the
+  # session-10 probes established:
+  #   - `mk_date`  : a compile-time LOOSE gate (1<=m<=12, 1<=d<=31 as inline bounds,
+  #     the only fragment `requires` allows — DEC-LLL-017); out-of-range LITERALS are
+  #     compile errors (DEC-LLL-015).
+  #   - `try_mk_date` : full RUNTIME validation (exact per-month day count, leap year)
+  #     as errors-as-values (REQ-LLL-045) — the path for EXTERNAL data (DB/parse/input)
+  #     a static precondition cannot ingest.
+  # The raw `Date(...)` constructor is NOT sealed, so validity is a discipline of
+  # going through these, not an unrepresentable-invalid guarantee (probe 2).
+  type Date = Date(Int, Int, Int)
+
+  # errors-as-values for runtime validation.
+  type DateResult = DateOk(Date) | DateErr(List[Int])
+
+  part is_leap(y: Int) -> Bool:
+    yield (y mod 4 == 0 and not (y mod 100 == 0)) or (y mod 400 == 0)
+
+  # PROVEN bounded: every month has between 28 and 31 days. `is_leap` is called in
+  # the BODY (allowed); the contract itself is bounds-only (no calls).
+  part days_in_month(y: Int, m: Int) -> Int:
+    requires 1 <= m, m <= 12
+    ensures result >= 28, result <= 31
+    match m == 2:
+      true ->
+        match is_leap(y):
+          true  -> yield 29
+          false -> yield 28
+      false ->
+        match m == 4 or m == 6 or m == 9 or m == 11:
+          true  -> yield 30
+          false -> yield 31
+
+  # compile-time LOOSE smart constructor: rejects out-of-range literals statically.
+  part mk_date(y: Int, m: Int, d: Int) -> Date:
+    requires 1 <= m, m <= 12, 1 <= d, d <= 31
+    yield Date(y, m, d)
+
+  # runtime EXACT validation for external data (errors-as-values). The guarded call
+  # to `days_in_month` discharges its precondition from the branch condition.
+  part try_mk_date(y: Int, m: Int, d: Int) -> DateResult:
+    match 1 <= m and m <= 12:
+      false -> yield DateErr("month out of range")
+      true ->
+        match 1 <= d and d <= days_in_month(y, m):
+          true  -> yield DateOk(Date(y, m, d))
+          false -> yield DateErr("day out of range for month")
+
+  part year(dt: Date) -> Int:
+    match dt:
+      Date(y, m, d) -> yield y
+
+  part month(dt: Date) -> Int:
+    match dt:
+      Date(y, m, d) -> yield m
+
+  part day(dt: Date) -> Int:
+    match dt:
+      Date(y, m, d) -> yield d
+
+  # total, strict lexicographic order on (year, month, day).
+  part before(a: Date, b: Date) -> Bool:
+    match year(a) == year(b):
+      false -> yield year(a) < year(b)
+      true ->
+        match month(a) == month(b):
+          false -> yield month(a) < month(b)
+          true  -> yield day(a) < day(b)
+
+  part eq_date(a: Date, b: Date) -> Bool:
+    yield year(a) == year(b) and month(a) == month(b) and day(a) == day(b)
+
+  # an invoice due on `due` is overdue once `today` is strictly past it.
+  part is_overdue(due: Date, today: Date) -> Bool:
+    yield before(due, today)

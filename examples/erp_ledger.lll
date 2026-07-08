@@ -1,0 +1,55 @@
+import "../std/money.lll"
+import "../std/date.lll"
+
+module Erp.Ledger:
+
+  # Wave-3 slice-1 E2E (REQ-LLL-065): a tiny accounts-payable ledger that exercises
+  # the verified Money + Date value-objects. Every line prints `1` iff an ERP
+  # invariant holds AT RUNTIME, complementing the STATIC Z3 proofs in the two std
+  # modules. All-ones output = exact money (no float drift) + valid, ordered dates.
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part money_is(r: MoneyResult, u: Int) -> Bool:
+    match r:
+      MoneyOk(m)  -> yield minor_units(m) == u
+      MoneyErr(e) -> yield false
+
+  part money_is_err(r: MoneyResult) -> Bool:
+    match r:
+      MoneyOk(m)  -> yield false
+      MoneyErr(e) -> yield true
+
+  part date_is_ok(r: DateResult) -> Bool:
+    match r:
+      DateOk(d)  -> yield true
+      DateErr(e) -> yield false
+
+  part date_is_err(r: DateResult) -> Bool:
+    match r:
+      DateOk(d)  -> yield false
+      DateErr(e) -> yield true
+
+  part main() -> Int via IO:
+    # 1. EXACT money: ten 0.10 postings sum to EXACTLY 1.00 (a binary float drifts).
+    let dimes = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    let a = IO.print(flag(exact_sum(dimes, 0.0) == 1.0))
+    # 2. débit = crédit: a balanced entry nets to EXACTLY zero.
+    let b = IO.print(flag(settle(1000.0, 1000.0) == 0.0))
+    # 3. currency-safe add (same currency) yields 5.00 + 2.50 = 7.50 (750 minor units).
+    let usd = 840
+    let eur = 978
+    let c = IO.print(flag(money_is(add(Money(500, usd), Money(250, usd)), 750)))
+    # 4. cross-currency add is REFUSED (errors-as-values), never silently summed.
+    let d = IO.print(flag(money_is_err(add(Money(500, usd), Money(250, eur)))))
+    # 5. due-date ordering: an invoice due 2024-01-15 is overdue on 2024-03-01.
+    let due   = mk_date(2024, 1, 15)
+    let today = mk_date(2024, 3, 1)
+    let e = IO.print(flag(is_overdue(due, today)))
+    # 6. runtime validation REJECTS 2023-02-29 (2023 is not a leap year).
+    let f = IO.print(flag(date_is_err(try_mk_date(2023, 2, 29))))
+    # 7. runtime validation ACCEPTS 2024-02-29 (valid leap day).
+    yield IO.print(flag(date_is_ok(try_mk_date(2024, 2, 29))))
