@@ -1031,8 +1031,36 @@ impl<'a> Emit<'a> {
             Expr::Neg(a) => format!("(- {})", self.tr(a, env, None)?),
             Expr::Not(a) => format!("(not {})", self.tr(a, env, None)?),
             Expr::Bin(op, a, b) => {
-                let ta = self.tr(a, env, None)?;
-                let tb = self.tr(b, env, None)?;
+                let mut ta = self.tr(a, env, None)?;
+                let mut tb = self.tr(b, env, None)?;
+                // Equality with a bare polymorphic nullary constructor operand (`None`):
+                // it is sort-ambiguous and Z3 4.16 will NOT infer its sort from a
+                // constructor-application sibling (`(Some 5)`) — only from an annotated
+                // `(as …)` or a declared constant. Left bare, `(= (Some 5) None)` makes
+                // Z3 emit `unknown constant None`, which the fail-closed guard turns into
+                // a hard error. So annotate the bare constructor `(as None (Option Int))`
+                // from the sibling's recorded CONCRETE sort — only when that sort is a
+                // parametric instantiation (contains a space, e.g. `(Option Int)`); a
+                // monomorphic nullary ctor (`Non : Opt`) is already unambiguous and left
+                // untouched (REQ-LLL-074/080).
+                if matches!(crate::opsem::form(*op).class, crate::opsem::OpClass::Equality) {
+                    let sib_a = self.sorts.get(&ta).cloned();
+                    let sib_b = self.sorts.get(&tb).cloned();
+                    if self.cm.ctors.contains_key(&ta) {
+                        if let Some(srt) = sib_b {
+                            if srt.contains(' ') {
+                                ta = format!("(as {ta} {srt})");
+                            }
+                        }
+                    }
+                    if self.cm.ctors.contains_key(&tb) {
+                        if let Some(srt) = sib_a {
+                            if srt.contains(' ') {
+                                tb = format!("(as {tb} {srt})");
+                            }
+                        }
+                    }
+                }
                 let f = crate::opsem::form(*op);
                 if f.nonzero_divisor {
                     // only div/mod set this flag (opsem is the single source)
@@ -1297,14 +1325,29 @@ impl<'a> Emit<'a> {
                     for (i, a) in args.iter().enumerate() {
                         ts.push(self.tr(a, env, fields.get(i))?);
                     }
-                    let term = format!("({name} {})", ts.join(" "));
-                    // record the constructed value's sort so a field access on a record
-                    // built inline — notably a call-site precondition `f(Point(1,2))`
-                    // where the formal binds to this term string — recovers it via
-                    // `sort_of` instead of failing LOUD (REQ-LLL-070, mirror of the
-                    // tuple-literal sort recording).
-                    self.sorts
-                        .insert(term.clone(), smt_ty(&Ty::User(owner, vec![])));
+                    // the constructed value's sort: prefer the CONCRETE instantiation
+                    // fixed by context (`Some(5)` in an `Option[Int]` position →
+                    // `(Option Int)`, not the sort-incomplete `Option`) so a sibling bare
+                    // `None` can be annotated from it in an equality, and an abstract
+                    // application can be qualified below (REQ-LLL-074).
+                    let sort = match expected {
+                        Some(Ty::User(n, targs)) if *n == owner && !targs.is_empty() => {
+                            smt_ty(&Ty::User(owner.clone(), targs.clone()))
+                        }
+                        _ => smt_ty(&Ty::User(owner.clone(), vec![])),
+                    };
+                    // A parametric constructor applied at an ABSTRACT sort — `Some(x)`
+                    // where `x : Tv_a` in a polymorphic part — cannot be resolved by Z3
+                    // 4.16 from the argument alone (`unknown constant Some (Tv_a)`), so
+                    // qualify it `((as Some (Option Tv_a)) x)`. A concrete application
+                    // (`(Some 5)`) keeps its bare, cache-stable form. Record the value's
+                    // sort under the emitted term either way (REQ-LLL-074/080).
+                    let term = if !fields.is_empty() && sort.contains("Tv_") {
+                        format!("((as {name} {sort}) {})", ts.join(" "))
+                    } else {
+                        format!("({name} {})", ts.join(" "))
+                    };
+                    self.sorts.insert(term.clone(), sort);
                     return Ok(term);
                 }
                 let callee = &self.cm.module.parts[self.cm.index[name]];
@@ -1934,6 +1977,18 @@ fn discharge(
     }
     let refs: Vec<&Obligation> = obligations.iter().collect();
     let out = run_z3(z3, &script_for(&refs, false, dt_decls))?;
+    // Fail-CLOSED on ANY Z3 error (REQ-LLL-080): a well-formed script never emits
+    // `(error …)`. If one appears — a malformed declaration, an ill-sorted assert, an
+    // unknown symbol — the run is untrustworthy, so REFUSE it as a hard verification
+    // failure rather than reading the surviving `sat`/`unsat` lines. The structural
+    // argument that a skipped command only ever *removes* constraints (making the
+    // negated goal easier to satisfy → `sat` → rejected) already makes an error
+    // fail-safe, but this makes it fail-LOUD and independent of that reasoning: a Z3
+    // error must NEVER be silently reinterpreted as a discharged obligation
+    // (DEC-LLL-015/017 — an undischarged obligation is a compile error, never a repli).
+    if out.contains("(error") {
+        return Err(format!("z3 reported an error while discharging obligations:\n{out}"));
+    }
     let verdicts: Vec<&str> = out
         .lines()
         .filter(|l| matches!(l.trim(), "sat" | "unsat" | "unknown" | "timeout"))
@@ -1963,4 +2018,36 @@ fn discharge(
         }
     }
     Ok(failures)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn z3_error_during_discharge_is_a_hard_failure_never_a_silent_proof() {
+        // REQ-LLL-080 (the catastrophic path): a Z3 `(error …)` — here an obligation
+        // whose declaration names an UNDECLARED sort — must make `discharge` return
+        // Err (fail-CLOSED), never Ok with a spuriously-discharged obligation. Without
+        // the explicit `(error` guard the malformed `(check-sat)` still emits `sat`
+        // (empty context), which is rejected — but only by the structural accident that
+        // a skipped command removes constraints. This asserts the STRONG guarantee: any
+        // Z3 error is a hard, loud failure, independent of that reasoning.
+        let z3 = match find_z3() {
+            Ok(p) => p,
+            Err(_) => return, // z3 absent in this environment — nothing to assert
+        };
+        let obl = Obligation {
+            part: "t".into(),
+            descr: "bogus obligation over an undeclared sort".into(),
+            decls: vec!["(declare-const x Undeclared)".into()],
+            hyps: Vec::new(),
+            goal: "(= x x)".into(),
+        };
+        let res = discharge(&z3, std::slice::from_ref(&obl), &[]);
+        assert!(
+            res.is_err(),
+            "a Z3 error must be a hard verification failure, got: {res:?}"
+        );
+    }
 }

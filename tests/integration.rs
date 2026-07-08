@@ -4939,6 +4939,35 @@ fn contract_nested_unanchored_nullary_ctor_fails_loud() {
 }
 
 #[test]
+fn contract_polymorphic_nullary_ctor_verifies() {
+    // REQ-LLL-074: a NULLARY parametric ctor at an ABSTRACT type works — `ensures
+    // result == None` on a polymorphic `Option[a]`-returning part. The vc emits the
+    // sort-annotated `(as None (Option Tv_a))`, which Z3 4.16 accepts (unlike a bare
+    // constructor application at `Tv_a`). Body `yield None` ⇒ proves.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part noneval() -> Option[a]:\n    ensures result == None\n    yield None\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "polymorphic ensures result == None must verify (REQ-LLL-074)"
+    );
+}
+
+#[test]
+fn contract_polymorphic_ctor_application_is_rejected_fail_loud() {
+    // REQ-LLL-081 (honest v1 boundary): a parametric ctor APPLICATION at an abstract
+    // type in a contract — `ensures result == Some(x)` on a polymorphic `Option[a]` —
+    // is not yet encodable (Z3 4.16 cannot apply a constructor at an abstract sort, and
+    // the vc's qualified form is only wired on the yield side). It must be a CLEAN
+    // fail-loud type error, never a Z3 internal error or a vacuous proof.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: a) -> Option[a]:\n    ensures result == Some(x)\n    yield Some(x)\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("polymorphic ctor application in a contract must be rejected");
+    assert!(
+        err.contains("polymorphic type") && err.contains("REQ-LLL-081"),
+        "expected the clean v1-not-supported error, got: {err}"
+    );
+}
+
+#[test]
 fn parametric_nullary_ctor_without_type_context_is_a_clean_error() {
     // REQ-LLL-068 (Landmine 1): a parametric nullary constructor `None : Option[a]` carries
     // no field to pin its type argument. Used where no expected type fixes it, the checker

@@ -988,6 +988,21 @@ fn ty_mentions_var(t: &Ty, v: &str) -> bool {
     }
 }
 
+/// Does `t` contain ANY `Ty::Var` (i.e. is it a non-ground / polymorphic type)?
+/// Used to reject a parametric constructor APPLICATION at an abstract type inside a
+/// contract, which Z3 4.16 cannot encode soundly there (REQ-LLL-081).
+fn ty_contains_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => ty_contains_var(e),
+        Ty::Map(k, v) => ty_contains_var(k) || ty_contains_var(v),
+        Ty::Fun(ps, r) => ps.iter().any(ty_contains_var) || ty_contains_var(r),
+        Ty::Tuple(cs) => cs.iter().any(ty_contains_var),
+        Ty::User(_, args) => args.iter().any(ty_contains_var),
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => false,
+    }
+}
+
 /// Does every `Ty::Var` in `t` equal `only` (REQ-LLL-050)? Used to reject a class
 /// method signature that references a SECOND free type variable — see the call
 /// site in the class-registration loop for why that can never be instantiated.
@@ -2248,6 +2263,22 @@ fn type_of_pure(
                     .iter()
                     .map(|p| subst.get(p).cloned().unwrap_or_else(|| Ty::Var(p.clone())))
                     .collect();
+                // A parametric constructor APPLICATION at an abstract type (`Some(x)` in
+                // a polymorphic part whose result is `Option[a]`) cannot be encoded
+                // soundly in a contract: Z3 4.16 cannot apply the constructor at an
+                // abstract sort, and the vc's qualified `((as Some (Option Tv_a)) x)`
+                // form is only wired where an `expected` sort exists (a yield), not on
+                // both sides of a contract equality. Reject it CLEANLY here (v1) instead
+                // of letting it reach Z3 as an internal error (fail-loud, REQ-LLL-081). A
+                // NULLARY constructor (`None`) at an abstract type still works — it is a
+                // bare Var annotated `(as None (Option Tv_a))`, and never reaches here.
+                if targs.iter().any(ty_contains_var) {
+                    return Err(format!(
+                        "constructing the parametric value `{name}(…)` at a polymorphic \
+                         type is not yet supported in a contract (v1) — use a concrete \
+                         instantiation (REQ-LLL-081)"
+                    ));
+                }
                 Ty::User(owner, targs)
             }
         }
