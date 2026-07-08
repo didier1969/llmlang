@@ -348,19 +348,40 @@ fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
     }
 }
 
-/// One arm of a GENERAL nullary foreign enum (REQ-LLL-052, hybrid tranche-1), OUT
-/// direction (foreign Rust enum → llmlang ADT), mapped BY NAME: the nullary Rust variant
-/// `{path}::{rustv}` builds the nullary llmlang ctor `{ei}::{ctor}`. The checker proved
-/// every mapped ctor is nullary, so there is no payload to marshal.
-fn enum_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
-    format!("{path}::{rustv} => Rc::new({ei}::{ctor}), ")
+/// One arm of a GENERAL foreign enum (REQ-LLL-052), OUT direction (foreign Rust enum →
+/// llmlang ADT), mapped BY NAME. Nullary: `{path}::{rustv} => Rc::new({ei}::{ctor})`.
+/// Single scalar payload (tranche-2a, Int/Bool): binds the field and passes it through —
+/// i64↔Int and bool↔Bool are IDENTITY in the generated repr, so no marshalling call.
+fn enum_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str, has_payload: bool) -> String {
+    if has_payload {
+        format!("{path}::{rustv}(__x) => Rc::new({ei}::{ctor}(__x)), ")
+    } else {
+        format!("{path}::{rustv} => Rc::new({ei}::{ctor}), ")
+    }
 }
 
-/// One arm of a GENERAL nullary foreign enum (REQ-LLL-052, hybrid tranche-1), IN
-/// direction (llmlang ADT → foreign Rust enum), mapped BY NAME. The checker proved the
-/// ADT's ctors are fully covered, so the enclosing match is exhaustive with no `_` arm.
-fn enum_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
-    format!("{ei}::{ctor} => {path}::{rustv}, ")
+/// One arm of a GENERAL foreign enum (REQ-LLL-052), IN direction (llmlang ADT → foreign
+/// Rust enum), mapped BY NAME. The checker proved the ADT's ctors are fully covered, so
+/// the enclosing match is exhaustive with no `_` arm. A single scalar payload (tranche-2a)
+/// is dereferenced out of the boxed llmlang enum (`*__x`), identity-marshalled.
+fn enum_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str, has_payload: bool) -> String {
+    if has_payload {
+        format!("{ei}::{ctor}(__x) => {path}::{rustv}(*__x), ")
+    } else {
+        format!("{ei}::{ctor} => {path}::{rustv}, ")
+    }
+}
+
+/// Whether the named ctor of the named ADT carries a payload (REQ-LLL-052 tranche-2a: the
+/// checker restricts a general foreign-enum ctor to nullary OR a single Int/Bool field, so
+/// "non-empty" ⟹ exactly one scalar field). Drives the payload-binding arm form above.
+fn ctor_has_payload(types: &[TypeDecl], adt: &str, ctor: &str) -> bool {
+    types
+        .iter()
+        .find(|t| t.name == adt)
+        .and_then(|t| t.ctors.iter().find(|(cn, _)| cn == ctor))
+        .map(|(_, f)| !f.is_empty())
+        .unwrap_or(false)
 }
 
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
@@ -508,10 +529,16 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                                      __json_in(&*__a{i}) }}"
                                 )
                             } else {
-                                // a GENERAL nullary foreign enum (REQ-LLL-052): a direct
-                                // exhaustive by-name match — no recursion, no payload.
-                                let marms: String =
-                                    arms.iter().map(|(r, c)| enum_in_arm(path, r, &ei, c)).collect();
+                                // a GENERAL foreign enum (REQ-LLL-052): a direct exhaustive
+                                // by-name match — no recursion; a single scalar payload
+                                // (tranche-2a) is passed through per `ctor_has_payload`.
+                                let marms: String = arms
+                                    .iter()
+                                    .map(|(r, c)| {
+                                        let hp = ctor_has_payload(&cm.module.types, &n, c);
+                                        enum_in_arm(path, r, &ei, c, hp)
+                                    })
+                                    .collect();
                                 format!("match &*__a{i} {{ {marms}}}")
                             }
                         }
@@ -589,13 +616,19 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                                  }} }} __json_out({call}) }}"
                             )
                         } else {
-                            // a GENERAL nullary foreign enum (REQ-LLL-052): a direct by-name
-                            // match with NO `_` arm — rustc enforces exhaustiveness over the
-                            // foreign enum at build, so an omitted/misspelled variant is a
-                            // build error re-anchored to the shim (REQ-LLL-027), never a silent
-                            // mis-map AND never an unreachable-pattern warning (zero-warning).
-                            let marms: String =
-                                arms.iter().map(|(r, c)| enum_out_arm(path, r, &ei, c)).collect();
+                            // a GENERAL foreign enum (REQ-LLL-052): a direct by-name match with
+                            // NO `_` arm — rustc enforces exhaustiveness over the foreign enum at
+                            // build, so an omitted/misspelled variant is a build error re-anchored
+                            // to the shim (REQ-LLL-027), never a silent mis-map AND never an
+                            // unreachable-pattern warning (zero-warning). A single scalar payload
+                            // (tranche-2a) is bound and passed through per `ctor_has_payload`.
+                            let marms: String = arms
+                                .iter()
+                                .map(|(r, c)| {
+                                    let hp = ctor_has_payload(&cm.module.types, &n, c);
+                                    enum_out_arm(path, r, &ei, c, hp)
+                                })
+                                .collect();
                             format!("match {call} {{ {marms}}}")
                         }
                     }

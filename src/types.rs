@@ -1268,12 +1268,31 @@ fn check_enum_by_name(
                 )
             })?
             .1;
-        if !fields.is_empty() {
-            return Err(format!(
-                "effect `{eff}` op `{op}`: constructor `{ctor}` (from `{path}::{rustv}`) must be \
-                 NULLARY — a foreign enum with typed variant payloads is deferred to a later \
-                 tranche (REQ-LLL-052); this tranche marshals only C-like/tag enums by name"
-            ));
+        // tranche-2a: a variant is NULLARY or carries a SINGLE unambiguous scalar payload
+        // (`Int`/`Bool`). A single field has no positional reorder ambiguity, and Int/Bool
+        // are unambiguous default marshalling pairs (so no per-field `as` is needed).
+        // MULTIPLE fields (positional reorder risk) or a single NON-scalar field (`List[Int]`
+        // is ambiguous String/Bytes; nested/tuple need declared marshalling) are deferred to
+        // tranche-2b — a clean compile error, never a silent positional payload mis-map.
+        match fields.as_slice() {
+            [] | [Ty::Int] | [Ty::Bool] => {}
+            [single] => {
+                return Err(format!(
+                    "effect `{eff}` op `{op}`: constructor `{ctor}` (from `{path}::{rustv}`) has a \
+                     single `{single}` payload field, but a foreign-enum variant payload must be \
+                     `Int` or `Bool` (an unambiguous scalar) in this tranche — `List[Int]` \
+                     (ambiguous String/Bytes) and nested/tuple payloads are deferred (REQ-LLL-052 \
+                     tranche-2b)"
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "effect `{eff}` op `{op}`: constructor `{ctor}` (from `{path}::{rustv}`) has \
+                     MULTIPLE payload fields — a foreign-enum variant with several fields needs \
+                     declared positional field marshalling, deferred to REQ-LLL-052 tranche-2b; \
+                     this tranche marshals nullary or single-scalar (Int/Bool) variants"
+                ));
+            }
         }
     }
     for (cn, _) in &td.ctors {

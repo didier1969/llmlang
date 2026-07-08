@@ -2481,18 +2481,59 @@ fn ffi_general_nullary_enum_marshals_by_name_round_trip_via_cargo() {
 }
 
 #[test]
-fn ffi_general_enum_non_nullary_ctor_is_rejected() {
-    // REQ-LLL-052 (hybrid tranche-1 boundary): a general foreign enum maps ONLY nullary
-    // ctors in this tranche — a variant with a typed payload needs payload marshalling
-    // (tranche-2). Mapping a ctor with a field (`Tagged(Int)`) must be a clean COMPILE
-    // error naming the nullary restriction, NEVER a silent positional payload mis-map
-    // (DEC-LLL-015) — the whole point of by-name marshalling.
-    let src = "module M:\n\n  type T = A | Tagged(Int)\n\n  effect E:\n    f(Int) -> T = extern \"std::cmp::max\" as (i64) -> enum std::cmp::Ordering [ A -> A, Tagged -> Tagged ]\n\n  part g(x: Int) -> T via E:\n    yield E.f(x)\n";
-    let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("a non-nullary ctor in a general foreign enum must be rejected");
+fn ffi_general_enum_scalar_payload_marshals_by_name_round_trip_via_cargo() {
+    // REQ-LLL-052 tranche-2a: a general foreign enum whose variants carry a SINGLE
+    // unambiguous scalar payload (i64/bool) marshals BY NAME — the Option/Result-shape
+    // tag-with-data case. `tag_of(42)` returns `Num(42)` (OUT, an i64 payload), `tag_value`
+    // reads it back (IN). A single field has no positional reorder ambiguity; Int/Bool are
+    // unambiguous default marshalling pairs, so the payload crosses without an `as` clause.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_enum");
+    let src = format!(
+        "depends ffi_enum \"1.0.0\" from \"{fixture}\"\n\nmodule TagTest:\n\n  type Tagged = Empty | Num(Int) | Flag(Bool)\n\n  effect T:\n    tag_of(Int) -> Tagged = extern \"ffi_enum::tag_of\" as (i64) -> enum ffi_enum::Tagged [ Empty -> Empty, Num -> Num, Flag -> Flag ]\n    tag_value(Tagged) -> Int = extern \"ffi_enum::tag_value\" as (enum ffi_enum::Tagged [ Empty -> Empty, Num -> Num, Flag -> Flag ]) -> i64\n\n  part main() -> Int via IO, T:\n    let t = T.tag_of(42)\n    yield IO.print(T.tag_value(t))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("tag_test.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
     assert!(
-        err.contains("NULLARY") || err.contains("nullary"),
-        "message must name the nullary restriction (not a silent mis-map): {err}"
+        out.status.success(),
+        "scalar-payload enum marshalling (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // tag_of(42) = Num(42); tag_value(Num(42)) = 42
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 42"),
+        "expected 42, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_general_enum_multi_field_or_nonscalar_payload_is_rejected() {
+    // REQ-LLL-052 tranche-2a boundary: this tranche marshals nullary or SINGLE-scalar
+    // (Int/Bool) variants. A variant with MULTIPLE payload fields (positional reorder risk)
+    // or a single NON-scalar field (`List[Int]` is ambiguous String/Bytes without an `as`)
+    // is deferred to tranche-2b — a clean COMPILE error, never a silent positional mis-map.
+    let multi = "module M:\n\n  type T = A | Pair(Int, Int)\n\n  effect E:\n    f(Int) -> T = extern \"std::cmp::max\" as (i64) -> enum std::cmp::Ordering [ A -> A, Pair -> Pair ]\n\n  part g(x: Int) -> T via E:\n    yield E.f(x)\n";
+    let err = types::check_module(parser::parse_module(multi).expect("parse"))
+        .expect_err("a multi-field variant must be rejected");
+    assert!(
+        err.contains("MULTIPLE") || err.contains("tranche-2b"),
+        "message names the multi-field deferral: {err}"
+    );
+    let nonscalar = "module M:\n\n  type T = A | Text(List[Int])\n\n  effect E:\n    f(Int) -> T = extern \"std::cmp::max\" as (i64) -> enum std::cmp::Ordering [ A -> A, Text -> Text ]\n\n  part g(x: Int) -> T via E:\n    yield E.f(x)\n";
+    let err2 = types::check_module(parser::parse_module(nonscalar).expect("parse"))
+        .expect_err("a single non-scalar field must be rejected");
+    assert!(
+        err2.contains("Int` or `Bool") || err2.contains("scalar"),
+        "message names the scalar-only restriction: {err2}"
     );
 }
 
