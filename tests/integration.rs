@@ -5355,3 +5355,84 @@ fn parametric_record_compound_type_arg_field_sort_recovers() {
         failures(&verify_src(src))
     );
 }
+
+#[test]
+fn parametric_type_over_arity_in_signature_is_rejected() {
+    // REQ-LLL-075: a parametric type applied to TOO MANY arguments in a signature —
+    // `Box[Int, Bool]` on `type Box[a]` — is a clean LLL error at check time, not a
+    // mis-typed codegen only rustc would catch downstream (robustness).
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  part f(b: Box[Int, Bool]) -> Int:\n    yield b.val\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("over-arity must be rejected");
+    assert!(
+        err.contains("`Box` expects 1 type argument(s), got 2"),
+        "expected a clear arity error, got: {err}"
+    );
+}
+
+#[test]
+fn parametric_type_under_arity_bare_is_rejected() {
+    // REQ-LLL-075: a bare parametric type name — `Box` where `Box` takes one parameter —
+    // is under-applied (LLL is first-order: no higher-kinded bare type constructors). It
+    // must be rejected with the arity count, not silently accepted as a sort-incomplete type.
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  part f(b: Box) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("under-arity (bare) must be rejected");
+    assert!(
+        err.contains("`Box` expects 1 type argument(s), got 0"),
+        "expected a clear arity error, got: {err}"
+    );
+}
+
+#[test]
+fn parametric_type_partial_arity_two_param_is_rejected() {
+    // REQ-LLL-075: a 2-parameter type given only ONE argument — `Result[Int]` on
+    // `type Result[a, b]` — is rejected (the spec's `Result[Int]` too-few case).
+    let src = "module T:\n\n  type Result[a, b] = Ok(a) | Err(b)\n\n  part f(r: Result[Int]) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("partial arity must be rejected");
+    assert!(
+        err.contains("`Result` expects 2 type argument(s), got 1"),
+        "expected a clear arity error, got: {err}"
+    );
+}
+
+#[test]
+fn parametric_type_wrong_arity_in_field_is_rejected() {
+    // REQ-LLL-075: the arity check reaches FIELD types too, not only signatures —
+    // `type Wrap = {inner: Box[Int, Bool]}` on `type Box[a]` is rejected (a field type
+    // is checked for arity right after its `valid_field_ty` support gate).
+    let src = "module T:\n\n  type Box[a] = {val: a}\n  type Wrap = {inner: Box[Int, Bool]}\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("field over-arity must be rejected");
+    assert!(
+        err.contains("`Box` expects 1 type argument(s), got 2"),
+        "expected a clear arity error, got: {err}"
+    );
+}
+
+#[test]
+fn monomorphic_type_over_applied_is_rejected() {
+    // REQ-LLL-075: the symmetric under-side — a MONOMORPHIC type given arguments
+    // (`Color[Int]` on `type Color = Red | Green`, zero parameters) — is rejected too.
+    let src = "module T:\n\n  type Color = Red | Green\n\n  part f(c: Color[Int]) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("over-applied monomorphic type must be rejected");
+    assert!(
+        err.contains("`Color` expects 0 type argument(s), got 1"),
+        "expected a clear arity error, got: {err}"
+    );
+}
+
+#[test]
+fn correct_parametric_arity_including_nested_verifies() {
+    // REQ-LLL-075 (positive control): correct arities — a NESTED `Box[Option[Int]]`
+    // (outer arity 1, inner arity 1) and a two-parameter `Result[Int, Bool]` (arity 2) —
+    // still type-check and verify, so the new gate does not over-reject valid programs.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n  type Box[a] = {val: a}\n  type Result[a, b] = Ok(a) | Err(b)\n\n  part unwrap(b: Box[Option[Int]]) -> Bool:\n    ensures result == (b.val == None)\n    match b.val:\n      None -> yield true\n      Some(x) -> yield false\n\n  part tag(r: Result[Int, Bool]) -> Int:\n    match r:\n      Ok(n) -> yield n\n      Err(b) -> yield 0\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "correct parametric arities (nested + two-param) must verify (REQ-LLL-075): {:?}",
+        failures(&verify_src(src))
+    );
+}

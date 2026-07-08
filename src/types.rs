@@ -168,6 +168,17 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate type `{}`", td.name));
         }
     }
+    // declared type parameters per ADT: type name → ordered param names. Two consumers:
+    // (REQ-LLL-074) `type_of_pure` (the contract typer, no module handle) types a
+    // parametric constructor APPLICATION `Some(x)` by placing inferred arguments in this
+    // declared order; (REQ-LLL-075) every `User` reference is checked against this arity
+    // (`Box[Int, Bool]` or a bare `Box` on `type Box[a]` is a clean LLL error, not a
+    // mis-typed codegen only rustc would catch). Built here so field types are covered too.
+    let typarams: HashMap<String, Vec<String>> = module
+        .types
+        .iter()
+        .map(|td| (td.name.clone(), td.type_params.clone()))
+        .collect();
     let mut ctors: HashMap<String, (String, Vec<Ty>)> = HashMap::new();
     for td in &module.types {
         if td.ctors.is_empty() {
@@ -182,6 +193,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                         td.name
                     ));
                 }
+                // a declared type in a field must also be applied at its correct arity
+                // (`{inner: Box[Int, Bool]}` on `type Box[a]` is rejected, REQ-LLL-075)
+                check_user_ty_declared(ft, &typarams)?;
             }
             if index.contains_key(cname) {
                 return Err(format!(
@@ -218,22 +232,13 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         records.insert(td.name.clone(), td.field_names.clone());
     }
-    // declared type parameters per ADT (REQ-LLL-074): type name → ordered param names.
-    // `type_of_pure` (the contract typer, no module handle) needs this to type a
-    // parametric constructor APPLICATION `Some(x)` in a contract — it unifies the
-    // ctor's field types against the argument types and places the inferred arguments
-    // in this declared parameter order (mirrors `check_expr`'s ctor-call arm).
-    let typarams: HashMap<String, Vec<String>> = module
-        .types
-        .iter()
-        .map(|td| (td.name.clone(), td.type_params.clone()))
-        .collect();
-    // every `User` type mentioned in a signature must be declared
+    // every `User` type mentioned in a signature must be declared AND applied at its
+    // correct arity (REQ-LLL-075)
     for p in &module.parts {
         for (_, t) in &p.params {
-            check_user_ty_declared(t, &type_names)?;
+            check_user_ty_declared(t, &typarams)?;
         }
-        check_user_ty_declared(&p.ret, &type_names)?;
+        check_user_ty_declared(&p.ret, &typarams)?;
     }
     // effect table (REQ-LLL-018): "Effect.op" -> (effect, param types, ret type).
     // IO is a builtin effect; user effects come from `effect` declarations.
@@ -283,10 +288,10 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         let mut has_user_tail = false;
         for op in &ed.ops {
             for t in &op.params {
-                check_user_ty_declared(t, &type_names)?;
+                check_user_ty_declared(t, &typarams)?;
             }
             if op.ret != Ty::Never {
-                check_user_ty_declared(&op.ret, &type_names)?;
+                check_user_ty_declared(&op.ret, &typarams)?;
             }
             // FFI resolution guard (REQ-LLL-027 gap 2): reject an `= extern` path that
             // cannot link in v1's single-file rustc build, here, instead of letting it
@@ -621,7 +626,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 return Err(format!("class `{}`: duplicate method `{mn}`", c.name));
             }
             for t in mparams.iter().chain(std::iter::once(mret)) {
-                check_user_ty_declared(t, &type_names)?;
+                check_user_ty_declared(t, &typarams)?;
                 // DEC-LLL-047: ground-instantiation only ever substitutes the
                 // class's OWN tyvar. A method signature that mentions a DIFFERENT
                 // free type variable could never be discharged by any instance
@@ -823,7 +828,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 inst.class, inst.ty
             ));
         }
-        check_user_ty_declared(&inst.ty, &type_names)?;
+        check_user_ty_declared(&inst.ty, &typarams)?;
         let provided: HashSet<&str> = inst.defs.iter().map(|(n, _)| n.as_str()).collect();
         if provided.len() != inst.defs.len() {
             return Err(format!(
@@ -1295,25 +1300,41 @@ fn validate_extern_path(
 }
 
 /// Reject a signature that names an undeclared user type.
-fn check_user_ty_declared(t: &Ty, types: &HashSet<String>) -> Result<(), String> {
+/// Verify every user type referenced in `t` is declared AND applied at its declared
+/// ARITY (REQ-LLL-075): `Box[Int, Bool]` or a bare `Box` on `type Box[a]` is a clean
+/// LLL error here, not a mis-typed codegen only rustc would catch downstream. `arities`
+/// maps every declared type name to its ordered type parameters. Recurses through every
+/// type former so a nested `List[Box[Int, Bool]]` or `Map[K, Nope]` is caught too.
+fn check_user_ty_declared(t: &Ty, arities: &HashMap<String, Vec<String>>) -> Result<(), String> {
     match t {
-        Ty::User(n, _) if !types.contains(n) => Err(format!("unknown type `{n}`")),
-        Ty::User(_, args) => {
+        Ty::User(n, args) => {
+            let params = arities.get(n).ok_or_else(|| format!("unknown type `{n}`"))?;
+            if args.len() != params.len() {
+                return Err(format!(
+                    "type `{n}` expects {} type argument(s), got {}",
+                    params.len(),
+                    args.len()
+                ));
+            }
             for a in args {
-                check_user_ty_declared(a, types)?;
+                check_user_ty_declared(a, arities)?;
             }
             Ok(())
         }
-        Ty::List(e) | Ty::Array(e) => check_user_ty_declared(e, types),
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => check_user_ty_declared(e, arities),
+        Ty::Map(k, v) => {
+            check_user_ty_declared(k, arities)?;
+            check_user_ty_declared(v, arities)
+        }
         Ty::Fun(ps, r) => {
             for p in ps {
-                check_user_ty_declared(p, types)?;
+                check_user_ty_declared(p, arities)?;
             }
-            check_user_ty_declared(r, types)
+            check_user_ty_declared(r, arities)
         }
         Ty::Tuple(cs) => {
             for c in cs {
-                check_user_ty_declared(c, types)?;
+                check_user_ty_declared(c, arities)?;
             }
             Ok(())
         }
