@@ -1629,47 +1629,185 @@ fn user_datatype_decls(types: &[TypeDecl]) -> Vec<String> {
     // each sort is `(Name arity)` — arity is the number of type parameters, so a
     // parametric ADT `type Option[a]` declares `(Option 1)` exactly like the
     // built-in `(Lst 1)` (REQ-LLL-068). Monomorphic ADTs keep `(Name 0)`.
-    let names: Vec<String> = types
+    let name_of = |td: &TypeDecl| format!("({} {})", td.name, td.type_params.len());
+    let body_of = |td: &TypeDecl| -> String {
+        let ctors: Vec<String> = td
+            .ctors
+            .iter()
+            .map(|(cn, fields)| {
+                if fields.is_empty() {
+                    format!("({cn})")
+                } else {
+                    let fs: Vec<String> = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ft)| format!("({cn}_{i} {})", smt_ty(ft)))
+                        .collect();
+                    format!("({cn} {})", fs.join(" "))
+                }
+            })
+            .collect();
+        let body = format!("({})", ctors.join(" "));
+        // a parametric datatype wraps its ctors in `(par (Tv_a …) …)`, binding the
+        // type-parameter sorts referenced by the fields; an arity-0 ADT emits the
+        // bare ctor list.
+        if td.type_params.is_empty() {
+            body
+        } else {
+            let binders: Vec<String> = td.type_params.iter().map(|p| format!("Tv_{p}")).collect();
+            format!("(par ({}) {})", binders.join(" "), body)
+        }
+    };
+
+    // Dependency edges A → B — "A's fields reference user type B" (B ≠ A, B declared
+    // in THIS module. A datatype whose field is a CONCRETE instantiation of a
+    // parametric peer (e.g. a record field `Option[Int]` → sort `(Option Int)`) may
+    // NOT share a `declare-datatypes` block with that peer: SMT-LIB 2.6 forbids a
+    // concrete application of a parametric member of the same mutually-recursive
+    // group (Z3 4.16: "mismatch between number of declared and supplied sort
+    // parameters", which sinks the whole block). So each strongly-connected
+    // component is emitted as its OWN block, ordered so a referenced type is
+    // declared BEFORE the type that references it. Genuine mutual recursion keeps
+    // its cycle grouped in one block; self-reference (`type Tree[a] = … | Node(Tree[a],
+    // Tree[a])`, field sort `(Tree Tv_a)`) is a singleton block referencing its own
+    // bound sort parameter, which is legal (REQ-LLL-079).
+    let index: std::collections::HashMap<&str, usize> = types
         .iter()
-        .map(|td| format!("({} {})", td.name, td.type_params.len()))
+        .enumerate()
+        .map(|(i, td)| (td.name.as_str(), i))
         .collect();
-    let bodies: Vec<String> = types
+    let adj: Vec<Vec<usize>> = types
         .iter()
-        .map(|td| {
-            let ctors: Vec<String> = td
-                .ctors
-                .iter()
-                .map(|(cn, fields)| {
-                    if fields.is_empty() {
-                        format!("({cn})")
-                    } else {
-                        let fs: Vec<String> = fields
-                            .iter()
-                            .enumerate()
-                            .map(|(i, ft)| format!("({cn}_{i} {})", smt_ty(ft)))
-                            .collect();
-                        format!("({cn} {})", fs.join(" "))
-                    }
-                })
-                .collect();
-            let body = format!("({})", ctors.join(" "));
-            // a parametric datatype wraps its ctors in `(par (Tv_a …) …)`, binding the
-            // type-parameter sorts referenced by the fields; an arity-0 ADT emits the
-            // bare ctor list in the SAME block (mixed arities are legal SMT-LIB 2.6).
-            if td.type_params.is_empty() {
-                body
-            } else {
-                let binders: Vec<String> =
-                    td.type_params.iter().map(|p| format!("Tv_{p}")).collect();
-                format!("(par ({}) {})", binders.join(" "), body)
+        .enumerate()
+        .map(|(i, td)| {
+            let mut refs: std::collections::BTreeSet<String> = Default::default();
+            for (_, fields) in &td.ctors {
+                for ft in fields {
+                    collect_user_type_refs(ft, &mut refs);
+                }
             }
+            let mut out: Vec<usize> = refs
+                .iter()
+                .filter_map(|r| index.get(r.as_str()).copied())
+                .filter(|&j| j != i) // a self-loop stays a singleton block (legal)
+                .collect();
+            out.sort_unstable();
+            out.dedup();
+            out
         })
         .collect();
-    vec![format!(
-        "(declare-datatypes ({}) ({}))",
-        names.join(" "),
-        bodies.join(" ")
-    )]
+
+    // Tarjan SCC yields components in reverse-topological order of the condensation:
+    // a component is emitted AFTER the components it points to. With edges A → B,
+    // B's component is emitted first — exactly the declaration order we need
+    // (referenced types precede their dependents).
+    tarjan_scc(&adj)
+        .iter()
+        .map(|comp| {
+            let names: Vec<String> = comp.iter().map(|&i| name_of(&types[i])).collect();
+            let bodies: Vec<String> = comp.iter().map(|&i| body_of(&types[i])).collect();
+            format!(
+                "(declare-datatypes ({}) ({}))",
+                names.join(" "),
+                bodies.join(" ")
+            )
+        })
+        .collect()
+}
+
+/// Collect the names of every user-declared type referenced anywhere inside a type
+/// (including as a type argument of another user type, or nested in a
+/// list/array/map/set/function/tuple element). Drives the datatype-declaration
+/// dependency ordering in `user_datatype_decls` (REQ-LLL-079).
+fn collect_user_type_refs(t: &Ty, out: &mut std::collections::BTreeSet<String>) {
+    match t {
+        Ty::User(n, args) => {
+            out.insert(n.clone());
+            for a in args {
+                collect_user_type_refs(a, out);
+            }
+        }
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => collect_user_type_refs(e, out),
+        Ty::Map(k, v) => {
+            collect_user_type_refs(k, out);
+            collect_user_type_refs(v, out);
+        }
+        Ty::Fun(ps, r) => {
+            for p in ps {
+                collect_user_type_refs(p, out);
+            }
+            collect_user_type_refs(r, out);
+        }
+        Ty::Tuple(cs) => {
+            for c in cs {
+                collect_user_type_refs(c, out);
+            }
+        }
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::Var(_) | Ty::Never | Ty::Unit => {}
+    }
+}
+
+/// Tarjan's strongly-connected-components algorithm (iterative, so a deeply nested
+/// datatype graph never overflows the stack). Returns the SCCs in reverse-
+/// topological order of the condensation DAG — a component appears after every
+/// component reachable from it. For the dependency edges of `user_datatype_decls`
+/// (A → B = "A references B") that is precisely declaration order: a referenced
+/// datatype is emitted before the datatype that references it (REQ-LLL-079).
+fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    const UNSET: usize = usize::MAX;
+    let mut index = vec![UNSET; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+    let mut counter = 0usize;
+    for start in 0..n {
+        if index[start] != UNSET {
+            continue;
+        }
+        // explicit DFS stack of (node, index of next child to visit)
+        index[start] = counter;
+        low[start] = counter;
+        counter += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&(v, ci)) = call_stack.last() {
+            if ci < adj[v].len() {
+                let w = adj[v][ci];
+                call_stack.last_mut().unwrap().1 += 1;
+                if index[w] == UNSET {
+                    index[w] = counter;
+                    low[w] = counter;
+                    counter += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call_stack.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                if low[v] == index[v] {
+                    let mut comp = Vec::new();
+                    loop {
+                        let x = stack.pop().unwrap();
+                        on_stack[x] = false;
+                        comp.push(x);
+                        if x == v {
+                            break;
+                        }
+                    }
+                    sccs.push(comp);
+                }
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+            }
+        }
+    }
+    sccs
 }
 
 fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> String {

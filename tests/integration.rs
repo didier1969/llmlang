@@ -4804,6 +4804,64 @@ fn parametric_result_two_params_verifies_and_runs() {
 }
 
 #[test]
+fn record_with_option_field_verifies_and_runs() {
+    // REQ-LLL-079 (the ERP-critical pattern): a record with a field whose type is a
+    // CONCRETE instantiation of a parametric ADT (`opt: Option[Int]` → sort `(Option
+    // Int)`). Before the fix, `Box` and `Option` shared one `declare-datatypes`
+    // block, so Box's field `(Option Int)` — a concrete application of a parametric
+    // member of the SAME group — made Z3 4.16 reject the whole block ("mismatch
+    // between number of declared and supplied sort parameters" → "datatype
+    // constructors have not been created"). Now the blocks are emitted in dependency
+    // order (Option first), so matching `b.opt` proves and runs.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n  type Box = {opt: Option[Int]}\n\n  part unbox(b: Box) -> Int:\n    match b.opt:\n      Some(v) -> yield v\n      None -> yield 0\n\n  part main() -> Int:\n    yield unbox(Box(Some(7)))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "record-with-Option-field must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 7"), "record-with-Option-field runtime wrong: {out}");
+}
+
+#[test]
+fn plain_adt_wrapping_parametric_adt_verifies_and_runs() {
+    // REQ-LLL-079: the same declaration-ordering hazard for a plain (non-record) ADT
+    // whose constructor field is a concrete parametric instantiation `W(Option[Int])`.
+    // The extracted `Option[Int]` is then matched in term position — the path that
+    // reconstructs the parametric selectors — so it exercises both the declaration
+    // ordering and the downstream selector use.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n  type Wrap = W(Option[Int])\n\n  part unwrap(w: Wrap) -> Int:\n    match w:\n      W(o) ->\n        match o:\n          Some(v) -> yield v\n          None -> yield 0\n\n  part main() -> Int:\n    yield unwrap(W(Some(7)))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "plain-ADT-wrapping-Option must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 7"), "plain-ADT-wrapping-Option runtime wrong: {out}");
+}
+
+#[test]
+fn self_recursive_parametric_adt_verifies_and_runs() {
+    // REQ-LLL-079 (no-regression guard): a self-recursive parametric ADT `type
+    // Tree[a] = Leaf(a) | Node(Tree[a], Tree[a])` references its OWN sort at the bound
+    // parameter (`(Tree Tv_a)`), which is legal INSIDE a single block. The dependency
+    // ordering must keep it a singleton block (a self-loop is not a cross-type edge)
+    // rather than splitting or duplicating it.
+    let src = "module T:\n\n  type Tree[a] = Leaf(a) | Node(Tree[a], Tree[a])\n\n  part sumleaf(t: Tree[Int]) -> Int:\n    match t:\n      Leaf(v) -> yield v\n      Node(l, r) -> yield sumleaf(l) + sumleaf(r)\n\n  part main() -> Int:\n    yield sumleaf(Node(Leaf(3), Node(Leaf(4), Leaf(5))))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "self-recursive parametric ADT must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 12"), "self-recursive parametric ADT runtime wrong: {out}");
+}
+
+#[test]
+fn mutually_recursive_datatypes_share_one_scc_block() {
+    // REQ-LLL-079 (no-regression guard): two DISTINCT datatypes that reference each
+    // other (`Forest` ↔ `Tree`) form one strongly-connected component and MUST stay
+    // grouped in a single `declare-datatypes` block — splitting them would make each
+    // reference an undeclared sort. The SCC condensation preserves the group.
+    let src = "module M:\n\n  type Forest = FNil | FCons(Tree, Forest)\n  type Tree = Leaf(Int) | Branch(Forest)\n\n  part leafval(t: Tree) -> Int:\n    match t:\n      Leaf(v) -> yield v\n      Branch(f) -> yield 0\n\n  part main() -> Int:\n    yield leafval(Leaf(42))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "mutually-recursive datatypes must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 42"), "mutually-recursive datatypes runtime wrong: {out}");
+}
+
+#[test]
 fn parametric_nullary_ctor_without_type_context_is_a_clean_error() {
     // REQ-LLL-068 (Landmine 1): a parametric nullary constructor `None : Option[a]` carries
     // no field to pin its type argument. Used where no expected type fixes it, the checker
