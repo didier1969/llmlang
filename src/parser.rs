@@ -58,7 +58,10 @@ pub fn parse_module(src: &str) -> Result<Module, String> {
 /// type declarations are known, so a forward-referenced record works — and BEFORE
 /// any identity/codegen stage, so the named and positional forms converge in
 /// content-hash (DEC-LLL-058). After this pass no `RecordLit` survives; every later
-/// `Expr` match treats it as `unreachable!`.
+/// `Expr` match treats it as `unreachable!`, so the pass MUST reach every `Expr` the
+/// module carries: part bodies + contracts, INSTANCE method bodies (`defs`, consumed
+/// by `inline_methods`/vc), and CLASS law bodies — a literal in any of those is valid
+/// surface syntax and would otherwise crash on the `unreachable!` arm.
 fn desugar_record_lits(m: &mut Module) -> Result<(), String> {
     let recs: std::collections::HashMap<String, Vec<String>> = m
         .types
@@ -71,6 +74,21 @@ fn desugar_record_lits(m: &mut Module) -> Result<(), String> {
         .into_iter()
         .map(|p| desugar_part(p, &recs))
         .collect::<Result<Vec<_>, String>>()?;
+    // instance method bodies are concrete implementation Exprs (REQ-LLL-048).
+    for inst in &mut m.instances {
+        let defs = std::mem::take(&mut inst.defs);
+        inst.defs = defs
+            .into_iter()
+            .map(|(name, e)| Ok::<_, String>((name, desugar_expr(e, &recs)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+    }
+    // class law bodies are Bool Exprs over the class methods (DEC-LLL-047).
+    for cls in &mut m.classes {
+        for law in &mut cls.laws {
+            let body = std::mem::replace(&mut law.body, Expr::Unit);
+            law.body = desugar_expr(body, &recs)?;
+        }
+    }
     Ok(())
 }
 

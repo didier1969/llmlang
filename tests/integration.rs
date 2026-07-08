@@ -5152,6 +5152,20 @@ fn named_literal_on_parametric_record_runs() {
 }
 
 #[test]
+fn named_literal_in_instance_method_body_is_desugared() {
+    // REQ-LLL-077 (completeness of the desugar pass): a named literal is valid in ANY
+    // expression position, including an INSTANCE method body (`Instance.defs`, consumed by
+    // `inline_methods`/vc) — not only in part bodies. The parse-time desugar must reach
+    // those Exprs; otherwise a surviving `RecordLit` hits the `unreachable!` arm and
+    // PANICS on a valid program (fail-loud-never-crash, DEC-LLL-015). This is the exact
+    // regression guard for the parts-only pass. `mk` returns a record built by name.
+    let src = "module T:\n\n  type Point = {x: Int, y: Int}\n\n  class Mk[a]:\n    mk(a) -> Point\n\n  instance Mk[Int]:\n    mk = \\(n: Int) -> Point{x: n, y: n}\n\n  part gx(p: Point) -> Int:\n    yield p.x\n";
+    let m = parser::parse_module(src).expect("parse");
+    // must NOT panic on the unreachable! arm; a well-typed instance type-checks
+    types::check_module(m).expect("named literal in an instance body must desugar + check (REQ-LLL-077)");
+}
+
+#[test]
 fn named_literal_field_errors_are_clean() {
     // REQ-LLL-077 (fail-loud desugaring, DEC-LLL-015): the parse-time desugar validates
     // the field set precisely — an unknown, missing, duplicated field, or a non-record
