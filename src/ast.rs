@@ -554,6 +554,14 @@ pub enum Expr {
     /// type); the index is NOT stored — the surface AST stays source-faithful, and the
     /// field NAME is part of identity, never α-renamable (DEC-LLL-020).
     Field(Box<Expr>, String),
+    /// Named-literal record construction `Point{x: 1, y: 2}` (REQ-LLL-077). Pure
+    /// SURFACE sugar: it is desugared to the positional constructor call `Point(1, 2)`
+    /// during `parse_module` — the fields are reordered into the record's declared
+    /// field order — so it CONVERGES in content-hash with the positional form
+    /// (reversibility, DEC-LLL-058). No stage after parsing ever sees this node
+    /// (checker/hash/vc/codegen match arms are `unreachable!`); it exists only as the
+    /// transient parser output between construction and the parse-time desugar pass.
+    RecordLit(String, Vec<(String, Expr)>),
     /// A typed hole `?` (CPT-LLL-002, DEC-LLL-052): a deliberate placeholder for an
     /// as-yet-unwritten TERM. The checker assigns it the context-expected type and
     /// records its in-scope binders (structured feedback for an LLM's completion
@@ -583,6 +591,11 @@ impl Expr {
             }
             Expr::Lambda(_, body) => body.walk(f),
             Expr::Proj(a, _) | Expr::Field(a, _) => a.walk(f),
+            Expr::RecordLit(_, fields) => {
+                for (_, e) in fields {
+                    e.walk(f);
+                }
+            }
             _ => {}
         }
     }

@@ -488,6 +488,7 @@ impl<'a> Norm<'a> {
             // a distinct, stable token so a holey definition and its filled version
             // are different definitions (different def-hash) — DEC-LLL-052.
             Expr::Hole => "(hole)".to_string(),
+            Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
             Expr::Unit => "(unit)".to_string(),
             Expr::IntLit(v) => format!("{v}"),
             // canonical (reduced) fraction → identity by value: `3.5` and `3.50`

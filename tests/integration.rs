@@ -3181,17 +3181,16 @@ fn record_field_name_is_identity() {
 }
 
 #[test]
-fn parametric_record_is_rejected_fail_loud() {
-    // Parametric records are deferred (REQ-LLL-077). Their absence must fail LOUD, not
-    // silently pass to codegen with an un-substituted field type — an explicit rejection
-    // honours the fail-loud invariant (DEC-LLL-015/017).
+fn parametric_record_field_type_checks() {
+    // REQ-LLL-077 SUPERSEDES the earlier deferral: a parametric record `Box[a]` used at
+    // `Box[Int]` now type-checks — the field `val: a` is substituted to `Int` at the use
+    // site (previously this was rejected fail-loud). The soundness of that substitution is
+    // proven separately (`parametric_record_field_is_sound`, `..._option_field_is_sound`).
     let src = "module B:\n\n  type Box[a] = {val: a}\n\n  part unbox(b: Box[Int]) -> Int:\n    yield b.val\n";
     let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("must reject a parametric record");
-    assert!(
-        err.contains("parametric") && err.contains("REQ-LLL-077"),
-        "unexpected error: {err}"
-    );
+    let cm = types::check_module(m).expect("parametric record must now type-check (REQ-LLL-077)");
+    // the field access is typed against the substituted field, so the part's body is Int
+    assert_eq!(cm.module.parts[0].ret, ast::Ty::Int);
 }
 
 #[test]
@@ -5016,4 +5015,139 @@ fn parametric_nullary_ctor_cse_stays_type_safe() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let ones = stdout.lines().filter(|l| l.trim() == "1").count();
     assert_eq!(ones, 2, "both nullary None branches must be recognized as absent:\n{stdout}");
+}
+
+#[test]
+fn parametric_record_field_verifies() {
+    // REQ-LLL-077 (parametric records, checker substitution): a record `Box[a]` used at
+    // `Box[Int]`. The field `val: a` must be SUBSTITUTED to `Int` at the use site, else
+    // arithmetic on `b.val` (`b.val >= 0`, `b.val + 1`) would be a type error on the
+    // abstract `a`. Proving `result > b.val` from `b.val >= 0` confirms both checkers
+    // (contract `type_of_pure` and term `check_expr`) substitute the type argument.
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  part inc(b: Box[Int]) -> Int:\n    requires b.val >= 0\n    ensures result > b.val\n    yield b.val + 1\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "parametric record field arithmetic must verify (REQ-LLL-077): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn parametric_record_field_is_sound() {
+    // REQ-LLL-077 (SOUNDNESS): the substituted field is a REAL Z3 term, not a vacuous
+    // pass — `ensures result > b.val + 1` with body `yield b.val + 1` must be REFUTED
+    // (Z3 returns a counter-model `(Box 0)`), never proved.
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  part inc(b: Box[Int]) -> Int:\n    requires b.val >= 0\n    ensures result > b.val + 1\n    yield b.val + 1\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "parametric record field over-strong ensures must be rejected (soundness, REQ-LLL-077)"
+    );
+}
+
+#[test]
+fn parametric_record_option_field_against_none_verifies() {
+    // REQ-LLL-077 (the discriminator that validates the vc sort substitution): a record
+    // `Wrap[a]` with a field `opt: Option[a]`, instantiated at `Wrap[Int]`. The equality
+    // `w.opt == None` forces the vc to anchor the bare `None` from the RECORDED sort of
+    // `w.opt`. That sort must be the SUBSTITUTED `(Option Int)` → `(as None (Option Int))`
+    // (accepted). Were the field sort recorded un-substituted as `(Option Tv_a)`, the
+    // annotation `(as None (Option Tv_a))` names an unbound sort → Z3 error → fail-closed
+    // rejection (REQ-LLL-080). Proving is therefore proof the substitution is correct.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n  type Wrap[a] = {opt: Option[a]}\n\n  part is_empty(w: Wrap[Int]) -> Bool:\n    ensures result == (w.opt == None)\n    match w.opt:\n      None -> yield true\n      Some(x) -> yield false\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "parametric record Option field == None must verify (REQ-LLL-077): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn parametric_record_option_field_is_sound() {
+    // REQ-LLL-077 (SOUNDNESS of the sort substitution): the same program with the branch
+    // results FLIPPED must be REFUTED — Z3 builds a real `(Wrap Int)` counter-model
+    // (`(Wrap None)` / `(Wrap (Some 2))`), proving the selector + `(Option Int)` sort are
+    // genuine terms, not a fail-closed error that would spuriously "pass".
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n  type Wrap[a] = {opt: Option[a]}\n\n  part is_empty(w: Wrap[Int]) -> Bool:\n    ensures result == (w.opt == None)\n    match w.opt:\n      None -> yield false\n      Some(x) -> yield true\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "parametric record Option field with flipped branches must be rejected (soundness, REQ-LLL-077)"
+    );
+}
+
+#[test]
+fn parametric_record_constructs_and_runs() {
+    // REQ-LLL-077 (codegen end-to-end): a parametric record built, accessed, and run.
+    // Confirms rustc compiles the generic by-value accessor (the `Clone` bound on the
+    // generated `__f_val` is exercised, not just asserted) — `unwrap(Box(41)) + 1 = 42`.
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  part unwrap(b: Box[Int]) -> Int:\n    yield b.val\n\n  part main() -> Int:\n    yield unwrap(Box(41)) + 1\n";
+    assert!(verify_src(src).ok(), "parametric record build must verify (REQ-LLL-077)");
+    let out = build_run(src);
+    assert!(out.contains("=> 42"), "parametric record runtime wrong: {out}");
+}
+
+#[test]
+fn named_literal_converges_with_positional() {
+    // REQ-LLL-077 (named-literal construction, DEC-LLL-058 reversibility): `Point{x: 1,
+    // y: 2}` is desugared at parse time to the positional ctor call `Point(1, 2)`,
+    // reordering fields into DECLARED order. So the named form, the positional form, and
+    // a named form with SHUFFLED field order all share ONE content-hash — field order at
+    // the literal is not part of identity.
+    let pos = "module P:\n\n  type Point = {x: Int, y: Int}\n\n  part mk() -> Point:\n    yield Point(1, 2)\n";
+    let named = "module P:\n\n  type Point = {x: Int, y: Int}\n\n  part mk() -> Point:\n    yield Point{x: 1, y: 2}\n";
+    let shuffled = "module P:\n\n  type Point = {x: Int, y: Int}\n\n  part mk() -> Point:\n    yield Point{y: 2, x: 1}\n";
+    let (_, hp) = full(pos);
+    let (_, hn) = full(named);
+    let (_, hs) = full(shuffled);
+    assert_eq!(
+        hp.def_hash["mk"], hn.def_hash["mk"],
+        "named literal must hash-converge with positional construction (DEC-LLL-058)"
+    );
+    assert_eq!(
+        hp.def_hash["mk"], hs.def_hash["mk"],
+        "field order in a named literal must not affect identity (DEC-LLL-058)"
+    );
+}
+
+#[test]
+fn named_literal_constructs_and_runs() {
+    // REQ-LLL-077: the named form builds and runs identically to the positional form —
+    // `Point{x: 3, y: 4}.x + Point{...}.y = 7`.
+    let src = "module P:\n\n  type Point = {x: Int, y: Int}\n\n  part sum(p: Point) -> Int:\n    yield p.x + p.y\n\n  part main() -> Int:\n    yield sum(Point{x: 3, y: 4})\n";
+    assert!(verify_src(src).ok(), "named-literal module must verify (REQ-LLL-077)");
+    let out = build_run(src);
+    assert!(out.contains("=> 7"), "named-literal runtime wrong: {out}");
+}
+
+#[test]
+fn named_literal_on_parametric_record_runs() {
+    // REQ-LLL-077 (both halves together): a named literal `Box{val: 41}` constructing a
+    // PARAMETRIC record, its field read back through the substituted-type accessor.
+    let src = "module C:\n\n  type Box[a] = {val: a}\n\n  part unwrap(b: Box[Int]) -> Int:\n    requires b.val >= 0\n    ensures result == b.val\n    yield b.val\n\n  part main() -> Int:\n    yield unwrap(Box{val: 41}) + 1\n";
+    assert!(verify_src(src).ok(), "parametric named-literal must verify (REQ-LLL-077)");
+    let out = build_run(src);
+    assert!(out.contains("=> 42"), "parametric named-literal runtime wrong: {out}");
+}
+
+#[test]
+fn named_literal_field_errors_are_clean() {
+    // REQ-LLL-077 (fail-loud desugaring, DEC-LLL-015): the parse-time desugar validates
+    // the field set precisely — an unknown, missing, duplicated field, or a non-record
+    // head each yields a distinct, actionable error, never a silently mis-built ctor call.
+    let base = "module E:\n\n  type Point = {x: Int, y: Int}\n\n  part mk() -> Point:\n    yield ";
+    let cases: &[(&str, &str)] = &[
+        ("Point{x: 1, z: 2}\n", "has no field `z`"),
+        ("Point{x: 1}\n", "is missing field `y`"),
+        ("Point{x: 1, x: 2}\n", "repeats field `x`"),
+        ("Nope{a: 1}\n", "is not a record type"),
+    ];
+    for (frag, needle) in cases {
+        let src = format!("{base}{frag}");
+        let err = parser::parse_module(&src)
+            .err()
+            .unwrap_or_else(|| panic!("named-literal `{frag}` must be rejected"));
+        assert!(
+            err.contains(needle),
+            "named-literal `{frag}`: expected error containing `{needle}`, got: {err}"
+        );
+    }
 }

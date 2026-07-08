@@ -205,18 +205,11 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         if td.field_names.is_empty() {
             continue;
         }
-        // parametric records are DEFERRED (REQ-LLL-077): the field type would be a
-        // `Ty::Var` returned un-substituted by both checkers, and vc's `sort_of` cannot
-        // map a parametric record sort `(Box Tv_a)` back to its declaration. Reject
-        // EXPLICITLY here — an honest fail-loud, never a silently-wrong contract
-        // (DEC-LLL-015/017) — rather than relying on an incidental downstream mismatch.
-        if !td.type_params.is_empty() {
-            return Err(format!(
-                "record `{}` is parametric — parametric records are not yet supported \
-                 (REQ-LLL-077); use a monomorphic record for now",
-                td.name
-            ));
-        }
+        // parametric records `type Box[a] = {val: a}` (REQ-LLL-077) are supported: both
+        // checkers substitute the type arguments into the field type at a use site
+        // (`type_of_pure` / `check_expr` Field arms), and vc recovers the field's
+        // CONCRETE sort from the base's parametric sort `(Box Int)` (sort_of / tr Field
+        // arms). The datatype is declared `(par (Tv_a) …)` exactly like a parametric ADT.
         let mut seen = std::collections::HashSet::new();
         for f in &td.field_names {
             if !seen.insert(f) {
@@ -2011,6 +2004,9 @@ fn type_of_pure(
                     .into(),
             )
         }
+        Expr::RecordLit(..) => {
+            unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)")
+        }
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::RatLit(..) => Ty::Rational,
@@ -2106,17 +2102,27 @@ fn type_of_pure(
         // admitted here (unlike a user `part` call, DEC-LLL-017), which is exactly what
         // lets a record invariant be stated over a field in requires/ensures/measure.
         Expr::Field(e, name) => match type_of_pure(e, vars, result, ctors, records, typarams)? {
-            Ty::User(tn, _) => {
+            Ty::User(tn, targs) => {
                 let idx = records
                     .get(&tn)
                     .and_then(|fs| fs.iter().position(|f| f == name))
                     .ok_or_else(|| format!("type `{tn}` has no field `{name}`"))?;
                 // the field's declared type = the i-th positional field of the record's
-                // sole constructor (ctor name == type name for a record).
+                // sole constructor (ctor name == type name for a record). For a PARAMETRIC
+                // record `Box[a]` used at `Box[Int]`, substitute the type arguments into
+                // the declared field type (REQ-LLL-077) so `b.val` is `Int`, not the
+                // abstract `a` (mirrors `check_expr`'s Field arm and the ctor-pattern arm).
                 let (_, fields) = ctors
                     .get(&tn)
                     .ok_or_else(|| format!("type `{tn}` is not a record"))?;
-                fields[idx].clone()
+                let subst: HashMap<String, Ty> = typarams
+                    .get(&tn)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .zip(targs)
+                    .collect();
+                subst_ty(&fields[idx], &subst)
             }
             other => return Err(format!("field access `.{name}` needs a record, got {other}")),
         },
@@ -2846,6 +2852,9 @@ fn check_expr(
                 }
             }
         }
+        Expr::RecordLit(..) => {
+            unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)")
+        }
         Expr::Unit => Ty::Unit,
         Expr::IntLit(_) => Ty::Int,
         Expr::RatLit(..) => Ty::Rational,
@@ -2884,11 +2893,12 @@ fn check_expr(
         },
         // named-field access `e.name` (REQ-LLL-070): type-directed against the base's
         // RECORD type. Resolves the name to the i-th positional field of the record's
-        // sole constructor. Records are monomorphic in this slice — the field type is
-        // returned as declared (no type-parameter substitution, mirroring the contract
-        // rule in `type_of_pure`; parametric records are a follow-up).
+        // sole constructor. For a PARAMETRIC record `Box[a]` used at `Box[Int]`, the type
+        // arguments are substituted into the declared field type (REQ-LLL-077, mirroring
+        // the contract rule in `type_of_pure` and the ctor-pattern binding arm) so an
+        // access `b.val` is typed `Int`, not the abstract `a`.
         Expr::Field(e, name) => match check_expr(ctx, e, None)? {
-            Ty::User(tn, _) => {
+            Ty::User(tn, targs) => {
                 let td = ctx
                     .module
                     .types
@@ -2907,7 +2917,8 @@ fn check_expr(
                         ctx.part.name
                     )
                 })?;
-                td.ctors[0].1[idx].clone()
+                let subst = ctx.adt_subst(&tn, &targs);
+                subst_ty(&td.ctors[0].1[idx], &subst)
             }
             other => {
                 return Err(format!(

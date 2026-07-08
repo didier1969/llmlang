@@ -511,6 +511,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         }
         Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit
         | Expr::Hole => e.clone(),
+        Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
     })
 }
 
@@ -527,6 +528,7 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
     match e {
         Expr::Var(n) => map.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
         Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => e.clone(),
+        Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
         Expr::Bin(op, a, b) => {
             Expr::Bin(*op, Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map)))
         }
@@ -614,6 +616,100 @@ fn smt_ty(t: &Ty) -> String {
     }
 }
 
+/// Split an SMT user-datatype sort string into `(head, type-argument sorts)`
+/// (REQ-LLL-077). `"Box"` → `("Box", [])` (monomorphic); `"(Box Int)"` →
+/// `("Box", ["Int"])`; `"(Box (Option Int))"` → `("Box", ["(Option Int)"])`. Splits
+/// the top-level arguments by paren depth so a nested parametric argument stays one
+/// token. Used to recover a parametric record's instantiation from its base sort.
+fn split_user_sort(srt: &str) -> (String, Vec<String>) {
+    let srt = srt.trim();
+    let Some(inner) = srt.strip_prefix('(').and_then(|s| s.strip_suffix(')')) else {
+        return (srt.to_string(), Vec::new());
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !cur.is_empty() {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    if parts.is_empty() {
+        return (srt.to_string(), Vec::new());
+    }
+    let head = parts.remove(0);
+    (head, parts)
+}
+
+/// Substitute the type-parameter sort tokens `Tv_<param>` in a field's SMT sort
+/// string with their concrete argument sorts (REQ-LLL-077). Whole-token aware — an
+/// identifier run is replaced only if it matches a key exactly, so `Tv_a` never
+/// matches inside `Tv_ab` and structure (`(Lst Tv_a)` → `(Lst Int)`) is preserved.
+/// The empty map (monomorphic record) is the identity.
+fn subst_sort_vars(sort: &str, map: &HashMap<String, String>) -> String {
+    if map.is_empty() {
+        return sort.to_string();
+    }
+    let mut out = String::new();
+    let mut ident = String::new();
+    let flush = |ident: &mut String, out: &mut String| {
+        if !ident.is_empty() {
+            match map.get(ident.as_str()) {
+                Some(rep) => out.push_str(rep),
+                None => out.push_str(ident),
+            }
+            ident.clear();
+        }
+    };
+    for ch in sort.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            ident.push(ch);
+        } else {
+            flush(&mut ident, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut ident, &mut out);
+    out
+}
+
+/// The concrete SMT sort of the `name` field of a record whose base has sort `srt`
+/// (REQ-LLL-070/077). Recovers the record's `TypeDecl` from the sort head, then
+/// substitutes the base's type arguments into the field's declared sort — so a field
+/// `val: a` of `Box[a]` accessed on a `(Box Int)` base yields `Int`. Returns `None`
+/// when `srt` is not a declared record sort (the caller then fails LOUD or falls
+/// back — never a silent obligation skip, DEC-LLL-015/017).
+fn record_field_sort(types: &[TypeDecl], srt: &str, name: &str) -> Option<String> {
+    let (head, args) = split_user_sort(srt);
+    let td = types
+        .iter()
+        .find(|td| td.name == head && !td.field_names.is_empty())?;
+    let idx = td.field_names.iter().position(|f| f == name)?;
+    let subst: HashMap<String, String> = td
+        .type_params
+        .iter()
+        .map(|p| format!("Tv_{p}"))
+        .zip(args)
+        .collect();
+    Some(subst_sort_vars(&smt_ty(&td.ctors[0].1[idx]), &subst))
+}
+
 impl<'a> Emit<'a> {
     fn fresh(&mut self, ty: &str) -> String {
         self.fresh += 1;
@@ -690,13 +786,14 @@ impl<'a> Emit<'a> {
                         .get(name)
                         .map(|(owner, _)| smt_ty(&Ty::User(owner.clone(), vec![])))
                 }),
-            // named-field access → the field's declared sort, recovered from the record
-            // type of the base (mirror of Proj; monomorphic record sort == its bare name).
+            // named-field access → the field's CONCRETE sort, recovered from the record
+            // type of the base (mirror of Proj). For a parametric record `Box[a]` the
+            // base sort is `(Box Int)` and the field's declared type `a` is substituted
+            // to `Int` (REQ-LLL-077); a monomorphic record's bare-name sort is the
+            // identity case.
             Expr::Field(inner, name) => {
                 let srt = self.sort_of(inner, env)?;
-                let td = self.cm.module.types.iter().find(|td| td.name == srt)?;
-                let idx = td.field_names.iter().position(|f| f == name)?;
-                Some(smt_ty(&td.ctors[0].1[idx]))
+                record_field_sort(&self.cm.module.types, &srt, name)
             }
             _ => None,
         }
@@ -892,6 +989,9 @@ impl<'a> Emit<'a> {
                         .into(),
                 )
             }
+            Expr::RecordLit(..) => {
+                unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)")
+            }
             Expr::Unit => "unit".to_string(),
             Expr::IntLit(v) => {
                 if *v < 0 {
@@ -1010,22 +1110,31 @@ impl<'a> Emit<'a> {
                 let srt = self.sort_of(e, env).ok_or_else(|| {
                     format!("vcgen: cannot determine the record type of the base of `.{name}`")
                 })?;
+                // find the record by the sort HEAD, so a parametric base `(Box Int)`
+                // resolves to `Box` (REQ-LLL-077), not just a bare monomorphic name.
+                let (head, _) = split_user_sort(&srt);
                 let td = self
                     .cm
                     .module
                     .types
                     .iter()
-                    .find(|td| td.name == srt && !td.field_names.is_empty())
+                    .find(|td| td.name == head && !td.field_names.is_empty())
                     .ok_or_else(|| {
                         format!("vcgen: field access `.{name}` on non-record sort `{srt}`")
                     })?;
                 let idx = td.field_names.iter().position(|f| f == name).ok_or_else(|| {
                     format!("vcgen: record `{}` has no field `{name}`", td.name)
                 })?;
-                let (ctor, fields) = &td.ctors[0];
+                let ctor = &td.ctors[0].0;
                 let term = format!("({ctor}_{idx} {et})");
-                // record the field's own sort so a NESTED access / match on it resolves.
-                self.sorts.insert(term.clone(), smt_ty(&fields[idx]));
+                // record the field's CONCRETE sort (a parametric record's type arguments
+                // substituted into the declared field sort, REQ-LLL-077) so a NESTED
+                // access, match, or equality annotation on it resolves — the SAME recovery
+                // as `sort_of`, whose wrong result could only ill-sort a term into a Z3
+                // error (fail-closed, REQ-LLL-080), never a false proof.
+                if let Some(fsort) = record_field_sort(&self.cm.module.types, &srt, name) {
+                    self.sorts.insert(term.clone(), fsort);
+                }
                 term
             }
             Expr::Neg(a) => format!("(- {})", self.tr(a, env, None)?),

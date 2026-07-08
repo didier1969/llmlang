@@ -1194,8 +1194,9 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
     // getter on the receiver's concrete enum type — codegen needs NO per-node types.
     if !td.field_names.is_empty() {
         let (cn, fields) = &td.ctors[0];
-        // a Clone bound per type parameter keeps the `.clone()` sound if a record is
-        // ever parametric (monomorphic in this slice — then `impl_generics` is empty).
+        // a Clone bound per type parameter keeps the by-value `.clone()` accessor sound
+        // for a PARAMETRIC record `Box[a]` (REQ-LLL-077); a monomorphic record has no
+        // type parameters, so `impl_generics` is empty and this is the identity.
         let impl_generics = if td.type_params.is_empty() {
             String::new()
         } else {
@@ -2019,6 +2020,7 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     .into(),
             )
         }
+        Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => format!("{v}i64"),
         // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already

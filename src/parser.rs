@@ -42,12 +42,152 @@ pub struct Parser {
 pub fn parse_module(src: &str) -> Result<Module, String> {
     let toks = lex(src)?;
     let mut p = Parser { toks, pos: 0 };
-    let m = p.module()?;
+    let mut m = p.module()?;
     p.skip_newlines();
     if !p.at_end() {
         return Err(p.err("trailing content after module"));
     }
+    desugar_record_lits(&mut m)?;
     Ok(m)
+}
+
+/// Desugar every named-literal record construction `Point{x: 1, y: 2}`
+/// (`Expr::RecordLit`) into the equivalent positional constructor call
+/// `Point(1, 2)`, reordering the provided fields into the record's DECLARED field
+/// order (REQ-LLL-077). Runs once over the whole module after parsing — where all
+/// type declarations are known, so a forward-referenced record works — and BEFORE
+/// any identity/codegen stage, so the named and positional forms converge in
+/// content-hash (DEC-LLL-058). After this pass no `RecordLit` survives; every later
+/// `Expr` match treats it as `unreachable!`.
+fn desugar_record_lits(m: &mut Module) -> Result<(), String> {
+    let recs: std::collections::HashMap<String, Vec<String>> = m
+        .types
+        .iter()
+        .filter(|td| !td.field_names.is_empty())
+        .map(|td| (td.name.clone(), td.field_names.clone()))
+        .collect();
+    let parts = std::mem::take(&mut m.parts);
+    m.parts = parts
+        .into_iter()
+        .map(|p| desugar_part(p, &recs))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(())
+}
+
+type Recs = std::collections::HashMap<String, Vec<String>>;
+
+fn desugar_part(mut p: Part, recs: &Recs) -> Result<Part, String> {
+    p.requires = desugar_exprs(p.requires, recs)?;
+    p.ensures = desugar_exprs(p.ensures, recs)?;
+    p.measure = desugar_exprs(p.measure, recs)?;
+    p.examples = desugar_exprs(p.examples, recs)?;
+    p.body = desugar_body(p.body, recs)?;
+    Ok(p)
+}
+
+fn desugar_body(body: Vec<Stmt>, recs: &Recs) -> Result<Vec<Stmt>, String> {
+    body.into_iter().map(|s| desugar_stmt(s, recs)).collect()
+}
+
+fn desugar_stmt(s: Stmt, recs: &Recs) -> Result<Stmt, String> {
+    Ok(match s {
+        Stmt::Let(n, e) => Stmt::Let(n, desugar_expr(e, recs)?),
+        Stmt::Yield(e) => Stmt::Yield(desugar_expr(e, recs)?),
+        Stmt::Match(scrut, arms) => {
+            let scrut = desugar_expr(scrut, recs)?;
+            let arms = arms
+                .into_iter()
+                .map(|a| {
+                    Ok::<_, String>(Arm {
+                        pattern: a.pattern,
+                        guard: a.guard.map(|g| desugar_expr(g, recs)).transpose()?,
+                        body: desugar_body(a.body, recs)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Stmt::Match(scrut, arms)
+        }
+        Stmt::Handle(h) => Stmt::Handle(Handle {
+            call: desugar_expr(h.call, recs)?,
+            effect: h.effect,
+            from: h.from.map(|e| desugar_expr(e, recs)).transpose()?,
+            clauses: h
+                .clauses
+                .into_iter()
+                .map(|c| {
+                    Ok::<_, String>(HandleClause {
+                        op: c.op,
+                        params: c.params,
+                        body: desugar_body(c.body, recs)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        }),
+    })
+}
+
+fn desugar_exprs(xs: Vec<Expr>, recs: &Recs) -> Result<Vec<Expr>, String> {
+    xs.into_iter().map(|x| desugar_expr(x, recs)).collect()
+}
+
+fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
+    Ok(match e {
+        Expr::RecordLit(name, fields) => {
+            // desugar the field expressions first (a nested record literal), then reorder.
+            let fields = fields
+                .into_iter()
+                .map(|(k, v)| Ok::<_, String>((k, desugar_expr(v, recs)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            let order = recs.get(&name).ok_or_else(|| {
+                format!(
+                    "`{name}{{…}}` is not a record type — named-literal construction needs a \
+                     type declared with named fields (`type {name} = {{…}}`)"
+                )
+            })?;
+            let mut provided: std::collections::HashMap<String, Expr> =
+                std::collections::HashMap::new();
+            for (fname, fe) in fields {
+                if !order.iter().any(|f| f == &fname) {
+                    return Err(format!("record `{name}` has no field `{fname}`"));
+                }
+                if provided.insert(fname.clone(), fe).is_some() {
+                    return Err(format!("record `{name}` literal repeats field `{fname}`"));
+                }
+            }
+            let mut args = Vec::with_capacity(order.len());
+            for f in order {
+                let arg = provided.remove(f).ok_or_else(|| {
+                    format!("record `{name}` literal is missing field `{f}`")
+                })?;
+                args.push(arg);
+            }
+            Expr::Call(name, args)
+        }
+        Expr::Bin(op, a, b) => Expr::Bin(
+            op,
+            Box::new(desugar_expr(*a, recs)?),
+            Box::new(desugar_expr(*b, recs)?),
+        ),
+        Expr::Not(a) => Expr::Not(Box::new(desugar_expr(*a, recs)?)),
+        Expr::Neg(a) => Expr::Neg(Box::new(desugar_expr(*a, recs)?)),
+        Expr::Cons(a, b) => Expr::Cons(
+            Box::new(desugar_expr(*a, recs)?),
+            Box::new(desugar_expr(*b, recs)?),
+        ),
+        Expr::Call(n, args) => Expr::Call(n, desugar_exprs(args, recs)?),
+        Expr::EffCall(n, args) => Expr::EffCall(n, desugar_exprs(args, recs)?),
+        Expr::ListLit(xs) => Expr::ListLit(desugar_exprs(xs, recs)?),
+        Expr::Tuple(xs) => Expr::Tuple(desugar_exprs(xs, recs)?),
+        Expr::Lambda(ps, body) => Expr::Lambda(ps, Box::new(desugar_expr(*body, recs)?)),
+        Expr::Proj(a, i) => Expr::Proj(Box::new(desugar_expr(*a, recs)?), i),
+        Expr::Field(a, n) => Expr::Field(Box::new(desugar_expr(*a, recs)?), n),
+        leaf @ (Expr::IntLit(_)
+        | Expr::RatLit(..)
+        | Expr::BoolLit(_)
+        | Expr::Var(_)
+        | Expr::Unit
+        | Expr::Hole) => leaf,
+    })
 }
 
 impl Parser {
@@ -1308,6 +1448,29 @@ impl Parser {
                     }
                     self.eat(Tok::RParen)?;
                     Ok(Expr::Call(name, args))
+                } else if self.peek() == &Tok::LBrace {
+                    // named-literal record construction `Point{x: 1, y: 2}` (REQ-LLL-077).
+                    // `{` never begins any other expression form (blocks are `:`+indent;
+                    // braces are otherwise only the record TYPE declaration, a distinct
+                    // position), so `Ident {` is unambiguous. Emitted as a transient
+                    // `RecordLit`; `parse_module` desugars it to the positional ctor call
+                    // reordered into declared field order, converging in hash (DEC-LLL-058).
+                    self.pos += 1;
+                    let mut fields = Vec::new();
+                    if self.peek() != &Tok::RBrace {
+                        loop {
+                            let fname = self.ident()?;
+                            self.eat(Tok::Colon)?;
+                            fields.push((fname, self.expr()?));
+                            if self.peek() == &Tok::Comma {
+                                self.pos += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.eat(Tok::RBrace)?;
+                    Ok(Expr::RecordLit(name, fields))
                 } else {
                     Ok(Expr::Var(name))
                 }
