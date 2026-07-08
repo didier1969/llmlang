@@ -194,6 +194,15 @@ impl EGraph {
                 let (ch, ct) = (self.add(h), self.add(t));
                 self.mk(Node::Cons(ch, ct))
             }
+            Expr::ListLit(xs) if xs.is_empty() => {
+                // REQ-LLL-069: an EMPTY list literal carries no element to pin its
+                // (polymorphic) element type, so two empties of DIFFERENT monomorphic
+                // types (e.g. []:List[Int] and []:List[List[Int]]) canonicalize to the
+                // SAME `Node::List(vec![])` and would be unsoundly hashconsed/shared —
+                // emitting ill-typed Rust. Keep each empty UNIQUE per occurrence (like
+                // Opaque); an empty list is zero-cost, so losing its sharing is free.
+                self.opaque_of(e)
+            }
             Expr::ListLit(xs) => {
                 let cs: Vec<Id> = xs.iter().map(|x| self.add(x)).collect();
                 self.mk(Node::List(cs))

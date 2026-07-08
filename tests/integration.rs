@@ -4465,3 +4465,36 @@ fn stdlib_breadth_essentials_verify_and_run() {
         "no stdlib essential may fail at runtime:\n{stdout}"
     );
 }
+
+#[test]
+fn cse_does_not_merge_empties_of_different_types() {
+    // REQ-LLL-069: two []-literals of DIFFERENT monomorphic element types in one scope
+    // (inner []:List[Int] as the tail of `h :: []`, outer []:List[List[Int]] as the tail
+    // of `(…) :: []`) must NOT be merged by the optimizer's structural CSE — merging them
+    // emitted ill-typed Rust (E0308). Codegen + rustc must accept the program and it runs.
+    let src = "module CseEmpty:\n\n  part rows(h: Int) -> List[List[Int]]:\n    yield (h :: []) :: []\n\n  part main() -> Int via IO:\n    match rows(7):\n      []     -> yield IO.print(0)\n      r :: t -> yield IO.print(1)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "repro must verify: {:?}", failures(&report));
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("cse.rs");
+    let bin = dir.join("cse_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "differently-typed empty lists must emit well-typed Rust:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 1"),
+        "the non-empty list-of-lists must match the cons arm"
+    );
+}

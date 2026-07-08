@@ -72,8 +72,9 @@ module Std.Str:
           []     -> yield h
           x :: y -> yield append(h, append(sep, join(sep, t)))
 
-  # an empty string with a FIXED element type — lets the nested empty pieces in `split`
-  # infer as `List[Int]` (a bare `[]` head in `[] :: rest` is otherwise ambiguous).
+  # an empty string with a FIXED element type: a bare `[]` as the *head* of a
+  # `List[List[Int]]` (as in `split`'s base case `[] :: []`) has no child to pin its
+  # `List[Int]` element type, so the checker cannot infer it — `empty_line()` fixes it.
   part empty_line() -> List[Int]:
     yield []
 
@@ -89,11 +90,11 @@ module Std.Str:
           false ->
             match rest:
               r :: rs -> yield (h :: r) :: rs
-              # unreachable (split always yields >= 1 piece) but needed for exhaustiveness;
-              # `empty_line()` (a call, not a bare `[]`) keeps the inner List[Int] empty
-              # distinct from the outer List[List[Int]] empty so codegen CSE cannot merge
-              # two differently-typed empties (REQ-LLL-069, a separate codegen defect).
-              []      -> yield (h :: empty_line()) :: []
+              # unreachable (split always yields >= 1 piece) but needed for exhaustiveness.
+              # The two empties here have DIFFERENT types (inner []:List[Int], outer tail
+              # []:List[List[Int]]); the optimizer keeps each unique so codegen stays
+              # well-typed (REQ-LLL-069 fix, regression-tested).
+              []      -> yield (h :: []) :: []
 
   # ---- integer <-> decimal string (REQ-LLL-067) ----
 
