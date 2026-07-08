@@ -71,6 +71,9 @@ pub enum Tok {
     Backslash, // lambda: \(x: T) -> expr
     Pipe,      // sum-type alternative: C1 | C2
     Question,  // typed hole `?` (CPT-LLL-002, DEC-LLL-052)
+    Dot,       // positional projection `e.0` (REQ-LLL-070). A `.`+letter glues into a
+               // `Dotted` name and a `.`+digit-after-digits is a decimal, so a `Dot`
+               // token only ever reaches here as a genuine projection operator.
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +174,14 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                 push(out, Tok::Question);
                 i += 1;
             }
+            '.' => {
+                // positional projection `e.0` (REQ-LLL-070). A qualified name
+                // (`.`+letter) is glued in `lex_word` and a decimal (`<digits>.<digits>`)
+                // is consumed in the number arm, so any `.` reaching this dispatch is a
+                // genuine projection operator.
+                push(out, Tok::Dot);
+                i += 1;
+            }
             '-' => {
                 if i + 1 < b.len() && b[i + 1] == b'>' {
                     push(out, Tok::Arrow);
@@ -245,7 +256,14 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                 // only when a DIGIT follows the dot, so a qualified name (`IO.print`,
                 // letter after dot — handled in `lex_word`) and a bare `.` stay
                 // untouched. Parsed to an exact, gcd-reduced fraction — never a float.
-                if i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
+                // NOT when these digits immediately follow a projection `.` (REQ-LLL-070):
+                // in `t.0.1` the `0.1` is two indices, not the decimal 0.1 — a real
+                // decimal's integer part is never preceded by a `Dot`.
+                if i + 1 < b.len()
+                    && b[i] == b'.'
+                    && b[i + 1].is_ascii_digit()
+                    && !matches!(out.last().map(|s| &s.tok), Some(Tok::Dot))
+                {
                     let int_part = &s[start..i];
                     let frac_start = i + 1;
                     i += 1;

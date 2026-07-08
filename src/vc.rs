@@ -505,6 +505,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         Expr::Lambda(ps, body) => {
             Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
         }
+        Expr::Proj(a, i) => Expr::Proj(Box::new(inline_methods(a, class, inst)?), *i),
         Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit
         | Expr::Hole => e.clone(),
     })
@@ -533,6 +534,7 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
         }
         Expr::ListLit(xs) => Expr::ListLit(xs.iter().map(|x| subst_vars(x, map)).collect()),
         Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| subst_vars(x, map)).collect()),
+        Expr::Proj(a, i) => Expr::Proj(Box::new(subst_vars(a, map)), *i),
         Expr::Call(n, args) => {
             Expr::Call(n.clone(), args.iter().map(|a| subst_vars(a, map)).collect())
         }
@@ -635,12 +637,62 @@ impl<'a> Emit<'a> {
         });
     }
 
+    /// The SMT sort of a value-producing expression, when structurally determinable
+    /// (REQ-LLL-070). Used to recover a tuple's arity for a projection selector
+    /// WITHOUT storing it in the AST. Total on well-typed tuple bases (the checker
+    /// has already proven the base is a tuple); returns `None` for forms that cannot
+    /// carry a tuple sort in a provable position, where the caller fails LOUDLY —
+    /// never a silent obligation skip (DEC-LLL-015/017).
+    fn sort_of(&self, e: &Expr, env: &HashMap<String, String>) -> Option<String> {
+        match e {
+            Expr::IntLit(_) => Some(smt_ty(&Ty::Int)),
+            Expr::RatLit(..) => Some(smt_ty(&Ty::Rational)),
+            Expr::BoolLit(_) => Some(smt_ty(&Ty::Bool)),
+            Expr::Unit => Some(smt_ty(&Ty::Unit)),
+            // a bound variable: the sort of its translated term (params recorded in
+            // setup, let-locals recorded at their binding below). A nullary ctor's
+            // sort is its owning user datatype.
+            Expr::Var(n) => env
+                .get(n)
+                .and_then(|term| self.sorts.get(term).cloned())
+                .or_else(|| {
+                    self.cm
+                        .ctors
+                        .get(n)
+                        .map(|(ty_name, _)| smt_ty(&Ty::User(ty_name.clone(), vec![])))
+                }),
+            Expr::Tuple(items) => {
+                let cs: Option<Vec<String>> =
+                    items.iter().map(|it| self.sort_of(it, env)).collect();
+                cs.map(|cs| format!("(Tup{} {})", cs.len(), cs.join(" ")))
+            }
+            Expr::Proj(inner, i) => {
+                let s = self.sort_of(inner, env)?;
+                tuple_component_sorts(&s)?.get(*i).cloned()
+            }
+            // a call to a module part yields its declared return type's sort (a ctor
+            // call returns a user datatype, never a tuple — irrelevant to projection).
+            Expr::Call(name, _) => self
+                .cm
+                .index
+                .get(name)
+                .map(|&ix| smt_ty(&self.cm.module.parts[ix].ret)),
+            _ => None,
+        }
+    }
+
     fn walk_body(&mut self, body: &[Stmt], mut env: HashMap<String, String>) -> Result<(), String> {
         for s in body {
             match s {
                 Stmt::Let(name, e) => {
                     let t = self.tr(e, &env, None)?;
                     if name != "_" {
+                        // record the local's sort when determinable, so a later
+                        // projection on it recovers the arity (REQ-LLL-070). Absence
+                        // just means such a projection fails LOUD, never silently.
+                        if let Some(s) = self.sort_of(e, &env) {
+                            self.sorts.insert(t.clone(), s);
+                        }
                         env.insert(name.clone(), t);
                     }
                 }
@@ -876,7 +928,42 @@ impl<'a> Emit<'a> {
                 for (i, it) in items.iter().enumerate() {
                     ts.push(self.tr(it, env, comps.map(|cs| &cs[i]))?);
                 }
-                format!("(tup{} {})", items.len(), ts.join(" "))
+                let term = format!("(tup{} {})", items.len(), ts.join(" "));
+                // record this tuple value's sort so a projection reached through it —
+                // e.g. after it is bound to a callee parameter at a call site, where the
+                // formal is `env`-mapped to this literal term — recovers its arity
+                // (REQ-LLL-070). Prefer the expected type; else derive it structurally.
+                let sort = match expected {
+                    Some(t @ Ty::Tuple(_)) => Some(smt_ty(t)),
+                    _ => self.sort_of(e, env),
+                };
+                if let Some(s) = sort {
+                    self.sorts.insert(term.clone(), s);
+                }
+                term
+            }
+            // positional projection `e.i` → the native tuple SELECTOR `(projN_i …)`
+            // (REQ-LLL-070, DEC-LLL-036). The arity N is recovered from the base's
+            // sort (never stored in the AST); an INDETERMINATE sort fails LOUDLY —
+            // an obligation is NEVER silently skipped (DEC-LLL-015/017). Emitting the
+            // `(proj` marker auto-declares `TupN` via `collect_tuple_arities`.
+            Expr::Proj(e, i) => {
+                let et = self.tr(e, env, None)?;
+                let sort = self.sort_of(e, env).ok_or_else(|| {
+                    format!("vcgen: cannot determine the tuple sort of the base of `.{i}`")
+                })?;
+                let comps = tuple_component_sorts(&sort).ok_or_else(|| {
+                    format!("vcgen: base of projection `.{i}` has non-tuple sort `{sort}`")
+                })?;
+                let n = comps.len();
+                let comp_sort = comps.get(*i).cloned().ok_or_else(|| {
+                    format!("vcgen: projection index {i} out of bounds for tuple arity {n}")
+                })?;
+                let term = format!("(proj{n}_{i} {et})");
+                // record the projection's own sort so a NESTED projection or a match
+                // on it resolves (mirror of the tuple-pattern binding recording).
+                self.sorts.insert(term.clone(), comp_sort);
+                term
             }
             Expr::Neg(a) => format!("(- {})", self.tr(a, env, None)?),
             Expr::Not(a) => format!("(not {})", self.tr(a, env, None)?),

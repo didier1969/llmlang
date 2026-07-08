@@ -3002,6 +3002,82 @@ fn tuple_components_first_order_is_rejected() {
 }
 
 // ===================================================================
+// REQ-LLL-070 (prerequisite) — positional tuple projection `p.0` as a
+// checker-level primitive lowered to the native Z3 tuple SELECTOR, legal
+// inside a contract (the foundation records/named-field access build on).
+
+#[test]
+fn tuple_positional_projection_in_contract_verifies_and_runs() {
+    // The DEFINING obligation: `requires p.0 > 0` must constrain the very
+    // `(proj2_0 p)` the body yields, so Z3 discharges `ensures result > 0`.
+    // The caller `f((5, 9))` also proves the precondition on a tuple LITERAL
+    // (`(proj2_0 (tup2 5 9)) > 0`), exercising projection on a param AND a literal.
+    let src = "module T:\n\n  part f(p: (Int, Int)) -> Int:\n    requires p.0 > 0\n    ensures result > 0\n    yield p.0\n\n  part main() -> Int:\n    yield f((5, 9))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "projection-in-contract must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 5"), "projection runtime wrong: {out}");
+}
+
+#[test]
+fn tuple_projection_without_requires_is_fail_safe() {
+    // Fail-SAFE: strip the `requires` and the SAME `ensures result > 0` is no
+    // longer provable (the projection is unconstrained) — verification must
+    // FAIL, proving the selector encoding is not vacuously true.
+    let src = "module T:\n\n  part f(p: (Int, Int)) -> Int:\n    ensures result > 0\n    yield p.0\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "unconstrained projection must not verify");
+}
+
+#[test]
+fn tuple_projection_out_of_bounds_rejected() {
+    // `.2` on a 2-tuple: the projection index is checked against the arity.
+    let src = "module T:\n\n  part f(p: (Int, Int)) -> Int:\n    yield p.2\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject out-of-bounds projection");
+    assert!(
+        err.contains("projection") || err.contains("index") || err.contains("out of"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn tuple_projection_on_non_tuple_rejected() {
+    // `.0` on an Int has no components — a clean type error, not a crash.
+    let src = "module T:\n\n  part f(n: Int) -> Int:\n    yield n.0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject projection on non-tuple");
+    assert!(
+        err.contains("tuple") || err.contains("projection"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn tuple_projection_of_let_local_and_literal_runs() {
+    // Totality of arity recovery (`sort_of`): projection on a let-bound tuple
+    // AND on a bare tuple literal both resolve their arity, not only parameters.
+    let src = "module T:\n\n  part f() -> Int:\n    let x = (3, 4)\n    yield x.1\n\n  part main() -> Int:\n    yield f() + (10, 20).0\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "let/literal projection must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 14"), "let/literal projection runtime wrong: {out}");
+}
+
+#[test]
+fn tuple_call_result_and_nested_projection_runs() {
+    // Load-bearing for records: projection of a CALL result (`mk(a,b).0`, exercising
+    // `sort_of`'s Call branch) AND nested positional projection (`t.0.1`, exercising
+    // both the recorded projection sort and the lexer suppressing decimal-formation
+    // right after a projection `.` — `0.1` is two indices, not the decimal 0.1).
+    let src = "module PP:\n  part mk(a: Int, b: Int) -> (Int, Int):\n    yield (a, b)\n  part use_call(a: Int, b: Int) -> Int:\n    yield mk(a, b).0\n  part nested(t: ((Int, Int), Int)) -> Int:\n    yield t.0.1\n  part main() -> Int:\n    yield use_call(5, 9) + nested(((1, 2), 3))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "call-result + nested projection must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 7"), "call/nested projection runtime wrong: {out}");
+}
+
+// ===================================================================
 // REQ-LLL-026 slice 3c item 2 — user-authored tail-resumptive handlers,
 // compiled by capability-passing (fn-pointer evidence), DEC-LLL-037.
 // The proof fork already havocs a user op's result (REQ-LLL-018), so the

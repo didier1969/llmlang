@@ -517,6 +517,9 @@ impl<'a> Norm<'a> {
                 let xs: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
                 format!("(tuple {})", xs.join(" "))
             }
+            // positional projection `e.i` — identity by (index, base). The arity is
+            // NOT part of the text, so it is not in the hash (REQ-LLL-070, DEC-LLL-020).
+            Expr::Proj(a, i) => format!("(proj {i} {})", self.expr(a)),
             Expr::Neg(a) => format!("(neg {})", self.expr(a)),
             Expr::Not(a) => format!("(not {})", self.expr(a)),
             Expr::Bin(op, a, b) => format!("({op:?} {} {})", self.expr(a), self.expr(b)),

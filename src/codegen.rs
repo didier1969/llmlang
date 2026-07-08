@@ -2026,6 +2026,9 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             let xs: Result<Vec<String>, String> = items.iter().map(|i| expr(i, cx, res)).collect();
             format!("({})", xs?.join(", "))
         }
+        // positional projection `e.i` → native Rust tuple field access `(<e>).i`
+        // (REQ-LLL-070); rustc infers the component type from the tuple's type.
+        Expr::Proj(e, i) => format!("({}).{i}", expr(e, cx, res)?),
         Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),
         Expr::Not(a) => format!("(!{})", expr(a, cx, res)?),
         Expr::Bin(op, a, b) => {

@@ -530,6 +530,13 @@ pub enum Expr {
     Unit,
     /// A tuple value `(e1, …, en)` with arity ≥ 2 (REQ-LLL-026, DEC-LLL-036).
     Tuple(Vec<Expr>),
+    /// Positional projection `e.i` of a tuple component (REQ-LLL-070, prerequisite
+    /// for named records). A checker-level PRIMITIVE — not a user `part` — so it is
+    /// legal inside a contract (requires/ensures/measure), where it lowers to the
+    /// native Z3 tuple SELECTOR `(projN_i …)` (DEC-LLL-036). The index is 0-based and
+    /// checked against the tuple's arity; the arity itself is NOT stored (derived from
+    /// the base's type — the surface AST stays source-faithful, DEC-LLL-020).
+    Proj(Box<Expr>, usize),
     /// A typed hole `?` (CPT-LLL-002, DEC-LLL-052): a deliberate placeholder for an
     /// as-yet-unwritten TERM. The checker assigns it the context-expected type and
     /// records its in-scope binders (structured feedback for an LLM's completion
@@ -558,6 +565,7 @@ impl Expr {
                 }
             }
             Expr::Lambda(_, body) => body.walk(f),
+            Expr::Proj(a, _) => a.walk(f),
             _ => {}
         }
     }

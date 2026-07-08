@@ -1116,7 +1116,24 @@ impl Parser {
             let e = self.unary_expr()?;
             return Ok(Expr::Neg(Box::new(e)));
         }
-        self.atom()
+        self.postfix_expr()
+    }
+    /// An atom followed by zero or more postfix projections `.i` (REQ-LLL-070).
+    /// Projection binds tighter than unary minus (`-p.0` = `-(p.0)`) and composes
+    /// with calls and grouping (`f(x).0`, `(a, b).1`). v1: positional only — named
+    /// field access `.field` arrives with records.
+    fn postfix_expr(&mut self) -> Result<Expr, String> {
+        let mut e = self.atom()?;
+        while self.peek() == &Tok::Dot {
+            self.pos += 1;
+            match self.bump() {
+                Tok::Int(n) if n >= 0 => e = Expr::Proj(Box::new(e), n as usize),
+                other => {
+                    return Err(format!("expected a tuple index after `.`, found {other:?}"))
+                }
+            }
+        }
+        Ok(e)
     }
     fn atom(&mut self) -> Result<Expr, String> {
         match self.bump() {

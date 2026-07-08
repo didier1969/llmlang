@@ -2013,6 +2013,19 @@ fn type_of_pure(
             }
             Ty::list(th)
         }
+        // positional projection in a contract (REQ-LLL-070): a checker-level PRIMITIVE
+        // over a tuple, lowered to the Z3 selector `(projN_i …)` — admitted here
+        // (unlike a user `part` call, DEC-LLL-017), which is precisely what lets a
+        // tuple/record field be named in requires/ensures/measure.
+        Expr::Proj(e, i) => match type_of_pure(e, vars, result, ctors)? {
+            Ty::Tuple(cs) => cs.get(*i).cloned().ok_or_else(|| {
+                format!(
+                    "tuple projection `.{i}` out of bounds: the tuple has {} component(s)",
+                    cs.len()
+                )
+            })?,
+            other => return Err(format!("projection `.{i}` needs a tuple, got {other}")),
+        },
         // array spec primitives are admitted in contracts (DEC-LLL-017 amendment):
         // they are TERM constructors backed by a Z3 theory operator, not user calls.
         Expr::Call(name, args) if is_array_spec_term(name) => match name.as_str() {
@@ -2676,6 +2689,24 @@ fn check_expr(
             }
             Ty::Tuple(tys)
         }
+        // positional projection `e.i` (REQ-LLL-070): type-directed against the base's
+        // tuple type. No expected type flows into the base — its arity is fixed by its
+        // own type, never by context. Mirrors the contract rule in `type_of_pure`.
+        Expr::Proj(e, i) => match check_expr(ctx, e, None)? {
+            Ty::Tuple(cs) => cs.get(*i).cloned().ok_or_else(|| {
+                format!(
+                    "part `{}`: tuple projection `.{i}` out of bounds: the tuple has {} component(s)",
+                    ctx.part.name,
+                    cs.len()
+                )
+            })?,
+            other => {
+                return Err(format!(
+                    "part `{}`: projection `.{i}` needs a tuple, got {other}",
+                    ctx.part.name
+                ))
+            }
+        },
         Expr::ListLit(items) => {
             if let Some(first) = items.first() {
                 let elem = check_expr(ctx, first, None)?;
