@@ -1,0 +1,33 @@
+import "../std/result.lll"
+
+module Demo.Result:
+
+  # Wave-4 (REQ-LLL-068): the two-parameter parametric ADT `Result[a, e]` at RUNTIME.
+  # Every printed `1` is a fact proven by Z3 AND observed after lowering to the generic
+  # Rust enum `ResultI<Ta, Te>`.
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part dbl(n: Int) -> Int:
+    yield n * 2
+
+  # a checked division returning `Result[Int, Int]` (error code on divide-by-zero) —
+  # the honest total signature: the caller must handle the failure branch.
+  part checked_div(a: Int, b: Int) -> Result[Int, Int]:
+    match b:
+      0 -> yield Err(0 - 1)
+      _ -> yield Ok(a div b)
+
+  part main() -> Int via IO:
+    # ok_or: success value on Ok, default on Err.
+    let a = IO.print(flag(ok_or(checked_div(10, 2), 0) == 5))
+    let b = IO.print(flag(ok_or(checked_div(10, 0), 99) == 99))
+    # is_ok / is_err discriminate the branches.
+    let c = IO.print(flag(is_ok(checked_div(9, 3))))
+    let d = IO.print(flag(is_err(checked_div(9, 0))))
+    # map_ok transforms the success, propagates the error unchanged.
+    let e = IO.print(flag(ok_or(map_ok(dbl, checked_div(6, 2)), 0) == 6))
+    yield IO.print(flag(is_err(map_ok(dbl, checked_div(6, 0)))))

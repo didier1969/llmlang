@@ -1,0 +1,36 @@
+module Std.Option:
+
+  # The canonical optional type, wave-4 (REQ-LLL-068): the FIRST user-declared PARAMETRIC
+  # ADT (`type T[a] = …`). `Option[a]` models "maybe a value" totally — the honest return
+  # of a partial function (lookup / head / find) that replaces the sentinel-default smell
+  # (`nth(xs, i, d)`, `index_of … -1`). A verified `ensures` may reason about `Some(x)` via
+  # a match, so callers get a proof-checked "present or absent" rather than a magic value.
+  type Option[a] = None | Some(a)
+
+  part is_some(o: Option[a]) -> Bool:
+    match o:
+      None    -> yield false
+      Some(x) -> yield true
+
+  part is_none(o: Option[a]) -> Bool:
+    match o:
+      None    -> yield true
+      Some(x) -> yield false
+
+  # unwrap with a default (total).
+  part get_or(o: Option[a], d: a) -> a:
+    match o:
+      None    -> yield d
+      Some(x) -> yield x
+
+  # functorial map: transform the contained value, propagate absence.
+  part map_opt(f: (a) -> b, o: Option[a]) -> Option[b]:
+    match o:
+      None    -> yield None
+      Some(x) -> yield Some(f(x))
+
+  # monadic bind: chain a partial computation.
+  part and_then(o: Option[a], f: (a) -> Option[b]) -> Option[b]:
+    match o:
+      None    -> yield None
+      Some(x) -> yield f(x)

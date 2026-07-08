@@ -1,0 +1,32 @@
+module Std.Result:
+
+  # `Result[a, e]` — the verified errors-as-values type (REQ-LLL-068): a computation
+  # yields `Ok(a)` on success or `Err(e)` on failure. It is the SECOND parametric ADT
+  # and the first with TWO type parameters, proving the `type T[a, e]` machinery
+  # generalizes past arity 1 (the Z3 datatype binds `(par (Tv_a Tv_e) …)`, the Rust
+  # enum is `ResultI<Ta, Te>`). The ctors `Ok`/`Err` deliberately share the std
+  # prelude's names — they lower fully-qualified (`ResultI::Ok`), never shadowing it.
+  type Result[a, e] = Ok(a) | Err(e)
+
+  part is_ok(r: Result[a, e]) -> Bool:
+    match r:
+      Ok(x)  -> yield true
+      Err(y) -> yield false
+
+  part is_err(r: Result[a, e]) -> Bool:
+    match r:
+      Ok(x)  -> yield false
+      Err(y) -> yield true
+
+  # unwrap the success value with a default (total).
+  part ok_or(r: Result[a, e], d: a) -> a:
+    match r:
+      Ok(x)  -> yield x
+      Err(y) -> yield d
+
+  # transform the success value, propagate the error UNCHANGED — this re-maps the
+  # FIRST parameter (a -> b) while carrying the SECOND (e) through untouched.
+  part map_ok(f: (a) -> b, r: Result[a, e]) -> Result[b, e]:
+    match r:
+      Ok(x)  -> yield Ok(f(x))
+      Err(y) -> yield Err(y)

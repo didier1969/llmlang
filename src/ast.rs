@@ -168,6 +168,12 @@ pub struct ForeignSig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeDecl {
     pub name: String,
+    /// parametric type parameters `type Option[a] = …` (REQ-LLL-068). Empty for a
+    /// monomorphic ADT. Each name scopes over the constructor field types, where it
+    /// appears as a `Ty::Var`. Identity is by POSITION, not spelling — `Option[a]`
+    /// and `Option[b]` are the same type (alpha-equivalence, handled in hash.rs).
+    #[serde(default)]
+    pub type_params: Vec<String>,
     /// each constructor: its name + positional field types
     pub ctors: Vec<(String, Vec<Ty>)>,
 }
@@ -287,8 +293,11 @@ pub enum Ty {
     /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
     /// v1: parameter and result types are concrete (monomorphic HOF).
     Fun(Vec<Ty>, Box<Ty>),
-    /// A user-declared algebraic data type, by name (REQ-LLL-011).
-    User(String),
+    /// A user-declared algebraic data type applied to type arguments (REQ-LLL-011,
+    /// REQ-LLL-068). Monomorphic ADTs carry an EMPTY argument list (`User("Foo", [])`);
+    /// a parametric ADT applies them (`Option[Int]` = `User("Option", [Int])`). The
+    /// arguments substitute for the declaration's `type_params` in constructor fields.
+    User(String, Vec<Ty>),
     /// The empty type — the return type of an ABORT effect operation (REQ-LLL-018).
     /// A `Never`-typed expression diverges (aborts the handled block), so it
     /// coerces to any expected type and code after it is dead.
@@ -327,7 +336,8 @@ impl Ty {
     /// True when the type mentions no type variable (fully concrete).
     pub fn is_concrete(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => true,
+            Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => true,
+            Ty::User(_, args) => args.iter().all(Ty::is_concrete),
             Ty::Var(_) => false,
             Ty::List(e) | Ty::Array(e) => e.is_concrete(),
             Ty::Map(k, v) => k.is_concrete() && v.is_concrete(),
@@ -353,7 +363,11 @@ impl std::fmt::Display for Ty {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
                 write!(f, "({}) -> {r}", ps.join(", "))
             }
-            Ty::User(name) => write!(f, "{name}"),
+            Ty::User(name, args) if args.is_empty() => write!(f, "{name}"),
+            Ty::User(name, args) => {
+                let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{name}[{}]", args.join(", "))
+            }
             Ty::Never => write!(f, "Never"),
             Ty::Unit => write!(f, "Unit"),
             Ty::Tuple(cs) => {

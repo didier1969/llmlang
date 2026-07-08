@@ -583,8 +583,15 @@ fn smt_ty(t: &Ty) -> String {
         // functions are declared as uninterpreted functions (declare-fun), never
         // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
-        // a user ADT is a Z3 datatype of the same name (REQ-LLL-011)
-        Ty::User(n) => n.clone(),
+        // a user ADT is a Z3 datatype of the same name (REQ-LLL-011). A parametric
+        // ADT applies its type arguments — `Option[Int]` → `(Option Int)` — exactly
+        // like the parametric list `(Lst Int)` (REQ-LLL-068). The argument sort
+        // `Ty::Var(a)` renders `Tv_a`, matching the `par` binder in the datatype decl.
+        Ty::User(n, args) if args.is_empty() => n.clone(),
+        Ty::User(n, args) => {
+            let inner: Vec<String> = args.iter().map(smt_ty).collect();
+            format!("({} {})", n, inner.join(" "))
+        }
         // `Never` is the return type of an abort op; an abort path is proven dead
         // (assume false), so its result is never translated to a value sort.
         Ty::Never => unreachable!("Never has no value sort — abort paths are proven unreachable"),
@@ -671,14 +678,31 @@ impl<'a> Emit<'a> {
                         .as_deref()
                         .and_then(|srt| srt.strip_prefix("(Lst ").and_then(|r| r.strip_suffix(')')))
                         .map(|e| e.to_string());
+                    // the scrutinee sort iff it is a PARAMETRIC user datatype `(Name …)`
+                    // whose head is a declared type with type parameters (REQ-LLL-068):
+                    // its ctor patterns must use the robust reconstruction tester, not
+                    // Z3 4.16's unreliable parametric recognizer.
+                    let user_adt_sort: Option<String> = scrut_sort.as_deref().and_then(|srt| {
+                        let head = srt.strip_prefix('(')?.split_whitespace().next()?;
+                        self.cm
+                            .module
+                            .types
+                            .iter()
+                            .any(|td| td.name == head && !td.type_params.is_empty())
+                            .then(|| srt.to_string())
+                    });
                     // component sorts of a tuple scrutinee, to type the projections
                     // bound by a tuple pattern (nested list/tuple matches).
                     let tuple_sorts: Option<Vec<String>> =
                         scrut_sort.as_deref().and_then(tuple_component_sorts);
                     let mut arm_conds: Vec<String> = Vec::new();
                     for arm in arms {
-                        let (cond, bindings) =
-                            pattern_cond(&arm.pattern, &s_t, list_elem.as_deref());
+                        let (cond, bindings) = pattern_cond(
+                            &arm.pattern,
+                            &s_t,
+                            list_elem.as_deref(),
+                            user_adt_sort.as_deref(),
+                        );
                         // record sorts of list sub-terms bound here (nested matches)
                         if let Some(e) = &list_elem {
                             for (_, term) in &bindings {
@@ -1261,6 +1285,12 @@ fn pattern_cond(
     p: &Pattern,
     scrut: &str,
     list_elem: Option<&str>,
+    // the scrutinee's SMT sort iff it is a PARAMETRIC user datatype `(Option Tv_a)`
+    // (REQ-LLL-068). Z3 4.16's recognizer `((_ is Ctor) x)` is unreliable across
+    // multiple instantiations of a parametric datatype (same bug the `Lst`/`Maybe`
+    // paths already dodge), so a ctor pattern is tested by ROBUST reconstruction from
+    // constructors + selectors instead. `None` for a monomorphic ADT (recognizer OK).
+    user_adt_sort: Option<&str>,
 ) -> (String, Vec<(String, String)>) {
     match p {
         Pattern::IntLit(v) => {
@@ -1297,14 +1327,30 @@ fn pattern_cond(
                 ],
             )
         }
-        // user ADT constructor: `(_ is Ctor)` tester + `(Ctor_i s)` field selectors
+        // user ADT constructor: `(Ctor_i s)` field selectors bind the fields; the
+        // "is this ctor" test is the RECOGNIZER for a monomorphic ADT, but ROBUST
+        // reconstruction for a parametric one (REQ-LLL-068, Z3 4.16 recognizer bug).
         Pattern::Ctor(cn, binders) => {
-            let bindings = binders
+            let bindings: Vec<(String, String)> = binders
                 .iter()
                 .enumerate()
                 .map(|(i, b)| (b.clone(), format!("({cn}_{i} {scrut})")))
                 .collect();
-            (format!("((_ is {cn}) {scrut})"), bindings)
+            let cond = match user_adt_sort {
+                // nullary ctor `None`: equality to the sort-annotated constant — the
+                // `as` disambiguates which datatype instantiation (mirror of `nil`).
+                Some(sort) if binders.is_empty() => format!("(= {scrut} (as {cn} {sort}))"),
+                // ctor with fields `Some(x)`: `scrut = Ctor(sel_0 scrut, …)` holds iff
+                // the top constructor is `Ctor` — uses only constructors/selectors, so
+                // it sidesteps the flaky recognizer while staying exact.
+                Some(_) => {
+                    let sels: Vec<String> =
+                        (0..binders.len()).map(|i| format!("({cn}_{i} {scrut})")).collect();
+                    format!("(= {scrut} ({cn} {}))", sels.join(" "))
+                }
+                None => format!("((_ is {cn}) {scrut})"),
+            };
+            (cond, bindings)
         }
         // tuple: a single free constructor → irrefutable (cond `true`); each
         // binder is the corresponding projection `(projN_i s)` (DEC-LLL-036).
@@ -1435,7 +1481,13 @@ fn user_datatype_decls(types: &[TypeDecl]) -> Vec<String> {
     if types.is_empty() {
         return Vec::new();
     }
-    let names: Vec<String> = types.iter().map(|td| format!("({} 0)", td.name)).collect();
+    // each sort is `(Name arity)` — arity is the number of type parameters, so a
+    // parametric ADT `type Option[a]` declares `(Option 1)` exactly like the
+    // built-in `(Lst 1)` (REQ-LLL-068). Monomorphic ADTs keep `(Name 0)`.
+    let names: Vec<String> = types
+        .iter()
+        .map(|td| format!("({} {})", td.name, td.type_params.len()))
+        .collect();
     let bodies: Vec<String> = types
         .iter()
         .map(|td| {
@@ -1455,7 +1507,17 @@ fn user_datatype_decls(types: &[TypeDecl]) -> Vec<String> {
                     }
                 })
                 .collect();
-            format!("({})", ctors.join(" "))
+            let body = format!("({})", ctors.join(" "));
+            // a parametric datatype wraps its ctors in `(par (Tv_a …) …)`, binding the
+            // type-parameter sorts referenced by the fields; an arity-0 ADT emits the
+            // bare ctor list in the SAME block (mixed arities are legal SMT-LIB 2.6).
+            if td.type_params.is_empty() {
+                body
+            } else {
+                let binders: Vec<String> =
+                    td.type_params.iter().map(|p| format!("Tv_{p}")).collect();
+                format!("(par ({}) {})", binders.join(" "), body)
+            }
         })
         .collect();
     vec![format!(

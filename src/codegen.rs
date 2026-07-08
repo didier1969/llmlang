@@ -56,9 +56,9 @@ fn emit_actor_runtime(out: &mut String, msg_ty: &Ty) {
     // the llmlang value type and unwraps the `Rc`; `actor_loop` re-wraps for `lll_step`. `super::`
     // because the ADT and its `Rc` alias live in the parent (crate-root) module.
     let (chan_ty, send_param, wrap_send, unwrap_step) = match msg_ty {
-        Ty::User(n) => (
+        Ty::User(n, _) => (
             format!("super::{n}I"),
-            format!("super::{n}"),
+            format!("std::rc::Rc<super::{n}I>"),
             "(*msg).clone()".to_string(),
             // `lll_step` takes a heap ADT param BY REFERENCE (`&Msg`); the re-wrapped
             // `Rc` is a temporary borrowed for the call (moves `m`, used once as FnOnce).
@@ -477,7 +477,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                         // the ADT's ctors (checker enforces full coverage) → no `_` arm.
                         Some(Foreign::Enum { path, arms }) => {
                             let n = match &op.params[i] {
-                                Ty::User(n) => n.clone(),
+                                Ty::User(n, _) => n.clone(),
                                 _ => unreachable!(
                                     "checker guarantees an ADT param for a foreign enum"
                                 ),
@@ -519,7 +519,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                     // lowers unambiguously.
                     Some(Foreign::Result(ft, _)) => {
                         let td = match &op.ret {
-                            Ty::User(n) => cm.module.types.iter().find(|td| &td.name == n),
+                            Ty::User(n, _) => cm.module.types.iter().find(|td| &td.name == n),
                             _ => None,
                         }
                         .expect("checker guarantees a 2-ctor ADT return for a `Result` foreign");
@@ -550,7 +550,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                     // DEFERRED Array/Object) fail-stops — never a silent mis-mapping.
                     Some(Foreign::Enum { path, arms }) => {
                         let n = match &op.ret {
-                            Ty::User(n) => n.clone(),
+                            Ty::User(n, _) => n.clone(),
                             _ => unreachable!("checker guarantees an ADT return for a foreign enum"),
                         };
                         let ei = format!("{n}I");
@@ -731,8 +731,16 @@ fn rs_ty(t: &Ty) -> String {
             let a: Vec<String> = ps.iter().map(rs_ty).collect();
             format!("fn({}) -> {}", a.join(", "), rs_ty(r))
         }
-        // a user ADT is a Rust enum of the same name (REQ-LLL-011)
-        Ty::User(n) => n.clone(),
+        // a user ADT is the Rc-wrapped inner enum `Rc<{Name}I<args>>` (REQ-LLL-011).
+        // Rendered FULLY here rather than via a `pub type {Name} = Rc<{Name}I>` alias:
+        // a user type named `Option`/`Result` would otherwise shadow the std prelude
+        // type in the generated runtime (REQ-LLL-068). Only `{Name}I` ever names a Rust
+        // item, and that never collides — the same hygiene the ctors already use.
+        Ty::User(n, args) if args.is_empty() => format!("Rc<{n}I>"),
+        Ty::User(n, args) => {
+            let inner: Vec<String> = args.iter().map(rs_ty).collect();
+            format!("Rc<{n}I<{}>>", inner.join(", "))
+        }
         // `Never` is the return type of an abort op; it is never lowered as a
         // value type — an abort op compiles to an early `return Err`, so its
         // "result" has Rust's never type.
@@ -807,7 +815,11 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
             let a: Vec<String> = ps.iter().map(|p| rs_ty_self(p, self_var)).collect();
             format!("fn({}) -> {}", a.join(", "), rs_ty_self(r, self_var))
         }
-        Ty::User(n) => n.clone(),
+        Ty::User(n, args) if args.is_empty() => format!("Rc<{n}I>"),
+        Ty::User(n, args) => {
+            let inner: Vec<String> = args.iter().map(|a| rs_ty_self(a, self_var)).collect();
+            format!("Rc<{n}I<{}>>", inner.join(", "))
+        }
         Ty::Never => "!".to_string(),
         Ty::Unit => "()".to_string(),
         Ty::Tuple(cs) => {
@@ -959,7 +971,12 @@ fn collect_key_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_key_tvars(c, acc);
             }
         }
-        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {}
+        Ty::User(_, args) => {
+            for a in args {
+                collect_key_tvars(a, acc);
+            }
+        }
+        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -988,7 +1005,12 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tvars(c, acc);
             }
         }
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {}
+        Ty::User(_, args) => {
+            for a in args {
+                collect_tvars(a, acc);
+            }
+        }
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -1001,7 +1023,7 @@ fn mangle(name: &str) -> String {
 /// traversal skip the per-node refcount inc/dec (DEC-LLL-031 voie B) — every other
 /// type (Int/Bool/Unit/Fun/Tuple/type-var) is Copy or moved, with no refcount.
 fn is_heap(t: &Ty) -> bool {
-    matches!(t, Ty::List(_) | Ty::User(_) | Ty::Array(_) | Ty::Map(..) | Ty::Set(_))
+    matches!(t, Ty::List(_) | Ty::User(..) | Ty::Array(_) | Ty::Map(..) | Ty::Set(_))
 }
 
 /// Collect the names of parts USED AS A FIRST-CLASS VALUE — a bare `Expr::Var`
@@ -1141,11 +1163,21 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
     // (rs_ty renders it as `T` = the Rc alias) gives recursion for free
     // (REQ-LLL-011). Values are shared via reference counting.
     let ei = format!("{}I", td.name);
+    // parametric ADT (REQ-LLL-068): the inner enum and its Rc alias carry the type
+    // parameters as Rust generics `<Ta, …>`. The derives generate CONDITIONAL impls
+    // (`impl<Ta: Ord> Ord for OptionI<Ta>`), so a parameter needs a bound only where
+    // the corresponding capability is actually used — no bound on the declaration.
+    let generics = if td.type_params.is_empty() {
+        String::new()
+    } else {
+        let ps: Vec<String> = td.type_params.iter().map(|p| tv_param(p)).collect();
+        format!("<{}>", ps.join(", "))
+    };
     // Ord/Eq are derived so any concrete type may serve as a verified Map key
     // (BTreeMap requires `K: Ord`); the proof never reasons about key order, so the
     // total order is a runtime-only artifact (REQ-LLL-037, DEC-LLL-043).
     out.push_str(&format!(
-        "\n#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]\npub enum {ei} {{\n"
+        "\n#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]\npub enum {ei}{generics} {{\n"
     ));
     for (cn, fields) in &td.ctors {
         if fields.is_empty() {
@@ -1156,9 +1188,10 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
         }
     }
     out.push_str("}\n");
-    out.push_str(&format!("pub type {} = Rc<{ei}>;\n", td.name));
-    // NB: no `pub use {ei}::*;` — every ctor reference is emitted fully-qualified
-    // (`{ei}::Ctor`) so a user ctor named `Ok`/`Err` cannot shadow Rust's `Result`.
+    // NB: NO `pub type {Name} = Rc<{ei}>` alias and no `pub use {ei}::*` — a user ADT
+    // named `Option`/`Result` (or a ctor named `Ok`/`Some`/`None`) would shadow the std
+    // prelude in the generated runtime. Every ADT type is spelled `Rc<{ei}<…>>` (rs_ty)
+    // and every ctor `{ei}::Ctor`, fully-qualified, so nothing collides (REQ-LLL-068).
 }
 
 fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {

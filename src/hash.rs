@@ -606,7 +606,12 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tyvars(c, acc);
             }
         }
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {}
+        Ty::User(_, args) => {
+            for a in args {
+                collect_tyvars(a, acc);
+            }
+        }
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -630,7 +635,14 @@ fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
                 .join(", "),
             canon_ty(r, rename)
         ),
-        Ty::User(n) => n.clone(),
+        Ty::User(n, args) if args.is_empty() => n.clone(),
+        Ty::User(n, args) => format!(
+            "{n}[{}]",
+            args.iter()
+                .map(|a| canon_ty(a, rename))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Ty::Never => "Never".to_string(),
         Ty::Unit => "Unit".to_string(),
         // `Tup(...)` — distinct from the function form `(...) -> R` and grouping

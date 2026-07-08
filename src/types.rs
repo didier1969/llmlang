@@ -129,6 +129,27 @@ impl Ctx<'_> {
         }
         self.part.effects.iter().any(|e| e == effect) || self.handled.iter().any(|e| e == effect)
     }
+
+    /// The declared type parameters of ADT `tyname` (empty for a monomorphic type
+    /// or an unknown name) — REQ-LLL-068.
+    fn type_params(&self, tyname: &str) -> Vec<String> {
+        self.module
+            .types
+            .iter()
+            .find(|td| td.name == tyname)
+            .map(|td| td.type_params.clone())
+            .unwrap_or_default()
+    }
+
+    /// Substitution mapping ADT `tyname`'s declared parameters to the concrete type
+    /// arguments `targs` at a use site (REQ-LLL-068). Empty when the type is
+    /// monomorphic, so `subst_ty` becomes the identity.
+    fn adt_subst(&self, tyname: &str, targs: &[Ty]) -> HashMap<String, Ty> {
+        self.type_params(tyname)
+            .into_iter()
+            .zip(targs.iter().cloned())
+            .collect()
+    }
 }
 
 pub fn check_module(module: Module) -> Result<CheckedModule, String> {
@@ -154,10 +175,10 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         for (cname, fields) in &td.ctors {
             for ft in fields {
-                if !valid_field_ty(ft, &type_names) {
+                if !valid_field_ty(ft, &type_names, &td.type_params) {
                     return Err(format!(
                         "type `{}` constructor `{cname}`: field type {ft} is unsupported \
-                         (v1: Int, Bool, List[…], or the type itself)",
+                         (v1: Int, Bool, List[…], a type parameter, or a declared type)",
                         td.name
                     ));
                 }
@@ -314,7 +335,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                             ));
                         }
                         let td = match &op.ret {
-                            Ty::User(n) => module.types.iter().find(|td| &td.name == n),
+                            Ty::User(n, _) => module.types.iter().find(|td| &td.name == n),
                             _ => None,
                         }
                         .ok_or_else(|| {
@@ -888,7 +909,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
 fn scalar_actor_msg_ty(t: &Ty, module: &Module) -> bool {
     match t {
         Ty::Int => true,
-        Ty::User(n) => module.types.iter().find(|td| &td.name == n).is_some_and(|td| {
+        Ty::User(n, _) => module.types.iter().find(|td| &td.name == n).is_some_and(|td| {
             td.ctors
                 .iter()
                 .all(|(_, fs)| fs.iter().all(|f| matches!(f, Ty::Int | Ty::Bool | Ty::Rational)))
@@ -897,11 +918,16 @@ fn scalar_actor_msg_ty(t: &Ty, module: &Module) -> bool {
     }
 }
 
-fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
+fn valid_field_ty(t: &Ty, types: &HashSet<String>, params: &[String]) -> bool {
     match t {
         Ty::Int | Ty::Bool => true,
-        Ty::List(e) => valid_field_ty(e, types),
-        Ty::User(n) => types.contains(n),
+        Ty::List(e) => valid_field_ty(e, types, params),
+        // a reference to one of the enclosing type's parameters `type Option[a] = Some(a)`
+        // (REQ-LLL-068) — the field is polymorphic in that parameter.
+        Ty::Var(v) => params.contains(v),
+        // a declared ADT, applied to type arguments each of which is itself a valid
+        // field type (`List[a]`, `Tree[a]`, a monomorphic `Json`).
+        Ty::User(n, args) => types.contains(n) && args.iter().all(|a| valid_field_ty(a, types, params)),
         _ => false,
     }
 }
@@ -918,7 +944,8 @@ fn ty_mentions_var(t: &Ty, v: &str) -> bool {
         Ty::Map(k, val) => ty_mentions_var(k, v) || ty_mentions_var(val, v),
         Ty::Fun(ps, r) => ps.iter().any(|p| ty_mentions_var(p, v)) || ty_mentions_var(r, v),
         Ty::Tuple(cs) => cs.iter().any(|c| ty_mentions_var(c, v)),
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => false,
+        Ty::User(_, args) => args.iter().any(|a| ty_mentions_var(a, v)),
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => false,
     }
 }
 
@@ -932,7 +959,8 @@ fn ty_uses_only_var(t: &Ty, only: &str) -> bool {
         Ty::Map(k, v) => ty_uses_only_var(k, only) && ty_uses_only_var(v, only),
         Ty::Fun(ps, r) => ps.iter().all(|p| ty_uses_only_var(p, only)) && ty_uses_only_var(r, only),
         Ty::Tuple(cs) => cs.iter().all(|c| ty_uses_only_var(c, only)),
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => true,
+        Ty::User(_, args) => args.iter().all(|a| ty_uses_only_var(a, only)),
+        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => true,
     }
 }
 
@@ -989,8 +1017,9 @@ pub(crate) fn check_given_satisfied(
 pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
     match t {
         Ty::Var(a) if a == var => with.clone(),
-        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::User(_) | Ty::Never | Ty::Unit => {
-            t.clone()
+        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => t.clone(),
+        Ty::User(n, args) => {
+            Ty::User(n.clone(), args.iter().map(|a| subst_tyvar(a, var, with)).collect())
         }
         Ty::List(e) => Ty::List(Box::new(subst_tyvar(e, var, with))),
         Ty::Array(e) => Ty::Array(Box::new(subst_tyvar(e, var, with))),
@@ -1029,7 +1058,7 @@ fn check_json_enum(
         ));
     }
     let td = match llt {
-        Ty::User(n) => module.types.iter().find(|td| &td.name == n),
+        Ty::User(n, _) => module.types.iter().find(|td| &td.name == n),
         _ => None,
     }
     .ok_or_else(|| {
@@ -1077,7 +1106,7 @@ fn check_json_enum(
             // each element recurses through the same by-name marshaller. A different
             // element type would have no marshalling arm, so `List[Self]` is required.
             "Array" => (
-                fields.len() == 1 && fields[0] == Ty::list(Ty::User(td.name.clone())),
+                fields.len() == 1 && fields[0] == Ty::list(Ty::User(td.name.clone(), vec![])),
                 "one `List[Self]` field (a list of the same JSON ADT)",
             ),
             // Object stays DEFERRED: a JSON object needs Map-typed ctor fields, which
@@ -1236,7 +1265,13 @@ fn validate_extern_path(
 /// Reject a signature that names an undeclared user type.
 fn check_user_ty_declared(t: &Ty, types: &HashSet<String>) -> Result<(), String> {
     match t {
-        Ty::User(n) if !types.contains(n) => Err(format!("unknown type `{n}`")),
+        Ty::User(n, _) if !types.contains(n) => Err(format!("unknown type `{n}`")),
+        Ty::User(_, args) => {
+            for a in args {
+                check_user_ty_declared(a, types)?;
+            }
+            Ok(())
+        }
         Ty::List(e) | Ty::Array(e) => check_user_ty_declared(e, types),
         Ty::Fun(ps, r) => {
             for p in ps {
@@ -1943,7 +1978,10 @@ fn type_of_pure(
         // in `ensures`, e.g. `result == NoChange`).
         Expr::Var(n) => vars.get(n).cloned().or_else(|| {
             ctors.get(n).and_then(|(ty_name, fields)| {
-                fields.is_empty().then(|| Ty::User(ty_name.clone()))
+                // a nullary ctor as a contract value (REQ-LLL-036 W1). Parametric-ADT
+                // reasoning inside contracts is deferred (REQ-LLL-068 follow-up); a
+                // monomorphic ADT carries no type arguments here.
+                fields.is_empty().then(|| Ty::User(ty_name.clone(), vec![]))
             })
         }).ok_or_else(|| format!("unknown variable `{n}`"))?,
         Expr::Neg(a) => {
@@ -2144,6 +2182,15 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
         (Ty::Int, Ty::Int) | (Ty::Bool, Ty::Bool) | (Ty::Rational, Ty::Rational) => Ok(()),
         (Ty::Var(v), _) => match subst.get(v) {
             Some(bound) if bound == arg => Ok(()),
+            // the stored binding is still an unresolved type variable — e.g. a nullary
+            // constructor `None` in an earlier argument seeded `a → a` by echoing the
+            // callee's own param var. Refine it to the newly-seen, possibly-concrete
+            // `arg`. Monotone toward concreteness, so the concrete/concrete conflict
+            // below still errors (REQ-LLL-068, Landmine 1: `get_or(None, 42)`).
+            Some(Ty::Var(_)) => {
+                subst.insert(v.clone(), arg.clone());
+                Ok(())
+            }
             Some(bound) => Err(format!(
                 "type variable `{v}` would have to be both {bound} and {arg}"
             )),
@@ -2159,7 +2206,12 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
             unify_arg(pv, av, subst)
         }
         (Ty::Set(pe), Ty::Set(ae)) => unify_arg(pe, ae, subst),
-        (Ty::User(pn), Ty::User(an)) if pn == an => Ok(()),
+        (Ty::User(pn, pa), Ty::User(an, aa)) if pn == an && pa.len() == aa.len() => {
+            for (p, a) in pa.iter().zip(aa) {
+                unify_arg(p, a, subst)?;
+            }
+            Ok(())
+        }
         (Ty::Fun(pp, pr), Ty::Fun(ap, ar)) if pp.len() == ap.len() => {
             for (p, a) in pp.iter().zip(ap) {
                 unify_arg(p, a, subst)?;
@@ -2183,7 +2235,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Bool => Ty::Bool,
         Ty::Rational => Ty::Rational,
         Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
-        Ty::User(n) => Ty::User(n.clone()),
+        Ty::User(n, args) => Ty::User(n.clone(), args.iter().map(|a| subst_ty(a, subst)).collect()),
         Ty::List(e) => Ty::list(subst_ty(e, subst)),
         Ty::Array(e) => Ty::array(subst_ty(e, subst)),
         Ty::Map(k, v) => Ty::map(subst_ty(k, subst), subst_ty(v, subst)),
@@ -2271,12 +2323,12 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                 // scrutinee root for structural-descent tracking: either a list
                 // param, or a var already known smaller-than a param
                 let scrut_root: Option<String> = match scrut {
-                    Expr::Var(v) if matches!(ts, Ty::List(_) | Ty::User(_)) => {
+                    Expr::Var(v) if matches!(ts, Ty::List(_) | Ty::User(..)) => {
                         if ctx
                             .part
                             .params
                             .iter()
-                            .any(|(p, t)| p == v && matches!(t, Ty::List(_) | Ty::User(_)))
+                            .any(|(p, t)| p == v && matches!(t, Ty::List(_) | Ty::User(..)))
                         {
                             Some(v.clone())
                         } else {
@@ -2308,7 +2360,7 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                     .insert(t.clone(), root.clone());
                             }
                         }
-                        (Pattern::Ctor(cname, binders), Ty::User(tyname)) => {
+                        (Pattern::Ctor(cname, binders), Ty::User(tyname, targs)) => {
                             let (owner, fields) = ctx
                                 .ctors
                                 .get(cname)
@@ -2333,11 +2385,17 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                     binders.len()
                                 ));
                             }
+                            // instantiate the ctor's field types at the scrutinee's type
+                            // arguments (REQ-LLL-068): `o: Option[Int]` matched `Some(x)`
+                            // binds `x : Int`, not the declaration's abstract `a`.
+                            let subst = ctx.adt_subst(tyname, targs);
                             for (b, ft) in binders.iter().zip(&fields) {
-                                ctx.vars.last_mut().unwrap().insert(b.clone(), ft.clone());
-                                // a field of the same type is structurally smaller →
-                                // terminating recursion over the ADT (e.g. trees)
-                                if *ft == Ty::User(tyname.clone()) {
+                                let bft = subst_ty(ft, &subst);
+                                ctx.vars.last_mut().unwrap().insert(b.clone(), bft);
+                                // a field of the SAME ADT is structurally smaller →
+                                // terminating recursion over the ADT (e.g. trees). Match
+                                // by name so a parametric self-reference `Tree[a]` counts.
+                                if matches!(ft, Ty::User(n, _) if n == tyname) {
                                     if let Some(root) = &scrut_root {
                                         ctx.smaller
                                             .last_mut()
@@ -2657,7 +2715,29 @@ fn check_expr(
                             fields.len()
                         ));
                     }
-                    Ty::User(tyname.clone())
+                    let params = ctx.type_params(tyname);
+                    if params.is_empty() {
+                        Ty::User(tyname.clone(), vec![])
+                    } else {
+                        // a parametric nullary constructor (`None : Option[a]`) carries no
+                        // field to pin its type arguments — they come from the expected
+                        // type, else it is a clean inference error (REQ-LLL-068, Landmine 1).
+                        match expected {
+                            Some(Ty::User(en, eargs))
+                                if en == tyname && eargs.len() == params.len() =>
+                            {
+                                Ty::User(tyname.clone(), eargs.clone())
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "part `{}`: cannot infer the type argument(s) of nullary \
+                                     constructor `{n}` here — use it where its type is fixed \
+                                     (e.g. a `yield` or a typed argument position)",
+                                    ctx.part.name
+                                ))
+                            }
+                        }
+                    }
                 } else if let Some(&idx) = ctx.index.get(n) {
                     // a pure part used as a first-class function value (REQ-LLL-009)
                     let callee = &ctx.module.parts[idx];
@@ -3110,16 +3190,45 @@ fn check_expr(
                     args.len()
                 ));
             }
-            for (a, ft) in args.iter().zip(&fields) {
-                let ta = check_expr(ctx, a, Some(ft))?;
-                if ta != *ft {
-                    return Err(format!(
-                        "part `{}`: constructor `{name}` field expects {ft}, got {ta}",
-                        ctx.part.name
-                    ));
+            let params = ctx.type_params(&tyname);
+            if params.is_empty() {
+                // monomorphic ADT: field types are concrete — exact-match each argument.
+                for (a, ft) in args.iter().zip(&fields) {
+                    let ta = check_expr(ctx, a, Some(ft))?;
+                    if ta != *ft {
+                        return Err(format!(
+                            "part `{}`: constructor `{name}` field expects {ft}, got {ta}",
+                            ctx.part.name
+                        ));
+                    }
                 }
+                Ty::User(tyname, vec![])
+            } else {
+                // parametric ADT (REQ-LLL-068): infer the type arguments by unifying each
+                // field type (which mentions the ADT parameters) against the argument.
+                // Seed from the expected type so a nested nullary ctor (`Some(None)`) is
+                // pinned, and push the (partly-known) field type inward as `expected`.
+                let mut subst: HashMap<String, Ty> = HashMap::new();
+                if let Some(Ty::User(en, eargs)) = expected {
+                    if en == &tyname && eargs.len() == params.len() {
+                        for (p, ea) in params.iter().zip(eargs) {
+                            subst.insert(p.clone(), ea.clone());
+                        }
+                    }
+                }
+                for (a, ft) in args.iter().zip(&fields) {
+                    let ft_expected = subst_ty(ft, &subst);
+                    let ta = check_expr(ctx, a, Some(&ft_expected))?;
+                    unify_arg(ft, &ta, &mut subst).map_err(|e| {
+                        format!("part `{}`: constructor `{name}` field: {e}", ctx.part.name)
+                    })?;
+                }
+                let targs: Vec<Ty> = params
+                    .iter()
+                    .map(|p| subst.get(p).cloned().unwrap_or_else(|| Ty::Var(p.clone())))
+                    .collect();
+                Ty::User(tyname, targs)
             }
-            Ty::User(tyname)
         }
         Expr::Call(name, args) if ctx.lookup(name).is_some() => {
             // application of a function-valued local variable (REQ-LLL-009)
@@ -3214,7 +3323,10 @@ fn check_expr(
             for (i, (a, (pn, pt))) in args.iter().zip(&callee_params).enumerate() {
                 let ta = match (i == fp_idx, &fn_arg_ty_override) {
                     (true, Some(t)) => t.clone(),
-                    _ => check_expr(ctx, a, Some(pt))?,
+                    // push the param type with the bindings gathered SO FAR (REQ-LLL-068):
+                    // once an earlier argument pinned a type variable, a later nullary
+                    // constructor `None` sees the concrete expected type `Option[Int]`.
+                    _ => check_expr(ctx, a, Some(&subst_ty(pt, &subst)))?,
                 };
                 unify_arg(pt, &ta, &mut subst).map_err(|e| {
                     format!("part `{}`: argument `{pn}` of `{name}`: {e}", ctx.part.name)
@@ -3226,7 +3338,7 @@ fn check_expr(
             // `measure`, else it is rejected as possibly non-terminating.
             if name == &ctx.part.name {
                 let structural = ctx.part.params.iter().enumerate().any(|(i, (pname, pty))| {
-                    matches!(pty, Ty::List(_) | Ty::User(_))
+                    matches!(pty, Ty::List(_) | Ty::User(..))
                         && matches!(&args[i], Expr::Var(v) if ctx.smaller_root(v) == Some(pname.as_str()))
                 });
                 ctx.rec_calls.push(structural);
@@ -3272,10 +3384,12 @@ fn check_expr(
             // then substitute into the return type (REQ-LLL-007, DEC-LLL-028).
             let mut subst: HashMap<String, Ty> = HashMap::new();
             for (a, (pn, pt)) in args.iter().zip(&callee_params) {
-                // push the declared param type inward as the expected type, so an
-                // empty list `[]` in argument position takes its element type from
-                // the callee's signature (e.g. `rev_acc(xs, [])`).
-                let ta = check_expr(ctx, a, Some(pt))?;
+                // push the param type inward as the expected type, substituting the
+                // bindings gathered from EARLIER arguments (REQ-LLL-007/068): an empty
+                // list `[]` takes its element type from the signature (`rev_acc(xs, [])`),
+                // and a nullary ctor `None` its type args once a prior argument pinned
+                // the type variable (`map_opt(inc, None)` → `None : Option[Int]`).
+                let ta = check_expr(ctx, a, Some(&subst_ty(pt, &subst)))?;
                 unify_arg(pt, &ta, &mut subst).map_err(|e| {
                     format!("part `{}`: argument `{pn}` of `{name}`: {e}", ctx.part.name)
                 })?;
@@ -3289,7 +3403,7 @@ fn check_expr(
                     .iter()
                     .enumerate()
                     .any(|(i, (pname, pty))| {
-                        matches!(pty, Ty::List(_) | Ty::User(_))
+                        matches!(pty, Ty::List(_) | Ty::User(..))
                             && matches!(&args[i], Expr::Var(v) if ctx.smaller_root(v) == Some(pname.as_str()))
                     });
                 ctx.rec_calls.push(structural);

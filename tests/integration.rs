@@ -4498,3 +4498,112 @@ fn cse_does_not_merge_empties_of_different_types() {
         "the non-empty list-of-lists must match the cons arm"
     );
 }
+
+// ---- parametric user ADTs `type T[a]` (REQ-LLL-068) ----
+
+/// Compile a loaded+checked module to a native binary and return its stdout. Mirrors
+/// the `lll run` pipeline: verify → codegen → rustc → execute (REQ-LLL-068 demos).
+fn verify_codegen_run(path: &str, tag: &str) -> String {
+    let (_, m) = loader::load_program(path).expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "{tag} must verify over Z3: {:?}", failures(&report));
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join(format!("{tag}.rs"));
+    let bin = dir.join(format!("{tag}_bin"));
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "{tag} Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn parametric_option_adt_verifies_and_runs() {
+    // REQ-LLL-068: the FIRST user-declared parametric ADT `type Option[a] = None | Some(a)`.
+    // Its combinators (is_some/is_none/get_or/map_opt/and_then) are proven polymorphically
+    // by Z3 (one proof per element type) and lower to a generic Rust enum `OptionI<T>`. The
+    // demo exercises a bare `None` pinned by a sibling argument, the partial-lookup pattern
+    // (`safe_head` returns `Option` instead of a sentinel), and map/and_then chaining.
+    let stdout = verify_codegen_run("examples/option_demo.lll", "option");
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 7, "every Option fact must hold at runtime (7 ones expected):\n{stdout}");
+    assert!(stdout.contains("=> 1"), "the final yielded Option fact must hold:\n{stdout}");
+    assert!(!stdout.lines().any(|l| l.trim() == "0"), "no Option fact may fail:\n{stdout}");
+}
+
+#[test]
+fn parametric_result_two_params_verifies_and_runs() {
+    // REQ-LLL-068: the two-parameter parametric ADT `type Result[a, e] = Ok(a) | Err(e)`
+    // proves the machinery generalizes past arity 1 — the Z3 datatype binds `(par (Tv_a
+    // Tv_e) …)`, the Rust enum is `ResultI<Ta, Te>`, and `map_ok` re-maps the FIRST
+    // parameter while carrying the SECOND. The ctors `Ok`/`Err` share the std prelude's
+    // names yet lower fully-qualified (`ResultI::Ok`), never shadowing it.
+    let stdout = verify_codegen_run("examples/result_demo.lll", "result");
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 6, "every Result fact must hold at runtime (6 ones expected):\n{stdout}");
+    assert!(stdout.contains("=> 1"), "the final yielded Result fact must hold:\n{stdout}");
+    assert!(!stdout.lines().any(|l| l.trim() == "0"), "no Result fact may fail:\n{stdout}");
+}
+
+#[test]
+fn parametric_nullary_ctor_without_type_context_is_a_clean_error() {
+    // REQ-LLL-068 (Landmine 1): a parametric nullary constructor `None : Option[a]` carries
+    // no field to pin its type argument. Used where no expected type fixes it, the checker
+    // must reject it with a CLEAN inference error — never panic, never a silent default.
+    let src = "module Bad:\n\n  type Option[a] = None | Some(a)\n\n  part bad() -> Int:\n    let o = None\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("bare None must be rejected");
+    assert!(
+        err.contains("cannot infer the type argument") && err.contains("None"),
+        "the error must name the unconstrained nullary constructor: {err}"
+    );
+}
+
+#[test]
+fn parametric_nullary_ctor_cse_stays_type_safe() {
+    // REQ-LLL-068 (Landmine 2, optimizer half): two `None`s of DIFFERENT types in one scope
+    // (`Option[Int]` and `Option[Bool]`) are the parametric analogue of the REQ-069 empty-list
+    // hazard. The equality-saturation optimizer hashconses `None` (an `Expr::Var`) into one
+    // e-class, but a bare `Var` is below the CSE cost threshold, so it is RE-INLINED at each
+    // site (where rustc infers the type from context) rather than hoisted into one ill-typed
+    // shared binding. This runs the ACTUAL optimizer pass, then compiles + executes.
+    let src = "module CseNone:\n\n  type Option[a] = None | Some(a)\n\n  part flag(b: Bool) -> Int:\n    match b:\n      true  -> yield 1\n      false -> yield 0\n\n  part is_none(o: Option[a]) -> Bool:\n    match o:\n      None    -> yield true\n      Some(x) -> yield false\n\n  part pair() -> (Option[Int], Option[Bool]):\n    yield (None, None)\n\n  part main() -> Int via IO:\n    match pair():\n      (oi, ob) ->\n        let a = IO.print(flag(is_none(oi)))\n        yield IO.print(flag(is_none(ob)))\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "the two-None module must verify: {:?}", failures(&report));
+    // run the equality-saturation optimizer (exec fork) BEFORE codegen — this is where a
+    // name-based merge of the two differently-typed `None`s would corrupt the output.
+    let opt = optimize::optimize(&cm);
+    let rust = codegen::emit_rust(&opt).expect("codegen");
+    let rs = dir.join("cse_none.rs");
+    let bin = dir.join("cse_none_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "two differently-typed `None`s through the optimizer must emit well-typed Rust:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 2, "both nullary None branches must be recognized as absent:\n{stdout}");
+}

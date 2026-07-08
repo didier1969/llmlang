@@ -215,6 +215,19 @@ impl Parser {
     fn type_decl(&mut self) -> Result<TypeDecl, String> {
         self.eat(Tok::Type)?;
         let name = self.ident()?;
+        // optional parametric type parameters `type Option[a] = …` (REQ-LLL-068):
+        // a bracketed comma-list of lowercase idents, each scoping over the ctor
+        // field types (where it appears as a `Ty::Var`).
+        let mut type_params = Vec::new();
+        if self.peek() == &Tok::LBracket {
+            self.pos += 1;
+            type_params.push(self.ident()?);
+            while self.peek() == &Tok::Comma {
+                self.pos += 1;
+                type_params.push(self.ident()?);
+            }
+            self.eat(Tok::RBracket)?;
+        }
         self.eat(Tok::Assign)?;
         let mut ctors = Vec::new();
         loop {
@@ -239,7 +252,7 @@ impl Parser {
             }
         }
         self.eat(Tok::Newline)?;
-        Ok(TypeDecl { name, ctors })
+        Ok(TypeDecl { name, type_params, ctors })
     }
 
     /// `effect Name:` + one `op(T, …) -> Ret` per indented line (REQ-LLL-018).
@@ -936,8 +949,21 @@ impl Parser {
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {
                 Ok(Ty::Var(s))
             }
-            // any other capitalized bareword names a user ADT (REQ-LLL-011)
-            Tok::Ident(s) => Ok(Ty::User(s)),
+            // any other capitalized bareword names a user ADT (REQ-LLL-011), optionally
+            // applied to type arguments `Option[Int]`, `Result[a, e]` (REQ-LLL-068).
+            Tok::Ident(s) => {
+                let mut args = Vec::new();
+                if self.peek() == &Tok::LBracket {
+                    self.pos += 1;
+                    args.push(self.ty()?);
+                    while self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                        args.push(self.ty()?);
+                    }
+                    self.eat(Tok::RBracket)?;
+                }
+                Ok(Ty::User(s, args))
+            }
             // `()` = unit; `(T)` = grouping; `(T1, …)` = tuple (REQ-LLL-026); and
             // any of these followed by `->` is a function type (REQ-LLL-009).
             Tok::LParen => {

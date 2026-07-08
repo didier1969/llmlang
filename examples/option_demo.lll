@@ -1,0 +1,43 @@
+import "../std/option.lll"
+
+module Demo.Option:
+
+  # Wave-4 (REQ-LLL-068): the FIRST user-declared PARAMETRIC ADT exercised at RUNTIME.
+  # Every printed `1` is a fact proven statically by Z3 AND observed at runtime — the
+  # `Option[a]` combinators lower to a generic Rust enum `OptionI<T>` (monomorphized).
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part inc(n: Int) -> Int:
+    yield n + 1
+
+  # a partial lookup returning `Option` — the HONEST replacement for a sentinel
+  # default: absence is a first-class value the caller must handle, not a magic -1.
+  part safe_head(xs: List[Int]) -> Option[Int]:
+    match xs:
+      []     -> yield None
+      h :: t -> yield Some(h)
+
+  part wrap(n: Int) -> Option[Int]:
+    yield Some(n)
+
+  part main() -> Int via IO:
+    # get_or: default on absence, the value on presence.
+    let a = IO.print(flag(get_or(None, 42) == 42))
+    let b = IO.print(flag(get_or(Some(7), 42) == 7))
+    # a bare `None` argument pinned by an earlier argument's type (map_opt's `a` = Int).
+    let m0 = map_opt(inc, None)
+    let c = IO.print(flag(is_none(m0)))
+    # map_opt propagates absence and transforms presence.
+    let m1 = map_opt(inc, safe_head([]))
+    let d = IO.print(flag(is_none(m1)))
+    let m2 = map_opt(inc, safe_head(9 :: []))
+    let e = IO.print(flag(get_or(m2, 0) == 10))
+    # and_then chains a partial computation.
+    let r = and_then(safe_head(5 :: []), wrap)
+    let f = IO.print(flag(get_or(r, 0) == 5))
+    # a present value round-trips through Some/get_or.
+    yield IO.print(flag(get_or(safe_head(3 :: 4 :: []), 0) == 3))
