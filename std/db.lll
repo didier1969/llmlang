@@ -1,0 +1,64 @@
+module Std.Db:
+
+  # Verified SQLite persistence, wave-3 slice-2 (REQ-LLL-066, DEC-LLL-064). The compiler
+  # emits a built-in `lll_db_runtime` (src/codegen.rs `emit_db_runtime`) — a process-global
+  # `handle -> rusqlite::Connection` registry — and each op below binds to it across the FFI
+  # frontier, marshalling with the SAME machinery as the serde_json bridge (REQ-LLL-056/061):
+  #   - a SQL string is a `List[Int]` of codepoints (DEC-LLL-030), crossed to Rust `&str`;
+  #   - `query` returns a `serde_json::Value` mapped BY NAME into the `Json` ADT below.
+  #
+  # A query result is an ARRAY of ROWS; each row an ARRAY of scalar CELLS in column order
+  # (rows-as-positional-arrays — named-column Object marshalling is deferred, DEC-LLL-061).
+  # DB faults are fail-stop (DEC-LLL-026: abort loudly, never silently corrupt the books);
+  # errors-as-values and bound query parameters are logged follow-ups. `rusqlite` is
+  # USER-declared by the importing module (`depends rusqlite "…" features "bundled"`).
+  type Json = JNull | JBool(Bool) | JStr(List[Int]) | JNum(Int) | JArr(List[Json])
+
+  effect Db:
+    open(List[Int]) -> Int = extern "lll_db_runtime::open" as (str) -> i64
+    exec(Int, List[Int]) -> Int = extern "lll_db_runtime::exec" as (i64, str) -> i64
+    query(Int, List[Int]) -> Json = extern "lll_db_runtime::query" as (i64, str) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum, Array -> JArr ]
+    begin(Int) -> Int = extern "lll_db_runtime::begin"
+    commit(Int) -> Int = extern "lll_db_runtime::commit"
+    rollback(Int) -> Int = extern "lll_db_runtime::rollback"
+
+  # ---- pure destructors over a query result (a JArr of JArr rows) ----
+
+  # the elements of a JSON Array (a row list, or a row's cell list); [] for a non-array.
+  part unarr(j: Json) -> List[Json]:
+    match j:
+      JArr(xs) -> yield xs
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JStr(s)  -> yield []
+      JNum(n)  -> yield []
+
+  # the Int held by a JNum; a sentinel for the other shapes (a schema mismatch shows up
+  # as this out-of-band value rather than a silent 0).
+  part unnum(j: Json) -> Int:
+    match j:
+      JNum(n)  -> yield n
+      JNull    -> yield 0 - 1
+      JBool(b) -> yield 0 - 2
+      JStr(s)  -> yield 0 - 3
+      JArr(xs) -> yield 0 - 4
+
+  # the i-th element of a cell/row list (0-based); JNull past the end. Structural
+  # recursion on the list terminates.
+  part nth(xs: List[Json], i: Int) -> Json:
+    match xs:
+      []     -> yield JNull
+      h :: t ->
+        match i == 0:
+          true  -> yield h
+          false -> yield nth(t, i - 1)
+
+  # row count of a query result.
+  part count(rows: List[Json]) -> Int:
+    match rows:
+      []     -> yield 0
+      h :: t -> yield 1 + count(t)
+
+  # the Int in column `col` of a single row (a JArr of cells).
+  part cell_int(row: Json, col: Int) -> Int:
+    yield unnum(nth(unarr(row), col))

@@ -152,6 +152,107 @@ mod lll_actor_runtime {{
     ));
 }
 
+/// REQ-LLL-066 / DEC-LLL-064: the built-in SQLite runtime, emitted iff an op binds to
+/// `lll_db_runtime::…` — mirror of `emit_actor_runtime`. A process-global registry maps
+/// an `i64` handle to a live `rusqlite::Connection`; ops look a connection up by handle.
+/// Marshalling stays at the FFI frontier (the generated shims): a `List[Int]` SQL string
+/// arrives as `&str`, and `query` hands back a `serde_json::Value` — an Array of per-row
+/// Arrays of scalar cells (rows-as-positional-arrays, since Object marshalling is deferred
+/// — DEC-LLL-061) — which the shim maps BY NAME into the user `Json` ADT. DB faults are
+/// fail-stop (DEC-LLL-026 philosophy: abort loudly, never silently corrupt the books);
+/// errors-as-values for DB is a logged follow-up. `rusqlite` is USER-declared via
+/// `depends rusqlite "…" features "bundled"` — the compiler injects no dependency.
+fn emit_db_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_db_runtime {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    // handle -> live connection. `Mutex<HashMap<..>>` is `Sync` (Connection is `Send`),
+    // so it lives in a `static` behind `OnceLock`, exactly like the actor mailbox table.
+    fn table() -> &'static Mutex<HashMap<i64, rusqlite::Connection>> {
+        static T: OnceLock<Mutex<HashMap<i64, rusqlite::Connection>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    static NEXT: AtomicI64 = AtomicI64::new(0);
+
+    // `:memory:` (or empty) opens a private in-memory database; any other string is a
+    // file path — durable to disk, so a second `open` of the same path reads it back.
+    pub fn open(path: &str) -> i64 {
+        let conn = if path == ":memory:" || path.is_empty() {
+            rusqlite::Connection::open_in_memory()
+        } else {
+            rusqlite::Connection::open(path)
+        }
+        .unwrap_or_else(|e| panic!("lll_db_runtime::open `{path}`: {e}"));
+        let h = NEXT.fetch_add(1, Ordering::SeqCst);
+        table().lock().unwrap().insert(h, conn);
+        h
+    }
+
+    // executes one or more statements (`execute_batch` — CREATE/INSERT/UPDATE/DELETE or a
+    // multi-statement batch); returns the row-change count of the last statement.
+    pub fn exec(h: i64, sql: &str) -> i64 {
+        let g = table().lock().unwrap();
+        let conn = g.get(&h).unwrap_or_else(|| panic!("lll_db_runtime::exec: invalid db handle {h}"));
+        conn.execute_batch(sql).unwrap_or_else(|e| panic!("lll_db_runtime::exec `{sql}`: {e}"));
+        conn.changes() as i64
+    }
+
+    // a read query -> a JSON Array of rows; each row a JSON Array of scalar cells, in
+    // column order. Cell kinds map to serde_json: NULL->Null, INTEGER->Number,
+    // REAL->Number (the Int marshaller fail-stops on a non-integer — DEC-LLL-051),
+    // TEXT/BLOB->String (BLOB lossy-decoded; the ledger is text/integer only).
+    pub fn query(h: i64, sql: &str) -> serde_json::Value {
+        let g = table().lock().unwrap();
+        let conn = g.get(&h).unwrap_or_else(|| panic!("lll_db_runtime::query: invalid db handle {h}"));
+        let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("lll_db_runtime::query prepare `{sql}`: {e}"));
+        let ncols = stmt.column_count();
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        let mut qrows = stmt.query([]).unwrap_or_else(|e| panic!("lll_db_runtime::query exec `{sql}`: {e}"));
+        while let Some(row) = qrows.next().unwrap_or_else(|e| panic!("lll_db_runtime::query row: {e}")) {
+            let mut cells: Vec<serde_json::Value> = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                let vr = row.get_ref(i).unwrap_or_else(|e| panic!("lll_db_runtime::query cell {i}: {e}"));
+                let jv = match vr {
+                    rusqlite::types::ValueRef::Null => serde_json::Value::Null,
+                    rusqlite::types::ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
+                    rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null),
+                    rusqlite::types::ValueRef::Text(t) => {
+                        serde_json::Value::String(String::from_utf8_lossy(t).into_owned())
+                    }
+                    rusqlite::types::ValueRef::Blob(b) => {
+                        serde_json::Value::String(String::from_utf8_lossy(b).into_owned())
+                    }
+                };
+                cells.push(jv);
+            }
+            rows.push(serde_json::Value::Array(cells));
+        }
+        serde_json::Value::Array(rows)
+    }
+
+    // ACID transaction control via raw SQL on the same connection; the returned 0 is an
+    // ignored placeholder (the op is performed for its effect). BEGIN/COMMIT/ROLLBACK
+    // bracket a unit of work — a rolled-back INSERT leaves the table unchanged.
+    fn txn(h: i64, cmd: &str) -> i64 {
+        let g = table().lock().unwrap();
+        let conn = g.get(&h).unwrap_or_else(|| panic!("lll_db_runtime::{cmd}: invalid db handle {h}"));
+        conn.execute_batch(cmd).unwrap_or_else(|e| panic!("lll_db_runtime::{cmd}: {e}"));
+        0
+    }
+    pub fn begin(h: i64) -> i64 { txn(h, "BEGIN") }
+    pub fn commit(h: i64) -> i64 { txn(h, "COMMIT") }
+    pub fn rollback(h: i64) -> i64 { txn(h, "ROLLBACK") }
+}
+"#,
+    );
+}
+
 /// The op-anchored typed FFI shim name for a dotted op key `Eff.op` (REQ-LLL-041,
 /// slice 038b): `Eff.op` → `__lll_ffi_Eff_op`. A perform of an `= extern` op lowers
 /// to a call of this uniquely-named adapter, so a boundary signature/arity mismatch
@@ -326,6 +427,12 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             .map(|p| p.params[1].1.clone())
             .unwrap_or(Ty::Int);
         emit_actor_runtime(&mut out, &msg_ty);
+    }
+    // REQ-LLL-066 / DEC-LLL-064: emit the built-in SQLite runtime iff any op binds to it
+    // (checker whitelists the exact `lll_db_runtime::…` paths). Composition of an EMITTED
+    // module with FFI `as`-marshalling was proven by the session-11 probe before this.
+    if extern_ops.values().any(|p| p.starts_with("lll_db_runtime::")) {
+        emit_db_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

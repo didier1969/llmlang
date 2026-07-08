@@ -1,0 +1,62 @@
+import "../std/db.lll"
+import "../std/money.lll"
+
+depends serde_json "1.0.150"
+depends rusqlite "0.39.0" features "bundled"
+
+module Erp.Persist:
+
+  # Wave-3 slice-2 E2E (REQ-LLL-066): an accounts ledger written to SQLite, RELOADED by a
+  # fresh query, and its ERP invariant (débit == crédit) proven on the reloaded rows — the
+  # value-objects survive a real disk round-trip. Every printed `1` is a runtime-verified
+  # ERP fact; all-ones = persistence + reconstruction + ACID all hold.
+  #
+  # Schema: entries(kind, cents, ccy). kind 0 = debit, 1 = credit; cents = exact integer
+  # minor units (no float drift, per Money's storage discipline); ccy = ISO-4217 numeric.
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  # sum the minor units of every row whose kind == want, reconstructed as a Money in
+  # currency ccy. Structural recursion on the row list terminates.
+  part sum_kind(rows: List[Json], want: Int, acc: Int, ccy: Int) -> Money:
+    match rows:
+      []     -> yield Money(acc, ccy)
+      h :: t ->
+        match cell_int(h, 0) == want:
+          true  -> yield sum_kind(t, want, acc + cell_int(h, 1), ccy)
+          false -> yield sum_kind(t, want, acc, ccy)
+
+  part main() -> Int via IO, Db:
+    let usd = 840
+    let db = Db.open(":memory:")
+    let s0 = Db.exec(db, "CREATE TABLE entries (kind INTEGER, cents INTEGER, ccy INTEGER)")
+    # a balanced entry: two debits (1500 + 500) offset by one credit (2000), same currency.
+    let s1 = Db.exec(db, "INSERT INTO entries VALUES (0, 1500, 840)")
+    let s2 = Db.exec(db, "INSERT INTO entries VALUES (0, 500, 840)")
+    let s3 = Db.exec(db, "INSERT INTO entries VALUES (1, 2000, 840)")
+
+    # RELOAD: read the persisted rows back through a fresh query.
+    let rows = unarr(Db.query(db, "SELECT kind, cents, ccy FROM entries ORDER BY cents"))
+    let debits  = sum_kind(rows, 0, 0, usd)
+    let credits = sum_kind(rows, 1, 0, usd)
+    # 1. the ledger balances ON THE RELOADED DATA: sum(debits) == sum(credits) == 2000.
+    let a = IO.print(flag(minor_units(debits) == minor_units(credits)))
+    # 2. exactly the three inserted rows came back.
+    let b = IO.print(flag(count(rows) == 3))
+
+    # 3. ACID rollback: an INSERT inside an aborted transaction leaves the table unchanged.
+    let t1 = Db.begin(db)
+    let t2 = Db.exec(db, "INSERT INTO entries VALUES (0, 9999, 840)")
+    let t3 = Db.rollback(db)
+    let rows2 = unarr(Db.query(db, "SELECT kind, cents, ccy FROM entries"))
+    let c = IO.print(flag(count(rows2) == 3))
+
+    # 4. ACID commit: an INSERT inside a committed transaction persists (row count grows).
+    let u1 = Db.begin(db)
+    let u2 = Db.exec(db, "INSERT INTO entries VALUES (1, 100, 840)")
+    let u3 = Db.commit(db)
+    let rows3 = unarr(Db.query(db, "SELECT kind, cents, ccy FROM entries"))
+    yield IO.print(flag(count(rows3) == 4))

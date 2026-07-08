@@ -1193,6 +1193,27 @@ fn validate_extern_path(
              — only {ACTOR_RUNTIME_PATHS:?} are built in (REQ-LLL-036 W2)"
         ));
     }
+    // REQ-LLL-066 / DEC-LLL-064: the emitted `lll_db_runtime` glue (src/codegen.rs
+    // `emit_db_runtime`) mirrors the actor whitelist — a narrow, EXACT set of built-in
+    // SQLite paths, NOT a general "any lll_db_runtime::path" escape hatch. Anything else
+    // under the root is rejected so the surface stays intentional.
+    const DB_RUNTIME_PATHS: &[&str] = &[
+        "lll_db_runtime::open",
+        "lll_db_runtime::exec",
+        "lll_db_runtime::query",
+        "lll_db_runtime::begin",
+        "lll_db_runtime::commit",
+        "lll_db_runtime::rollback",
+    ];
+    if root == "lll_db_runtime" {
+        if DB_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_db_runtime` path \
+             — only {DB_RUNTIME_PATHS:?} are built in (REQ-LLL-066)"
+        ));
+    }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends
     // my-crate "1.0"`), but Rust always exposes it as an UNDERSCORED module
     // path (`extern "my_crate::func"`, never `my-crate::func` — hyphens are

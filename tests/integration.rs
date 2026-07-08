@@ -4334,3 +4334,97 @@ fn holey_module_check_exits_2_build_refuses_then_filling_verifies_and_builds() {
     let fh = hash::hash_module(&full(filled_src).0).unwrap().def_hash["f"].clone();
     assert_ne!(hh, fh, "filling a hole changes identity (DEC-LLL-020)");
 }
+
+#[test]
+fn erp_persist_ledger_roundtrip_via_cargo() {
+    // REQ-LLL-066 (wave-3 slice-2, DEC-LLL-064): the shipped ERP persistence example —
+    // a ledger written to SQLite, RELOADED by a fresh query, its débit==crédit invariant
+    // proven on the reloaded Money value-objects, then ACID rollback (an aborted INSERT
+    // leaves the table unchanged) and ACID commit (a committed INSERT persists). Exercises
+    // the emitted `lll_db_runtime` + serde_json row marshalling + both shipped std modules
+    // over the real rusqlite(bundled) backend. All-ones output = every invariant holds.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg("examples/erp_persist.lll")
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "ERP persistence E2E failed:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 4, "every persistence/ACID invariant must hold (4 ones expected):\n{stdout}");
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no persistence invariant may fail at runtime:\n{stdout}"
+    );
+}
+
+#[test]
+fn db_file_persists_across_connections_via_cargo() {
+    // REQ-LLL-066 / DEC-LLL-064: the durability proof. Data written through ONE connection
+    // is flushed to DISK, so a SECOND connection opened on the same file path reads it back
+    // (a `:memory:` db is per-connection and would come back empty). Exercises the SHIPPED
+    // std/db.lll over serde_json + rusqlite(bundled): writer inserts (41),(1); reader on a
+    // fresh handle sees max=41 over 2 rows → prints 41+2 = 43.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let db_file = dir.join("ledger.db");
+    let db_path = db_file.to_str().unwrap();
+    let dbmod = format!("{repo}/std/db.lll");
+    let src = format!(
+        "import \"{dbmod}\"\n\ndepends serde_json \"1.0.150\"\ndepends rusqlite \"0.39.0\" features \"bundled\"\n\nmodule DbDurable:\n\n  part main() -> Int via IO, Db:\n    let w = Db.open(\"{db_path}\")\n    let a = Db.exec(w, \"CREATE TABLE t (v INTEGER)\")\n    let b = Db.exec(w, \"INSERT INTO t VALUES (41), (1)\")\n    let r = Db.open(\"{db_path}\")\n    let rows = unarr(Db.query(r, \"SELECT v FROM t ORDER BY v DESC\"))\n    let top = cell_int(nth(rows, 0), 0)\n    let n = count(rows)\n    yield IO.print(top + n)\n"
+    );
+    let f = dir.join("db_durable.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "cross-connection durability run failed:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("=> 43"),
+        "a second connection must read the first's committed writes (expect 43):\n{stdout}"
+    );
+}
+
+#[test]
+fn db_transaction_rollback_discards_insert_via_cargo() {
+    // REQ-LLL-066 / DEC-LLL-064: focused ACID rollback — an INSERT inside an aborted
+    // transaction leaves NO trace. begin; insert (7); rollback; then count → 0 rows.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let dbmod = format!("{repo}/std/db.lll");
+    let src = format!(
+        "import \"{dbmod}\"\n\ndepends serde_json \"1.0.150\"\ndepends rusqlite \"0.39.0\" features \"bundled\"\n\nmodule DbRollback:\n\n  part main() -> Int via IO, Db:\n    let db = Db.open(\":memory:\")\n    let a = Db.exec(db, \"CREATE TABLE t (v INTEGER)\")\n    let t1 = Db.begin(db)\n    let t2 = Db.exec(db, \"INSERT INTO t VALUES (7)\")\n    let t3 = Db.rollback(db)\n    let rows = unarr(Db.query(db, \"SELECT v FROM t\"))\n    yield IO.print(count(rows))\n"
+    );
+    let f = dir.join("db_rollback.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "rollback run failed:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("=> 0"),
+        "a rolled-back INSERT must leave 0 rows:\n{stdout}"
+    );
+}
