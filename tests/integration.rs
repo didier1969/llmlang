@@ -5436,3 +5436,34 @@ fn correct_parametric_arity_including_nested_verifies() {
         failures(&verify_src(src))
     );
 }
+
+#[test]
+fn law_binder_wrong_arity_is_rejected() {
+    // REQ-LLL-075 (law-binder annotation site): a law binder's type is parsed separately
+    // from method signatures. A bad arity there — `law foo(b: Box[Int, Bool])` on
+    // `type Box[a]` — otherwise reached the vc's ground law-instantiation and leaked a raw
+    // Z3 "invalid number of parameters to sort constructor". It must be a clean LLL error.
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  class C[a]:\n    m(a) -> Int\n    law foo(b: Box[Int, Bool]): true\n\n  instance C[Int]:\n    m = \\(x: Int) -> 0\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("law binder over-arity must be rejected");
+    assert!(
+        err.contains("`Box` expects 1 type argument(s), got 2"),
+        "expected a clean arity error (not a raw Z3 leak), got: {err}"
+    );
+}
+
+#[test]
+fn lambda_param_wrong_arity_is_rejected() {
+    // REQ-LLL-075 (lambda-binder annotation site): a lambda parameter's type is nested
+    // inside an expression, not a `check_module` signature site. An UNUSED lambda hides
+    // any type-mismatch that would otherwise mask the arity error, so `let g = \(b:
+    // Box[Int, Bool]) -> 0` isolates the arity check — without it, the bad arity slips
+    // past `check` to a rustc generic-arity error at build time (REQ-LLL-075's target).
+    let src = "module T:\n\n  type Box[a] = {val: a}\n\n  part f() -> Int:\n    let g = \\(b: Box[Int, Bool]) -> 0\n    yield 0\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("lambda param over-arity must be rejected");
+    assert!(
+        err.contains("`Box` expects 1 type argument(s), got 2"),
+        "expected a clean arity error, got: {err}"
+    );
+}

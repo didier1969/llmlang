@@ -88,6 +88,9 @@ struct Ctx<'a> {
     module: &'a Module,
     index: &'a HashMap<String, usize>,
     ctors: &'a HashMap<String, (String, Vec<Ty>)>,
+    /// declared type name → ordered type parameters, for arity-checking a lambda
+    /// parameter's type annotation inside a body (REQ-LLL-075).
+    arities: &'a HashMap<String, Vec<String>>,
     part: &'a Part,
     /// every pattern-binder name of the whole part (for scope hints)
     all_binders: std::collections::HashSet<String>,
@@ -643,6 +646,15 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 }
             }
         }
+        // a law binder's type annotation is validated the same way (REQ-LLL-075): a
+        // bad-arity binder like `law foo(b: Box[Int, Bool])` otherwise reaches the vc's
+        // ground law-instantiation and leaks a raw Z3 "invalid number of parameters to
+        // sort constructor" error instead of a clean LLL message.
+        for law in &c.laws {
+            for (_, t) in &law.binders {
+                check_user_ty_declared(t, &typarams)?;
+            }
+        }
         if class_map.insert(c.name.clone(), c).is_some() {
             return Err(format!("duplicate class `{}`", c.name));
         }
@@ -739,6 +751,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             module: &module,
             index: &index,
             ctors: &ctors,
+            arities: &typarams,
             part,
             all_binders: collect_binders(&part.body),
             vars: vec![vars0],
@@ -888,6 +901,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 module: &module,
                 index: &index,
                 ctors: &ctors,
+                arities: &typarams,
                 part: &synth,
                 all_binders: HashSet::new(),
                 vars: vec![HashMap::new()],
@@ -3665,6 +3679,14 @@ fn check_expr(
             subst_ty(&callee_ret, &subst)
         }
         Expr::Lambda(params, body) => {
+            // a lambda parameter's type annotation must name a declared type at its
+            // correct arity (REQ-LLL-075) — otherwise `\(b: Box[Int, Bool]) -> …` slips
+            // past `check` to a rustc generic-arity error at build time. Every other
+            // annotation site is validated in `check_module`; a lambda binder is the one
+            // nested inside an expression, so it is checked here.
+            for (_, t) in params {
+                check_user_ty_declared(t, ctx.arities)?;
+            }
             // lambdas are pure (v1); check the body in a fresh scope holding the
             // lambda parameters (it may still read enclosing locals — codegen
             // emits a capturing closure).
