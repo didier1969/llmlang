@@ -737,6 +737,39 @@ impl Parser {
                         clauses,
                     }));
                 }
+                // Conditional sugar (REQ-LLL-071, DEC-LLL-058): `if c then a else b`
+                // desugars AT THE PARSER to `match c: true -> a; false -> b`. This
+                // builds the IDENTICAL `Stmt::Match` the explicit form parses (arm
+                // bodies are implicit-yield inline results), so the compact and
+                // explicit texts share one content-hash — the sugar is invisible to
+                // identity (DEC-LLL-020/001). A pure parser sugar: zero change to the
+                // checker, Z3, or codegen (the conditional lives only as `match`).
+                Tok::If => {
+                    self.pos += 1;
+                    let cond = self.expr()?;
+                    self.eat(Tok::Then)?;
+                    let then_e = self.expr()?;
+                    self.eat(Tok::Else)?;
+                    let else_e = self.expr()?;
+                    if self.peek() == &Tok::Newline {
+                        self.pos += 1;
+                    }
+                    out.push(Stmt::Match(
+                        cond,
+                        vec![
+                            Arm {
+                                pattern: Pattern::BoolLit(true),
+                                guard: None,
+                                body: vec![Stmt::Yield(then_e)],
+                            },
+                            Arm {
+                                pattern: Pattern::BoolLit(false),
+                                guard: None,
+                                body: vec![Stmt::Yield(else_e)],
+                            },
+                        ],
+                    ));
+                }
                 // Token Sugar (REQ-LLL-057, CPT-LLL-003): a bare tail expression is
                 // shorthand for `yield <expr>`. The block's result position makes the
                 // `yield` keyword redundant; the parser reinstates the identical

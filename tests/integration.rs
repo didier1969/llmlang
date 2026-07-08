@@ -3077,6 +3077,23 @@ fn tuple_call_result_and_nested_projection_runs() {
     assert!(out.contains("=> 7"), "call/nested projection runtime wrong: {out}");
 }
 
+#[test]
+fn if_then_else_desugars_runs_and_hash_converges() {
+    // REQ-LLL-071 / DEC-LLL-058: `if c then a else b` is PURE parser sugar for
+    // `match c: true -> a; false -> b`. It runs, AND builds the byte-identical AST
+    // (same content-hash) as the explicit match — the sugar is invisible to identity.
+    let sugar = "module T:\n\n  part abs(n: Int) -> Int:\n    if n >= 0 then n else 0 - n\n\n  part main() -> Int:\n    yield abs(0 - 5)\n";
+    let explicit = "module T:\n\n  part abs(n: Int) -> Int:\n    match n >= 0:\n      true -> yield n\n      false -> yield 0 - n\n\n  part main() -> Int:\n    yield abs(0 - 5)\n";
+    let out = build_run(sugar);
+    assert!(out.contains("=> 5"), "if/else runtime wrong: {out}");
+    let (_, h_sugar) = full(sugar);
+    let (_, h_expl) = full(explicit);
+    assert_eq!(
+        h_sugar.def_hash["abs"], h_expl.def_hash["abs"],
+        "if/else sugar must hash-converge with explicit match (DEC-LLL-058)"
+    );
+}
+
 // ===================================================================
 // REQ-LLL-026 slice 3c item 2 — user-authored tail-resumptive handlers,
 // compiled by capability-passing (fn-pointer evidence), DEC-LLL-037.

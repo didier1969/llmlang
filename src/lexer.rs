@@ -48,6 +48,11 @@ pub enum Tok {
     KwNot,
     KwMod,
     KwDiv,
+    // conditional sugar `if c then a else b` (REQ-LLL-071, DEC-LLL-058): pure parser
+    // sugar desugared to `match c: true -> a; false -> b` — same AST, same hash.
+    If,
+    Then,
+    Else,
     // symbols
     LParen,
     RParen,
@@ -350,6 +355,9 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
         "not" => Tok::KwNot,
         "mod" => Tok::KwMod,
         "div" => Tok::KwDiv,
+        "if" => Tok::If,
+        "then" => Tok::Then,
+        "else" => Tok::Else,
         _ if dotted => Tok::Dotted(w.to_string()),
         _ => Tok::Ident(w.to_string()),
     };
