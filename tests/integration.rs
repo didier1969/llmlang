@@ -3620,6 +3620,27 @@ fn rationale_add_show_round_trips() {
 }
 
 #[test]
+fn audit_repl_starts_read_only_and_reports_the_module() {
+    // The `lll audit` explainability REPL (explain::audit_repl) had zero test coverage.
+    // Smoke-test its startup path end-to-end: arg-parse → load → check → banner, with
+    // stdin at EOF so the read-only session exits cleanly (0). Asserts the banner names
+    // the module and its part count — enough to pin the whole entry path without driving
+    // the interactive command loop (logged separately for operator triage).
+    let dir = tempdir().join("audit-smoke");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("m.lll");
+    std::fs::write(&lll, "module M:\n\n  part inc(n: Int) -> Int:\n    ensures result > n\n    yield n + 1\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["audit", lll.to_str().unwrap()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "audit repl exits cleanly at EOF: {so}");
+    assert!(so.contains("audit") && so.contains('M') && so.contains("part"), "banner names the module + parts: {so}");
+}
+
+#[test]
 fn check_format_json_emits_structured_diagnostics_with_counterexample() {
     // REQ-LLL-033: the LLM channel — `lll check --format=json` yields structured,
     // repair-oriented diagnostics (codes, did-you-mean fixes, and for a failed
