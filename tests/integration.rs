@@ -5188,3 +5188,105 @@ fn named_literal_field_errors_are_clean() {
         );
     }
 }
+
+#[test]
+fn named_literal_in_ensures_contract_desugars_and_verifies() {
+    // REQ-LLL-077 (completeness — CONTRACT clauses, the crash-class the parts-only pass
+    // could have missed): a `part` is not atomic — `requires`/`ensures`/`measure`/`examples`
+    // are Exprs parsed by `expr()`, distinct from the body. DEC-LLL-017 admits a ctor in a
+    // contract, so `ensures result == Point{x: 1, y: 2}` is a VALID program. The parse-time
+    // desugar must reach the contract clauses (`desugar_part`), else a surviving `RecordLit`
+    // hits the `unreachable!` arm in vc `tr` and PANICS a valid program (violates DEC-LLL-015).
+    // Positional body + named literal in `ensures` → both desugar to `Point(1, 2)` → equal → proves.
+    let src = "module T:\n\n  type Point = {x: Int, y: Int}\n\n  part mk() -> Point:\n    ensures result == Point{x: 1, y: 2}\n    yield Point(1, 2)\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "named literal in an `ensures` contract must desugar + verify (REQ-LLL-077): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn named_literal_in_class_law_body_is_desugared() {
+    // REQ-LLL-077 (completeness — LAW bodies, the second branch of the advisor-found
+    // blocking fix): a class law body is a Bool Expr over the class methods (DEC-LLL-047),
+    // and an instance def is a concrete implementation Expr (REQ-LLL-048). Both may carry a
+    // named literal; the parse-time desugar must reach them, else a surviving `RecordLit`
+    // panics the `unreachable!` arms downstream. The TRUE guard is that ZERO `RecordLit`
+    // survives the parse (a structural fact, independent of law-verification semantics).
+    let src = "module T:\n\n  type Point = {x: Int, y: Int}\n\n  class Origin[a]:\n    orig(a) -> Point\n    law is_origin(z: Int): orig(z) == Point{x: 0, y: 0}\n\n  instance Origin[Int]:\n    orig = \\(n: Int) -> Point{x: 0, y: 0}\n\n  part gx(p: Point) -> Int:\n    yield p.x\n";
+    let m = parser::parse_module(src).expect("parse");
+    let mut surviving = 0usize;
+    for cls in &m.classes {
+        for law in &cls.laws {
+            law.body
+                .walk(&mut |e| if matches!(e, ast::Expr::RecordLit(..)) { surviving += 1 });
+        }
+    }
+    for inst in &m.instances {
+        for (_, e) in &inst.defs {
+            e.walk(&mut |e| if matches!(e, ast::Expr::RecordLit(..)) { surviving += 1 });
+        }
+    }
+    assert_eq!(
+        surviving, 0,
+        "named literals in law bodies and instance defs must be desugared at parse (REQ-LLL-077)"
+    );
+}
+
+#[test]
+fn parametric_record_two_type_params_field_substitutes() {
+    // REQ-LLL-077 (multi-param substitution — the `zip(type_params, args)` ORDER): a record
+    // `Pair[a, b] = {fst: a, snd: b}` at `Pair[Int, Bool]`. `.fst` must recover `Int` (used
+    // arithmetically / as the `Int` result) and `.snd` must recover `Bool` (used as the
+    // `requires` predicate). A reversed or single-arg zip would map `.fst`->Bool / `.snd`->Int
+    // → `requires p.snd` ill-sorted (Int where Bool expected) and `result == p.fst` a
+    // type/Z3 error → rejection. Proving therefore requires the zip order be correct in BOTH
+    // the checker (`adt_subst`) and vc (`record_field_sort` / `split_user_sort`).
+    let src = "module T:\n\n  type Pair[a, b] = {fst: a, snd: b}\n\n  part pick(p: Pair[Int, Bool]) -> Int:\n    requires p.snd\n    ensures result == p.fst\n    yield p.fst\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "two-type-param record field substitution must verify (REQ-LLL-077): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn parametric_record_two_type_params_field_is_sound() {
+    // REQ-LLL-077 (SOUNDNESS of the multi-param field): the substituted `p.fst` is a REAL
+    // Z3 `Int` term — `ensures result > p.fst` with body `yield p.fst` (so `result == p.fst`)
+    // must be REFUTED, never a vacuous pass.
+    let src = "module T:\n\n  type Pair[a, b] = {fst: a, snd: b}\n\n  part pick(p: Pair[Int, Bool]) -> Int:\n    requires p.snd\n    ensures result > p.fst\n    yield p.fst\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "two-type-param record over-strong ensures must be rejected (soundness, REQ-LLL-077)"
+    );
+}
+
+#[test]
+fn nested_named_literal_constructs_and_runs() {
+    // REQ-LLL-077 (recursive desugar): a named literal whose field value is ITSELF a named
+    // literal — `Outer{inner: Inner{v: 5}}`. `desugar_expr` must recurse into the field
+    // exprs of a `RecordLit` (it desugars fields before reordering), not only the top level.
+    let src = "module N:\n\n  type Inner = {v: Int}\n\n  type Outer = {inner: Inner}\n\n  part deep(o: Outer) -> Int:\n    yield o.inner.v\n\n  part main() -> Int:\n    yield deep(Outer{inner: Inner{v: 5}})\n";
+    assert!(verify_src(src).ok(), "nested named literal must verify (REQ-LLL-077)");
+    let out = build_run(src);
+    assert!(out.contains("=> 5"), "nested named literal runtime wrong: {out}");
+}
+
+#[test]
+fn parametric_record_compound_type_arg_field_sort_recovers() {
+    // REQ-LLL-077 (`split_user_sort` on NESTED parens — the only call site that stresses its
+    // paren-depth parser): a record `Box[a]` instantiated at a COMPOUND arg `Box[Option[Int]]`.
+    // The base sort string is `(Box (Option Int))`; `split_user_sort` must parse head `Box`
+    // with the single arg `(Option Int)` (not split the inner parens), so `b.val` recovers
+    // `(Option Int)` and the bare `None` anchors to `(as None (Option Int))` (accepted). A
+    // mis-counted paren depth → wrong field sort → `None` names an unbound sort → Z3 error →
+    // fail-closed reject (REQ-LLL-080). Proving is therefore proof the nested-paren split is correct.
+    let src = "module C:\n\n  type Option[a] = None | Some(a)\n  type Box[a] = {val: a}\n\n  part is_empty(b: Box[Option[Int]]) -> Bool:\n    ensures result == (b.val == None)\n    match b.val:\n      None -> yield true\n      Some(x) -> yield false\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "record at a compound type arg (Box[Option[Int]]) field == None must verify (REQ-LLL-077): {:?}",
+        failures(&verify_src(src))
+    );
+}
