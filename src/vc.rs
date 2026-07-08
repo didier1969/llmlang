@@ -737,6 +737,40 @@ impl<'a> Emit<'a> {
         });
     }
 
+    /// The expected type for an equality operand that is a constructor APPLICATION,
+    /// taken from its SIBLING operand's static type (REQ-LLL-081). A polymorphic
+    /// `Some(x)` (`x : Tv_a`) is sort-ambiguous to Z3 4.16 until qualified
+    /// `((as Some (Option Tv_a)) x)`; the `Call` arm produces exactly that form when
+    /// handed this expected type. Only a ctor application asks for a hint — a bare Var
+    /// or nullary ctor is anchored by the string-level `(as …)` annotation instead —
+    /// and only a `result`/parameter sibling supplies one. Anything else leaves the
+    /// operand bare: a concrete application stays cache-stable, and an abstract one with
+    /// no sort-bearing sibling is rejected fail-closed by Z3 (REQ-LLL-080), never proved.
+    fn ctor_app_expected(&self, operand: &Expr, sibling: &Expr) -> Option<Ty> {
+        match operand {
+            Expr::Call(name, args) if !args.is_empty() && self.cm.ctors.contains_key(name) => {
+                self.operand_ty(sibling)
+            }
+            _ => None,
+        }
+    }
+
+    /// The static type of a simple equality operand: the part's return type for
+    /// `result`, or a parameter's declared type (REQ-LLL-081). `None` for any other
+    /// shape, which then supplies no sibling sort.
+    fn operand_ty(&self, e: &Expr) -> Option<Ty> {
+        match e {
+            Expr::Var(n) if n == "result" => Some(self.part.ret.clone()),
+            Expr::Var(n) => self
+                .part
+                .params
+                .iter()
+                .find(|(pn, _)| pn == n)
+                .map(|(_, t)| t.clone()),
+            _ => None,
+        }
+    }
+
     /// The SMT sort of a value-producing expression, when structurally determinable
     /// (REQ-LLL-070). Used to recover a tuple's arity for a projection selector
     /// WITHOUT storing it in the AST. Total on well-typed tuple bases (the checker
@@ -1140,8 +1174,17 @@ impl<'a> Emit<'a> {
             Expr::Neg(a) => format!("(- {})", self.tr(a, env, None)?),
             Expr::Not(a) => format!("(not {})", self.tr(a, env, None)?),
             Expr::Bin(op, a, b) => {
-                let mut ta = self.tr(a, env, None)?;
-                let mut tb = self.tr(b, env, None)?;
+                // REQ-LLL-081: in an equality, a constructor APPLICATION operand at an
+                // abstract sort (`Some(x)`, `x : Tv_a`) is unresolvable by Z3 unless
+                // qualified `((as Some (Option Tv_a)) x)`. Thread the SIBLING operand's
+                // static type into the ctor-app operand so the `Call` arm emits that
+                // qualified form; every other operand keeps `None`, preserving the
+                // concrete-case emission exactly (a Z3-inferable `(Some 5)` stays bare).
+                let eq = matches!(crate::opsem::form(*op).class, crate::opsem::OpClass::Equality);
+                let ea = if eq { self.ctor_app_expected(a, b) } else { None };
+                let eb = if eq { self.ctor_app_expected(b, a) } else { None };
+                let mut ta = self.tr(a, env, ea.as_ref())?;
+                let mut tb = self.tr(b, env, eb.as_ref())?;
                 // Equality with a bare polymorphic nullary constructor operand (`None`):
                 // it is sort-ambiguous and Z3 4.16 will NOT infer its sort from a
                 // constructor-application sibling (`(Some 5)`) — only from an annotated
@@ -1152,7 +1195,7 @@ impl<'a> Emit<'a> {
                 // parametric instantiation (contains a space, e.g. `(Option Int)`); a
                 // monomorphic nullary ctor (`Non : Opt`) is already unambiguous and left
                 // untouched (REQ-LLL-074/080).
-                if matches!(crate::opsem::form(*op).class, crate::opsem::OpClass::Equality) {
+                if eq {
                     let sib_a = self.sorts.get(&ta).cloned();
                     let sib_b = self.sorts.get(&tb).cloned();
                     if self.cm.ctors.contains_key(&ta) {
@@ -1454,6 +1497,24 @@ impl<'a> Emit<'a> {
                     let term = if !fields.is_empty() && sort.contains("Tv_") {
                         format!("((as {name} {sort}) {})", ts.join(" "))
                     } else {
+                        // A bare application whose ARGUMENT sort is abstract (`Some(x)`,
+                        // `x : Tv_a`) with no `expected` instantiation to qualify the head
+                        // draws `unknown constant Some (Tv_a)` from Z3 4.16. This is only
+                        // reachable in a contract equality whose sibling bears no static
+                        // sort (`Some(x) == Some(y)`); the common `result == Some(x)` is
+                        // qualified above from the sibling (REQ-LLL-081). Reject it CLEANLY
+                        // (fail-closed) here rather than leak a raw Z3 error (DEC-LLL-015).
+                        if !fields.is_empty()
+                            && args.iter().any(|a| {
+                                matches!(self.sort_of(a, env), Some(s) if s.contains("Tv_"))
+                            })
+                        {
+                            return Err(format!(
+                                "vcgen: polymorphic constructor application `{name}(…)` has \
+                                 no sort from context here (REQ-LLL-081) — compare it against \
+                                 `result` or a parameter so its type argument is fixed"
+                            ));
+                        }
                         format!("({name} {})", ts.join(" "))
                     };
                     self.sorts.insert(term.clone(), sort);

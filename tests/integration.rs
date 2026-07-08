@@ -4951,18 +4951,67 @@ fn contract_polymorphic_nullary_ctor_verifies() {
 }
 
 #[test]
-fn contract_polymorphic_ctor_application_is_rejected_fail_loud() {
-    // REQ-LLL-081 (honest v1 boundary): a parametric ctor APPLICATION at an abstract
-    // type in a contract — `ensures result == Some(x)` on a polymorphic `Option[a]` —
-    // is not yet encodable (Z3 4.16 cannot apply a constructor at an abstract sort, and
-    // the vc's qualified form is only wired on the yield side). It must be a CLEAN
-    // fail-loud type error, never a Z3 internal error or a vacuous proof.
+fn contract_polymorphic_ctor_application_verifies() {
+    // REQ-LLL-081 (delivered — supersedes the REQ-074 v1 fail-loud boundary): a
+    // parametric ctor APPLICATION at an ABSTRACT type in a contract — `ensures result ==
+    // Some(x)` on a polymorphic `Option[a]`-returning part (`x : a`). The contract typer
+    // now infers `Option[a]`, and the vc qualifies the ctor-app operand as
+    // `((as Some (Option Tv_a)) x)` by threading the sibling `result`'s sort (a bare
+    // `(Some x)` would draw `unknown constant Some` from Z3 4.16). Body `yield Some(x)` ⇒ proves.
     let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: a) -> Option[a]:\n    ensures result == Some(x)\n    yield Some(x)\n\n  part main() -> Int:\n    yield 0\n";
-    let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("polymorphic ctor application in a contract must be rejected");
     assert!(
-        err.contains("polymorphic type") && err.contains("REQ-LLL-081"),
-        "expected the clean v1-not-supported error, got: {err}"
+        verify_src(src).ok(),
+        "polymorphic ensures result == Some(x) must verify (REQ-LLL-081): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn contract_polymorphic_ctor_application_is_sound() {
+    // REQ-LLL-081 (SOUNDNESS): the qualified `((as Some (Option Tv_a)) x)` is a REAL Z3
+    // term, not a vacuous pass. `ensures result == Some(x)` with body `yield None` must
+    // be REFUTED — Z3 builds an `(Option Tv_a)` counter-model where `None ≠ Some(x)`.
+    // (`x : a` is abstract, so an arithmetic mutation like `x + 1` is not well-typed; the
+    // discriminating body is the wrong CONSTRUCTOR.)
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: a) -> Option[a]:\n    ensures result == Some(x)\n    yield None\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "polymorphic ensures result == Some(x) with body None must be rejected (soundness, REQ-LLL-081)"
+    );
+}
+
+#[test]
+fn contract_polymorphic_ctor_application_left_operand_verifies() {
+    // REQ-LLL-081 (symmetry): the ctor application may sit on EITHER side of the equality
+    // — `ensures Some(x) == result` puts it on the LEFT, so the sibling sort is threaded
+    // from the RIGHT operand `result`. Exercises both branches of `ctor_app_expected`.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: a) -> Option[a]:\n    ensures Some(x) == result\n    yield Some(x)\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "polymorphic ensures Some(x) == result must verify (REQ-LLL-081): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn contract_polymorphic_ctor_application_without_sibling_sort_fails_closed() {
+    // REQ-LLL-081 (fail-closed residual boundary — empirically proven, not assumed): when
+    // NEITHER equality operand is a `result`/parameter bearing a static sort, the vc has
+    // no sibling sort to qualify an abstract ctor application from (`Some(x) == Some(x)`,
+    // both bare, `x : Tv_a`). Left bare it would draw `unknown constant Some (Tv_a)` from
+    // Z3 4.16 — so the vc rejects it CLEANLY at generation time with an actionable message
+    // (a vcgen error, the same fail-loud channel as every other un-encodable term), never
+    // a raw Z3 leak, never a panic, never a false proof (DEC-LLL-015, REQ-LLL-080/081).
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: a) -> Option[a]:\n    ensures Some(x) == Some(x)\n    yield Some(x)\n\n  part main() -> Int:\n    yield 0\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let err = match vc::verify(&cm, &hm, &dir, false) {
+        Ok(_) => panic!("residual (Some(x) == Some(x)) must fail closed, but verify returned Ok"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("REQ-LLL-081") && err.contains("no sort from context"),
+        "the residual must be a clean vcgen fail-loud, got: {err}"
     );
 }
 
