@@ -5467,3 +5467,54 @@ fn lambda_param_wrong_arity_is_rejected() {
         "expected a clean arity error, got: {err}"
     );
 }
+
+#[test]
+fn nested_parametric_match_verifies() {
+    // REQ-LLL-072: a `match` on a binder bound to a PARAMETRIC-typed ctor field — the
+    // inner `match inner` where `inner : Option[Int]` came from `Some(inner)` on an
+    // `Option[Option[Int]]`. The vc now records `inner`'s concrete sort `(Option Int)`
+    // (ctor_field_sorts), so the inner match resolves its constructors/selectors instead
+    // of falling back to Z3 4.16's flaky parametric recognizer (which rejected a valid
+    // program with a raw `ambiguous function declaration reference None` error).
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part get(o: Option[Option[Int]]) -> Int:\n    match o:\n      None -> yield 0\n      Some(inner) ->\n        match inner:\n          None -> yield 0\n          Some(x) -> yield x\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "nested parametric match must verify (REQ-LLL-072): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn nested_parametric_match_is_sound() {
+    // REQ-LLL-072 (SOUNDNESS): the recovered inner sort yields a REAL Z3 term, not a
+    // vacuous pass. `ensures result >= 0` while the innermost `Some(x)` yields `x` (which
+    // may be negative) must be REFUTED — Z3 builds the `Some(Some(-1))` counter-model.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part inner_nonneg(o: Option[Option[Int]]) -> Int:\n    ensures result >= 0\n    match o:\n      None -> yield 0\n      Some(inner) ->\n        match inner:\n          None -> yield 0\n          Some(x) -> yield x\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "nested parametric match with an over-strong ensures must be rejected (soundness, REQ-LLL-072)"
+    );
+}
+
+#[test]
+fn recursive_parametric_match_verifies() {
+    // REQ-LLL-072 (recursive datatype): matching INTO a recursive parametric field —
+    // `match l` where `l : Tree[Int]` came from `Node(l, r)` on a `Tree[a] = Leaf(a) |
+    // Node(Tree[a], Tree[a])`. The field sort `(Tree Int)` is recovered the same way.
+    let src = "module T:\n\n  type Tree[a] = Leaf(a) | Node(Tree[a], Tree[a])\n\n  part left_leaf(t: Tree[Int]) -> Int:\n    match t:\n      Leaf(x) -> yield x\n      Node(l, r) ->\n        match l:\n          Leaf(y) -> yield y\n          Node(a, b) -> yield 0\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "recursive parametric match must verify (REQ-LLL-072): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
+fn nested_parametric_match_constructs_and_runs() {
+    // REQ-LLL-072 (end-to-end): the nested extraction also builds and runs —
+    // `get(Some(Some(42))) = 42`, confirming codegen handles the nested parametric match.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part get(o: Option[Option[Int]]) -> Int:\n    match o:\n      None -> yield 0\n      Some(inner) ->\n        match inner:\n          None -> yield 0\n          Some(x) -> yield x\n\n  part main() -> Int:\n    yield get(Some(Some(42)))\n";
+    assert!(verify_src(src).ok(), "nested match module must verify (REQ-LLL-072)");
+    let out = build_run(src);
+    assert!(out.contains("=> 42"), "nested match runtime wrong: {out}");
+}

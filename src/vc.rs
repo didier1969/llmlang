@@ -710,6 +710,33 @@ fn record_field_sort(types: &[TypeDecl], srt: &str, name: &str) -> Option<String
     Some(subst_sort_vars(&smt_ty(&td.ctors[0].1[idx]), &subst))
 }
 
+/// The CONCRETE sort of each field of constructor `cn` when the scrutinee sort `srt` is
+/// a parametric instantiation `(Owner arg…)` — the ctor's declared field types with the
+/// owner's type parameters substituted by the instantiation's arguments (REQ-LLL-072).
+/// The positional-ADT analogue of `record_field_sort`: a binder bound to a
+/// parametric-typed field (`Some(inner)` on `Option[Option[Int]]`) then carries
+/// `(Option Int)` into a nested match instead of losing its sort — without it the inner
+/// match falls back to Z3 4.16's flaky parametric recognizer and a valid program is
+/// rejected (fail-safe, never a false proof — DEC-LLL-015). `None` unless `srt` is a
+/// parametric instantiation of `cn`'s owning datatype.
+fn ctor_field_sorts(types: &[TypeDecl], srt: &str, cn: &str) -> Option<Vec<String>> {
+    let (head, args) = split_user_sort(srt);
+    let td = types
+        .iter()
+        .find(|td| td.name == head && !td.type_params.is_empty())?;
+    if args.len() != td.type_params.len() {
+        return None;
+    }
+    let (_, fields) = td.ctors.iter().find(|(name, _)| name == cn)?;
+    let subst: HashMap<String, String> = td
+        .type_params
+        .iter()
+        .map(|p| format!("Tv_{p}"))
+        .zip(args)
+        .collect();
+    Some(fields.iter().map(|ft| subst_sort_vars(&smt_ty(ft), &subst)).collect())
+}
+
 impl<'a> Emit<'a> {
     fn fresh(&mut self, ty: &str) -> String {
         self.fresh += 1;
@@ -922,6 +949,18 @@ impl<'a> Emit<'a> {
                         if let (Some(cs), Pattern::Tuple(_)) = (&tuple_sorts, &arm.pattern) {
                             for (i, (_, term)) in bindings.iter().enumerate() {
                                 if let Some(sort) = cs.get(i) {
+                                    self.sorts.insert(term.clone(), sort.clone());
+                                }
+                            }
+                        }
+                        // record sorts of ctor field sub-terms bound here (REQ-LLL-072):
+                        // a binder bound to a PARAMETRIC-typed field (`Some(inner)` on
+                        // `Option[Option[Int]]`) must carry its concrete field sort into a
+                        // nested match, else the inner match loses the sort and falls back
+                        // to Z3 4.16's flaky parametric recognizer. Positional by field order.
+                        if let (Some(srt), Pattern::Ctor(cn, _)) = (&scrut_sort, &arm.pattern) {
+                            if let Some(fsorts) = ctor_field_sorts(&self.cm.module.types, srt, cn) {
+                                for ((_, term), sort) in bindings.iter().zip(&fsorts) {
                                     self.sorts.insert(term.clone(), sort.clone());
                                 }
                             }
