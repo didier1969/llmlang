@@ -324,7 +324,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     // a named foreign-enum param (REQ-LLL-056) is validated by NAME
                     // against the ADT's constructors, not the positional pair table.
                     if let Foreign::Enum { path, arms } = f {
-                        check_json_enum(&module, &ed.name, &op.name, llt, path, arms)?;
+                        check_foreign_enum(&module, &ed.name, &op.name, llt, path, arms)?;
                         continue;
                     }
                     if !foreign_marshal_ok(llt, f) {
@@ -349,7 +349,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     // a named foreign-enum return (REQ-LLL-056) → a llmlang ADT, mapped
                     // BY NAME to the Rust variants (serde_json::Value in v1).
                     Foreign::Enum { path, arms } => {
-                        check_json_enum(&module, &ed.name, &op.name, &op.ret, path, arms)?;
+                        check_foreign_enum(&module, &ed.name, &op.name, &op.ret, path, arms)?;
                     }
                     // a fallible foreign `Result<T, E>` return (REQ-LLL-038 slice 038e,
                     // DEC-LLL-046) → a 2-constructor ADT (errors-as-values). v1: E is
@@ -1193,6 +1193,94 @@ fn check_json_enum(
                 "effect `{eff}` op `{op}`: constructor `{cn}` of `{}` is not mapped to any \
                  serde_json::Value variant — every constructor must be mapped (round-trip, \
                  REQ-LLL-056)",
+                td.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Route a foreign `enum` clause: the v1 special-case `serde_json::Value` (tagged JSON
+/// scalars, REQ-LLL-056) vs a GENERAL foreign Rust enum marshalled by name (REQ-LLL-052).
+fn check_foreign_enum(
+    module: &Module,
+    eff: &str,
+    op: &str,
+    llt: &Ty,
+    path: &str,
+    arms: &[(String, String)],
+) -> Result<(), String> {
+    if path == "serde_json::Value" {
+        check_json_enum(module, eff, op, llt, path, arms)
+    } else {
+        check_enum_by_name(module, eff, op, llt, path, arms)
+    }
+}
+
+/// A general foreign Rust enum (REQ-LLL-052, hybrid tranche-1): each Rust variant maps
+/// BY NAME to a NULLARY llmlang constructor — a C-like / `std::cmp::Ordering`-shape enum.
+/// Nullary-only in this tranche: a variant carrying a payload needs typed payload
+/// marshalling (tranche-2), so a non-nullary ctor is a clean COMPILE error, never a
+/// silent positional payload mis-map (DEC-LLL-015). Full ADT coverage keeps the IN
+/// (llmlang->Rust) match exhaustive; the Rust variant NAMES themselves are checked by
+/// rustc at build (a wrong or omitted name → a build error re-anchored to the shim,
+/// REQ-LLL-027), so an unmapped/misspelled variant is fail-loud, never silent.
+fn check_enum_by_name(
+    module: &Module,
+    eff: &str,
+    op: &str,
+    llt: &Ty,
+    path: &str,
+    arms: &[(String, String)],
+) -> Result<(), String> {
+    let td = match llt {
+        Ty::User(n, _) => module.types.iter().find(|td| &td.name == n),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        format!(
+            "effect `{eff}` op `{op}`: a foreign `enum {path}` must map to a user ADT, but the \
+             operation type is `{llt}`"
+        )
+    })?;
+    let mut seen_rust: HashSet<&str> = HashSet::new();
+    let mut seen_ctor: HashSet<&str> = HashSet::new();
+    for (rustv, ctor) in arms {
+        if !seen_rust.insert(rustv.as_str()) {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: Rust variant `{path}::{rustv}` is mapped twice"
+            ));
+        }
+        if !seen_ctor.insert(ctor.as_str()) {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: constructor `{ctor}` is mapped twice"
+            ));
+        }
+        let fields = &td
+            .ctors
+            .iter()
+            .find(|(cn, _)| cn == ctor)
+            .ok_or_else(|| {
+                format!(
+                    "effect `{eff}` op `{op}`: constructor `{ctor}` (mapped from `{path}::{rustv}`) \
+                     does not exist in ADT `{}`",
+                    td.name
+                )
+            })?
+            .1;
+        if !fields.is_empty() {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: constructor `{ctor}` (from `{path}::{rustv}`) must be \
+                 NULLARY — a foreign enum with typed variant payloads is deferred to a later \
+                 tranche (REQ-LLL-052); this tranche marshals only C-like/tag enums by name"
+            ));
+        }
+    }
+    for (cn, _) in &td.ctors {
+        if !seen_ctor.contains(cn.as_str()) {
+            return Err(format!(
+                "effect `{eff}` op `{op}`: constructor `{cn}` of `{}` is not mapped to any \
+                 `{path}` variant — every constructor must be mapped (round-trip, REQ-LLL-052)",
                 td.name
             ));
         }

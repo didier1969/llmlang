@@ -348,6 +348,21 @@ fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
     }
 }
 
+/// One arm of a GENERAL nullary foreign enum (REQ-LLL-052, hybrid tranche-1), OUT
+/// direction (foreign Rust enum → llmlang ADT), mapped BY NAME: the nullary Rust variant
+/// `{path}::{rustv}` builds the nullary llmlang ctor `{ei}::{ctor}`. The checker proved
+/// every mapped ctor is nullary, so there is no payload to marshal.
+fn enum_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
+    format!("{path}::{rustv} => Rc::new({ei}::{ctor}), ")
+}
+
+/// One arm of a GENERAL nullary foreign enum (REQ-LLL-052, hybrid tranche-1), IN
+/// direction (llmlang ADT → foreign Rust enum), mapped BY NAME. The checker proved the
+/// ADT's ctors are fully covered, so the enclosing match is exhaustive with no `_` arm.
+fn enum_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
+    format!("{ei}::{ctor} => {path}::{rustv}, ")
+}
+
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
@@ -483,14 +498,22 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                                 ),
                             };
                             let ei = format!("{n}I");
-                            let marms: String =
-                                arms.iter().map(|(r, c)| json_in_arm(path, r, &ei, c)).collect();
-                            // a local recursive fn so an Array arm can recurse into itself
-                            // (REQ-LLL-060); the ADT ctors are fully covered → exhaustive.
-                            format!(
-                                "{{ fn __json_in(__j: &{ei}) -> {path} {{ match __j {{ {marms}}} }} \
-                                 __json_in(&*__a{i}) }}"
-                            )
+                            if path == "serde_json::Value" {
+                                let marms: String =
+                                    arms.iter().map(|(r, c)| json_in_arm(path, r, &ei, c)).collect();
+                                // a local recursive fn so an Array arm can recurse into itself
+                                // (REQ-LLL-060); the ADT ctors are fully covered → exhaustive.
+                                format!(
+                                    "{{ fn __json_in(__j: &{ei}) -> {path} {{ match __j {{ {marms}}} }} \
+                                     __json_in(&*__a{i}) }}"
+                                )
+                            } else {
+                                // a GENERAL nullary foreign enum (REQ-LLL-052): a direct
+                                // exhaustive by-name match — no recursion, no payload.
+                                let marms: String =
+                                    arms.iter().map(|(r, c)| enum_in_arm(path, r, &ei, c)).collect();
+                                format!("match &*__a{i} {{ {marms}}}")
+                            }
                         }
                         other => marshal_arg(i, other),
                     })
@@ -554,16 +577,27 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                             _ => unreachable!("checker guarantees an ADT return for a foreign enum"),
                         };
                         let ei = format!("{n}I");
-                        let marms: String =
-                            arms.iter().map(|(r, c)| json_out_arm(path, r, &ei, c)).collect();
-                        // a local recursive fn so an Array arm can recurse into itself
-                        // (REQ-LLL-060); an UNDECLARED variant (e.g. Object) fail-stops.
-                        format!(
-                            "{{ fn __json_out(__v: {path}) -> Rc<{ei}> {{ match __v {{ {marms}\
-                             __other => panic!(\"FFI boundary: serde_json::Value variant \
-                             {{__other:?}} is unsupported in v1 (Object deferred — REQ-LLL-056)\") \
-                             }} }} __json_out({call}) }}"
-                        )
+                        if path == "serde_json::Value" {
+                            let marms: String =
+                                arms.iter().map(|(r, c)| json_out_arm(path, r, &ei, c)).collect();
+                            // a local recursive fn so an Array arm can recurse into itself
+                            // (REQ-LLL-060); an UNDECLARED variant (e.g. Object) fail-stops.
+                            format!(
+                                "{{ fn __json_out(__v: {path}) -> Rc<{ei}> {{ match __v {{ {marms}\
+                                 __other => panic!(\"FFI boundary: serde_json::Value variant \
+                                 {{__other:?}} is unsupported in v1 (Object deferred — REQ-LLL-056)\") \
+                                 }} }} __json_out({call}) }}"
+                            )
+                        } else {
+                            // a GENERAL nullary foreign enum (REQ-LLL-052): a direct by-name
+                            // match with NO `_` arm — rustc enforces exhaustiveness over the
+                            // foreign enum at build, so an omitted/misspelled variant is a
+                            // build error re-anchored to the shim (REQ-LLL-027), never a silent
+                            // mis-map AND never an unreachable-pattern warning (zero-warning).
+                            let marms: String =
+                                arms.iter().map(|(r, c)| enum_out_arm(path, r, &ei, c)).collect();
+                            format!("match {call} {{ {marms}}}")
+                        }
                     }
                     _ => call,
                 };

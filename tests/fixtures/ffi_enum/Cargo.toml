@@ -1,0 +1,11 @@
+# Test fixture for REQ-LLL-052: by-name marshalling of a general (non-serde_json)
+# nullary Rust enum at the FFI boundary — a C-like / std::cmp::Ordering-shape enum.
+[package]
+name = "ffi_enum"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

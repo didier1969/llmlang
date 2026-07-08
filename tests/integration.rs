@@ -2446,6 +2446,57 @@ fn ffi_bytes_marshals_round_trip_via_cargo() {
 }
 
 #[test]
+fn ffi_general_nullary_enum_marshals_by_name_round_trip_via_cargo() {
+    // REQ-LLL-052 (hybrid tranche-1): a general (non-serde_json) NULLARY foreign enum
+    // marshals BY NAME — the `std::cmp::Ordering`-shape use case the requirement names.
+    // Exercised BOTH directions: `sign_of` returns `ffi_enum::Sign` (OUT: foreign->ADT),
+    // `sign_to_int` takes it (IN: ADT->foreign). By NAME, never positional: the `[Rust ->
+    // Lll]` arms bind variants by name, so a reordered enum can never silently mis-map.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_enum");
+    let src = format!(
+        "depends ffi_enum \"1.0.0\" from \"{fixture}\"\n\nmodule SignTest:\n\n  type Sign = Neg | Zero | Pos\n\n  effect Cmp:\n    sign_of(Int) -> Sign = extern \"ffi_enum::sign_of\" as (i64) -> enum ffi_enum::Sign [ Neg -> Neg, Zero -> Zero, Pos -> Pos ]\n    sign_to_int(Sign) -> Int = extern \"ffi_enum::sign_to_int\" as (enum ffi_enum::Sign [ Neg -> Neg, Zero -> Zero, Pos -> Pos ]) -> i64\n\n  part main() -> Int via IO, Cmp:\n    let s = Cmp.sign_of(0 - 7)\n    let back = Cmp.sign_to_int(s)\n    yield IO.print(back)\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("sign_test.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "general nullary enum marshalling (Cargo mode) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // sign_of(-7) = Neg -> Sign; sign_to_int(Neg) = -1
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> -1"),
+        "expected -1, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn ffi_general_enum_non_nullary_ctor_is_rejected() {
+    // REQ-LLL-052 (hybrid tranche-1 boundary): a general foreign enum maps ONLY nullary
+    // ctors in this tranche — a variant with a typed payload needs payload marshalling
+    // (tranche-2). Mapping a ctor with a field (`Tagged(Int)`) must be a clean COMPILE
+    // error naming the nullary restriction, NEVER a silent positional payload mis-map
+    // (DEC-LLL-015) — the whole point of by-name marshalling.
+    let src = "module M:\n\n  type T = A | Tagged(Int)\n\n  effect E:\n    f(Int) -> T = extern \"std::cmp::max\" as (i64) -> enum std::cmp::Ordering [ A -> A, Tagged -> Tagged ]\n\n  part g(x: Int) -> T via E:\n    yield E.f(x)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a non-nullary ctor in a general foreign enum must be rejected");
+    assert!(
+        err.contains("NULLARY") || err.contains("nullary"),
+        "message must name the nullary restriction (not a silent mis-map): {err}"
+    );
+}
+
+#[test]
 fn ffi_bytes_out_of_range_fails_stop_not_silently_truncate() {
     // REQ-LLL-051 acceptance criterion: an out-of-range element (e.g. 300, not
     // a valid u8) must fail-stop at the boundary, never silently wrap/truncate
@@ -4174,16 +4225,16 @@ fn ffi_json_unmapped_constructor_is_compile_error() {
 }
 
 #[test]
-fn ffi_json_non_json_enum_path_is_compile_error() {
-    // REQ-LLL-056: v1 (tranche-1) gates `serde_json::Value` only. Any other enum path is
-    // a clear COMPILE error rather than a silent mis-marshalling of an unknown enum.
-    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadPath:\n\n  type Json = JNull\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum std::cmp::Ordering [ Null -> JNull ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+fn ffi_general_nullary_enum_path_type_checks_req052_lifts_req056_gate() {
+    // REQ-LLL-052 supersedes REQ-LLL-056's v1 restriction: a non-`serde_json::Value` enum
+    // path is NO LONGER a compile error — a general NULLARY foreign enum marshals BY NAME.
+    // (This test formerly asserted the old gate, as `ffi_json_non_json_enum_path_is_compile_error`.)
+    // The `std::cmp::Ordering` mapping is the requirement's own motivating example: its
+    // three nullary variants map to a three-ctor ADT, fully covered, so it type-checks.
+    // The Rust variant NAMES are validated by rustc at build, not here.
+    let src = "module M:\n\n  type Sign = Neg | Zero | Pos\n\n  effect Cmp:\n    sign_of(Int) -> Sign = extern \"std::cmp::max\" as (i64) -> enum std::cmp::Ordering [ Less -> Neg, Equal -> Zero, Greater -> Pos ]\n\n  part g(x: Int) -> Sign via Cmp:\n    yield Cmp.sign_of(x)\n";
     let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("a non-serde_json enum path must be rejected");
-    assert!(
-        err.contains("serde_json::Value") && err.contains("std::cmp::Ordering"),
-        "expected a path-gating error, got: {err}"
-    );
+    types::check_module(m).expect("a general nullary foreign enum now type-checks (REQ-LLL-052)");
 }
 
 // ---- equality-saturation optimizer (REQ-LLL-058 tranche-1) ----
