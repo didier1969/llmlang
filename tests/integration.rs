@@ -5469,6 +5469,34 @@ fn lambda_param_wrong_arity_is_rejected() {
 }
 
 #[test]
+fn parametric_arity_nested_in_containers_is_rejected() {
+    // REQ-LLL-075 (container-recursion arms): `check_user_ty_declared` recurses through
+    // `Set`/`Map`/`Fun`/`Tuple` before hitting the user-type arity gate. The commit that
+    // added the recursion claimed these were caught but only tested the `User`/field sites;
+    // this closes the gap by exercising each container arm with a bad-arity `Box[Int, Bool]`
+    // (on `type Box[a]`, arity 1) buried inside it. Each must be a clean LLL arity error.
+    let cases = [
+        // Set element (List | Array | Set share arm 1338)
+        "module T:\n\n  type Box[a] = {val: a}\n\n  part f(s: Set[Box[Int, Bool]]) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n",
+        // Map value (arm 1339)
+        "module T:\n\n  type Box[a] = {val: a}\n\n  part f(m: Map[Int, Box[Int, Bool]]) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n",
+        // Function parameter (arm 1343)
+        "module T:\n\n  type Box[a] = {val: a}\n\n  part f(g: (Box[Int, Bool]) -> Int) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n",
+        // Tuple component (arm 1349)
+        "module T:\n\n  type Box[a] = {val: a}\n\n  part f(t: (Int, Box[Int, Bool])) -> Int:\n    yield 0\n\n  part main() -> Int:\n    yield 0\n",
+    ];
+    for src in cases {
+        let m = parser::parse_module(src).expect("parse");
+        let err = types::check_module(m)
+            .expect_err("bad arity nested in a container must be rejected");
+        assert!(
+            err.contains("`Box` expects 1 type argument(s), got 2"),
+            "expected a clean container-nested arity error, got: {err}"
+        );
+    }
+}
+
+#[test]
 fn nested_parametric_match_verifies() {
     // REQ-LLL-072: a `match` on a binder bound to a PARAMETRIC-typed ctor field — the
     // inner `match inner` where `inner : Option[Int]` came from `Some(inner)` on an
