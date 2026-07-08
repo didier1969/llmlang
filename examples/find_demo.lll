@@ -1,0 +1,28 @@
+import "../std/list.lll"
+
+module Demo.Find:
+
+  # Wave-5 (REQ-LLL-073): honest search returning `Option` — absence is a value,
+  # never a sentinel. `find`/`lookup` live in std/list; `Option` combinators come
+  # transitively (list imports option). Every printed `1` is a proven-then-observed fact.
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part is_zero(n: Int) -> Bool:
+    match n:
+      0 -> yield true
+      _ -> yield false
+
+  part main() -> Int via IO:
+    # find: first match present → Some, none present → None
+    let a = IO.print(flag(get_or(find(is_zero, 3 :: 0 :: 9 :: []), 42) == 0))
+    let b = IO.print(flag(is_none(find(is_zero, 3 :: 5 :: 9 :: []))))
+    let c = IO.print(flag(is_some(find(is_zero, 0 :: []))))
+    # lookup: Int-keyed association (id -> price)
+    let table = (1, 100) :: (2, 250) :: (3, 99) :: []
+    let d = IO.print(flag(get_or(lookup(table, 2), 0) == 250))
+    let e = IO.print(flag(is_none(lookup(table, 7))))
+    yield IO.print(flag(get_or(lookup(table, 3), 0) == 99))

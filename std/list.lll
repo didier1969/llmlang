@@ -1,3 +1,5 @@
+import "option.lll"
+
 module Std.List:
 
   # ---- stdlib, written IN llmlang and verified by the real Z3 pipeline ----
@@ -163,3 +165,24 @@ module Std.List:
         match ys:
           []       -> yield []
           yh :: yt -> yield (xh, yh) :: zip(xt, yt)
+
+  # HONEST search (REQ-LLL-073): absence is a first-class `Option`, never a magic
+  # sentinel. `find` returns the first element satisfying `p` (contrast `index_of`
+  # above, which returns `0 - 1` on miss — the sentinel smell records/Option retire).
+  part find(p: (a) -> Bool, xs: List[a]) -> Option[a]:
+    match xs:
+      []     -> yield None
+      h :: t ->
+        match p(h):
+          true  -> yield Some(h)
+          false -> yield find(p, t)
+
+  # Int-keyed association lookup (ERP: id → entity) → `Option[v]`. Dogfoods the
+  # `if/then/else` sugar (REQ-LLL-071) in the tuple arm.
+  part lookup(xs: List[(Int, a)], key: Int) -> Option[a]:
+    match xs:
+      []     -> yield None
+      h :: t ->
+        match h:
+          (k, v) ->
+            if k == key then Some(v) else lookup(t, key)

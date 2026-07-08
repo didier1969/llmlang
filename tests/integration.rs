@@ -1708,11 +1708,15 @@ fn cons_expression_verifies_and_types() {
 
 #[test]
 fn stdlib_fully_verifies() {
-    let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/list.lll"),
-    )
-    .expect("std/list.lll");
-    let r = verify_src(&src);
+    // std/list.lll imports std/option.lll (REQ-LLL-073: find/lookup return Option),
+    // so it must be loaded through the import-resolving loader, not parsed as a lone
+    // module. The intent is unchanged: the whole stdlib graph verifies over Z3.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/list.lll");
+    let (_, module) = loader::load_program(path.to_str().unwrap()).expect("load std/list.lll");
+    let cm = types::check_module(module).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let r = vc::verify(&cm, &hm, &dir, false).expect("verify");
     assert!(r.ok(), "stdlib must verify: {:?}", failures(&r));
 }
 
@@ -4556,6 +4560,43 @@ fn stdlib_breadth_essentials_verify_and_run() {
     assert!(
         !stdout.lines().any(|l| l.trim() == "0"),
         "no stdlib essential may fail at runtime:\n{stdout}"
+    );
+}
+
+#[test]
+fn honest_search_find_lookup_option_verify_and_run() {
+    // REQ-LLL-073: `find`/`lookup` in std/list return `Option` (honest absence — no
+    // sentinel). Verified by Z3 and exercised at runtime; the `Option` combinators
+    // resolve TRANSITIVELY through the single `list.lll` import (list imports option),
+    // and `lookup` dogfoods the `if/then/else` sugar. Six ones = every fact holds.
+    let (_, m) = loader::load_program("examples/find_demo.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "find/lookup must verify over Z3: {:?}", failures(&report));
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("find.rs");
+    let bin = dir.join("find_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "find/lookup Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 6, "every honest-search fact must hold at runtime (6 ones):\n{stdout}");
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no honest-search fact may fail at runtime:\n{stdout}"
     );
 }
 
