@@ -260,3 +260,70 @@ fn verdict(
         None => "not verified at current hash".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // REQ-LLL-082: `call_tool`/`respond` are private `fn` with zero prior coverage —
+    // reachable only from an in-crate test. These pin the protocol-conformance
+    // surface (envelope shape, tool dispatch, fail-loud on bad input) WITHOUT Z3:
+    // every path here type-checks or errors before `vc::verify` runs.
+    use super::*;
+
+    fn tmp(tag: &str, src: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("lll_mcp_ut_{}_{tag}.lll", std::process::id()));
+        std::fs::write(&p, src).unwrap();
+        p
+    }
+
+    #[test]
+    fn respond_wraps_ok_and_err_envelopes() {
+        // The JSON-RPC 2.0 envelope is well-formed both ways: id echoed, `jsonrpc`
+        // present, an error carries a numeric `code`. Pure over any `Write`.
+        let mut ok = Vec::new();
+        respond(&mut ok, json!(7), Ok(json!({ "hi": true }))).unwrap();
+        let v: Value = serde_json::from_slice(&ok).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["result"]["hi"], true);
+        assert!(v.get("error").is_none(), "ok envelope has no error: {v}");
+
+        let mut err = Vec::new();
+        respond(&mut err, json!("abc"), Err((-32601, "method not found: x".into()))).unwrap();
+        let v: Value = serde_json::from_slice(&err).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], "abc");
+        assert_eq!(v["error"]["code"], -32601);
+        assert!(v["error"]["message"].as_str().unwrap().contains("method not found"));
+    }
+
+    #[test]
+    fn call_tool_rejects_unknown_tool_and_missing_arg() {
+        // Both fail-loud BEFORE any module load (no filesystem, no Z3).
+        let e = call_tool("/no/such/file.lll", "bogus", &json!({})).unwrap_err();
+        assert!(e.contains("unknown tool"), "got: {e}");
+        let e = call_tool("/no/such/file.lll", "lll_part", &json!({})).unwrap_err();
+        assert!(e.contains("missing required argument"), "got: {e}");
+    }
+
+    #[test]
+    fn call_tool_lll_defs_lists_parts() {
+        // Happy path: load a real module + list its parts. Type-check only — the
+        // verdict column reads the proof cache (empty) → "not verified".
+        let f = tmp("defs", "module M:\n\n  part main() -> Int:\n    yield 0\n");
+        let out = call_tool(f.to_str().unwrap(), "lll_defs", &json!({})).unwrap();
+        assert!(out.contains("module M"), "got: {out}");
+        assert!(out.contains("part(s)"), "got: {out}");
+        assert!(out.contains("main"), "got: {out}");
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn call_tool_lll_part_unknown_part_is_rejected() {
+        // Valid module, non-existent part → fail-loud after load, before rationale/cwd.
+        let f = tmp("part", "module M:\n\n  part main() -> Int:\n    yield 0\n");
+        let e = call_tool(f.to_str().unwrap(), "lll_part", &json!({ "part": "nope" })).unwrap_err();
+        assert!(e.contains("unknown part"), "got: {e}");
+        let _ = std::fs::remove_file(&f);
+    }
+}

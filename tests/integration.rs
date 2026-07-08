@@ -3733,6 +3733,56 @@ fn audit_repl_starts_read_only_and_reports_the_module() {
 }
 
 #[test]
+fn mcp_serve_speaks_jsonrpc_initialize_list_and_errors() {
+    // REQ-LLL-082: the `lll mcp` server (mcp::serve) drives an UNTRUSTED JSON-RPC 2.0
+    // loop that had zero protocol-conformance coverage. Pipe a sequence over stdin and
+    // assert one well-formed reply per request: initialize → serverInfo; tools/list →
+    // the 3 audit tools; a malformed line → parse error -32700; an unknown method →
+    // method-not-found -32601. None of these loads the module, so no Z3 is needed; the
+    // loop closes at stdin EOF and exits 0. Substring assertions (no serde_json dep),
+    // same idiom as the audit smoke-test above.
+    use std::io::Write;
+    let dir = tempdir().join("mcp-serve");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("m.lll");
+    std::fs::write(&lll, "module M:\n\n  part main() -> Int:\n    yield 0\n").unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["mcp", lll.to_str().unwrap()])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n\
+              this is not json\n\
+              {\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"bogus/method\"}\n",
+        )
+        .unwrap();
+    drop(stdin); // EOF → the serve loop terminates
+    let out = child.wait_with_output().unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "serve exits cleanly at EOF: {}", String::from_utf8_lossy(&out.stderr));
+    let lines: Vec<&str> = so.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 4, "one reply per request (incl. malformed): {so}");
+    // initialize → server identity
+    assert!(lines[0].contains("lll-audit") && lines[0].contains("serverInfo"), "initialize reply: {}", lines[0]);
+    // tools/list → exactly the 3 audit tools
+    assert!(
+        lines[1].contains("lll_defs") && lines[1].contains("lll_part") && lines[1].contains("lll_check"),
+        "tools/list must expose the 3 tools: {}",
+        lines[1]
+    );
+    // malformed JSON → parse error, and the unknown method → method-not-found
+    assert!(lines[2].contains("-32700"), "malformed line → parse error: {}", lines[2]);
+    assert!(lines[3].contains("-32601"), "unknown method → method-not-found: {}", lines[3]);
+}
+
+#[test]
 fn check_format_json_emits_structured_diagnostics_with_counterexample() {
     // REQ-LLL-033: the LLM channel — `lll check --format=json` yields structured,
     // repair-oriented diagnostics (codes, did-you-mean fixes, and for a failed
