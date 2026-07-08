@@ -5518,3 +5518,18 @@ fn nested_parametric_match_constructs_and_runs() {
     let out = build_run(src);
     assert!(out.contains("=> 42"), "nested match runtime wrong: {out}");
 }
+
+#[test]
+fn rational_avoids_the_float_trap() {
+    // REQ-LLL-054 / DEC-LLL-051 (the SIGNATURE property of the exact `Rational` type):
+    // `0.1 + 0.2 == 0.3` — the canonical IEEE-754 rounding trap — holds EXACTLY, because
+    // decimal literals are exact rationals (1/10 + 2/10 = 3/10) discharged over Z3's Real
+    // theory, not binary floats. A Float-backed type would REFUTE this; the pass is the
+    // proof the language reasons over exact rationals.
+    let src = "module T:\n\n  part sum() -> Rational:\n    ensures result == 0.3\n    yield 0.1 + 0.2\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "0.1 + 0.2 must equal 0.3 exactly over Z3 Real (DEC-LLL-051): {:?}",
+        failures(&verify_src(src))
+    );
+}
