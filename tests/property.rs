@@ -127,7 +127,7 @@ fn leaf(v: i64) -> String {
 /// found bugs, not just integer math. Returns the full module text + expected
 /// value, or `None` on overflow.
 fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
-    match rng.below(10) {
+    match rng.below(12) {
         0 => {
             let (e, v) = gen_expr(rng, 2)?;
             Some((format!("module T:\n\n  part main() -> Int:\n    yield {e}\n"), v))
@@ -213,6 +213,27 @@ fn gen_body(rng: &mut Rng) -> Option<(String, i64)> {
             Some((
                 format!("module T:\n\n  type Tree = Leaf(Int) | Node(Tree, Tree)\n\n  part sumtree(t: Tree) -> Int:\n    match t:\n      Leaf(v) -> yield v\n      Node(l, r) -> yield sumtree(l) + sumtree(r)\n\n  part main() -> Int:\n    yield sumtree({tree})\n"),
                 v,
+            ))
+        }
+        9 => {
+            // REQ-LLL-079 + REQ-LLL-074: a record with a PARAMETRIC `Option[Int]` field,
+            // read through the field selector then matched. Exercises the topological
+            // `declare-datatypes` ordering (a record referencing a concrete parametric
+            // instantiation `(Option Int)`) end to end — verify, compile, run, agree.
+            let n = rng.small();
+            Some((
+                format!("module T:\n\n  type Option[a] = None | Some(a)\n  type Box = {{opt: Option[Int]}}\n\n  part unbox(b: Box) -> Int:\n    match b.opt:\n      Some(v) -> yield v\n      None -> yield 0\n\n  part main() -> Int:\n    yield unbox(Box(Some({n})))\n", n = leaf(n)),
+                n,
+            ))
+        }
+        10 => {
+            // REQ-LLL-074: a parametric constructor APPLICATION proven in a contract
+            // (`ensures result == Some(x)`), then destructured. Exercises the contract
+            // ctor-application typing + the vc's sort-anchored equality end to end.
+            let n = rng.small();
+            Some((
+                format!("module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: Int) -> Option[Int]:\n    ensures result == Some(x)\n    yield Some(x)\n\n  part unwrap(o: Option[Int]) -> Int:\n    match o:\n      Some(v) -> yield v\n      None -> yield 0\n\n  part main() -> Int:\n    yield unwrap(wrap({n}))\n", n = leaf(n)),
+                n,
             ))
         }
         _ => {
