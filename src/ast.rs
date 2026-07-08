@@ -176,6 +176,14 @@ pub struct TypeDecl {
     pub type_params: Vec<String>,
     /// each constructor: its name + positional field types
     pub ctors: Vec<(String, Vec<Ty>)>,
+    /// RECORD field names (REQ-LLL-070): `type Point = {x: Int, y: Int}` is a mono-ctor
+    /// product whose SOLE constructor's i-th positional field ALSO carries the name
+    /// `field_names[i]`, enabling `p.x` access (lowered to the datatype selector,
+    /// legal in contracts). Empty for a plain positional ADT. Unlike `type_params`,
+    /// field names ARE identity — never α-renamable (they are the surface contract),
+    /// captured automatically by the text-based type-block hash (DEC-LLL-020).
+    #[serde(default)]
+    pub field_names: Vec<String>,
 }
 
 /// A typeclass `class Eq[a]:` with required method signatures and laws
@@ -537,6 +545,15 @@ pub enum Expr {
     /// checked against the tuple's arity; the arity itself is NOT stored (derived from
     /// the base's type — the surface AST stays source-faithful, DEC-LLL-020).
     Proj(Box<Expr>, usize),
+    /// Named-field access `e.name` of a RECORD (REQ-LLL-070). Records are mono-ctor
+    /// user products with named fields (`type Point = {x: Int, y: Int}`); this is the
+    /// projection primitive `Proj` gains a NAME for. Like `Proj` it is a checker-level
+    /// primitive — not a user `part` — so it is legal inside a contract, where it lowers
+    /// to the native Z3 datatype SELECTOR `(Ctor_i …)` of the sole constructor. The name
+    /// resolves to a field INDEX during checking (type-directed against the base's record
+    /// type); the index is NOT stored — the surface AST stays source-faithful, and the
+    /// field NAME is part of identity, never α-renamable (DEC-LLL-020).
+    Field(Box<Expr>, String),
     /// A typed hole `?` (CPT-LLL-002, DEC-LLL-052): a deliberate placeholder for an
     /// as-yet-unwritten TERM. The checker assigns it the context-expected type and
     /// records its in-scope binders (structured feedback for an LLM's completion
@@ -565,7 +582,7 @@ impl Expr {
                 }
             }
             Expr::Lambda(_, body) => body.walk(f),
-            Expr::Proj(a, _) => a.walk(f),
+            Expr::Proj(a, _) | Expr::Field(a, _) => a.walk(f),
             _ => {}
         }
     }

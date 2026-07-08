@@ -3099,6 +3099,118 @@ fn if_then_else_desugars_runs_and_hash_converges() {
 }
 
 // ===================================================================
+// REQ-LLL-070 — records with named fields. A record is a mono-ctor product
+// (`type Point = {x: Int, y: Int}`); positional construction `Point(1, 2)` is
+// the plain ctor call (free), and named access `p.x` is a checker-level
+// PROJECTION PRIMITIVE lowered to the datatype selector `(Point_0 …)` — legal
+// in a contract (unlike a user `part`, DEC-LLL-017), which is the whole point:
+// a record invariant can be stated over a field in requires/ensures.
+// ===================================================================
+
+#[test]
+fn record_field_in_contract_verifies_and_runs() {
+    // The DEFINING obligation: `requires p.x > 0` must constrain the very
+    // `(Point_0 p)` the body yields, so Z3 discharges `ensures result > 0`.
+    // The caller `getx(Point(5, 9))` proves the precondition on a freshly
+    // CONSTRUCTED record (`(Point_0 (Point 5 9)) > 0`), exercising the
+    // `sort_of` ctor-call branch that recovers the record's sort at the call site.
+    let src = "module R:\n\n  type Point = {x: Int, y: Int}\n\n  part getx(p: Point) -> Int:\n    requires p.x > 0\n    ensures result > 0\n    yield p.x\n\n  part main() -> Int:\n    yield getx(Point(5, 9))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "record-field-in-contract must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 5"), "record field runtime wrong: {out}");
+}
+
+#[test]
+fn record_field_without_requires_is_fail_safe() {
+    // SOUNDNESS: the selector `(Point_0 p)` is a REAL Z3 term bound to the value,
+    // not a vacuous pass. Without `requires p.x > 0` the field is unconstrained,
+    // so `ensures result > 0` must NOT be provable — no false proof.
+    let src = "module R:\n\n  type Point = {x: Int, y: Int}\n\n  part getx(p: Point) -> Int:\n    ensures result > 0\n    yield p.x\n";
+    assert!(
+        !verify_src(src).ok(),
+        "an unconstrained record field must NOT prove a strong postcondition (soundness)"
+    );
+}
+
+#[test]
+fn record_nested_field_in_contract_and_construction_runs() {
+    // Nested records: `o.p.b` composes selectors `(Inner_1 (Outer_0 o))` in BOTH
+    // the contract and the body, and `Outer(Inner(3, 7), 1)` constructs a nested
+    // record positionally. `ensures result == o.p.b` is reflexive → verifies.
+    let src = "module R:\n\n  type Inner = {a: Int, b: Int}\n  type Outer = {p: Inner, tag: Int}\n\n  part deep(o: Outer) -> Int:\n    ensures result == o.p.b\n    yield o.p.b\n\n  part main() -> Int:\n    yield deep(Outer(Inner(3, 7), 1))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "nested record field must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("=> 7"), "nested record field runtime wrong: {out}");
+}
+
+#[test]
+fn record_field_absent_rejected() {
+    // `.z` is not a declared field of `Point` — a clean type error, not a crash.
+    let src = "module R:\n\n  type Point = {x: Int, y: Int}\n\n  part getz(p: Point) -> Int:\n    yield p.z\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject an absent field");
+    assert!(
+        err.contains("field") && err.contains('z'),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn record_field_on_non_record_rejected() {
+    // `.x` on an Int has no fields — a clean type error (fail-safe), not a crash.
+    let src = "module R:\n\n  part getx(n: Int) -> Int:\n    yield n.x\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject field access on a non-record");
+    assert!(err.contains("record"), "unexpected error: {err}");
+}
+
+#[test]
+fn record_field_name_is_identity() {
+    // The field NAME is behaviourally significant: reading `p.x` and reading `p.y`
+    // are different definitions, so they must NOT share a def-hash (DEC-LLL-020).
+    let read_x = "module R:\n\n  type Point = {x: Int, y: Int}\n\n  part getf(p: Point) -> Int:\n    yield p.x\n";
+    let read_y = "module R:\n\n  type Point = {x: Int, y: Int}\n\n  part getf(p: Point) -> Int:\n    yield p.y\n";
+    let (_, hx) = full(read_x);
+    let (_, hy) = full(read_y);
+    assert_ne!(
+        hx.def_hash["getf"], hy.def_hash["getf"],
+        "reading a different record field must be a different identity"
+    );
+}
+
+#[test]
+fn parametric_record_is_rejected_fail_loud() {
+    // Parametric records are deferred (REQ-LLL-077). Their absence must fail LOUD, not
+    // silently pass to codegen with an un-substituted field type — an explicit rejection
+    // honours the fail-loud invariant (DEC-LLL-015/017).
+    let src = "module B:\n\n  type Box[a] = {val: a}\n\n  part unbox(b: Box[Int]) -> Int:\n    yield b.val\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("must reject a parametric record");
+    assert!(
+        err.contains("parametric") && err.contains("REQ-LLL-077"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn erp_records_example_verifies_and_runs() {
+    // The showcase (examples/erp_records.lll): a verified ERP record with a field
+    // invariant in the contract, plus a nested-record field reaching through two
+    // selectors — Z3 discharges "a line total is never negative" one level down,
+    // and the compiled binary prints 750 + 200 = 950.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/erp_records.lll"),
+    )
+    .expect("read erp_records.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "ERP records example must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("=> 950"), "ERP records example runtime wrong: {out}");
+}
+
+// ===================================================================
 // REQ-LLL-026 slice 3c item 2 — user-authored tail-resumptive handlers,
 // compiled by capability-passing (fn-pointer evidence), DEC-LLL-037.
 // The proof fork already havocs a user op's result (REQ-LLL-018), so the

@@ -520,6 +520,10 @@ impl<'a> Norm<'a> {
             // positional projection `e.i` — identity by (index, base). The arity is
             // NOT part of the text, so it is not in the hash (REQ-LLL-070, DEC-LLL-020).
             Expr::Proj(a, i) => format!("(proj {i} {})", self.expr(a)),
+            // named-field access `e.name` — identity by (field NAME, base). The name is
+            // behaviourally significant (`p.x` ≠ `p.y`) and never α-renamed, unlike a
+            // type parameter (REQ-LLL-070, DEC-LLL-020).
+            Expr::Field(a, name) => format!("(field {name} {})", self.expr(a)),
             Expr::Neg(a) => format!("(neg {})", self.expr(a)),
             Expr::Not(a) => format!("(not {})", self.expr(a)),
             Expr::Bin(op, a, b) => format!("({op:?} {} {})", self.expr(a), self.expr(b)),

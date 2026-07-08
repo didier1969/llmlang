@@ -229,6 +229,40 @@ impl Parser {
             self.eat(Tok::RBracket)?;
         }
         self.eat(Tok::Assign)?;
+        // RECORD form `type Point = {x: Int, y: Int}` (REQ-LLL-070): a mono-ctor product
+        // whose SOLE constructor is named after the type, each positional field ALSO
+        // carrying a name. Lowered to a mono-ctor ADT + a `field_names` table so `p.x`
+        // (a checker-level projection primitive) reuses the datatype selector machinery
+        // — positional construction `Point(1, 2)` is the plain ctor call, free.
+        if self.peek() == &Tok::LBrace {
+            self.pos += 1;
+            let mut field_names = Vec::new();
+            let mut fields = Vec::new();
+            if self.peek() != &Tok::RBrace {
+                loop {
+                    field_names.push(self.ident()?);
+                    self.eat(Tok::Colon)?;
+                    fields.push(self.ty()?);
+                    if self.peek() == &Tok::Comma {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.eat(Tok::RBrace)?;
+            self.eat(Tok::Newline)?;
+            if field_names.is_empty() {
+                return Err(self.err("record type must declare at least one field"));
+            }
+            let ctor = name.clone();
+            return Ok(TypeDecl {
+                name,
+                type_params,
+                ctors: vec![(ctor, fields)],
+                field_names,
+            });
+        }
         let mut ctors = Vec::new();
         loop {
             let cname = self.ident()?;
@@ -252,7 +286,7 @@ impl Parser {
             }
         }
         self.eat(Tok::Newline)?;
-        Ok(TypeDecl { name, type_params, ctors })
+        Ok(TypeDecl { name, type_params, ctors, field_names: Vec::new() })
     }
 
     /// `effect Name:` + one `op(T, …) -> Ret` per indented line (REQ-LLL-018).
@@ -1151,18 +1185,24 @@ impl Parser {
         }
         self.postfix_expr()
     }
-    /// An atom followed by zero or more postfix projections `.i` (REQ-LLL-070).
-    /// Projection binds tighter than unary minus (`-p.0` = `-(p.0)`) and composes
-    /// with calls and grouping (`f(x).0`, `(a, b).1`). v1: positional only — named
-    /// field access `.field` arrives with records.
+    /// An atom followed by zero or more postfix projections — positional `.i` on a
+    /// tuple or named `.field` on a record (REQ-LLL-070). Projection binds tighter than
+    /// unary minus (`-p.0` = `-(p.0)`) and composes with calls and grouping (`f(x).0`,
+    /// `(a, b).1`, `rec.x.y`). The `.field` case is the single field-access path: a
+    /// lowercase-headed name never glues its dot in the lexer, so `p.x` always reaches
+    /// here as `Ident(p) Dot Ident(x)` (a capitalized qualified name like `IO.print`
+    /// glues to a `Dotted` and is an effect call, handled in `atom`).
     fn postfix_expr(&mut self) -> Result<Expr, String> {
         let mut e = self.atom()?;
         while self.peek() == &Tok::Dot {
             self.pos += 1;
             match self.bump() {
                 Tok::Int(n) if n >= 0 => e = Expr::Proj(Box::new(e), n as usize),
+                Tok::Ident(name) => e = Expr::Field(Box::new(e), name),
                 other => {
-                    return Err(format!("expected a tuple index after `.`, found {other:?}"))
+                    return Err(format!(
+                        "expected a tuple index `.i` or a record field name `.field` after `.`, found {other:?}"
+                    ))
                 }
             }
         }

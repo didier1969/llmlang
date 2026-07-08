@@ -1188,6 +1188,37 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
         }
     }
     out.push_str("}\n");
+    // record accessors (REQ-LLL-070): each named field gets a typed getter — an
+    // irrefutable match extraction on the sole constructor. Prefixed `__f_` so a field
+    // named like an Rc/std method (`clone`) can never shadow it, and rustc resolves the
+    // getter on the receiver's concrete enum type — codegen needs NO per-node types.
+    if !td.field_names.is_empty() {
+        let (cn, fields) = &td.ctors[0];
+        // a Clone bound per type parameter keeps the `.clone()` sound if a record is
+        // ever parametric (monomorphic in this slice — then `impl_generics` is empty).
+        let impl_generics = if td.type_params.is_empty() {
+            String::new()
+        } else {
+            let ps: Vec<String> = td
+                .type_params
+                .iter()
+                .map(|p| format!("{}: Clone", tv_param(p)))
+                .collect();
+            format!("<{}>", ps.join(", "))
+        };
+        out.push_str(&format!("impl{impl_generics} {ei}{generics} {{\n"));
+        for (idx, fname) in td.field_names.iter().enumerate() {
+            let binders: Vec<String> = (0..fields.len())
+                .map(|k| if k == idx { "__v".to_string() } else { "_".to_string() })
+                .collect();
+            out.push_str(&format!(
+                "    pub fn __f_{fname}(&self) -> {} {{ match self {{ {ei}::{cn}({}) => __v.clone(), }} }}\n",
+                rs_ty(&fields[idx]),
+                binders.join(", "),
+            ));
+        }
+        out.push_str("}\n");
+    }
     // NB: NO `pub type {Name} = Rc<{ei}>` alias and no `pub use {ei}::*` — a user ADT
     // named `Option`/`Result` (or a ctor named `Ok`/`Some`/`None`) would shadow the std
     // prelude in the generated runtime. Every ADT type is spelled `Rc<{ei}<…>>` (rs_ty)
@@ -2029,6 +2060,11 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         // positional projection `e.i` → native Rust tuple field access `(<e>).i`
         // (REQ-LLL-070); rustc infers the component type from the tuple's type.
         Expr::Proj(e, i) => format!("({}).{i}", expr(e, cx, res)?),
+        // named-field access `e.name` → the record's typed getter `__f_name()`
+        // (REQ-LLL-070). rustc resolves the getter on the receiver's concrete enum type,
+        // so codegen needs no per-node types; the getter returns an owned clone (via a
+        // `&self` irrefutable match), so the result is owned regardless of `res`.
+        Expr::Field(e, name) => format!("({}).__f_{name}()", expr(e, cx, res)?),
         Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),
         Expr::Not(a) => format!("(!{})", expr(a, cx, res)?),
         Expr::Bin(op, a, b) => {

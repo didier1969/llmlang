@@ -58,6 +58,8 @@ pub enum Tok {
     RParen,
     LBracket,
     RBracket,
+    LBrace,    // record type `{x: Int, y: Int}` (REQ-LLL-070)
+    RBrace,
     Comma,
     Colon,
     Arrow,     // ->
@@ -152,6 +154,14 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
             }
             ']' => {
                 push(out, Tok::RBracket);
+                i += 1;
+            }
+            '{' => {
+                push(out, Tok::LBrace);
+                i += 1;
+            }
+            '}' => {
+                push(out, Tok::RBrace);
                 i += 1;
             }
             ',' => {
@@ -313,10 +323,18 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
     let b = s.as_bytes();
     let mut i = start;
     let mut dotted = false;
+    // A `.` glues into the word ONLY when the word started with an UPPERCASE letter
+    // (REQ-LLL-070). Every qualified name in the language is capitalized-headed —
+    // effects `IO`/`State`/user effects, qualified types `Pricing.Quote`, module
+    // names `Std.List` — so `IO.print` still glues to `Dotted`, while a lowercase
+    // value `p.x` STOPS at the dot: it lexes as `Ident(p) Dot Ident(x)`, the single
+    // field-access path handled in the parser's postfix position (verified: no
+    // lowercase-headed dotted name exists anywhere in the language surface).
+    let head_upper = (b[start] as char).is_ascii_uppercase();
     while i < b.len()
         && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || (b[i] == b'.' && {
-            // only treat '.' as part of the word if followed by a letter (qualified name)
-            i + 1 < b.len() && (b[i + 1] as char).is_ascii_alphabetic()
+            // glue `.` only for a qualified name: capitalized head AND a letter follows
+            head_upper && i + 1 < b.len() && (b[i + 1] as char).is_ascii_alphabetic()
         }))
     {
         if b[i] == b'.' {

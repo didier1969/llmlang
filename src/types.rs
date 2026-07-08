@@ -196,6 +196,35 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             }
         }
     }
+    // record field-name tables (REQ-LLL-070): type name → ordered field names, for
+    // type-directed resolution of `p.field` in a contract (`type_of_pure`, which has
+    // no module handle). A record is a mono-ctor product; field names must be unique
+    // within it. Empty for a plain positional ADT.
+    let mut records: HashMap<String, Vec<String>> = HashMap::new();
+    for td in &module.types {
+        if td.field_names.is_empty() {
+            continue;
+        }
+        // parametric records are DEFERRED (REQ-LLL-077): the field type would be a
+        // `Ty::Var` returned un-substituted by both checkers, and vc's `sort_of` cannot
+        // map a parametric record sort `(Box Tv_a)` back to its declaration. Reject
+        // EXPLICITLY here — an honest fail-loud, never a silently-wrong contract
+        // (DEC-LLL-015/017) — rather than relying on an incidental downstream mismatch.
+        if !td.type_params.is_empty() {
+            return Err(format!(
+                "record `{}` is parametric — parametric records are not yet supported \
+                 (REQ-LLL-077); use a monomorphic record for now",
+                td.name
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for f in &td.field_names {
+            if !seen.insert(f) {
+                return Err(format!("record `{}` has a duplicate field `{f}`", td.name));
+            }
+        }
+        records.insert(td.name.clone(), td.field_names.clone());
+    }
     // every `User` type mentioned in a signature must be declared
     for p in &module.parts {
         for (_, t) in &p.params {
@@ -619,7 +648,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     let mut all_holes: Vec<HoleInfo> = Vec::new();
     for part in &module.parts {
         check_signature(part)?;
-        check_contracts(part, &callables, &ctors)?;
+        check_contracts(part, &callables, &ctors, &records)?;
         // no local may shadow a part or constructor name, so a bare `Var` that
         // names a part is unambiguously a first-class function value (REQ-LLL-009)
         let mut locals: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1850,6 +1879,7 @@ fn check_contracts(
     part: &Part,
     callables: &HashSet<String>,
     ctors: &HashMap<String, (String, Vec<Ty>)>,
+    records: &HashMap<String, Vec<String>>,
 ) -> Result<(), String> {
     let params: HashMap<String, Ty> = part.params.iter().cloned().collect();
     let no_calls = |e: &Expr, clause: &str| -> Result<(), String> {
@@ -1881,7 +1911,7 @@ fn check_contracts(
     };
     for r in &part.requires {
         no_calls(r, "requires")?;
-        let t = type_of_pure(r, &params, None, ctors)
+        let t = type_of_pure(r, &params, None, ctors, records)
             .map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: requires clause must be Bool", part.name));
@@ -1889,7 +1919,7 @@ fn check_contracts(
     }
     for r in &part.ensures {
         no_calls(r, "ensures")?;
-        let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors)
+        let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors, records)
             .map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: ensures clause must be Bool", part.name));
@@ -1897,7 +1927,7 @@ fn check_contracts(
     }
     for m in &part.measure {
         no_calls(m, "measure")?;
-        let t = type_of_pure(m, &params, None, ctors)
+        let t = type_of_pure(m, &params, None, ctors, records)
             .map_err(|e| format!("part `{}` measure: {e}", part.name))?;
         if t != Ty::Int {
             return Err(format!(
@@ -1931,6 +1961,7 @@ fn type_of_pure(
     vars: &HashMap<String, Ty>,
     result: Option<Ty>,
     ctors: &HashMap<String, (String, Vec<Ty>)>,
+    records: &HashMap<String, Vec<String>>,
 ) -> Result<Ty, String> {
     Ok(match e {
         // A hole `?` is a TERM-position placeholder only — forbidden in a contract so
@@ -1952,7 +1983,7 @@ fn type_of_pure(
             // requires/ensures — SMT datatype equality, DEC-LLL-036)
             let mut cs = Vec::with_capacity(items.len());
             for it in items {
-                cs.push(type_of_pure(it, vars, result.clone(), ctors)?);
+                cs.push(type_of_pure(it, vars, result.clone(), ctors, records)?);
             }
             Ty::Tuple(cs)
         }
@@ -1960,9 +1991,9 @@ fn type_of_pure(
             if items.is_empty() {
                 return Err("empty list literal `[]` is not allowed in contracts (v1)".into());
             }
-            let elem = type_of_pure(&items[0], vars, result.clone(), ctors)?;
+            let elem = type_of_pure(&items[0], vars, result.clone(), ctors, records)?;
             for i in &items[1..] {
-                if type_of_pure(i, vars, result.clone(), ctors)? != elem {
+                if type_of_pure(i, vars, result.clone(), ctors, records)? != elem {
                     return Err("list literal elements must share one type".into());
                 }
             }
@@ -1986,26 +2017,26 @@ fn type_of_pure(
         }).ok_or_else(|| format!("unknown variable `{n}`"))?,
         Expr::Neg(a) => {
             // negation preserves the numeric type — Int or Rational (REQ-LLL-054)
-            match type_of_pure(a, vars, result, ctors)? {
+            match type_of_pure(a, vars, result, ctors, records)? {
                 Ty::Int => Ty::Int,
                 Ty::Rational => Ty::Rational,
                 other => return Err(format!("negation needs Int or Rational, got {other}")),
             }
         }
         Expr::Not(a) => {
-            if type_of_pure(a, vars, result, ctors)? != Ty::Bool {
+            if type_of_pure(a, vars, result, ctors, records)? != Ty::Bool {
                 return Err("`not` needs Bool".into());
             }
             Ty::Bool
         }
         Expr::Bin(op, a, b) => {
-            let ta = type_of_pure(a, vars, result.clone(), ctors)?;
-            let tb = type_of_pure(b, vars, result, ctors)?;
+            let ta = type_of_pure(a, vars, result.clone(), ctors, records)?;
+            let tb = type_of_pure(b, vars, result, ctors, records)?;
             bin_type(*op, ta, tb)?
         }
         Expr::Cons(h, t) => {
-            let th = type_of_pure(h, vars, result.clone(), ctors)?;
-            let tt = type_of_pure(t, vars, result, ctors)?;
+            let th = type_of_pure(h, vars, result.clone(), ctors, records)?;
+            let tt = type_of_pure(t, vars, result, ctors, records)?;
             if tt != Ty::list(th.clone()) {
                 return Err(format!(
                     "`::` needs T on the left and List[T] on the right, got {th} :: {tt}"
@@ -2017,7 +2048,7 @@ fn type_of_pure(
         // over a tuple, lowered to the Z3 selector `(projN_i …)` — admitted here
         // (unlike a user `part` call, DEC-LLL-017), which is precisely what lets a
         // tuple/record field be named in requires/ensures/measure.
-        Expr::Proj(e, i) => match type_of_pure(e, vars, result, ctors)? {
+        Expr::Proj(e, i) => match type_of_pure(e, vars, result, ctors, records)? {
             Ty::Tuple(cs) => cs.get(*i).cloned().ok_or_else(|| {
                 format!(
                     "tuple projection `.{i}` out of bounds: the tuple has {} component(s)",
@@ -2026,6 +2057,25 @@ fn type_of_pure(
             })?,
             other => return Err(format!("projection `.{i}` needs a tuple, got {other}")),
         },
+        // named-field access in a contract (REQ-LLL-070): a checker-level PRIMITIVE over
+        // a RECORD, lowered to the datatype selector `(Ctor_i …)` of the sole ctor —
+        // admitted here (unlike a user `part` call, DEC-LLL-017), which is exactly what
+        // lets a record invariant be stated over a field in requires/ensures/measure.
+        Expr::Field(e, name) => match type_of_pure(e, vars, result, ctors, records)? {
+            Ty::User(tn, _) => {
+                let idx = records
+                    .get(&tn)
+                    .and_then(|fs| fs.iter().position(|f| f == name))
+                    .ok_or_else(|| format!("type `{tn}` has no field `{name}`"))?;
+                // the field's declared type = the i-th positional field of the record's
+                // sole constructor (ctor name == type name for a record).
+                let (_, fields) = ctors
+                    .get(&tn)
+                    .ok_or_else(|| format!("type `{tn}` is not a record"))?;
+                fields[idx].clone()
+            }
+            other => return Err(format!("field access `.{name}` needs a record, got {other}")),
+        },
         // array spec primitives are admitted in contracts (DEC-LLL-017 amendment):
         // they are TERM constructors backed by a Z3 theory operator, not user calls.
         Expr::Call(name, args) if is_array_spec_term(name) => match name.as_str() {
@@ -2033,7 +2083,7 @@ fn type_of_pure(
                 if args.len() != 1 {
                     return Err("`length` takes 1 argument".into());
                 }
-                if !matches!(type_of_pure(&args[0], vars, result.clone(), ctors)?, Ty::Array(_)) {
+                if !matches!(type_of_pure(&args[0], vars, result.clone(), ctors, records)?, Ty::Array(_)) {
                     return Err("`length` needs an Array".into());
                 }
                 Ty::Int
@@ -2042,20 +2092,20 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`get` takes 2 arguments (array, index)".into());
                 }
-                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
+                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
                     Ty::Array(e) => *e,
                     _ => return Err("`get` needs an Array".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors)? != Ty::Int {
+                if type_of_pure(&args[1], vars, result, ctors, records)? != Ty::Int {
                     return Err("`get` index must be Int".into());
                 }
                 elem
             }
             "array" => {
                 if let Some(first) = args.first() {
-                    let elem = type_of_pure(first, vars, result.clone(), ctors)?;
+                    let elem = type_of_pure(first, vars, result.clone(), ctors, records)?;
                     for a in &args[1..] {
-                        if type_of_pure(a, vars, result.clone(), ctors)? != elem {
+                        if type_of_pure(a, vars, result.clone(), ctors, records)? != elem {
                             return Err("array literal elements must share one type".into());
                         }
                     }
@@ -2068,11 +2118,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`contains` takes 2 arguments (array, value)".into());
                 }
-                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
+                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
                     Ty::Array(e) => *e,
                     _ => return Err("`contains` needs an Array".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors)? != elem {
+                if type_of_pure(&args[1], vars, result, ctors, records)? != elem {
                     return Err("`contains` value type mismatch".into());
                 }
                 Ty::Bool
@@ -2087,11 +2137,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`lookup` takes 2 arguments (map, key)".into());
                 }
-                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
+                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
                     Ty::Map(k, v) => (*k, *v),
                     _ => return Err("`lookup` needs a Map".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors)? != mk {
+                if type_of_pure(&args[1], vars, result, ctors, records)? != mk {
                     return Err("`lookup` key type mismatch".into());
                 }
                 mv
@@ -2100,11 +2150,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`haskey` takes 2 arguments (map, key)".into());
                 }
-                let mk = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
+                let mk = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
                     Ty::Map(k, _) => *k,
                     _ => return Err("`haskey` needs a Map".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors)? != mk {
+                if type_of_pure(&args[1], vars, result, ctors, records)? != mk {
                     return Err("`haskey` key type mismatch".into());
                 }
                 Ty::Bool
@@ -2119,11 +2169,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`member` takes 2 arguments (set, element)".into());
                 }
-                let se = match type_of_pure(&args[0], vars, result.clone(), ctors)? {
+                let se = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
                     Ty::Set(e) => *e,
                     _ => return Err("`member` needs a Set".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors)? != se {
+                if type_of_pure(&args[1], vars, result, ctors, records)? != se {
                     return Err("`member` element type mismatch".into());
                 }
                 Ty::Bool
@@ -2703,6 +2753,40 @@ fn check_expr(
             other => {
                 return Err(format!(
                     "part `{}`: projection `.{i}` needs a tuple, got {other}",
+                    ctx.part.name
+                ))
+            }
+        },
+        // named-field access `e.name` (REQ-LLL-070): type-directed against the base's
+        // RECORD type. Resolves the name to the i-th positional field of the record's
+        // sole constructor. Records are monomorphic in this slice — the field type is
+        // returned as declared (no type-parameter substitution, mirroring the contract
+        // rule in `type_of_pure`; parametric records are a follow-up).
+        Expr::Field(e, name) => match check_expr(ctx, e, None)? {
+            Ty::User(tn, _) => {
+                let td = ctx
+                    .module
+                    .types
+                    .iter()
+                    .find(|td| td.name == tn)
+                    .filter(|td| !td.field_names.is_empty())
+                    .ok_or_else(|| {
+                        format!(
+                            "part `{}`: field access `.{name}` needs a record, got `{tn}`",
+                            ctx.part.name
+                        )
+                    })?;
+                let idx = td.field_names.iter().position(|f| f == name).ok_or_else(|| {
+                    format!(
+                        "part `{}`: record `{tn}` has no field `{name}`",
+                        ctx.part.name
+                    )
+                })?;
+                td.ctors[0].1[idx].clone()
+            }
+            other => {
+                return Err(format!(
+                    "part `{}`: field access `.{name}` needs a record, got {other}",
                     ctx.part.name
                 ))
             }

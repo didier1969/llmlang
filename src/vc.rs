@@ -506,6 +506,9 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
             Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
         }
         Expr::Proj(a, i) => Expr::Proj(Box::new(inline_methods(a, class, inst)?), *i),
+        Expr::Field(a, name) => {
+            Expr::Field(Box::new(inline_methods(a, class, inst)?), name.clone())
+        }
         Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit
         | Expr::Hole => e.clone(),
     })
@@ -535,6 +538,7 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
         Expr::ListLit(xs) => Expr::ListLit(xs.iter().map(|x| subst_vars(x, map)).collect()),
         Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| subst_vars(x, map)).collect()),
         Expr::Proj(a, i) => Expr::Proj(Box::new(subst_vars(a, map)), *i),
+        Expr::Field(a, name) => Expr::Field(Box::new(subst_vars(a, map)), name.clone()),
         Expr::Call(n, args) => {
             Expr::Call(n.clone(), args.iter().map(|a| subst_vars(a, map)).collect())
         }
@@ -670,13 +674,30 @@ impl<'a> Emit<'a> {
                 let s = self.sort_of(inner, env)?;
                 tuple_component_sorts(&s)?.get(*i).cloned()
             }
-            // a call to a module part yields its declared return type's sort (a ctor
-            // call returns a user datatype, never a tuple — irrelevant to projection).
+            // a call to a module part yields its declared return type's sort; a
+            // CONSTRUCTOR call yields its owning user datatype (REQ-LLL-070). The ctor
+            // fallback is what lets a field access on a freshly-constructed record at a
+            // call-site precondition (`f(Point(1,2))` with `requires p.x > 0`) recover
+            // its sort instead of failing LOUD on a valid obligation.
             Expr::Call(name, _) => self
                 .cm
                 .index
                 .get(name)
-                .map(|&ix| smt_ty(&self.cm.module.parts[ix].ret)),
+                .map(|&ix| smt_ty(&self.cm.module.parts[ix].ret))
+                .or_else(|| {
+                    self.cm
+                        .ctors
+                        .get(name)
+                        .map(|(owner, _)| smt_ty(&Ty::User(owner.clone(), vec![])))
+                }),
+            // named-field access → the field's declared sort, recovered from the record
+            // type of the base (mirror of Proj; monomorphic record sort == its bare name).
+            Expr::Field(inner, name) => {
+                let srt = self.sort_of(inner, env)?;
+                let td = self.cm.module.types.iter().find(|td| td.name == srt)?;
+                let idx = td.field_names.iter().position(|f| f == name)?;
+                Some(smt_ty(&td.ctors[0].1[idx]))
+            }
             _ => None,
         }
     }
@@ -965,6 +986,35 @@ impl<'a> Emit<'a> {
                 self.sorts.insert(term.clone(), comp_sort);
                 term
             }
+            // named-field access `e.name` → the native datatype SELECTOR `(Ctor_i …)` of
+            // the record's sole constructor (REQ-LLL-070, DEC-LLL-036). The record type
+            // and field index are recovered from the base's sort (never stored in the
+            // AST); an INDETERMINATE sort fails LOUDLY — an obligation is NEVER silently
+            // skipped (DEC-LLL-015/017). The selector name `{Ctor}_{i}` matches the
+            // `user_datatype_decls` declaration (ctor name == type name for a record).
+            Expr::Field(e, name) => {
+                let et = self.tr(e, env, None)?;
+                let srt = self.sort_of(e, env).ok_or_else(|| {
+                    format!("vcgen: cannot determine the record type of the base of `.{name}`")
+                })?;
+                let td = self
+                    .cm
+                    .module
+                    .types
+                    .iter()
+                    .find(|td| td.name == srt && !td.field_names.is_empty())
+                    .ok_or_else(|| {
+                        format!("vcgen: field access `.{name}` on non-record sort `{srt}`")
+                    })?;
+                let idx = td.field_names.iter().position(|f| f == name).ok_or_else(|| {
+                    format!("vcgen: record `{}` has no field `{name}`", td.name)
+                })?;
+                let (ctor, fields) = &td.ctors[0];
+                let term = format!("({ctor}_{idx} {et})");
+                // record the field's own sort so a NESTED access / match on it resolves.
+                self.sorts.insert(term.clone(), smt_ty(&fields[idx]));
+                term
+            }
             Expr::Neg(a) => format!("(- {})", self.tr(a, env, None)?),
             Expr::Not(a) => format!("(not {})", self.tr(a, env, None)?),
             Expr::Bin(op, a, b) => {
@@ -1229,12 +1279,20 @@ impl<'a> Emit<'a> {
                 // ADT constructor application `(Ctor arg …)` (REQ-LLL-011) — thread
                 // each field type so an empty `array()` in a typed field fixes its
                 // element sort from the constructor signature (REQ-LLL-037).
-                if let Some((_, fields)) = self.cm.ctors.get(name).cloned() {
+                if let Some((owner, fields)) = self.cm.ctors.get(name).cloned() {
                     let mut ts = Vec::new();
                     for (i, a) in args.iter().enumerate() {
                         ts.push(self.tr(a, env, fields.get(i))?);
                     }
-                    return Ok(format!("({name} {})", ts.join(" ")));
+                    let term = format!("({name} {})", ts.join(" "));
+                    // record the constructed value's sort so a field access on a record
+                    // built inline — notably a call-site precondition `f(Point(1,2))`
+                    // where the formal binds to this term string — recovers it via
+                    // `sort_of` instead of failing LOUD (REQ-LLL-070, mirror of the
+                    // tuple-literal sort recording).
+                    self.sorts
+                        .insert(term.clone(), smt_ty(&Ty::User(owner, vec![])));
+                    return Ok(term);
                 }
                 let callee = &self.cm.module.parts[self.cm.index[name]];
                 let callee_params = callee.params.clone();
