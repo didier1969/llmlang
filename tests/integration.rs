@@ -2087,8 +2087,9 @@ fn actor_runtime_trace_records_delivery_order_and_replay_round_trips() {
         String::from_utf8_lossy(&run1.stderr)
     );
     let trace = std::fs::read_to_string(&trace_path).expect("read trace");
-    assert!(trace.contains("\"seq\":0,\"pid\":0,\"msg\":7"), "expected first delivery recorded, got:\n{trace}");
-    assert!(trace.contains("\"seq\":1,\"pid\":0,\"msg\":3"), "expected second delivery recorded, got:\n{trace}");
+    // Delivery records quote the Debug form so every line is valid JSON (i64 -> "7").
+    assert!(trace.contains("\"seq\":0,\"pid\":0,\"msg\":\"7\""), "expected first delivery recorded, got:\n{trace}");
+    assert!(trace.contains("\"seq\":1,\"pid\":0,\"msg\":\"3\""), "expected second delivery recorded, got:\n{trace}");
 
     let run2 = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
         .args(["run"])
@@ -2168,6 +2169,19 @@ fn actor_adt_message_scalar_fields_round_trips_via_cargo() {
         "ADT-message actor replay round-trip failed:\nstdout={rout}\nstderr={}",
         String::from_utf8_lossy(&r.stderr)
     );
+    // criterion #2: every delivery record is *valid JSON* even for an ADT message.
+    // The Debug form is quoted, so a strict parser accepts each `"seq"` line and the
+    // message renders as a JSON string (`"Add(5)"`), never a bare token. Guards the
+    // whole trace file staying machine-parseable for auditors/tools.
+    let atrace = std::fs::read_to_string(&trace_path).expect("read adt trace");
+    let deliveries: Vec<serde_json::Value> = atrace
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("every trace line is valid JSON"))
+        .filter(|v| v.get("seq").is_some())
+        .collect();
+    assert_eq!(deliveries.len(), 3, "three deliveries recorded, got:\n{atrace}");
+    let msgs: Vec<&str> = deliveries.iter().map(|v| v["msg"].as_str().expect("msg is a JSON string")).collect();
+    assert_eq!(msgs, ["Inc", "Add(5)", "Inc"], "delivery order + ADT rendering, got:\n{atrace}");
 }
 
 #[test]

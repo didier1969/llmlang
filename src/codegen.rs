@@ -2345,7 +2345,11 @@ fn trace_delivery<M: std::fmt::Debug>(pid: i64, msg: M) {
     let seq = DELIVERY_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut g = trace_file();
     if let Some(f) = g.as_mut() {
-        writeln!(f, "{{\"seq\":{seq},\"pid\":{pid},\"msg\":{msg:?}}}").unwrap();
+        // `msg` is stringified via Debug and quoted so every delivery line is
+        // valid JSON (i64 -> "7", ADT -> "Add(5)"). Quoting is safe because the
+        // actor-message gate forbids non-scalar fields, so the Debug rendering
+        // never contains a `"` or `\` that would need escaping.
+        writeln!(f, "{{\"seq\":{seq},\"pid\":{pid},\"msg\":\"{msg:?}\"}}").unwrap();
     }
 }
 
