@@ -1,0 +1,46 @@
+import "../std/list.lll"
+import "../std/str.lll"
+
+module Demo.StdlibBreadth:
+
+  # Wave-4 breadth (REQ-LLL-067): exercises the new list/str essentials at RUNTIME,
+  # complementing their static Z3 proofs. Every printed `1` is a runtime-verified fact.
+
+  part is_even(n: Int) -> Bool:
+    yield n mod 2 == 0
+
+  part add2(a: Int, b: Int) -> Int:
+    yield a + b
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part main() -> Int via IO:
+    # filter: evens of [1..6] = [2,4,6] (3 elements).
+    let evens = filter(is_even, 1 :: 2 :: 3 :: 4 :: 5 :: 6 :: [])
+    let a = IO.print(flag(len(evens) == 3))
+    # foldl: sum of [1,2,3,4] = 10.
+    let s = foldl(add2, 0, 1 :: 2 :: 3 :: 4 :: [])
+    let b = IO.print(flag(s == 10))
+    # any / all.
+    let c = IO.print(flag(any(is_even, 1 :: 3 :: 5 :: []) == false))
+    let d = IO.print(flag(all(is_even, 2 :: 4 :: 6 :: [])))
+    # index_of: found (1) and absent (-1).
+    let e = IO.print(flag(index_of(5 :: 3 :: 9 :: [], 3) == 1))
+    let f = IO.print(flag(index_of(5 :: 3 :: 9 :: [], 7) == 0 - 1))
+    # zip: [1,2] x [10,20] pairs up to length 2.
+    let z = zip(1 :: 2 :: [], 10 :: 20 :: [])
+    let g = IO.print(flag(len(z) == 2))
+    # str split / join round-trip on "a,b,c" (',' = codepoint 44).
+    let parts = split("a,b,c", 44)
+    let h = IO.print(flag(len(parts) == 3))
+    let i = IO.print(flag(str_eq(join(",", parts), "a,b,c")))
+    # substring "hello"[1..3] = "ell".
+    let j = IO.print(flag(str_eq(substring("hello", 1, 3), "ell")))
+    # contains_sub.
+    let k = IO.print(flag(contains_sub("hello world", "o w")))
+    # int <-> str round-trip on a negative number.
+    let n = str_to_int(int_to_str(0 - 4025))
+    yield IO.print(flag(n == 0 - 4025))

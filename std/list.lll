@@ -96,3 +96,70 @@ module Std.List:
       h :: t ->
         let m = minimum(t, d)
         yield min2(h, m)
+
+  # ---- essentials, wave-4 breadth (REQ-LLL-067): higher-order + search ----
+  # All structural recursion over `List[a]` — one proof serves every element type.
+
+  # keep the elements satisfying the predicate, in order.
+  part filter(p: (a) -> Bool, xs: List[a]) -> List[a]:
+    match xs:
+      []     -> yield []
+      h :: t ->
+        match p(h):
+          true  -> yield h :: filter(p, t)
+          false -> yield filter(p, t)
+
+  # left fold: foldl(f, acc, [x, y, z]) = f(f(f(acc, x), y), z).
+  part foldl(f: (b, a) -> b, acc: b, xs: List[a]) -> b:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield foldl(f, f(acc, h), t)
+
+  # right fold: foldr(f, [x, y, z], acc) = f(x, f(y, f(z, acc))).
+  part foldr(f: (a, b) -> b, xs: List[a], acc: b) -> b:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield f(h, foldr(f, t, acc))
+
+  # does ANY element satisfy the predicate?
+  part any(p: (a) -> Bool, xs: List[a]) -> Bool:
+    match xs:
+      []     -> yield false
+      h :: t ->
+        match p(h):
+          true  -> yield true
+          false -> yield any(p, t)
+
+  # do ALL elements satisfy the predicate?
+  part all(p: (a) -> Bool, xs: List[a]) -> Bool:
+    match xs:
+      []     -> yield true
+      h :: t ->
+        match p(h):
+          true  -> yield all(p, t)
+          false -> yield false
+
+  # 0-based index of the FIRST element equal to `v`, or -1 if absent (total `indexOf`
+  # — the -1 sentinel is a genuine "not found", not a runtime fallback: Option-returning
+  # search waits on parametric ADTs, REQ-LLL-068).
+  part index_of(xs: List[a], v: a) -> Int:
+    match xs:
+      []     -> yield 0 - 1
+      h :: t ->
+        match h:
+          w when w == v -> yield 0
+          _ ->
+            let r = index_of(t, v)
+            match r:
+              m when m < 0 -> yield 0 - 1
+              _            -> yield 1 + r
+
+  # pair elements positionally; stops at the shorter list. First-class tuples (surface
+  # construct + `match (a, b)` destructure) make `List[(a, b)]` consumable in pure llmlang.
+  part zip(xs: List[a], ys: List[b]) -> List[(a, b)]:
+    match xs:
+      []       -> yield []
+      xh :: xt ->
+        match ys:
+          []       -> yield []
+          yh :: yt -> yield (xh, yh) :: zip(xt, yt)

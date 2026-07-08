@@ -4428,3 +4428,40 @@ fn db_transaction_rollback_discards_insert_via_cargo() {
         "a rolled-back INSERT must leave 0 rows:\n{stdout}"
     );
 }
+
+#[test]
+fn stdlib_breadth_essentials_verify_and_run() {
+    // REQ-LLL-067 (wave-4 breadth): the extended list/str stdlib essentials — filter,
+    // foldl, any/all, index_of, zip (List[(a,b)]), plus str split/join/substring/
+    // contains_sub and int<->str — verified by Z3 and exercised at runtime. Named parts
+    // pass as first-class function values; all-ones = every essential behaves correctly.
+    let (_, m) = loader::load_program("examples/stdlib_breadth.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "stdlib breadth must verify over Z3: {:?}", failures(&report));
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("breadth.rs");
+    let bin = dir.join("breadth_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "stdlib breadth Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 12, "every stdlib essential must hold at runtime (12 ones expected):\n{stdout}");
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no stdlib essential may fail at runtime:\n{stdout}"
+    );
+}

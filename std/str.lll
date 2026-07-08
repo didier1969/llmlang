@@ -43,3 +43,92 @@ module Std.Str:
             match sh == ph:
               true  -> yield starts_with(st, pt)
               false -> yield false
+
+  # ---- essentials, wave-4 breadth (REQ-LLL-067) ----
+
+  # the substring of `n` codepoints starting at `start`; clamps at both ends (total).
+  part substring(s: List[Int], start: Int, n: Int) -> List[Int]:
+    yield take(drop(s, start), n)
+
+  # 0-based index of the first occurrence of codepoint `c`, or -1 (total).
+  part str_index_of(s: List[Int], c: Int) -> Int:
+    yield index_of(s, c)
+
+  # does `needle` occur as a contiguous substring of `hay`?
+  part contains_sub(hay: List[Int], needle: List[Int]) -> Bool:
+    match starts_with(hay, needle):
+      true  -> yield true
+      false ->
+        match hay:
+          []     -> yield false
+          h :: t -> yield contains_sub(t, needle)
+
+  # join pieces with `sep` between them: join(",", ["a", "b"]) = "a,b".
+  part join(sep: List[Int], parts: List[List[Int]]) -> List[Int]:
+    match parts:
+      []     -> yield []
+      h :: t ->
+        match t:
+          []     -> yield h
+          x :: y -> yield append(h, append(sep, join(sep, t)))
+
+  # an empty string with a FIXED element type — lets the nested empty pieces in `split`
+  # infer as `List[Int]` (a bare `[]` head in `[] :: rest` is otherwise ambiguous).
+  part empty_line() -> List[Int]:
+    yield []
+
+  # split on a single-codepoint delimiter: split("a,b", ',') = ["a", "b"]. Always yields
+  # at least one piece; adjacent delimiters produce empty pieces (standard split).
+  part split(s: List[Int], d: Int) -> List[List[Int]]:
+    match s:
+      []     -> yield empty_line() :: []
+      h :: t ->
+        let rest = split(t, d)
+        match h == d:
+          true  -> yield empty_line() :: rest
+          false ->
+            match rest:
+              r :: rs -> yield (h :: r) :: rs
+              # unreachable (split always yields >= 1 piece) but needed for exhaustiveness;
+              # `empty_line()` (a call, not a bare `[]`) keeps the inner List[Int] empty
+              # distinct from the outer List[List[Int]] empty so codegen CSE cannot merge
+              # two differently-typed empties (REQ-LLL-069, a separate codegen defect).
+              []      -> yield (h :: empty_line()) :: []
+
+  # ---- integer <-> decimal string (REQ-LLL-067) ----
+
+  part digit_cp(d: Int) -> Int:
+    requires 0 <= d, d <= 9
+    ensures 48 <= result, result <= 57
+    yield 48 + d
+
+  # decimal codepoints of a NON-NEGATIVE integer; `measure n` (n div 10 strictly
+  # decreases under euclidean division, DEC-LLL-026) discharges termination.
+  part int_to_str_pos(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    match n:
+      z when z < 10 -> yield digit_cp(n) :: []
+      _             -> yield append(int_to_str_pos(n div 10), digit_cp(n mod 10) :: [])
+
+  # decimal string of any integer; a negative value is prefixed with '-' (codepoint 45).
+  part int_to_str(n: Int) -> List[Int]:
+    match n:
+      z when z < 0 -> yield 45 :: int_to_str_pos(0 - n)
+      _            -> yield int_to_str_pos(n)
+
+  # accumulate decimal digits into an integer (assumes ASCII digits; validation is a
+  # logged robustness follow-up). Structural recursion terminates.
+  part str_to_int_acc(s: List[Int], acc: Int) -> Int:
+    match s:
+      []     -> yield acc
+      h :: t -> yield str_to_int_acc(t, acc * 10 + (h - 48))
+
+  # parse a decimal string to an integer; a leading '-' negates.
+  part str_to_int(s: List[Int]) -> Int:
+    match s:
+      []     -> yield 0
+      h :: t ->
+        match h == 45:
+          true  -> yield 0 - str_to_int_acc(t, 0)
+          false -> yield str_to_int_acc(s, 0)
