@@ -2113,6 +2113,64 @@ fn actor_runtime_trace_records_delivery_order_and_replay_round_trips() {
 }
 
 #[test]
+fn actor_adt_message_scalar_fields_round_trips_via_cargo() {
+    // REQ-LLL-036 tranche-1 (DEC-LLL-059, marshal-at-frontier): an actor now accepts a
+    // scalar-field SUM message (`Msg = Inc | Add(Int)`), not only `Int`. The message crosses
+    // the multi-thread Tokio boundary by unwrap/re-wrap of its `Rc` (its bare enum is `Send`);
+    // the state stays `Int`. Proves compile + `lll run` deliver ADT messages correctly and the
+    // multi-thread runtime is NOT regressed. 0 → Inc → 1 → Add(5) → 6 → Inc → 7.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorAdtMsg:\n\n  type Msg = Inc | Add(Int)\n\n  part step(state: Int, msg: Msg) -> Int:\n    match msg:\n      Inc    -> yield state + 1\n      Add(n) -> yield state + n\n\n  effect Actor:\n    spawn(Int) -> Int      = extern \"lll_actor_runtime::spawn\"\n    send(Int, Msg) -> Unit = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int      = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, Inc)\n    let _ = Actor.send(pid, Add(5))\n    let _ = Actor.send(pid, Inc)\n    yield IO.print(Actor.state(pid))\n";
+    let dir = tempdir();
+    let f = dir.join("actor_adt_msg.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "ADT-message actor run failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 7"),
+        "expected 7 (Inc, Add(5), Inc from 0), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // criterion #1: `--trace` then `--replay` round-trips green for an ADT-message actor.
+    // The delivery records now carry the message's Debug form (`Add(5)`); the replay queue
+    // skips them (no `"eff"` field), so the effect replay stays deterministic.
+    let trace_path = dir.join("adt_trace.jsonl");
+    let t = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--trace"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --trace");
+    assert!(t.status.success(), "trace run failed:\nstderr={}", String::from_utf8_lossy(&t.stderr));
+    let r = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--replay"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --replay");
+    let rout = String::from_utf8_lossy(&r.stdout);
+    assert!(
+        r.status.success() && rout.contains("=> 7") && rout.contains("[replay: OK"),
+        "ADT-message actor replay round-trip failed:\nstdout={rout}\nstderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+}
+
+#[test]
 fn actor_runtime_anti_storm_stops_crash_looping_actor() {
     // REQ-LLL-036 W3 (anti-storm, CPT-LLL-015 §8 — scoped to this ONE piece:
     // restart-fresh stays the only policy, no configurability yet). An actor
@@ -3516,7 +3574,46 @@ fn actor_runtime_wrong_step_signature_rejected() {
     let src = "module M:\n\n  part step(x: Bool) -> Int:\n    yield 0\n\n  effect Actor:\n    spawn(Int) -> Int = extern \"lll_actor_runtime::spawn\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
     let m = parser::parse_module(src).expect("parse");
     let err = types::check_module(m).expect_err("a wrong-shaped `step` must be rejected");
-    assert!(err.contains("(Int, Int) -> Int"), "expected a step-signature error, got: {err}");
+    assert!(err.contains("(Int, <msg>) -> Int"), "expected a step-signature error, got: {err}");
+}
+
+#[test]
+fn actor_message_non_scalar_field_rejected_at_check() {
+    // REQ-LLL-036 tranche-1 (DEC-LLL-059): a message ADT with a HEAP field (here a `List`)
+    // has an inner enum that is NOT `Send`, so it cannot cross the multi-thread boundary by
+    // unwrap/re-wrap. It is REJECTED at check with a clean fail-stop (DEC-LLL-015) — never a
+    // cryptic rustc error inside the generated runtime.
+    let src = "module M:\n\n  type Msg = Ping | Payload(List[Int])\n\n  part step(state: Int, msg: Msg) -> Int:\n    match msg:\n      Ping        -> yield state\n      Payload(xs) -> yield state\n\n  effect Actor:\n    spawn(Int) -> Int      = extern \"lll_actor_runtime::spawn\"\n    send(Int, Msg) -> Unit = extern \"lll_actor_runtime::send\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a message ADT with a heap field must be rejected");
+    assert!(
+        err.contains("scalar fields") && err.contains("recursive message marshaller"),
+        "expected a non-scalar-message error, got: {err}"
+    );
+}
+
+#[test]
+fn actor_message_recursive_adt_rejected_at_check() {
+    // A self-recursive message ADT has a constructor field of the ADT itself (a heap `Rc`),
+    // so it is not a scalar-field sum → rejected in tranche-1 (same fail-stop gate).
+    let src = "module M:\n\n  type Msg = Stop | Cons(Int, Msg)\n\n  part step(state: Int, msg: Msg) -> Int:\n    match msg:\n      Stop       -> yield state\n      Cons(h, t) -> yield state + h\n\n  effect Actor:\n    spawn(Int) -> Int      = extern \"lll_actor_runtime::spawn\"\n    send(Int, Msg) -> Unit = extern \"lll_actor_runtime::send\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a recursive message ADT must be rejected");
+    assert!(err.contains("scalar fields"), "expected a non-scalar-message error, got: {err}");
+}
+
+#[test]
+fn actor_non_int_state_rejected_at_check() {
+    // REQ-LLL-036 tranche-1: the actor STATE must stay scalar `Int` (a richer state keeps an
+    // `Rc` live across the actor's `.await`, breaking `Send`). A non-`Int` state is rejected
+    // with a pointer to the deferred thread-pinned variant (DEC-LLL-059).
+    let src = "module M:\n\n  part step(state: Bool, msg: Int) -> Bool:\n    yield state\n\n  effect Actor:\n    spawn(Int) -> Int = extern \"lll_actor_runtime::spawn\"\n\n  part main() -> Int via Actor:\n    yield Actor.spawn(0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a non-Int actor state must be rejected");
+    assert!(
+        err.contains("STATE must be scalar `Int`"),
+        "expected a non-Int-state error, got: {err}"
+    );
 }
 
 #[test]

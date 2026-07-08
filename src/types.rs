@@ -455,16 +455,29 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                  (REQ-LLL-036 W2, v1: one behavior per module)"
                     .to_string()
             })?;
-        if step.params.len() != 2
-            || step.params[0].1 != Ty::Int
-            || step.params[1].1 != Ty::Int
-            || step.ret != Ty::Int
-        {
+        // REQ-LLL-036 tranche-1 (DEC-LLL-059): the actor STATE stays scalar `Int` — a
+        // richer state would keep an `Rc` live across the actor's `.await`, breaking the
+        // future's `Send` bound (that is the deferred thread-pinned variant). The MESSAGE
+        // may be `Int` or a scalar-field sum ADT: its bare inner enum is `Send`, so it
+        // crosses the multi-thread boundary by unwrap/re-wrap (marshal-at-frontier).
+        if step.params.len() != 2 || step.params[0].1 != Ty::Int || step.ret != Ty::Int {
             return Err(format!(
-                "part `step`: an `lll_actor_runtime` extern op requires `step` to be exactly \
-                 `(Int, Int) -> Int`, found `({}) -> {}` (REQ-LLL-036 W2)",
+                "part `step`: an `lll_actor_runtime` actor requires `step` to be \
+                 `(Int, <msg>) -> Int` — the actor STATE must be scalar `Int` in tranche-1 \
+                 (richer state needs the thread-pinned variant, DEC-LLL-059), found \
+                 `({}) -> {}` (REQ-LLL-036)",
                 step.params.iter().map(|(_, t)| t.to_string()).collect::<Vec<_>>().join(", "),
                 step.ret
+            ));
+        }
+        if !scalar_actor_msg_ty(&step.params[1].1, &module) {
+            return Err(format!(
+                "part `step`: actor message type `{}` cannot cross the multi-thread actor \
+                 boundary in tranche-1 — a message must be `Int` or a sum type whose \
+                 constructors carry only scalar fields (Int/Bool/Rational). A heap field \
+                 (List/String/Array/Map/nested ADT) needs the deferred recursive message \
+                 marshaller — never a cryptic rustc error (DEC-LLL-015, REQ-LLL-036/DEC-LLL-059)",
+                step.params[1].1
             ));
         }
         // REQ-LLL-036 W2-t2: the emitted glue (`emit_actor_runtime`, codegen.rs)
@@ -865,6 +878,25 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
 /// Field types for a user ADT constructor: Int, Bool, List of a valid field
 /// type, or ANY declared user type (self-recursion → trees; cross-type → mutually
 /// recursive datatypes). Type variables and functions are out of scope (REQ-LLL-011).
+/// REQ-LLL-036 tranche-1 (DEC-LLL-059, marshal-at-frontier): an actor message may be
+/// `Int` or a sum type whose every constructor carries ONLY scalar fields (Int/Bool/
+/// Rational). Such a value's generated inner enum is `Send` (no `Rc`/heap field), so it
+/// crosses the multi-thread actor boundary by unwrap/re-wrap. A message with a heap field
+/// (List/String/Array/Map/nested-or-recursive ADT/fn) is REJECTED at `check` — it must
+/// never reach codegen and degrade into a cryptic rustc error (DEC-LLL-015). Richer
+/// messages need the deferred recursive marshaller.
+fn scalar_actor_msg_ty(t: &Ty, module: &Module) -> bool {
+    match t {
+        Ty::Int => true,
+        Ty::User(n) => module.types.iter().find(|td| &td.name == n).is_some_and(|td| {
+            td.ctors
+                .iter()
+                .all(|(_, fs)| fs.iter().all(|f| matches!(f, Ty::Int | Ty::Bool | Ty::Rational)))
+        }),
+        _ => false,
+    }
+}
+
 fn valid_field_ty(t: &Ty, types: &HashSet<String>) -> bool {
     match t {
         Ty::Int | Ty::Bool => true,
