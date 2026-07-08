@@ -2260,11 +2260,12 @@ fn type_of_pure(
                 // type variable). The vc qualifies the operand as `((as Some (Option Tv_a))
                 // x)` by threading the equality SIBLING's sort into the ctor-app operand —
                 // supplied only when the sibling is `result` or a parameter. A ctor
-                // application whose sibling bears no static sort (`Some(a) == Some(b)`)
-                // stays bare, and Z3 rejects it fail-closed (a sort error proves neither
-                // sat nor unsat → forced rejection), never a false proof (DEC-LLL-015/017,
-                // REQ-LLL-080). A NULLARY `None` at an abstract type is handled separately
-                // (a bare Var annotated `(as None (Option Tv_a))`).
+                // application whose sibling bears no static sort (`Some(a) == Some(b)`) has
+                // nothing to qualify from; the vc's `Call` arm rejects it cleanly at
+                // GENERATION time (a `vcgen` error, before Z3 runs), never a raw Z3 leak,
+                // never a false proof (DEC-LLL-015/017, REQ-LLL-080). A NULLARY `None` at an
+                // abstract type is handled separately (a bare Var annotated
+                // `(as None (Option Tv_a))`).
                 Ty::User(owner, targs)
             }
         }

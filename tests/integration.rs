@@ -4994,6 +4994,22 @@ fn contract_polymorphic_ctor_application_left_operand_verifies() {
 }
 
 #[test]
+fn contract_polymorphic_ctor_application_parameter_sibling_verifies() {
+    // REQ-LLL-081 (the PARAMETER branch of `operand_ty`): the sibling supplying the
+    // ctor-app's sort need not be `result` — a PARAMETER works too. Here `requires y ==
+    // Some(x)` qualifies `Some(x)` from the sibling parameter `y : Option[a]` (not from
+    // `result`), exercising `self.part.params.find(...)`. If that branch regressed to
+    // `None`, `Some(x)` would stay bare → a vcgen error → `verify_src` would panic; a
+    // clean pass proves the parameter sort is threaded. Body trivially discharges `result`.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part f(x: a, y: Option[a]) -> Bool:\n    requires y == Some(x)\n    ensures result == true\n    yield true\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        verify_src(src).ok(),
+        "a parameter sibling must supply the ctor-app sort (REQ-LLL-081): {:?}",
+        failures(&verify_src(src))
+    );
+}
+
+#[test]
 fn contract_polymorphic_ctor_application_without_sibling_sort_fails_closed() {
     // REQ-LLL-081 (fail-closed residual boundary — empirically proven, not assumed): when
     // NEITHER equality operand is a `result`/parameter bearing a static sort, the vc has
