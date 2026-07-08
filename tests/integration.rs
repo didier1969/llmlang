@@ -3809,6 +3809,41 @@ fn check_format_json_emits_structured_diagnostics_with_counterexample() {
 }
 
 #[test]
+fn check_format_json_exit_code_mirrors_verdict_req084() {
+    // REQ-LLL-084: `--format=json` MIRRORS the plain-mode exit-code (verified→0 / failed→1 /
+    // incomplete→2), NOT the legacy "always 0". A shell/CI `… && deploy` reads ONLY the
+    // exit-code, so a FAILED proof exiting 0 was a silent downgrade (violates fail-loud,
+    // DEC-LLL-015/017). The JSON report stays on stdout; stderr stays EMPTY — the code is
+    // derived from the report, never routed through an Err → eprintln.
+    let dir = tempdir().join("json-exit-084");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let run = |name: &str, src: &str| -> std::process::Output {
+        let f = dir.join(name);
+        std::fs::write(&f, src).unwrap();
+        std::process::Command::new(bin)
+            .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    // verified → 0, body ok:true, stderr empty
+    let ok = run("ok.lll", "module M:\n\n  part inc(n: Int) -> Int:\n    ensures result == n + 1\n    yield n + 1\n");
+    assert_eq!(ok.status.code(), Some(0), "verified → exit 0: {}", String::from_utf8_lossy(&ok.stdout));
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("\"ok\": true"), "verified body: {}", String::from_utf8_lossy(&ok.stdout));
+    assert!(ok.stderr.is_empty(), "stdout is the only channel — stderr empty: {}", String::from_utf8_lossy(&ok.stderr));
+    // failed proof → 1 (fail-loud: never a silent 0)
+    let bad = run("bad.lll", "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    ensures result >= 0\n    yield a - b\n");
+    assert_eq!(bad.status.code(), Some(1), "failed proof → exit 1: {}", String::from_utf8_lossy(&bad.stdout));
+    assert!(String::from_utf8_lossy(&bad.stdout).contains("\"ok\": false"), "failed body: {}", String::from_utf8_lossy(&bad.stdout));
+    assert!(bad.stderr.is_empty(), "failed json keeps stderr empty: {}", String::from_utf8_lossy(&bad.stderr));
+    // incomplete (typed hole) → 2
+    let holey = run("holey.lll", "module M:\n\n  part f(n: Int) -> Int:\n    yield ?\n");
+    assert_eq!(holey.status.code(), Some(2), "incomplete → exit 2: {}", String::from_utf8_lossy(&holey.stdout));
+    assert!(String::from_utf8_lossy(&holey.stdout).contains("incomplete"), "incomplete body: {}", String::from_utf8_lossy(&holey.stdout));
+    assert!(holey.stderr.is_empty(), "incomplete json keeps stderr empty: {}", String::from_utf8_lossy(&holey.stderr));
+}
+
+#[test]
 fn example_clause_surface_parses() {
     // REQ-LLL-049 inc.1: `example` is a per-part clause, same shape as
     // requires/ensures/measure — unlike them, it MAY contain a call to the

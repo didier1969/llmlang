@@ -492,11 +492,24 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             }
             let file = file.ok_or_else(usage)?;
             if json {
-                // LLM channel: structured diagnostics on stdout, always exit 0 —
-                // the consumer reads `ok` and repairs from `diagnostics`.
+                // LLM channel: structured diagnostics on stdout. The exit-code MIRRORS the
+                // plain-mode verdict (verified→0 / failed→1 / incomplete→2 — REQ-LLL-084) so a
+                // shell/CI caller (`lll check --format=json f && deploy`) never treats a FAILED
+                // proof as success: fail-loud, never a silent downgrade (DEC-LLL-015/017). For a
+                // CLI the exit-code IS the status-line — control flow (`&&`, set -e, CI steps)
+                // reads only it, never the body. The JSON body (ok/status/diagnostics) stays the
+                // primary channel for an LLM consumer, which reads `ok`. Derive the code from the
+                // report and exit AFTER the println (not via Err) so stdout is pure JSON and
+                // stderr stays empty. A real tool error (missing file, parse/type error) already
+                // folds into status:"failed" (check_report_json), matching plain's exit 1.
                 let report = check_report_json(file, no_cache);
                 println!("{}", report.to_json());
-                return Ok(());
+                let code = match report.status.as_deref() {
+                    Some("failed") => 1,
+                    Some("incomplete") => 2,
+                    _ => 0,
+                };
+                std::process::exit(code);
             }
             let (_, cm, hm) = load(file)?;
             let report = vc::verify(&cm, &hm, &cache_dir(), !no_cache)?;
