@@ -225,6 +225,16 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         records.insert(td.name.clone(), td.field_names.clone());
     }
+    // declared type parameters per ADT (REQ-LLL-074): type name → ordered param names.
+    // `type_of_pure` (the contract typer, no module handle) needs this to type a
+    // parametric constructor APPLICATION `Some(x)` in a contract — it unifies the
+    // ctor's field types against the argument types and places the inferred arguments
+    // in this declared parameter order (mirrors `check_expr`'s ctor-call arm).
+    let typarams: HashMap<String, Vec<String>> = module
+        .types
+        .iter()
+        .map(|td| (td.name.clone(), td.type_params.clone()))
+        .collect();
     // every `User` type mentioned in a signature must be declared
     for p in &module.parts {
         for (_, t) in &p.params {
@@ -648,7 +658,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     let mut all_holes: Vec<HoleInfo> = Vec::new();
     for part in &module.parts {
         check_signature(part)?;
-        check_contracts(part, &callables, &ctors, &records)?;
+        check_contracts(part, &callables, &ctors, &records, &typarams)?;
         // no local may shadow a part or constructor name, so a bare `Var` that
         // names a part is unambiguously a first-class function value (REQ-LLL-009)
         let mut locals: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
@@ -1880,19 +1890,30 @@ fn check_contracts(
     callables: &HashSet<String>,
     ctors: &HashMap<String, (String, Vec<Ty>)>,
     records: &HashMap<String, Vec<String>>,
+    typarams: &HashMap<String, Vec<String>>,
 ) -> Result<(), String> {
     let params: HashMap<String, Ty> = part.params.iter().cloned().collect();
     let no_calls = |e: &Expr, clause: &str| -> Result<(), String> {
         let mut bad = None;
         e.walk(&mut |x| {
             // array/map spec primitives (length/get/lookup/haskey/…) are admitted
-            // terms, not calls — UNLESS the name is a user part/constructor
-            // (then it is a real call).
+            // terms, not calls; an ADT constructor application `Some(x)`/`P(a, b)` is
+            // likewise admitted — DEC-LLL-017 explicitly puts "constructeurs/sélecteurs
+            // ADT natifs Z3" in the decidable fragment (REQ-LLL-074). A user PART call
+            // stays forbidden. A name that shadows a spec term with a user part is a
+            // real call (the part wins), so `callables` is checked first.
             let is_disallowed_call = match x {
                 Expr::EffCall(..) => true,
                 Expr::Call(n, _) => {
-                    (!is_array_spec_term(n) && !is_map_spec_term(n) && !is_set_spec_term(n))
-                        || callables.contains(n)
+                    // `callables` is parts ∪ constructors; a name in it that is NOT a
+                    // constructor is a user PART → a real, forbidden call. A constructor
+                    // or an (un-shadowed) array/map/set spec term is admitted.
+                    let is_part = callables.contains(n) && !ctors.contains_key(n);
+                    is_part
+                        || !(ctors.contains_key(n)
+                            || is_array_spec_term(n)
+                            || is_map_spec_term(n)
+                            || is_set_spec_term(n))
                 }
                 _ => false,
             };
@@ -1911,7 +1932,7 @@ fn check_contracts(
     };
     for r in &part.requires {
         no_calls(r, "requires")?;
-        let t = type_of_pure(r, &params, None, ctors, records)
+        let t = type_of_pure(r, &params, None, ctors, records, typarams)
             .map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: requires clause must be Bool", part.name));
@@ -1919,7 +1940,7 @@ fn check_contracts(
     }
     for r in &part.ensures {
         no_calls(r, "ensures")?;
-        let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors, records)
+        let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors, records, typarams)
             .map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         if t != Ty::Bool {
             return Err(format!("part `{}`: ensures clause must be Bool", part.name));
@@ -1927,7 +1948,7 @@ fn check_contracts(
     }
     for m in &part.measure {
         no_calls(m, "measure")?;
-        let t = type_of_pure(m, &params, None, ctors, records)
+        let t = type_of_pure(m, &params, None, ctors, records, typarams)
             .map_err(|e| format!("part `{}` measure: {e}", part.name))?;
         if t != Ty::Int {
             return Err(format!(
@@ -1962,6 +1983,7 @@ fn type_of_pure(
     result: Option<Ty>,
     ctors: &HashMap<String, (String, Vec<Ty>)>,
     records: &HashMap<String, Vec<String>>,
+    typarams: &HashMap<String, Vec<String>>,
 ) -> Result<Ty, String> {
     Ok(match e {
         // A hole `?` is a TERM-position placeholder only — forbidden in a contract so
@@ -1983,7 +2005,7 @@ fn type_of_pure(
             // requires/ensures — SMT datatype equality, DEC-LLL-036)
             let mut cs = Vec::with_capacity(items.len());
             for it in items {
-                cs.push(type_of_pure(it, vars, result.clone(), ctors, records)?);
+                cs.push(type_of_pure(it, vars, result.clone(), ctors, records, typarams)?);
             }
             Ty::Tuple(cs)
         }
@@ -1991,9 +2013,9 @@ fn type_of_pure(
             if items.is_empty() {
                 return Err("empty list literal `[]` is not allowed in contracts (v1)".into());
             }
-            let elem = type_of_pure(&items[0], vars, result.clone(), ctors, records)?;
+            let elem = type_of_pure(&items[0], vars, result.clone(), ctors, records, typarams)?;
             for i in &items[1..] {
-                if type_of_pure(i, vars, result.clone(), ctors, records)? != elem {
+                if type_of_pure(i, vars, result.clone(), ctors, records, typarams)? != elem {
                     return Err("list literal elements must share one type".into());
                 }
             }
@@ -2017,26 +2039,33 @@ fn type_of_pure(
         }).ok_or_else(|| format!("unknown variable `{n}`"))?,
         Expr::Neg(a) => {
             // negation preserves the numeric type — Int or Rational (REQ-LLL-054)
-            match type_of_pure(a, vars, result, ctors, records)? {
+            match type_of_pure(a, vars, result, ctors, records, typarams)? {
                 Ty::Int => Ty::Int,
                 Ty::Rational => Ty::Rational,
                 other => return Err(format!("negation needs Int or Rational, got {other}")),
             }
         }
         Expr::Not(a) => {
-            if type_of_pure(a, vars, result, ctors, records)? != Ty::Bool {
+            if type_of_pure(a, vars, result, ctors, records, typarams)? != Ty::Bool {
                 return Err("`not` needs Bool".into());
             }
             Ty::Bool
         }
         Expr::Bin(op, a, b) => {
-            let ta = type_of_pure(a, vars, result.clone(), ctors, records)?;
-            let tb = type_of_pure(b, vars, result, ctors, records)?;
+            let ta = type_of_pure(a, vars, result.clone(), ctors, records, typarams)?;
+            let tb = type_of_pure(b, vars, result, ctors, records, typarams)?;
+            // a nullary parametric constructor (`None`) types as `Option[]` — it has no
+            // field to infer a type argument from. When compared for equality against a
+            // fully-applied sibling (`result : Option[Int]`), adopt that operand's
+            // arguments so `result == None` type-checks and the vc gets a well-sorted
+            // equality (REQ-LLL-074). Z3 resolves the bare `None`'s sort from the
+            // equality anchor, so no `(as …)` annotation is needed on the vc side.
+            let (ta, tb) = reconcile_nullary_ctor(ta, tb, typarams);
             bin_type(*op, ta, tb)?
         }
         Expr::Cons(h, t) => {
-            let th = type_of_pure(h, vars, result.clone(), ctors, records)?;
-            let tt = type_of_pure(t, vars, result, ctors, records)?;
+            let th = type_of_pure(h, vars, result.clone(), ctors, records, typarams)?;
+            let tt = type_of_pure(t, vars, result, ctors, records, typarams)?;
             if tt != Ty::list(th.clone()) {
                 return Err(format!(
                     "`::` needs T on the left and List[T] on the right, got {th} :: {tt}"
@@ -2048,7 +2077,7 @@ fn type_of_pure(
         // over a tuple, lowered to the Z3 selector `(projN_i …)` — admitted here
         // (unlike a user `part` call, DEC-LLL-017), which is precisely what lets a
         // tuple/record field be named in requires/ensures/measure.
-        Expr::Proj(e, i) => match type_of_pure(e, vars, result, ctors, records)? {
+        Expr::Proj(e, i) => match type_of_pure(e, vars, result, ctors, records, typarams)? {
             Ty::Tuple(cs) => cs.get(*i).cloned().ok_or_else(|| {
                 format!(
                     "tuple projection `.{i}` out of bounds: the tuple has {} component(s)",
@@ -2061,7 +2090,7 @@ fn type_of_pure(
         // a RECORD, lowered to the datatype selector `(Ctor_i …)` of the sole ctor —
         // admitted here (unlike a user `part` call, DEC-LLL-017), which is exactly what
         // lets a record invariant be stated over a field in requires/ensures/measure.
-        Expr::Field(e, name) => match type_of_pure(e, vars, result, ctors, records)? {
+        Expr::Field(e, name) => match type_of_pure(e, vars, result, ctors, records, typarams)? {
             Ty::User(tn, _) => {
                 let idx = records
                     .get(&tn)
@@ -2083,7 +2112,7 @@ fn type_of_pure(
                 if args.len() != 1 {
                     return Err("`length` takes 1 argument".into());
                 }
-                if !matches!(type_of_pure(&args[0], vars, result.clone(), ctors, records)?, Ty::Array(_)) {
+                if !matches!(type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)?, Ty::Array(_)) {
                     return Err("`length` needs an Array".into());
                 }
                 Ty::Int
@@ -2092,20 +2121,20 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`get` takes 2 arguments (array, index)".into());
                 }
-                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
+                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
                     Ty::Array(e) => *e,
                     _ => return Err("`get` needs an Array".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors, records)? != Ty::Int {
+                if type_of_pure(&args[1], vars, result, ctors, records, typarams)? != Ty::Int {
                     return Err("`get` index must be Int".into());
                 }
                 elem
             }
             "array" => {
                 if let Some(first) = args.first() {
-                    let elem = type_of_pure(first, vars, result.clone(), ctors, records)?;
+                    let elem = type_of_pure(first, vars, result.clone(), ctors, records, typarams)?;
                     for a in &args[1..] {
-                        if type_of_pure(a, vars, result.clone(), ctors, records)? != elem {
+                        if type_of_pure(a, vars, result.clone(), ctors, records, typarams)? != elem {
                             return Err("array literal elements must share one type".into());
                         }
                     }
@@ -2118,11 +2147,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`contains` takes 2 arguments (array, value)".into());
                 }
-                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
+                let elem = match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
                     Ty::Array(e) => *e,
                     _ => return Err("`contains` needs an Array".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors, records)? != elem {
+                if type_of_pure(&args[1], vars, result, ctors, records, typarams)? != elem {
                     return Err("`contains` value type mismatch".into());
                 }
                 Ty::Bool
@@ -2137,11 +2166,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`lookup` takes 2 arguments (map, key)".into());
                 }
-                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
+                let (mk, mv) = match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
                     Ty::Map(k, v) => (*k, *v),
                     _ => return Err("`lookup` needs a Map".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors, records)? != mk {
+                if type_of_pure(&args[1], vars, result, ctors, records, typarams)? != mk {
                     return Err("`lookup` key type mismatch".into());
                 }
                 mv
@@ -2150,11 +2179,11 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`haskey` takes 2 arguments (map, key)".into());
                 }
-                let mk = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
+                let mk = match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
                     Ty::Map(k, _) => *k,
                     _ => return Err("`haskey` needs a Map".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors, records)? != mk {
+                if type_of_pure(&args[1], vars, result, ctors, records, typarams)? != mk {
                     return Err("`haskey` key type mismatch".into());
                 }
                 Ty::Bool
@@ -2169,20 +2198,85 @@ fn type_of_pure(
                 if args.len() != 2 {
                     return Err("`member` takes 2 arguments (set, element)".into());
                 }
-                let se = match type_of_pure(&args[0], vars, result.clone(), ctors, records)? {
+                let se = match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
                     Ty::Set(e) => *e,
                     _ => return Err("`member` needs a Set".into()),
                 };
-                if type_of_pure(&args[1], vars, result, ctors, records)? != se {
+                if type_of_pure(&args[1], vars, result, ctors, records, typarams)? != se {
                     return Err("`member` element type mismatch".into());
                 }
                 Ty::Bool
             }
             _ => unreachable!(),
         },
+        // ADT constructor application in a contract (REQ-LLL-074): DEC-LLL-017 admits
+        // native Z3 constructors, so `Some(x)` / `P(a, b)` is a spec term, not a
+        // forbidden user-part call. Type it by unifying the constructor's field types
+        // (which mention the owning ADT's parameters) against the argument types, then
+        // place the inferred arguments in the ADT's DECLARED parameter order — mirroring
+        // `check_expr`'s constructor-call arm. A monomorphic constructor (no parameters)
+        // exact-matches each field. Unlike the term checker, the contract typer does not
+        // push an `expected` type inward, so a NESTED nullary (`Some(None)`) cannot pin
+        // its inner argument — that fails loud below as a type error, never a silent
+        // mis-type (DEC-LLL-015/017).
+        Expr::Call(name, args) if ctors.contains_key(name) => {
+            let (owner, fields) = ctors.get(name).cloned().unwrap();
+            if args.len() != fields.len() {
+                return Err(format!(
+                    "constructor `{name}` takes {} field(s), got {}",
+                    fields.len(),
+                    args.len()
+                ));
+            }
+            let params = typarams.get(&owner).cloned().unwrap_or_default();
+            if params.is_empty() {
+                for (a, ft) in args.iter().zip(&fields) {
+                    let ta = type_of_pure(a, vars, result.clone(), ctors, records, typarams)?;
+                    if ta != *ft {
+                        return Err(format!("constructor `{name}` field expects {ft}, got {ta}"));
+                    }
+                }
+                Ty::User(owner, vec![])
+            } else {
+                let mut subst: HashMap<String, Ty> = HashMap::new();
+                for (a, ft) in args.iter().zip(&fields) {
+                    let ta = type_of_pure(a, vars, result.clone(), ctors, records, typarams)?;
+                    unify_arg(ft, &ta, &mut subst)
+                        .map_err(|e| format!("constructor `{name}` field: {e}"))?;
+                }
+                let targs: Vec<Ty> = params
+                    .iter()
+                    .map(|p| subst.get(p).cloned().unwrap_or_else(|| Ty::Var(p.clone())))
+                    .collect();
+                Ty::User(owner, targs)
+            }
+        }
         Expr::Call(..) | Expr::EffCall(..) => return Err("calls not allowed here".into()),
         Expr::Lambda(..) => return Err("lambdas are not allowed in contracts (v1)".into()),
     })
+}
+
+/// Reconcile a nullary parametric constructor's under-applied type (`Option[]`, from
+/// a bare `None`) with a fully-applied sibling on the other side of an equality:
+/// adopt the concrete type arguments so the two types match (REQ-LLL-074). Only the
+/// under-applied side of a matching parametric ADT pair is rewritten; everything else
+/// is returned untouched, so a genuine type mismatch still errors in `bin_type`.
+fn reconcile_nullary_ctor(
+    ta: Ty,
+    tb: Ty,
+    typarams: &HashMap<String, Vec<String>>,
+) -> (Ty, Ty) {
+    if let (Ty::User(na, aa), Ty::User(nb, ab)) = (&ta, &tb) {
+        if na == nb && typarams.get(na).is_some_and(|p| !p.is_empty()) {
+            if aa.is_empty() && !ab.is_empty() {
+                return (tb.clone(), tb);
+            }
+            if ab.is_empty() && !aa.is_empty() {
+                return (ta.clone(), ta);
+            }
+        }
+    }
+    (ta, tb)
 }
 
 pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {

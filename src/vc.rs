@@ -920,8 +920,21 @@ impl<'a> Emit<'a> {
             Expr::BoolLit(v) => format!("{v}"),
             Expr::Var(n) => match env.get(n) {
                 Some(t) => t.clone(),
-                // a nullary constructor is its own name in SMT (REQ-LLL-011)
-                None if self.cm.ctors.contains_key(n) => n.clone(),
+                // a nullary constructor is its own name in SMT (REQ-LLL-011). For a
+                // PARAMETRIC ADT the bare name is sort-ambiguous — `None` could inhabit
+                // any `(Option T)` — so when the surrounding context fixes a concrete
+                // instantiation, annotate it `(as None (Option Int))` (REQ-LLL-074).
+                // Without the anchor, `result == None` with `yield None` would encode as
+                // the sortless `(= None None)`, which Z3 cannot discharge (a valid
+                // program rejected). A monomorphic nullary ctor keeps its bare name.
+                None if self.cm.ctors.contains_key(n) => match expected {
+                    Some(t @ Ty::User(_, args)) if !args.is_empty() => {
+                        let term = format!("(as {n} {})", smt_ty(t));
+                        self.sorts.insert(term.clone(), smt_ty(t));
+                        term
+                    }
+                    _ => n.clone(),
+                },
                 None => return Err(format!("vcgen: unbound `{n}`")),
             },
             Expr::ListLit(items) => {

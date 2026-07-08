@@ -3807,13 +3807,30 @@ fn ensures_may_reference_a_nullary_constructor() {
 }
 
 #[test]
-fn ensures_construction_with_arguments_still_rejected() {
-    // Guard against overshooting the fix above: DEC-LLL-017 must still bar
-    // CONSTRUCTING an ADT value (a real `Call`, e.g. `Changed(new)`) inside
-    // `ensures` — only bare zero-arg constructor reference was ever intended.
-    let src = "module T:\n\n  type Delta = NoChange | Changed(Int)\n\n  part diff(old: Int, new: Int) -> Delta:\n    ensures result == Changed(new)\n    match old == new:\n      true  -> yield NoChange\n      false -> yield Changed(new)\n";
+fn ensures_may_construct_an_adt_value() {
+    // REQ-LLL-074 SUPERSEDES the earlier over-restriction: DEC-LLL-017 explicitly
+    // admits "constructeurs/sélecteurs ADT natifs Z3" in the decidable fragment, so
+    // CONSTRUCTING an ADT value in `ensures` — `result == Changed(new)` — is a spec
+    // term, not a forbidden user-part call. A user PART call in a contract stays
+    // barred (guarded by `ensures_part_call_still_rejected`). Here the body always
+    // yields `Changed(new)`, so Z3 discharges the postcondition exactly.
+    let src = "module T:\n\n  type Delta = NoChange | Changed(Int)\n\n  part bump(new: Int) -> Delta:\n    ensures result == Changed(new)\n    yield Changed(new)\n\n  part main() -> Int:\n    yield 0\n";
+    let report = verify_src(src);
+    assert!(
+        report.ok(),
+        "constructing an ADT value in ensures must verify (REQ-LLL-074): {:?}",
+        failures(&report)
+    );
+}
+
+#[test]
+fn ensures_part_call_still_rejected() {
+    // REQ-LLL-074 admits CONSTRUCTORS, but a user PART call in a contract is still a
+    // real, forbidden call (DEC-LLL-017) — the contract firewall would otherwise leak
+    // an arbitrary (possibly recursive/effectful) definition into the proof fragment.
+    let src = "module T:\n\n  part helper(x: Int) -> Int:\n    yield x + 1\n\n  part p(n: Int) -> Int:\n    ensures result == helper(n)\n    yield n + 1\n";
     let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("constructing an ADT value in ensures must be rejected");
+    let err = types::check_module(m).expect_err("a user part call in ensures must be rejected");
     assert!(err.contains("calls are not allowed"), "expected the DEC-LLL-017 error, got: {err}");
 }
 
@@ -4859,6 +4876,66 @@ fn mutually_recursive_datatypes_share_one_scc_block() {
     assert!(report.ok(), "mutually-recursive datatypes must verify: {:?}", failures(&report));
     let out = build_run(src);
     assert!(out.contains("=> 42"), "mutually-recursive datatypes runtime wrong: {out}");
+}
+
+#[test]
+fn contract_reasons_about_parametric_nullary_ctor() {
+    // REQ-LLL-074 (B1): `ensures result == None` on an `Option[Int]`-returning part.
+    // The nullary ctor `None` carries no field to infer its type argument, so the
+    // contract typer adopts the sibling operand's arguments (`Option[Int]`), and the
+    // vc anchors the otherwise-sortless `None` as `(as None (Option Int))` so Z3 can
+    // discharge it. Body `yield None` ⇒ proves.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part noneval() -> Option[Int]:\n    ensures result == None\n    yield None\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(verify_src(src).ok(), "ensures result == None must verify (REQ-LLL-074)");
+}
+
+#[test]
+fn contract_parametric_nullary_ctor_is_sound() {
+    // REQ-LLL-074 (B1 SOUNDNESS): the anchored `None` is a REAL Z3 term, not a
+    // vacuous pass. `ensures result == None` with a body that yields `Some(5)` must
+    // NOT prove — Z3 refutes the false postcondition.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part noneval() -> Option[Int]:\n    ensures result == None\n    yield Some(5)\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "ensures result == None with body Some(5) must be rejected (soundness, REQ-LLL-074)"
+    );
+}
+
+#[test]
+fn contract_reasons_about_parametric_ctor_application() {
+    // REQ-LLL-074 (B2): a parametric constructor APPLICATION `Some(x)` in `ensures`.
+    // DEC-LLL-017 admits native Z3 constructors, so the contract typer unifies the
+    // ctor's field type against `x : Int` to infer `Option[Int]`, and the vc emits
+    // `(Some x)` (Z3 fixes the sort from the argument). Body `yield Some(x)` ⇒ proves.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: Int) -> Option[Int]:\n    ensures result == Some(x)\n    yield Some(x)\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(verify_src(src).ok(), "ensures result == Some(x) must verify (REQ-LLL-074)");
+}
+
+#[test]
+fn contract_parametric_ctor_application_is_sound() {
+    // REQ-LLL-074 (B2 SOUNDNESS): the type arguments AND the field value are both
+    // proven — `ensures result == Some(x)` with body `yield Some(x + 1)` must NOT
+    // prove (Z3 refutes it: `Some(x)` ≠ `Some(x + 1)`), so the pass is not vacuous.
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part wrap(x: Int) -> Option[Int]:\n    ensures result == Some(x)\n    yield Some(x + 1)\n\n  part main() -> Int:\n    yield 0\n";
+    assert!(
+        !verify_src(src).ok(),
+        "ensures result == Some(x) with body Some(x+1) must be rejected (soundness, REQ-LLL-074)"
+    );
+}
+
+#[test]
+fn contract_nested_unanchored_nullary_ctor_fails_loud() {
+    // REQ-LLL-074 (fail-loud boundary): the contract typer does not push an expected
+    // type inward, so a NESTED nullary (`Some(None)`) cannot pin its inner argument.
+    // That must be a CLEAN type error — `Option[Option[Int]]` vs `Option[Option]` —
+    // never a silently-mistyped contract that proves vacuously (DEC-LLL-015/017).
+    let src = "module T:\n\n  type Option[a] = None | Some(a)\n\n  part nest() -> Option[Option[Int]]:\n    ensures result == Some(None)\n    yield Some(None)\n\n  part main() -> Int:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("nested unanchored nullary must fail loud");
+    assert!(
+        err.contains("same-type operands"),
+        "expected a clean same-type error, got: {err}"
+    );
 }
 
 #[test]
