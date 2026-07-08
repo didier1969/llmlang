@@ -4561,6 +4561,57 @@ fn holey_module_check_exits_2_build_refuses_then_filling_verifies_and_builds() {
 }
 
 #[test]
+fn typed_hole_scope_includes_let_and_pattern_binders() {
+    // REQ-LLL-059 / DEC-LLL-052 (A1 feedback contract): `HoleInfo.scope` is documented as
+    // "params + lets + pattern binders", yet only the params case was pinned. The other two
+    // binder kinds must ALSO surface in the hole's completion menu — the structured feedback
+    // an LLM edits against. A `let` binding preceding the hole:
+    let src = "module M:\n\n  part f(n: Int) -> Int:\n    let x = n + 1\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("let-hole checks");
+    let scope: std::collections::HashMap<_, _> =
+        cm.holes[0].scope.iter().map(|(k, v)| (k.as_str(), v.to_string())).collect();
+    assert_eq!(scope.get("n").map(String::as_str), Some("Int"), "param in scope");
+    assert_eq!(scope.get("x").map(String::as_str), Some("Int"), "let binder in scope");
+    // A `match` PATTERN binder enclosing the hole (`v` bound by `Some(v)`):
+    let src2 = "module M:\n\n  type Option[a] = None | Some(a)\n\n  part f(o: Option[Int]) -> Int:\n    match o:\n      None -> yield 0\n      Some(v) -> yield ?\n";
+    let cm2 = types::check_module(parser::parse_module(src2).expect("parse")).expect("match-hole checks");
+    let scope2: std::collections::HashMap<_, _> =
+        cm2.holes[0].scope.iter().map(|(k, v)| (k.as_str(), v.to_string())).collect();
+    assert_eq!(scope2.get("o").map(String::as_str), Some("Option[Int]"), "scrutinee param in scope");
+    assert_eq!(scope2.get("v").map(String::as_str), Some("Int"), "pattern binder in scope");
+}
+
+#[test]
+fn check_precedence_failed_dominates_incomplete_holes() {
+    // REQ-LLL-059 / DEC-LLL-052: the check exit-code precedence is failed(1) > incomplete(2) >
+    // verified(0). A module holding BOTH a holey part (incomplete) AND a part with an
+    // undischarged obligation (failed) must exit 1 — a real proof failure is never masked by
+    // an editable hole — with json status "failed", not "incomplete".
+    let dir = tempdir().join("holes-precedence");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  part holey(n: Int) -> Int:\n    yield ?\n\n  part bad(n: Int) -> Int:\n    ensures result == n + 1\n    yield n\n";
+    let f = dir.join("prec.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "failed must dominate incomplete (exit 1): {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let jout = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&jout.stdout);
+    assert!(j.contains("\"failed\""), "json status is failed, not incomplete: {j}");
+}
+
+#[test]
 fn erp_persist_ledger_roundtrip_via_cargo() {
     // REQ-LLL-066 (wave-3 slice-2, DEC-LLL-064): the shipped ERP persistence example —
     // a ledger written to SQLite, RELOADED by a fresh query, its débit==crédit invariant
