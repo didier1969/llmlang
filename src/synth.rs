@@ -40,6 +40,14 @@ pub struct Suggestion {
     /// set when the hole is out of v1 scope (multi-hole part, or a function/polymorphic
     /// type) — no enumeration is attempted, and this says why.
     pub unsupported: Option<String>,
+    /// The LOGICAL GOAL at the hole (D2, REQ-LLL-085), copied verbatim from
+    /// `HoleInfo.goal` — the enclosing part's rendered `ensures`. Surfaced so that
+    /// when no proved completion is found the LLM still sees the target to aim at.
+    /// Never recomputed here; pure display, no Z3, no weakest-precondition.
+    pub goal: Vec<String>,
+    /// The HYPOTHESES available at the hole (D2), copied from `HoleInfo.hypotheses`
+    /// — the enclosing part's rendered `requires`, the facts a completion may assume.
+    pub hypotheses: Vec<String>,
 }
 
 /// Enumerate + Z3-check completions for every hole of `cm` (optionally a single `part`).
@@ -74,6 +82,8 @@ pub fn suggest(
             expected: expected.clone(),
             candidates: Vec::new(),
             unsupported: None,
+            goal: h.goal.clone(),
+            hypotheses: h.hypotheses.clone(),
         };
         let n_holes = per_part.get(h.part.as_str()).copied().unwrap_or(0);
         if n_holes != 1 {

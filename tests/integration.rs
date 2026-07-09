@@ -4958,6 +4958,56 @@ fn suggest_json_contract_and_is_side_effect_free_req086() {
 }
 
 #[test]
+fn suggest_json_exposes_hole_logical_goal_req059() {
+    // REQ-LLL-059 D2 (child REQ-LLL-085): `lll suggest --format=json` carries the SAME logical
+    // goal (rendered `ensures`) and hypotheses (rendered `requires`) that `check --format=json`
+    // exposes — copied verbatim from `HoleInfo`, never recomputed, no Z3, no `vc`. Value: even
+    // when no proved completion is found the LLM still sees the target to satisfy. The two
+    // surfaces MUST agree (one source of truth), and the fields are OMITTED when the part has no
+    // contract (honest, never invented — mirrors `check`'s `skip_serializing_if`).
+    let dir = tempdir().join("suggest-goal");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  part clamp(x: Int, lo: Int) -> Int:\n    requires lo >= 0\n    ensures result >= lo\n    yield ?\n";
+    let f = dir.join("goal.lll");
+    std::fs::write(&f, src).unwrap();
+
+    let sj = std::process::Command::new(bin)
+        .args(["suggest", "--format=json", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(sj.status.code(), Some(0), "suggest is consultative → exit 0");
+    let s = String::from_utf8_lossy(&sj.stdout);
+    assert!(s.contains("\"goal\"") && s.contains("result >= lo"), "suggest json carries the goal: {s}");
+    assert!(s.contains("\"hypotheses\"") && s.contains("lo >= 0"), "suggest json carries the hypotheses: {s}");
+
+    // consistency: `check --format=json` on the SAME file exposes the same goal + hypotheses text
+    let cj = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let c = String::from_utf8_lossy(&cj.stdout);
+    assert!(
+        c.contains("result >= lo") && c.contains("lo >= 0"),
+        "check exposes the same goal/hypotheses as suggest: {c}"
+    );
+
+    // a part with NO contract: both fields are OMITTED (never invented), mirroring `check`
+    let plain = "module M:\n\n  part g(n: Int) -> Int:\n    yield ?\n";
+    let pf = dir.join("plain.lll");
+    std::fs::write(&pf, plain).unwrap();
+    let pj = std::process::Command::new(bin)
+        .args(["suggest", "--format=json", pf.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let p = String::from_utf8_lossy(&pj.stdout);
+    assert!(
+        !p.contains("\"goal\"") && !p.contains("\"hypotheses\""),
+        "no contract ⇒ goal/hypotheses omitted, not emitted empty: {p}"
+    );
+}
+
+#[test]
 fn suggested_completion_applied_to_text_closes_the_verify_loop_req059_umbrella() {
     // REQ-LLL-059 UMBRELLA coherence (generate↔verify↔repair): the typed-holes pieces compose
     // into ONE working loop end-to-end. A holey part (1) `check`s Incomplete (exit 2, the C3

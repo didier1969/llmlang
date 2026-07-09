@@ -1015,6 +1015,16 @@ fn print_suggest_json(cm: &types::CheckedModule, sugs: &[synth::Suggestion]) {
             if let Some(u) = &s.unsupported {
                 o["unsupported"] = serde_json::Value::String(u.clone());
             }
+            // D2 (REQ-LLL-085): carry the same logical goal + hypotheses that
+            // `check --format=json` exposes (copied from `HoleInfo`, never recomputed),
+            // so a no-proved-completion hole still shows the LLM the target to satisfy.
+            // Omitted when empty, mirroring `check`'s `skip_serializing_if`.
+            if !s.goal.is_empty() {
+                o["goal"] = serde_json::json!(s.goal);
+            }
+            if !s.hypotheses.is_empty() {
+                o["hypotheses"] = serde_json::json!(s.hypotheses);
+            }
             o
         })
         .collect();
