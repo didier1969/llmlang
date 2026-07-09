@@ -349,10 +349,28 @@ fn setup_part_emit<'a>(
             env.insert(mn.clone(), c);
         }
     }
-    // requires as hypotheses
-    for r in &part.requires {
-        let t = em.tr(r, &env, None)?;
-        em.hyps.push(t);
+    // requires as hypotheses. A quantified `requires` (REQ-LLL-087 T1 A1) is NEVER
+    // asserted as a `forall` (we do not emit `assert forall`): it is REGISTERED for
+    // deterministic ground instantiation at each `get(container, k)` in the body, keyed by
+    // the container it indexes — exactly the assume-side of a callee's quantified `ensures`.
+    // The caller PROVED it at the call site (fresh-const generalization), so assuming its
+    // ground instances `guard(k) => body(k)` is sound. A `requires` that indexes no bare-Var
+    // container simply contributes no hypothesis (we assume less — sound, never unsound).
+    let reqs = part.requires.clone();
+    for r in &reqs {
+        if let Expr::Forall { body, .. } = r {
+            for cname in get_container_vars(body) {
+                if let Some(sym) = env.get(&cname) {
+                    em.forall_ens
+                        .entry(sym.clone())
+                        .or_default()
+                        .push((r.clone(), env.clone()));
+                }
+            }
+        } else {
+            let t = em.tr(r, &env, None)?;
+            em.hyps.push(t);
+        }
     }
     Ok((em, env))
 }
@@ -1742,11 +1760,31 @@ impl<'a> Emit<'a> {
                 }
                 // prove callee requires at this call site
                 for (i, req) in callee.requires.clone().iter().enumerate() {
-                    let goal = self.tr_contract(req, &cenv)?;
-                    self.oblige(
-                        format!("requires #{} of `{name}` holds at call site", i + 1),
-                        goal,
-                    );
+                    let descr = format!("requires #{} of `{name}` holds at call site", i + 1);
+                    if let Expr::Forall { var, lo, hi, body } = req {
+                        // PROVE a quantified `requires` by FRESH-CONST universal
+                        // generalization — the SAME sound encoding as a quantified `ensures`
+                        // proof (REQ-LLL-087 T1 A1). A fresh, otherwise-unconstrained `i0`
+                        // stands for "any" index in `[lo, hi)`; the guard is pushed as a
+                        // scoped HYPOTHESIS (not folded into the goal) so the body's own
+                        // `get(a, i0)` bounds obligation is discharged by it. `cenv` binds the
+                        // callee's params to the ARGUMENT terms, so this proves the property
+                        // of the actual arguments. Never `assert forall` (DEC-LLL-015).
+                        let lo_s = self.tr(lo, &cenv, None)?;
+                        let hi_s = self.tr(hi, &cenv, None)?;
+                        let i0 = self.fresh("Int");
+                        let guard = format!("(and (<= {lo_s} {i0}) (< {i0} {hi_s}))");
+                        let mut benv = cenv.clone();
+                        benv.insert(var.clone(), i0);
+                        let saved = self.hyps.len();
+                        self.hyps.push(guard);
+                        let body_s = self.tr(body, &benv, None)?;
+                        self.oblige(descr, body_s);
+                        self.hyps.truncate(saved);
+                    } else {
+                        let goal = self.tr_contract(req, &cenv)?;
+                        self.oblige(descr, goal);
+                    }
                 }
                 // recursive call: prove measure bounded + decreasing (if measured)
                 if name == &self.part.name
@@ -1839,6 +1877,28 @@ impl<'a> Emit<'a> {
     fn tr_contract(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
         self.tr(e, env, None)
     }
+}
+
+/// The bare-`Var` names that appear as the CONTAINER (first argument) of a `get(c, _)`
+/// inside a quantified clause body — the containers a `forall` indexes. Used to KEY a
+/// quantified `requires` for on-demand ground instantiation (REQ-LLL-087 T1 A1 assume side),
+/// mirroring how a quantified `ensures` is keyed by its havoc'd result term. A non-`Var`
+/// container (e.g. a nested `get`) is skipped: keying is a relevance heuristic, so missing
+/// one only forgoes a hypothesis (sound), never fabricates one.
+fn get_container_vars(body: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    body.walk(&mut |x| {
+        if let Expr::Call(f, args) = x {
+            if f == "get" && !args.is_empty() {
+                if let Expr::Var(name) = &args[0] {
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+        }
+    });
+    out
 }
 
 /// Every component of a measure tuple is bounded below by 0 — the well-founded

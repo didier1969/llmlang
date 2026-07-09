@@ -5248,14 +5248,69 @@ fn forall_over_cons_list_is_an_honest_error_req087_t1() {
 }
 
 #[test]
-fn forall_in_requires_is_rejected_ensures_only_req087_t1() {
-    // REQ-LLL-087 T1 is `ensures`-ONLY in v1 (`forall`-in-`requires` is sound but deferred).
-    let (code, _out, err) = check_lll_src(
-        "t1-requires",
-        "module M:\n\n  part f(a: Array[Int]) -> Int:\n    requires forall i in 0 .. length(a): get(a, i) > 0\n    yield 0\n",
+fn forall_in_requires_assumed_by_ground_instantiation_req087_t1_a1() {
+    // REQ-LLL-087 T1 A1 ASSUME side: a quantified `requires` is ASSUMED by deterministic
+    // ground instantiation at each `get(a, k)` in the body (never `assert forall`) — keyed by
+    // the container `a` exactly as a callee's quantified `ensures` is keyed by its result. The
+    // body derives `get(a, 0) > 0` ONLY because the assumed `forall` is instantiated at 0.
+    let (code, out, _) = check_lll_src(
+        "t1a1-assume",
+        "module M:\n\n  part f(a: Array[Int]) -> Int:\n    requires forall i in 0 .. length(a): get(a, i) > 0\n    requires length(a) > 0\n    ensures result > 0\n    yield get(a, 0)\n",
     );
-    assert_ne!(code, Some(0), "a `forall` in `requires` is rejected in v1");
-    assert!(err.contains("ensures"), "the error names the ensures-only rule: {err}");
+    assert_eq!(code, Some(0), "the body derives the indexed fact from the assumed requires: {out}");
+}
+
+#[test]
+fn forall_in_requires_assume_keeps_range_guard_req087_t1_a1() {
+    // REQ-LLL-087 T1 A1 soundness KEYSTONE (assume side): the ground instance RETAINS the
+    // range guard. `g` assumes `forall i in 0..2: get(a,i)>0` but READS index 3 (in array
+    // bounds, `length(a) > 5`, but OUTSIDE the `forall` range [0,2)). The instance
+    // `guard(3) => …` is vacuous (3 ≮ 2), so nothing constrains `a[3]`: `ensures result > 0`
+    // must NOT be derivable. Were the guard dropped, `g` would verify FALSELY. It must FAIL.
+    let (code, out, _) = check_lll_src(
+        "t1a1-assume-guard",
+        "module M:\n\n  part g(a: Array[Int]) -> Int:\n    requires forall i in 0 .. 2: get(a, i) > 0\n    requires length(a) > 5\n    ensures result > 0\n    yield get(a, 3)\n",
+    );
+    assert_eq!(code, Some(1), "an index outside the assumed range is unconstrained — guard kept: {out}");
+    assert!(out.contains("ensures"), "the failure is the unprovable ensures: {out}");
+}
+
+#[test]
+fn forall_in_requires_proved_at_call_site_by_fresh_const_req087_t1_a1() {
+    // REQ-LLL-087 T1 A1 PROVE side: a caller passing `arr` to `f` must PROVE `f`'s quantified
+    // `requires` by fresh-const universal generalization over the ARGUMENT. `caller` discharges
+    // it only because `all_pos`'s quantified `ensures` is CONSUMED (ground-instantiated) to
+    // establish `get(arr, i0) > 0` under the range guard — the assume and prove sides compose.
+    let (code, out, _) = check_lll_src(
+        "t1a1-prove",
+        "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures length(result) == 3\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n\n  part f(a: Array[Int]) -> Int:\n    requires forall i in 0 .. length(a): get(a, i) > 0\n    requires length(a) > 0\n    ensures result > 0\n    yield get(a, 0)\n\n  part caller() -> Int:\n    ensures result > 0\n    let arr = all_pos()\n    yield f(arr)\n",
+    );
+    assert_eq!(code, Some(0), "the caller proves the quantified requires of `f` at the call site: {out}");
+}
+
+#[test]
+fn forall_in_requires_bad_call_is_rejected_req087_t1_a1() {
+    // REQ-LLL-087 T1 A1 soundness (prove side): the fresh index is UNconstrained (never a
+    // single witness). A caller passing `array(1, 0, 3)` — false at index 1 — CANNOT prove
+    // `f`'s `forall i: get(a,i) > 0`; the bad call is rejected at the call site, not admitted.
+    let (code, out, _) = check_lll_src(
+        "t1a1-badcall",
+        "module M:\n\n  part f(a: Array[Int]) -> Int:\n    requires forall i in 0 .. length(a): get(a, i) > 0\n    requires length(a) > 0\n    ensures result > 0\n    yield get(a, 0)\n\n  part bad() -> Int:\n    ensures result > 0\n    let arr = array(1, 0, 3)\n    yield f(arr)\n",
+    );
+    assert_eq!(code, Some(1), "a call with an array false at one index is rejected: {out}");
+    assert!(out.contains("requires") && out.contains("call site"), "the failure is the call-site requires: {out}");
+}
+
+#[test]
+fn forall_in_measure_is_rejected_req087_t1_a1() {
+    // REQ-LLL-087 T1 A1: `forall` reaches `requires` and `ensures`, but a `measure` stays an
+    // `Int` expression over parameters (a `forall` is `Bool`) — rejected with a clear message.
+    let (code, _out, err) = check_lll_src(
+        "t1a1-measure",
+        "module M:\n\n  part f(a: Array[Int], n: Int) -> Int:\n    measure forall i in 0 .. length(a): get(a, i) > 0\n    yield n\n",
+    );
+    assert_ne!(code, Some(0), "a `forall` in a `measure` is rejected");
+    assert!(err.contains("measure"), "the error names the measure rule: {err}");
 }
 
 #[test]

@@ -2118,12 +2118,12 @@ fn forall_free(e: &Expr) -> bool {
     ok
 }
 
-/// A bounded `forall` is legal ONLY as the ENTIRE `ensures` clause, and its bounds/body
-/// must be quantifier-free (REQ-LLL-087 T1). This rejects, at check time, the RED-LINE
-/// forms the fresh-const proof cannot handle: a `forall` buried in a compound clause
-/// (`A and forall …`) — which the vcgen could not eliminate — and nested/alternating
-/// quantifiers (`forall i: forall j: …`). Everything the proof machinery sees is thus a
-/// top-level, single, quantifier-free-bodied `forall`.
+/// A bounded `forall` is legal ONLY as the ENTIRE `requires` or `ensures` clause, and its
+/// bounds/body must be quantifier-free (REQ-LLL-087 T1 ensures + A1 requires). This rejects,
+/// at check time, the RED-LINE forms the fresh-const proof cannot handle: a `forall` buried
+/// in a compound clause (`A and forall …`) — which the vcgen could not eliminate — and
+/// nested/alternating quantifiers (`forall i: forall j: …`). Everything the proof machinery
+/// sees is thus a top-level, single, quantifier-free-bodied `forall`.
 fn forall_position_ok(clause: &Expr) -> Result<(), String> {
     match clause {
         Expr::Forall { lo, hi, body, .. } => {
@@ -2139,8 +2139,8 @@ fn forall_position_ok(clause: &Expr) -> Result<(), String> {
             if forall_free(other) {
                 Ok(())
             } else {
-                Err("a `forall` must be the ENTIRE `ensures` clause, not a sub-expression \
-                     (REQ-LLL-087 Tranche 1)"
+                Err("a `forall` must be the ENTIRE `requires`/`ensures` clause, not a \
+                     sub-expression (REQ-LLL-087 Tranche 1)"
                     .into())
             }
         }
@@ -2194,6 +2194,7 @@ fn check_contracts(
     };
     for r in &part.requires {
         no_calls(r, "requires")?;
+        forall_position_ok(r).map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         let t = type_of_pure(r, &params, None, ctors, records, typarams)
             .map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         if t != Ty::Bool {
@@ -2211,6 +2212,13 @@ fn check_contracts(
     }
     for m in &part.measure {
         no_calls(m, "measure")?;
+        if !forall_free(m) {
+            return Err(format!(
+                "part `{}`: a `forall` may not appear in a `measure` — a measure component is \
+                 an `Int` expression over parameters (REQ-LLL-087)",
+                part.name
+            ));
+        }
         let t = type_of_pure(m, &params, None, ctors, records, typarams)
             .map_err(|e| format!("part `{}` measure: {e}", part.name))?;
         if t != Ty::Int {
@@ -2270,18 +2278,13 @@ fn type_of_pure(
                     .into(),
             )
         }
-        // A BOUNDED universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1).
+        // A BOUNDED universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1
+        // ensures; A1 extends it to `requires`). A `measure` must be `Int`, and a `forall`
+        // is `Bool`, so the measure loop's Int check rejects a quantified measure — no
+        // bespoke guard needed here. In a `requires` (`result` is `None`) the body may not
+        // reference `result` (the `Var("result")` path rejects that), keeping the clause a
+        // property of the parameters only.
         Expr::Forall { var, lo, hi, body } => {
-            // `ensures`-ONLY: `result` is `Some` exactly in an `ensures` clause (it is what
-            // makes `result` referenceable), so its absence = requires/measure ⇒ reject.
-            // `forall`-in-`requires` is sound but deferred; a `measure` stays Int-on-params.
-            if result.is_none() {
-                return Err(
-                    "a `forall` may appear only in an `ensures` clause, not in \
-                     requires/measure (REQ-LLL-087 Tranche 1)"
-                        .into(),
-                );
-            }
             // half-open range `[lo, hi)` over an `Int` index
             let lo_ty = type_of_pure(lo, vars, result.clone(), ctors, records, typarams)?;
             let hi_ty = type_of_pure(hi, vars, result.clone(), ctors, records, typarams)?;
