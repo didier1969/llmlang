@@ -249,6 +249,11 @@ pub fn find_z3() -> Result<PathBuf, String> {
 
 // ---------- VC generation ----------
 
+/// Havoc'd callee-result term → its `forall` ensures clauses, each paired with the
+/// call-site env in which to translate them (REQ-LLL-087 T1 consumption). See the
+/// `Emit::forall_ens` field doc for the full instantiation contract.
+type ForallEnsMap = HashMap<String, Vec<(Expr, HashMap<String, String>)>>;
+
 struct Emit<'a> {
     cm: &'a CheckedModule,
     part: &'a Part,
@@ -270,7 +275,7 @@ struct Emit<'a> {
     /// ONE ground instance `guard(k) => body(k)` (`instantiate_forall_at`). Deterministic,
     /// finite (one per occurrence), guard-retained — never `assert forall`, never an
     /// unconditional out-of-bounds fact.
-    forall_ens: HashMap<String, Vec<(Expr, HashMap<String, String>)>>,
+    forall_ens: ForallEnsMap,
     /// True only while translating a `forall` instance body (`instantiate_forall_at`): a
     /// `get` in that body is a STATEMENT of the callee's proven fact, not a fresh access,
     /// so it emits NO bounds obligation and triggers NO further instantiation (which would

@@ -1275,6 +1275,7 @@ impl Parser {
     /// - `forall <id> in <lo> .. <hi>: <body>` — a half-open `Int` range (Tranche 1);
     /// - `forall <id> in <coll>: <body>` — the keys of a `Map`/members of a `Set` (A2),
     ///   resolved by the static type of `<coll>` in the CHECKER.
+    ///
     /// Surface-only well-formedness here; the checker restricts position (requires/ensures)
     /// and the fragment. The domain expressions are additive (they terminate cleanly at `..`
     /// or `:`); the body is a full expression.
