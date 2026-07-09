@@ -260,6 +260,10 @@ struct AlgRule {
     /// `Keep` → the non-literal operand survives; `Zero` → the whole term becomes `0`
     result: RuleResult,
     /// does the rewrite erase `x` (present in lhs, absent in rhs)? (totality axis)
+    /// INVARIANT: must be `true` whenever `result == Zero` — the SMT value/trap
+    /// check does NOT defend a mislabel (`x*0` never overflows, so a `Zero` rule
+    /// with `erases:false` would slip past `validate_rule_smt` and drop `x`'s
+    /// sub-expression trap). The erasing gate runs first precisely for this.
     erases: bool,
 }
 
