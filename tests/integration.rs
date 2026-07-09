@@ -4798,6 +4798,26 @@ fn typed_hole_records_logical_goal_and_hypotheses_req085() {
 }
 
 #[test]
+fn typed_hole_goal_surfaces_for_a_nested_hole_req085() {
+    // D2 (REQ-LLL-085): the goal surfaces for a hole NESTED inside a larger expression, not
+    // only a whole-body `yield ?`. Here `?` is one branch of an `if` under a contract. D2 v1
+    // surfaces the PART-level `ensures` (the contract obligation), NOT a position-refined
+    // weakest-precondition — and the `fix` text says the *part* must satisfy the goal, so the
+    // framing stays honest (`result` is the part's result, not the hole's value).
+    let src = "module M:\n\n  part pick(n: Int) -> Int:\n    ensures result >= 0\n    if n > 0 then ? else 100\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("nested hole checks");
+    assert_eq!(cm.holes.len(), 1, "one nested hole recorded");
+    let h = &cm.holes[0];
+    assert_eq!(
+        h.expected.as_ref().map(|t| t.to_string()).as_deref(),
+        Some("Int"),
+        "typed by the if-branch context"
+    );
+    assert_eq!(h.goal, vec!["result >= 0".to_string()], "part-level ensures surfaces at the nested hole");
+    assert!(h.hypotheses.is_empty(), "no `requires` ⇒ empty hypotheses");
+}
+
+#[test]
 fn render_contract_clause_is_source_faithful_req085() {
     // The D2 renderer turns a checked contract Expr back into unambiguous source-like text
     // (DERIVED from the text of truth, DEC-LLL-020). Precedence is made explicit by
