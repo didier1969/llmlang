@@ -5026,6 +5026,30 @@ fn check_json_reports_no_sufficient_hypothesis_when_out_of_catalogue_req088() {
     assert!(!j.to_lowercase().contains("unprovable"), "silence must not be read as `unprovable`: {j}");
 }
 
+#[test]
+fn check_json_never_suggests_a_non_parameter_havoc_var_req088() {
+    // REQ-LLL-088 HONESTY GATE: a `requires` clause may reference ONLY the part's value
+    // parameters. Here the failing obligation is over a HAVOC var (`IO.read()`'s result,
+    // declared `v1` in SMT), not a parameter — so even though `v1 >= 0` would close the
+    // proof gap, it is NOT a writeable precondition. The suggestion machinery must stay
+    // SILENT (empty catalogue after the `p_` filter): no `sufficient_hypotheses`, no
+    // authoritative-looking but meaningless `requires v1 …` in the fix. The honest
+    // counterexample stays present and primary.
+    let dir = tempdir().join("req088-havoc");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("h.lll");
+    std::fs::write(&f, "module M:\n\n  part f() -> Int via IO:\n    ensures result >= 0\n    yield IO.read()\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(j.contains("\"counterexample\""), "the honest counterexample stays present and primary: {j}");
+    assert!(!j.contains("sufficient_hypotheses"), "a non-parameter havoc var must NOT surface as a suggestion: {j}");
+    assert!(!j.contains("SUFFICIENT strengthening"), "no `requires <internal-var>` may leak into the fix: {j}");
+}
+
 // ---- contrats expressifs Tranche 0 : `[]` / `array()` vides en contrat (REQ-LLL-087) ----
 
 #[test]

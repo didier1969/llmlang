@@ -2357,7 +2357,17 @@ pub fn sufficient_hypotheses(f: &FailedObligation, cm: &CheckedModule) -> Vec<St
 /// variables — terminates trivially. No free constant beyond `0`, the variables, and
 /// structural terms already in scope (`seq.len`).
 fn catalogue(decls: &[String], goal: &str) -> Vec<Candidate> {
-    let vars: Vec<(String, String)> = decls.iter().filter_map(|d| parse_declare_const(d)).collect();
+    // HONESTY GATE: a `requires` clause may reference ONLY the part's value parameters,
+    // which are declared `p_<name>` (setup_part_emit). Havoc/effect/local temporaries are
+    // `v<n>` and typeclass-method UFs are `gm_<name>` (a `declare-fun`, already skipped) —
+    // none is referenceable at the source level, so a suggestion naming one would be
+    // misleading (REQ-LLL-088: never an authoritative-looking but meaningless hint). Keep
+    // only genuine parameters so every `src` renders to a name the author can actually write.
+    let vars: Vec<(String, String)> = decls
+        .iter()
+        .filter_map(|d| parse_declare_const(d))
+        .filter(|(name, _)| name.starts_with("p_"))
+        .collect();
     let src_of = |name: &str| name.strip_prefix("p_").unwrap_or(name).to_string();
     let mut out = Vec::new();
     // per-variable candidates
