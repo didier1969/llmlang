@@ -1638,6 +1638,78 @@ fn aps3d_maintenance_rule_kernel_verifies_and_runs() {
 }
 
 #[test]
+fn aps3d_rule_change_add_condition_costs_two_lines_and_is_exhaustive() {
+    // DEC-LLL-066 étape 4 (mesure du changement de RÈGLE) : ajouter une condition qui
+    // RÉUTILISE un fait existant coûte 2 lignes dans le noyau (la variante `WearBelow` +
+    // son arm `cond_holds`), et l'exhaustivité du match FORCE l'arm — retirer l'arm est
+    // une erreur de compile avec contre-modèle (vs engine.ex:225 qui retomberait
+    // silencieusement sur `false`). Ce test exerce la nouvelle condition de bout en bout
+    // (rien d'autre dans le noyau ne change ; le domaine reste prouvé) : sur un équipement
+    // à 40 % d'usure, la règle `WearBelow(50)` matche (40<50) et `WearAbove(50)` non →
+    // exactement 1 action évaluée. Câble la variante ajoutée (GUI-PRO-115).
+    let kernel = format!("{}/examples/aps3d_maintenance_kernel.lll", env!("CARGO_MANIFEST_DIR"));
+    let src = format!(
+        "import \"{kernel}\"\n\nmodule WearBelowChange:\n\n  part main() -> Int:\n    let f = Facts(40, 100)\n    let r1 = Rule(WearBelow(50) :: [], Alert(1))\n    let r2 = Rule(WearAbove(50) :: [], Alert(2))\n    let rules = r1 :: r2 :: []\n    yield len(evaluate(rules, f))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("wear_below.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "WearBelow rule-change example must verify and run:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // `lll run` streams the check report on stdout before the program output — the program's
+    // returned value is the LAST non-blank line (`=> N`), as in the other run-based E2E tests.
+    let last = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("");
+    assert_eq!(
+        last.trim(),
+        "=> 1",
+        "only WearBelow(50) matches at 40% wear (WearAbove(50) does not) → 1 action:\n{stdout}"
+    );
+}
+
+#[test]
+fn aps3d_rule_change_missing_condition_arm_is_compile_error() {
+    // DEC-LLL-066 étape 4 : le pendant fail-loud de la mesure. Une `Condition` avec une
+    // variante `WearBelow` MAIS sans l'arm correspondant dans un match = erreur de compile
+    // (match non exhaustif, DEC-LLL-015), avec un contre-modèle. C'est LA propriété que
+    // engine.ex n'a pas (son `condition_matches?(_, _) -> false` avale silencieusement une
+    // condition non traitée). On reconstruit le noyau INLINE, arm manquant, et on exige
+    // l'échec du check — impossible d'expédier une condition à moitié câblée.
+    let src = "module ExhaustGap:\n\n  type Facts = {max_wear: Int, min_days: Int}\n  type Condition = WearAbove(Int) | WearBelow(Int)\n\n  part cond_holds(c: Condition, f: Facts) -> Bool:\n    match c:\n      WearAbove(t) -> yield f.max_wear > t\n\n  part main() -> Int:\n    yield 0\n";
+    let dir = tempdir();
+    let f = dir.join("exhaust_gap.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("check")
+        .arg("--no-cache")
+        .arg(&f)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run lll check");
+    assert!(
+        !out.status.success(),
+        "a Condition variant with no matching arm must be a compile error (exhaustiveness)"
+    );
+    // le verdict `match is exhaustive [sat]` + contre-modèle sort sur STDOUT (rapport de
+    // check par part) ; le `error: verification failed` sur STDERR — on exige les deux.
+    let err = String::from_utf8_lossy(&out.stderr);
+    let outp = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        format!("{outp}\n{err}").contains("exhaustive"),
+        "expected a non-exhaustive-match compile error, got:\nstderr={err}\nstdout={outp}"
+    );
+}
+
+#[test]
 fn date_smart_constructor_static_gate_rejects_out_of_range_literal() {
     // DEC-LLL-063: the LOOSE compile-time gate on `mk_date` (requires 1<=m<=12, 1<=d<=31 —
     // inline bounds are the only fragment `requires` allows, DEC-LLL-017) makes an out-of-range

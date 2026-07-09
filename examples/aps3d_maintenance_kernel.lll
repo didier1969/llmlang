@@ -14,7 +14,11 @@ module Aps3d.Kernel:
   type Facts = {max_wear: Int, min_days: Int}
 
   # Les conditions réellement testées par le moteur (engine.ex:207-219).
-  type Condition = WearAbove(Int) | DaysBelow(Int)
+  # DEC-LLL-066 étape 4 (mesure changement de règle) : ajouter une condition qui RÉUTILISE
+  # un fait existant = 2 lignes (la variante ici + l'arm `cond_holds`). Retirer l'arm =
+  # ERREUR DE COMPILE (match non exhaustif) — impossible d'ajouter une condition à moitié
+  # câblée, là où engine.ex retomberait silencieusement sur `false` (ligne 225).
+  type Condition = WearAbove(Int) | DaysBelow(Int) | WearBelow(Int)
 
   # Les actions émises : Alert(niveau) | Schedule(horizon_jours).
   type Action = Alert(Int) | Schedule(Int)
@@ -27,6 +31,7 @@ module Aps3d.Kernel:
     match c:
       WearAbove(t) -> yield f.max_wear > t
       DaysBelow(t) -> yield f.min_days < t
+      WearBelow(t) -> yield f.max_wear < t
 
   # Conjonction : toutes les conditions tiennent. Récursion structurale (termine).
   part all_hold(cs: List[Condition], f: Facts) -> Bool:
