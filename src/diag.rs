@@ -57,6 +57,14 @@ pub struct Diagnostic {
     /// part's `requires` clauses, rendered — the facts a completion may assume.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hypotheses: Vec<String>,
+    /// For a FAILED obligation (REQ-LLL-088): Z3-VERIFIED sufficient `requires`
+    /// strengthenings — each `H` such that `hyps ∧ H ⊢ goal` AND `hyps ∧ H` is
+    /// satisfiable. A FACT ("adding `requires H` would suffice"), never "the cause",
+    /// never necessary/minimal/your-intent. ADDITIVE — never replaces `counterexample`
+    /// (which stays primary). Empty ⇒ no atomic strengthening was found — NOT
+    /// "unprovable", NOT "no fix exists". Distinct from D2's `hypotheses`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sufficient_hypotheses: Vec<String>,
 }
 
 /// The `lll check --format=json` payload: the overall verdict plus every
@@ -107,6 +115,7 @@ impl Diagnostic {
             scope: Vec::new(),
             goal: Vec::new(),
             hypotheses: Vec::new(),
+            sufficient_hypotheses: Vec::new(),
         }
     }
 
@@ -149,26 +158,44 @@ impl Diagnostic {
             scope,
             goal: h.goal.clone(),
             hypotheses: h.hypotheses.clone(),
+            sufficient_hypotheses: Vec::new(),
         }
     }
 
     /// Build a diagnostic from an undischarged proof obligation: the description,
     /// plus the Z3 model decoded to a named counterexample — the concrete input
     /// an LLM can plug back in to reproduce and repair.
-    pub fn from_failed_obligation(part: &str, f: &FailedObligation) -> Diagnostic {
+    pub fn from_failed_obligation(
+        part: &str,
+        f: &FailedObligation,
+        sufficient: Vec<String>,
+    ) -> Diagnostic {
         let counterexample = f.model.as_deref().map(decode_model).unwrap_or_default();
-        let fix = if counterexample.is_empty() {
-            Some("the obligation is not provable — strengthen `requires` or fix the body so `ensures` holds".to_string())
+        let mut fix = if counterexample.is_empty() {
+            "the obligation is not provable — strengthen `requires` or fix the body so `ensures` holds".to_string()
         } else {
             let inputs: Vec<String> = counterexample
                 .iter()
                 .map(|a| format!("{}={}", a.var, a.value))
                 .collect();
-            Some(format!(
+            format!(
                 "fails on {} — handle this case or strengthen `requires`",
                 inputs.join(", ")
-            ))
+            )
         };
+        // REQ-LLL-088: if some catalogue `requires H` would SUFFICE (Z3-verified), name it —
+        // marked as sufficient (not necessarily necessary / minimal / your intent), never as
+        // "the cause". Additive to the counterexample above, never a replacement.
+        if !sufficient.is_empty() {
+            fix.push_str(&format!(
+                " · a Z3-verified SUFFICIENT strengthening (not necessarily necessary): {}",
+                sufficient
+                    .iter()
+                    .map(|h| format!("`requires {h}`"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ));
+        }
         Diagnostic {
             code: "LLL-E5001".to_string(),
             severity: "error".to_string(),
@@ -176,12 +203,13 @@ impl Diagnostic {
             message: format!("undischarged obligation: {} [{}]", f.descr, f.status),
             line: None,
             part: Some(part.to_string()),
-            fix,
+            fix: Some(fix),
             counterexample,
             expected_type: None,
             scope: Vec::new(),
             goal: Vec::new(),
             hypotheses: Vec::new(),
+            sufficient_hypotheses: sufficient,
         }
     }
 }

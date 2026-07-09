@@ -63,6 +63,12 @@ pub struct FailedObligation {
     pub descr: String,
     pub status: String, // "sat" | "unknown" | "timeout"
     pub model: Option<String>,
+    /// The failed obligation's SMT context (REQ-LLL-088), carried so a follow-up
+    /// abduction pass can test which catalogue hypotheses would SUFFICE to discharge it
+    /// — without re-deriving the VC. Display/explanation only; never a proof input.
+    pub decls: Vec<String>,
+    pub hyps: Vec<String>,
+    pub goal: String,
 }
 
 pub struct VerifyReport {
@@ -2259,10 +2265,179 @@ fn discharge(
                 descr: o.descr.clone(),
                 status: v.trim().to_string(),
                 model,
+                decls: o.decls.clone(),
+                hyps: o.hyps.clone(),
+                goal: o.goal.clone(),
             });
         }
     }
     Ok(failures)
+}
+
+/// A candidate strengthening (REQ-LLL-088): its SMT assertion + its source rendering.
+struct Candidate {
+    smt: String,
+    src: String,
+}
+
+/// Z3-VERIFIED sufficient strengthenings for a FAILED obligation (REQ-LLL-088). Each
+/// returned hypothesis `H`, drawn from a FINITE catalogue derived from the obligation's
+/// declared variables, satisfies BOTH `hyps ∧ H ⊢ goal` (it closes the proof gap) AND
+/// `hyps ∧ H` is satisfiable (it does not degenerate the precondition to `false`). So each
+/// is a FACT proved by Z3 — "adding `requires H` would suffice" — never an abductive guess,
+/// never "the cause". Sound but INCOMPLETE: an EMPTY result means "no atomic catalogue
+/// strengthening was found", NOT "unprovable" and NOT "no fix exists". Explanation only:
+/// reads Z3 in refutation mode, NEVER writes the cache, NEVER posts a verdict; `unknown`/
+/// `timeout`/`(error …)` on either test drop that candidate (fail-loud — only certainty
+/// qualifies). Never replaces the decoded counterexample (which stays primary).
+pub fn sufficient_hypotheses(f: &FailedObligation, cm: &CheckedModule) -> Vec<String> {
+    // only a real counterexample (`sat`) has a well-defined proof gap to close.
+    if f.status != "sat" {
+        return Vec::new();
+    }
+    let cands = catalogue(&f.decls, &f.goal);
+    if cands.is_empty() {
+        return Vec::new();
+    }
+    let z3 = match find_z3() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let dt_decls = user_datatype_decls(&cm.module.types);
+    // Two synthetic obligations per candidate, reusing the production script assembler:
+    //  (a) proof:       `(assert (not goal))` with `hyps ∧ H` must be UNSAT (H ⊢ goal);
+    //  (b) consistency: goal `false` ⇒ `(assert (not false))` = true, so `(check-sat)` is
+    //                   SAT iff `hyps ∧ H` is satisfiable — the anti-degenerate guard.
+    let mut obls: Vec<Obligation> = Vec::new();
+    for c in &cands {
+        let mut hyps = f.hyps.clone();
+        hyps.push(c.smt.clone());
+        obls.push(Obligation {
+            part: String::new(),
+            descr: String::new(),
+            decls: f.decls.clone(),
+            hyps: hyps.clone(),
+            goal: f.goal.clone(),
+        });
+        obls.push(Obligation {
+            part: String::new(),
+            descr: String::new(),
+            decls: f.decls.clone(),
+            hyps,
+            goal: "false".to_string(),
+        });
+    }
+    let refs: Vec<&Obligation> = obls.iter().collect();
+    let out = match run_z3(&z3, &script_for(&refs, false, &dt_decls)) {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if out.contains("(error") {
+        return Vec::new(); // fail-safe: a malformed run explains nothing
+    }
+    let verdicts: Vec<&str> = out
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| matches!(*l, "sat" | "unsat" | "unknown" | "timeout"))
+        .collect();
+    if verdicts.len() != obls.len() {
+        return Vec::new(); // protocol mismatch → suggest nothing (never a guess)
+    }
+    let mut out_h = Vec::new();
+    for (i, c) in cands.iter().enumerate() {
+        if verdicts[2 * i] == "unsat" && verdicts[2 * i + 1] == "sat" {
+            out_h.push(c.src.clone());
+        }
+    }
+    out_h
+}
+
+/// A finite, well-sorted catalogue of candidate strengthenings derived from an obligation's
+/// declared variables (REQ-LLL-088 §4). Cardinality is polynomial in the (small) number of
+/// variables — terminates trivially. No free constant beyond `0`, the variables, and
+/// structural terms already in scope (`seq.len`).
+fn catalogue(decls: &[String], goal: &str) -> Vec<Candidate> {
+    let vars: Vec<(String, String)> = decls.iter().filter_map(|d| parse_declare_const(d)).collect();
+    let src_of = |name: &str| name.strip_prefix("p_").unwrap_or(name).to_string();
+    let mut out = Vec::new();
+    // per-variable candidates
+    for (name, sort) in &vars {
+        let s = src_of(name);
+        match sort.as_str() {
+            "Int" => {
+                for op in [">", ">=", "<", "<="] {
+                    out.push(Candidate {
+                        smt: format!("({op} {name} 0)"),
+                        src: format!("{s} {op} 0"),
+                    });
+                }
+                out.push(Candidate {
+                    smt: format!("(distinct {name} 0)"),
+                    src: format!("{s} != 0"),
+                });
+            }
+            "Bool" => {
+                out.push(Candidate { smt: name.clone(), src: s.clone() });
+                out.push(Candidate { smt: format!("(not {name})"), src: format!("not {s}") });
+            }
+            srt if srt.starts_with("(Lst ") => {
+                // cons-list non-emptiness via the `nil` recognizer, annotated with the sort
+                // so it is well-sorted (DEC-LLL-043: a cons-list has NO native `length`).
+                out.push(Candidate {
+                    smt: format!("(not (= {name} (as nil {srt})))"),
+                    src: format!("{s} != []"),
+                });
+            }
+            srt if srt.starts_with("(Seq ") => {
+                out.push(Candidate {
+                    smt: format!("(> (seq.len {name}) 0)"),
+                    src: format!("length({s}) > 0"),
+                });
+            }
+            _ => {}
+        }
+    }
+    // per-pair relations for Int variables CO-OCCURRING in the goal
+    let ints: Vec<&(String, String)> = vars.iter().filter(|(_, s)| s == "Int").collect();
+    for i in 0..ints.len() {
+        for j in 0..ints.len() {
+            if i == j {
+                continue;
+            }
+            let xn = &ints[i].0;
+            let yn = &ints[j].0;
+            if goal.contains(xn.as_str()) && goal.contains(yn.as_str()) {
+                let (xs, ys) = (src_of(xn), src_of(yn));
+                out.push(Candidate { smt: format!("(< {xn} {yn})"), src: format!("{xs} < {ys}") });
+                out.push(Candidate { smt: format!("(<= {xn} {yn})"), src: format!("{xs} <= {ys}") });
+                if i < j {
+                    out.push(Candidate { smt: format!("(= {xn} {yn})"), src: format!("{xs} == {ys}") });
+                }
+            }
+        }
+    }
+    // (index Int, Seq) in-bounds, when both occur in the goal
+    let seqs: Vec<&(String, String)> = vars.iter().filter(|(_, s)| s.starts_with("(Seq ")).collect();
+    for (an, _) in &seqs {
+        for (in_, _) in &ints {
+            if goal.contains(an.as_str()) && goal.contains(in_.as_str()) {
+                let (asrc, isrc) = (src_of(an), src_of(in_));
+                out.push(Candidate {
+                    smt: format!("(and (>= {in_} 0) (< {in_} (seq.len {an})))"),
+                    src: format!("0 <= {isrc} and {isrc} < length({asrc})"),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Parse `(declare-const <name> <sort>)` → (name, sort); `None` for any other command
+/// (e.g. `declare-fun`), so only true variables enter the catalogue.
+fn parse_declare_const(decl: &str) -> Option<(String, String)> {
+    let inner = decl.trim().strip_prefix("(declare-const ")?.strip_suffix(')')?;
+    let (name, sort) = inner.trim().split_once(char::is_whitespace)?;
+    Some((name.to_string(), sort.trim().to_string()))
 }
 
 #[cfg(test)]
@@ -2294,5 +2469,43 @@ mod tests {
             res.is_err(),
             "a Z3 error must be a hard verification failure, got: {res:?}"
         );
+    }
+
+    #[test]
+    fn catalogue_is_finite_and_well_sorted_req088() {
+        // REQ-LLL-088 §4: the candidate catalogue is a deterministic, finite function of the
+        // declared variables + sorts. Int ⇒ sign/non-null candidates; a cons-list ⇒ the `nil`
+        // recognizer annotated with its sort (NEVER `seq.len` — a cons-list has no native
+        // length, DEC-LLL-043); a Seq ⇒ non-emptiness via native `seq.len`.
+        let decls = vec![
+            "(declare-const p_b Int)".to_string(),
+            "(declare-const p_xs (Lst Int))".to_string(),
+            "(declare-const p_a (Seq Int))".to_string(),
+        ];
+        let cands = catalogue(&decls, "(> (seq.len p_a) p_b)");
+        let has_src = |s: &str| cands.iter().any(|c| c.src == s);
+        assert!(has_src("b != 0") && has_src("b > 0") && has_src("b < 0"), "Int sign/non-null candidates");
+        assert!(
+            cands.iter().any(|c| c.src == "xs != []"
+                && c.smt.contains("(as nil (Lst Int))")
+                && !c.smt.contains("seq.len")),
+            "cons-list non-emptiness via the annotated `nil` recognizer, never `seq.len`"
+        );
+        assert!(
+            cands.iter().any(|c| c.src == "length(a) > 0" && c.smt.contains("seq.len")),
+            "Seq non-emptiness via native `seq.len`"
+        );
+        // finite and well-formed: every candidate carries a non-empty source rendering.
+        assert!(!cands.is_empty() && cands.iter().all(|c| !c.src.is_empty()));
+    }
+
+    #[test]
+    fn parse_declare_const_reads_name_and_compound_sort_req088() {
+        assert_eq!(parse_declare_const("(declare-const p_b Int)"), Some(("p_b".into(), "Int".into())));
+        assert_eq!(
+            parse_declare_const("(declare-const p_xs (Lst Int))"),
+            Some(("p_xs".into(), "(Lst Int)".into()))
+        );
+        assert_eq!(parse_declare_const("(declare-fun f (Int) Int)"), None);
     }
 }

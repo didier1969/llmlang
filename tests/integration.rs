@@ -4940,6 +4940,92 @@ fn suggest_json_contract_and_is_side_effect_free_req086() {
     assert_eq!(chk.status.code(), Some(2), "module stays Incomplete after suggest");
 }
 
+// ---- explication d'échec : hypothèses suffisantes vérifiées par Z3 (REQ-LLL-088) ----
+
+#[test]
+fn check_json_names_sufficient_hypothesis_for_div_by_zero_req088() {
+    // REQ-LLL-088: on a FAILED obligation, `check --format=json` names a Z3-VERIFIED sufficient
+    // `requires` strengthening ALONGSIDE the counterexample. Division `a div b` fails on b=0; the
+    // counterexample stays PRIMARY and `b != 0` appears as a sufficient hypothesis (a fact —
+    // "would suffice" — never "the cause", never replacing the counterexample).
+    let dir = tempdir().join("req088-div");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("d.lll");
+    std::fs::write(&f, "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    yield a div b\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "a failed proof exits 1: {j}");
+    assert!(j.contains("\"counterexample\"") && j.contains("\"b\""), "counterexample stays primary: {j}");
+    assert!(j.contains("\"sufficient_hypotheses\"") && j.contains("b != 0"), "names `b != 0` as sufficient: {j}");
+    assert!(j.contains("not necessarily necessary"), "marked sufficient, not causal: {j}");
+}
+
+#[test]
+fn check_json_names_in_bounds_hypothesis_for_array_get_req088() {
+    // REQ-LLL-088: an out-of-bounds `get(a, i)` obligation yields the Seq/index in-bounds
+    // sufficient hypothesis `0 <= i and i < length(a)` (native `seq.len`, DEC-LLL-043).
+    let dir = tempdir().join("req088-arr");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("a.lll");
+    std::fs::write(&f, "module M:\n\n  part f(a: Array[Int], i: Int) -> Int:\n    yield get(a, i)\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(j.contains("\"sufficient_hypotheses\"") && j.contains("0 <= i and i < length(a)"), "names the in-bounds hypothesis: {j}");
+}
+
+#[test]
+fn check_json_omits_inconsistent_hypothesis_anti_degenerate_req088() {
+    // REQ-LLL-088 anti-degenerate guard (§3): a candidate that would make the precondition
+    // UNSATISFIABLE is NOT reported. Here `requires x <= 0` while the callee needs `x > 0`:
+    // `x > 0` closes the proof gap but `hyps ∧ (x>0)` is UNSAT (x<=0), so it is EXCLUDED — no
+    // "strengthen to `false`" suggestion. All catalogue candidates fail the consistency test.
+    let dir = tempdir().join("req088-anti");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("anti.lll");
+    std::fs::write(
+        &f,
+        "module M:\n\n  part needs_pos(x: Int) -> Int:\n    requires x > 0\n    yield x\n\n  part g(x: Int) -> Int:\n    requires x <= 0\n    yield needs_pos(x)\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "still a failed proof (exit 1): {j}");
+    assert!(!j.contains("sufficient_hypotheses"), "no inconsistent hypothesis is suggested: {j}");
+}
+
+#[test]
+fn check_json_reports_no_sufficient_hypothesis_when_out_of_catalogue_req088() {
+    // REQ-LLL-088 incompleteness (§5.3): when no ATOMIC catalogue strengthening suffices (here
+    // the fix is `b == 0`, not in the single-var catalogue), the field is simply ABSENT — the
+    // mechanism is sound but incomplete. Absence ≠ "unprovable" ≠ "no fix exists"; the honest
+    // counterexample stays present and primary, and nothing claims the obligation is unprovable.
+    let dir = tempdir().join("req088-incomplete");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("i.lll");
+    std::fs::write(&f, "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    ensures result == a + b\n    yield a\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(j.contains("\"counterexample\""), "counterexample stays present and primary: {j}");
+    assert!(!j.contains("sufficient_hypotheses"), "no atomic strengthening found ⇒ field absent (not a false claim): {j}");
+    assert!(!j.to_lowercase().contains("unprovable"), "silence must not be read as `unprovable`: {j}");
+}
+
 // ---- contrats expressifs Tranche 0 : `[]` / `array()` vides en contrat (REQ-LLL-087) ----
 
 #[test]

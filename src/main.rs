@@ -458,7 +458,11 @@ fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
     for (part, v) in &report.parts {
         if let vc::PartVerdict::Failed { failures } = v {
             for f in failures {
-                diagnostics.push(diag::Diagnostic::from_failed_obligation(part, f));
+                // REQ-LLL-088 (JSON channel only — kept off the plain `check` hot path): on a
+                // real counterexample, name any Z3-VERIFIED sufficient `requires` strengthening.
+                // Additive to the counterexample; never replaces it, never posts a verdict.
+                let sufficient = vc::sufficient_hypotheses(f, &cm);
+                diagnostics.push(diag::Diagnostic::from_failed_obligation(part, f, sufficient));
             }
         }
     }
