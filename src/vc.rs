@@ -1008,25 +1008,76 @@ impl<'a> Emit<'a> {
     }
 
     /// PROVE a bounded `exists` obligation — the DUAL of the `forall` fresh-const proof
-    /// (REQ-LLL-089). Tranche 1 (this commit): proving an existential is DEFERRED — fail LOUD
-    /// (DEC-LLL-015), never a silent skip, so an `exists` is currently sound to ASSUME (a
-    /// `requires`, Skolemized) but not yet to PROVE. Tranche 2 replaces this body with the
-    /// FINITE-DISJUNCTION encoding `body(lo) ∨ … ∨ body(hi-1)` for CONCRETE integer bounds
-    /// (symbolic bounds / Map-Set domains stay deferred — the genuine soundness wall).
+    /// (REQ-LLL-089). A CONCRETE integer range is eliminated by FINITE DISJUNCTION
+    /// `body(lo) ∨ … ∨ body(hi-1)` — never `assert exists`. The disjunction is translated with
+    /// `instantiating = false` (obligations LIVE): each disjunct's own `get`/`lookup` access
+    /// obligation IS the per-index safety check — sound, over-approximating to "all candidate
+    /// indices accessible" (incomplete, never unsound; the exact MIRROR of the CONSUME side's
+    /// `instantiating = true`). A SYMBOLIC bound (`length(xs)`, a param, arithmetic), a Map/Set
+    /// `in` domain, or a width over the finite-expansion cap is the genuine soundness wall
+    /// (witness synthesis / `assert forall` of the negation) and is DEFERRED — fail LOUD
+    /// (DEC-LLL-015), never a silent skip.
     fn oblige_exists(
         &mut self,
         descr: &str,
-        _var: &str,
-        _domain: &ForallDomain,
-        _body: &Expr,
-        _env: &HashMap<String, String>,
+        var: &str,
+        domain: &ForallDomain,
+        body: &Expr,
+        env: &HashMap<String, String>,
     ) -> Result<(), String> {
-        Err(format!(
-            "part `{}`: {descr} — proving an existential (`exists … : …`) is deferred to \
-             REQ-LLL-089 Tranche 2; `exists` is currently supported only where it is ASSUMED \
-             (a `requires`, consumed by Skolemization) (DEC-LLL-015)",
-            self.part.name
-        ))
+        // Generous but DoS-safe: a real concrete existential is small (`0 .. 10`); a wide or
+        // symbolic one falls to the deferred path rather than exploding the goal (REQ-LLL-089).
+        const MAX_EXISTS_WIDTH: i64 = 256;
+        let (lo, hi) = match domain {
+            ForallDomain::Range(lo, hi) => match (const_int(lo), const_int(hi)) {
+                (Some(lo), Some(hi)) => (lo, hi),
+                _ => {
+                    return Err(format!(
+                        "part `{}`: {descr} — proving `exists … in <lo> .. <hi>` needs CONCRETE \
+                         integer bounds; a symbolic bound is the soundness wall, deferred to \
+                         REQ-LLL-089 Tranche 2 (DEC-LLL-015)",
+                        self.part.name
+                    ))
+                }
+            },
+            ForallDomain::In(_) => {
+                return Err(format!(
+                    "part `{}`: {descr} — proving `exists … in <Map/Set>` is deferred; only an \
+                     ASSUMED existential over a collection is supported, by Skolemization \
+                     (REQ-LLL-089, DEC-LLL-015)",
+                    self.part.name
+                ))
+            }
+        };
+        // Empty range ⇒ the existential is vacuously FALSE (`∃x∈∅` never holds): the goal
+        // `false` is unprovable, so an empty-range existential is correctly REJECTED.
+        if hi <= lo {
+            self.oblige(descr.to_string(), "false".to_string());
+            return Ok(());
+        }
+        let width = hi.checked_sub(lo).filter(|w| *w <= MAX_EXISTS_WIDTH).ok_or_else(|| {
+            format!(
+                "part `{}`: {descr} — the existential range width exceeds the finite-expansion \
+                 cap ({MAX_EXISTS_WIDTH}); a wide existential proof is deferred (REQ-LLL-089)",
+                self.part.name
+            )
+        })?;
+        let mut disj = Vec::with_capacity(width as usize);
+        for k in lo..hi {
+            let klit = if k < 0 { format!("(- {})", -k) } else { format!("{k}") };
+            let mut benv = env.clone();
+            benv.insert(var.to_string(), klit);
+            disj.push(self.tr(body, &benv, None)?);
+        }
+        // Single disjunct ⇒ the bare body (a well-formed `(or x)` is fine for Z3, but the bare
+        // term is cleaner and avoids a one-armed disjunction).
+        let goal = if disj.len() == 1 {
+            disj.pop().unwrap()
+        } else {
+            format!("(or {})", disj.join(" "))
+        };
+        self.oblige(descr.to_string(), goal);
+        Ok(())
     }
 
     /// The expected type for an equality operand that is a constructor APPLICATION,
@@ -2064,6 +2115,18 @@ impl<'a> Emit<'a> {
     /// Contracts contain no calls/effects (enforced by the checker) — pure translation.
     fn tr_contract(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
         self.tr(e, env, None)
+    }
+}
+
+/// A CONCRETE integer value for a quantifier bound, if `e` is an integer literal (possibly
+/// negated) — the ONLY bounds that admit finite-disjunction expansion when PROVING an `exists`
+/// (REQ-LLL-089). A symbolic bound (`length(xs)`, a param, an arithmetic expression like
+/// `2 + 3`) returns `None` ⇒ the existential proof is deferred (the soundness wall).
+fn const_int(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::IntLit(v) => Some(*v),
+        Expr::Neg(inner) => const_int(inner).map(|v| -v),
+        _ => None,
     }
 }
 

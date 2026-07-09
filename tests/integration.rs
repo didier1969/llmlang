@@ -5645,16 +5645,104 @@ fn exists_in_requires_over_set_member_assumed_req089() {
 }
 
 #[test]
-fn exists_in_ensures_proof_is_deferred_req089() {
-    // REQ-LLL-089 boundary (Tranche 1): PROVING an existential (`ensures exists …`) is DEFERRED
-    // to Tranche 2 — fail LOUD (DEC-LLL-015), never a silent skip. `exists` is currently sound
-    // to ASSUME (a `requires`, Skolemized) but not yet to PROVE.
+fn exists_over_symbolic_bound_proof_is_deferred_req089() {
+    // REQ-LLL-089 boundary: PROVING `exists … in 0 .. <symbolic>` (here `length(result)`) is the
+    // genuine soundness wall (no finite disjunction) — DEFERRED, fail LOUD (DEC-LLL-015), never a
+    // silent skip. Only CONCRETE integer bounds are provable (by finite disjunction); a symbolic
+    // bound remains ASSUME-only (Skolemization).
     let (code, _out, err) = check_lll_src(
-        "089-defer",
+        "089-sym-defer",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures exists i in 0 .. length(result): get(result, i) == 7\n    yield array(7, 0, 0)\n",
+    );
+    assert_ne!(code, Some(0), "a symbolic-bound existential proof is deferred, not silently accepted");
+    assert!(err.contains("CONCRETE") && err.contains("deferred"), "explicit deferral error: {err}");
+}
+
+// ---- bounded `exists` — Tranche 2: PROVE over CONCRETE integer bounds (finite disjunction) ----
+
+#[test]
+fn exists_over_concrete_range_proved_by_disjunction_req089() {
+    // REQ-LLL-089 Tranche 2: a CONCRETE-bound `exists` `ensures` is PROVED by FINITE DISJUNCTION
+    // `body(0) ∨ body(1) ∨ body(2)` — never `assert exists`. `array(7, 0, 0)` satisfies
+    // `exists i in 0 .. 3: get(result, i) == 7` (the first disjunct holds).
+    let (code, out, _) = check_lll_src(
+        "089-disj-pos",
         "module M:\n\n  part f() -> Array[Int]:\n    ensures exists i in 0 .. 3: get(result, i) == 7\n    yield array(7, 0, 0)\n",
     );
-    assert_ne!(code, Some(0), "proving an existential ensures is deferred, not silently accepted");
-    assert!(err.contains("deferred") && err.contains("existential"), "explicit deferral error: {err}");
+    assert_eq!(code, Some(0), "a concrete-bound existential is proved by disjunction: {out}");
+}
+
+#[test]
+fn exists_false_for_every_index_is_rejected_req089() {
+    // REQ-LLL-089 Tranche 2 soundness: the disjunction is only provable when SOME disjunct holds.
+    // `array(1, 2, 3)` contains no `7`, so `exists i in 0 .. 3: get(result, i) == 7` is false at
+    // every index and is REJECTED — never fabricated.
+    let (code, out, _) = check_lll_src(
+        "089-disj-false",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures exists i in 0 .. 3: get(result, i) == 7\n    yield array(1, 2, 3)\n",
+    );
+    assert_eq!(code, Some(1), "an existential false at every index is not provable: {out}");
+}
+
+#[test]
+fn exists_over_empty_range_is_vacuously_false_req089() {
+    // REQ-LLL-089 Tranche 2 edge case — the DUAL of `forall` over an empty range (vacuously
+    // TRUE): an `exists` over an empty range `2 .. 2` is vacuously FALSE (`∃x∈∅` never holds), so
+    // the goal `false` is unprovable and the `ensures` is REJECTED, even for an all-`7` array.
+    let (code, out, _) = check_lll_src(
+        "089-empty",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures exists i in 2 .. 2: get(result, i) == 7\n    yield array(7, 7, 7)\n",
+    );
+    assert_eq!(code, Some(1), "an empty-range existential is vacuously false: {out}");
+}
+
+#[test]
+fn exists_single_element_range_proved_req089() {
+    // REQ-LLL-089 Tranche 2 edge case: a width-1 range `0 .. 1` expands to the BARE body (no
+    // one-armed `(or …)`). `array(7)` satisfies `exists i in 0 .. 1: get(result, i) == 7`.
+    let (code, out, _) = check_lll_src(
+        "089-single",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures exists i in 0 .. 1: get(result, i) == 7\n    yield array(7)\n",
+    );
+    assert_eq!(code, Some(0), "a single-element existential range verifies: {out}");
+}
+
+#[test]
+fn exists_over_pure_arithmetic_body_proved_req089() {
+    // REQ-LLL-089 Tranche 2: the canonical concrete existential — pure arithmetic on the binder,
+    // no array access (so no per-disjunct bounds obligation). `exists i in 0 .. 5: i == 3` holds
+    // (the `i = 3` disjunct is true).
+    let (code, out, _) = check_lll_src(
+        "089-arith",
+        "module M:\n\n  part f() -> Int:\n    ensures exists i in 0 .. 5: i == 3\n    yield 0\n",
+    );
+    assert_eq!(code, Some(0), "a pure-arithmetic existential is proved by disjunction: {out}");
+}
+
+#[test]
+fn exists_over_wide_range_proof_is_capped_req089() {
+    // REQ-LLL-089 Tranche 2 robustness: a concrete range wider than the finite-expansion cap
+    // (`0 .. 1000`) would DoS the checker with a huge goal — it is DEFERRED (fail-loud), not
+    // expanded. (Below the cap it would expand; the boundary is a deliberate robustness limit.)
+    let (code, _out, err) = check_lll_src(
+        "089-cap",
+        "module M:\n\n  part f() -> Int:\n    ensures exists i in 0 .. 1000: i == 3\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "a range past the finite-expansion cap is deferred");
+    assert!(err.contains("cap"), "explicit width-cap error: {err}");
+}
+
+#[test]
+fn exists_ensures_proved_then_consumed_by_caller_req089() {
+    // REQ-LLL-089 round-trip (prove + consume compose): a callee PROVES its concrete-bound
+    // `ensures exists` by disjunction; a caller CONSUMES it at the call site by Skolemization
+    // (assuming the existential over the havoc'd result). Both parts verify — the two dual halves
+    // of the existential machinery working together.
+    let (code, out, _) = check_lll_src(
+        "089-roundtrip",
+        "module M:\n\n  part finds() -> Array[Int]:\n    ensures exists i in 0 .. 3: get(result, i) == 7\n    yield array(0, 7, 0)\n\n  part uses() -> Int:\n    let xs = finds()\n    yield 0\n",
+    );
+    assert_eq!(code, Some(0), "the callee proves and the caller consumes the existential: {out}");
 }
 
 #[test]
