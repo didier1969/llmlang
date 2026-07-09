@@ -185,6 +185,24 @@ pub fn verify(
     Ok(VerifyReport { parts })
 }
 
+/// Discharge exactly ONE part's obligations via the SAME production path `verify` uses
+/// (REQ-LLL-086): its VCs + example obligations, checked against the module's user-ADT
+/// declarations, on the given z3. Returns the undischarged obligations — empty ⇒ the part
+/// is proved. This is the synthesis oracle: it NEVER reads or writes the proof cache and
+/// NEVER posts a module verdict, so a candidate completion can be judged without any side
+/// effect (soundness: propose ≠ accept — the fill is proved on its OWN reconstructed
+/// program, and `unknown`/`timeout`/`(error …)` are fail-CLOSED by `discharge`, DEC-LLL-015).
+pub fn discharge_part(
+    cm: &CheckedModule,
+    part: &Part,
+    z3: &Path,
+) -> Result<Vec<FailedObligation>, String> {
+    let dt_decls = user_datatype_decls(&cm.module.types);
+    let mut obligations = gen_part_obligations(cm, part)?;
+    obligations.extend(gen_part_example_obligations(cm, part)?);
+    discharge(z3, &obligations, &dt_decls)
+}
+
 pub fn cache_key(part: &Part, _cm: &CheckedModule, hm: &HashedModule) -> String {
     // proof_hash already folds in the part's own body+contract AND the
     // CONTRACT hashes of every direct dependency (calls are normalized to

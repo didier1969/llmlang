@@ -4864,6 +4864,82 @@ fn check_exposes_hole_goal_and_hypotheses_req085() {
     assert!(j.contains("\"hypotheses\"") && j.contains("lo >= 0"), "json hole carries the hypotheses: {j}");
 }
 
+// ---- synthèse de complétion de trou : `lll suggest` (REQ-LLL-086) ----
+
+#[test]
+fn suggest_returns_only_z3_proved_completions_req086() {
+    // REQ-LLL-086: enumerate-and-check returns ONLY completions Z3 PROVES satisfy the part's
+    // FULL contract. Here `ensures result >= acc`: of the in-scope Ints {n, acc} and literals
+    // {0, 1}, only `acc` is provable (result == acc ⇒ acc >= acc); `n`, `0`, `1` are plausible
+    // but FALSE and MUST be absent — soundness (propose ≠ accept).
+    let src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("check");
+    let sugs = synth::suggest(&cm, None, 16).expect("suggest runs");
+    assert_eq!(sugs.len(), 1, "one hole");
+    assert_eq!(sugs[0].candidates, vec!["acc".to_string()], "only `acc` is proved (n/0/1 absent)");
+}
+
+#[test]
+fn suggest_synthesises_unary_constructor_application_req086() {
+    // REQ-LLL-086 D1: a one-argument application `Some(n)` is enumerated (a constructor whose
+    // return unifies with the hole's `Option[Int]`, its field instantiated to `Int`) and kept
+    // because it discharges `ensures result == Some(n)`; `Some(0)`, `Some(1)`, `None` are rejected.
+    let src = "module M:\n\n  type Option[a] = None | Some(a)\n\n  part f(n: Int) -> Option[Int]:\n    ensures result == Some(n)\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("check");
+    let sugs = synth::suggest(&cm, None, 16).expect("suggest");
+    assert_eq!(sugs[0].candidates, vec!["Some(n)".to_string()], "only `Some(n)` is proved");
+}
+
+#[test]
+fn suggest_rejects_non_terminating_recursive_candidate_req086() {
+    // REQ-LLL-086 soundness (§3.4): NO special-case for recursion — a self-call candidate `f(n)`
+    // is enumerated but REJECTED because the reconstructed program must pass the FULL pipeline,
+    // including termination (a non-structural self-call with no measure is refused), exactly like
+    // a hand-written non-terminating body. A safe constant completion `0` is kept instead.
+    let src = "module M:\n\n  part f(n: Int) -> Int:\n    ensures result >= 0\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("check");
+    let sugs = synth::suggest(&cm, None, 16).expect("suggest");
+    assert!(sugs[0].candidates.iter().any(|c| c == "0"), "safe constant `0` proved: {:?}", sugs[0].candidates);
+    assert!(
+        !sugs[0].candidates.iter().any(|c| c == "f(n)"),
+        "non-terminating recursion `f(n)` is NOT proposed: {:?}",
+        sugs[0].candidates
+    );
+}
+
+#[test]
+fn suggest_json_contract_and_is_side_effect_free_req086() {
+    // REQ-LLL-086 E2E: `lll suggest --format=json` emits the proved completions labelled
+    // `suggested_completions` (never verified) with the "apply to text then check" note. It is
+    // CONSULTATIVE — exit 0, writes NO proof cache, and leaves the holey module `Incomplete`
+    // (a following `check` still exits 2). propose ≠ accept, zero side effect (DEC-LLL-020).
+    let dir = tempdir().join("suggest-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+    let f = dir.join("s.lll");
+    std::fs::write(&f, src).unwrap();
+
+    let out = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["suggest", "--format=json", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "suggest is consultative → exit 0");
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(j.contains("\"suggested_completions\"") && j.contains("acc"), "json lists the proved completion: {j}");
+    assert!(j.contains("NOT verified"), "json carries the propose≠accept note: {j}");
+    // suggest writes NO proof cache (per-part oracle never touches `.lll-cache`)
+    assert!(!dir.join(".lll-cache").exists(), "suggest writes no proof cache");
+    // the holey module still checks as Incomplete (exit 2) — suggest changed nothing
+    let chk = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(chk.status.code(), Some(2), "module stays Incomplete after suggest");
+}
+
 // ---- contrats expressifs Tranche 0 : `[]` / `array()` vides en contrat (REQ-LLL-087) ----
 
 #[test]

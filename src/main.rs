@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -538,6 +538,42 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 std::process::exit(2);
             }
             println!("✔ {}: all parts verified", cm.module.name);
+            Ok(())
+        }
+        ["suggest", rest @ ..] => {
+            // `lll suggest <f> [--part <name>] [--max <k>] [--format=json]` (REQ-LLL-086):
+            // enumerate + Z3-check hole completions. CONSULTATIVE — never edits the text,
+            // never writes the proof cache, never posts a verdict (a holey module stays
+            // Incomplete; propose ≠ accept). Exit 0: a suggestion is not a verdict.
+            let mut json = false;
+            let mut file: Option<&str> = None;
+            let mut part: Option<&str> = None;
+            let mut max: usize = 16;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--format=json" => json = true,
+                    "--part" => {
+                        i += 1;
+                        part = Some(*rest.get(i).ok_or_else(usage)?);
+                    }
+                    "--max" => {
+                        i += 1;
+                        max = rest.get(i).ok_or_else(usage)?.parse().map_err(|_| usage())?;
+                    }
+                    f if !f.starts_with("--") => file = Some(f),
+                    _ => return Err(usage()),
+                }
+                i += 1;
+            }
+            let file = file.ok_or_else(usage)?;
+            let (_, cm, _) = load(file)?;
+            let suggestions = synth::suggest(&cm, part, max)?;
+            if json {
+                print_suggest_json(&cm, &suggestions);
+            } else {
+                print_suggest_human(&cm, &suggestions);
+            }
             Ok(())
         }
         ["build", rest @ ..] => {
@@ -957,6 +993,62 @@ fn print_report(report: &vc::VerifyReport) {
             }
         }
     }
+}
+
+/// `lll suggest --format=json` payload (REQ-LLL-086): per hole, its coordinates + the
+/// Z3-PROVED completions, labelled `suggested_completion` (never `verified`) with a note —
+/// apply to the TEXT and re-`check` to obtain the proof (DEC-LLL-020; propose ≠ accept).
+fn print_suggest_json(cm: &types::CheckedModule, sugs: &[synth::Suggestion]) {
+    let holes: Vec<serde_json::Value> = sugs
+        .iter()
+        .map(|s| {
+            let mut o = serde_json::json!({
+                "part": s.part,
+                "line": s.line,
+                "expected_type": s.expected.to_string(),
+                "suggested_completions": s.candidates,
+            });
+            if let Some(u) = &s.unsupported {
+                o["unsupported"] = serde_json::Value::String(u.clone());
+            }
+            o
+        })
+        .collect();
+    let payload = serde_json::json!({
+        "module": cm.module.name,
+        "holes": holes,
+        "note": "a `suggested_completion` is NOT verified — apply it to the .lll text, then run `check` to obtain the proof (DEC-LLL-020)",
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+    );
+}
+
+/// Human rendering of `lll suggest` (REQ-LLL-086): the proved completions per hole.
+fn print_suggest_human(cm: &types::CheckedModule, sugs: &[synth::Suggestion]) {
+    if sugs.is_empty() {
+        println!("no holes in `{}` — nothing to suggest", cm.module.name);
+        return;
+    }
+    for s in sugs {
+        println!(
+            "◇ hole in part `{}` (line {}): expected type {}",
+            s.part, s.line, s.expected
+        );
+        if let Some(u) = &s.unsupported {
+            println!("    (skipped: {u})");
+            continue;
+        }
+        if s.candidates.is_empty() {
+            println!("    no proved completion found");
+        } else {
+            for c in &s.candidates {
+                println!("    suggest: {c}");
+            }
+        }
+    }
+    println!("note: a suggestion is NOT a proof — write it into the text, then `check` (DEC-LLL-020)");
 }
 
 /// Render each typed hole's completion menu (DEC-LLL-052): its part, the type the

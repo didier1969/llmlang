@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod opsem;
 pub mod optimize;
 pub mod parser;
+pub mod synth;
 pub mod types;
 pub mod vc;
 
