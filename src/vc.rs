@@ -1048,7 +1048,12 @@ impl<'a> Emit<'a> {
         // REJECTED — never a silent `seq.nth` junk read. Two independent, both-proven conditions:
         // `guard(w)` binds `w` to the DOMAIN; the access obligation binds it to the ARRAY/MAP.
         if let Some(w) = witness {
-            debug_assert!(
+            // HARD assert (not debug_assert): this is the soundness keystone. If a future
+            // refactor ever reached the witness path with obligations suppressed, `body[v:=w]`
+            // would translate WITHOUT its access obligations and an out-of-bounds witness would
+            // pass silently — a fail-loud panic is strictly better than that silent unsoundness
+            // (DEC-LLL-015). No correct caller violates it (both PROVE sites use instantiating=false).
+            assert!(
                 !self.instantiating,
                 "oblige_exists witness path must run with obligations LIVE (soundness keystone)"
             );
