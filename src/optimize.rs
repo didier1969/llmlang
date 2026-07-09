@@ -9,21 +9,24 @@
 //! Soundness rests on three preservation axes, each with its own gate (the #1
 //! risk of this feature, treated explicitly).
 //!
-//! VALUE: every algebraic rewrite rule ships a Z3 lemma `forall vars. lhs = rhs`;
-//! a rule whose lemma is not `unsat` (of its negation) is REJECTED as value-unsound.
+//! VALUE + TRAP: every algebraic rule is checked by Z3 over 64-bit two's-complement
+//! `x` (`(_ BitVec 64)`, the actual i64 backend — NOT unbounded `Int`), requiring
+//! lhs and rhs to trap on exactly the same inputs (signed-overflow predicates,
+//! DEC-LLL-026) AND agree in value everywhere else; a rule whose negation is not
+//! `unsat` is REJECTED. An operator we do not trap-model is rejected fail-loud
+//! (DEC-LLL-015), so extending the catalogue to Div/Mod/… trips a gate rather than
+//! silently riding a value-only check.
 //!
 //! EFFECT: `EffCall` (and any impure sub-term) is OPAQUE — never merged, never
 //! shared, never reordered — so two `IO.read()` stay distinct.
 //!
-//! TRAP/TOTALITY: a rule that ERASES a variable (present in lhs, absent in rhs) is
-//! REJECTED, because it could drop a trap (`x*0 -> 0` erases `x`, DEC-LLL-026); and
-//! CSE only hoists a sub-term with at least one occurrence in an UNGUARDED position
+//! TOTALITY: a rule that ERASES a variable (present in lhs, absent in rhs) is
+//! REJECTED — its `x` may be bound to an arbitrary trapping SUB-EXPRESSION (e.g.
+//! `a/b`), whose trap the constant-`x` SMT model above cannot see (`x*0 -> 0` drops
+//! it, DEC-LLL-026). This structural gate runs FIRST and is load-bearing; and CSE
+//! only hoists a sub-term with at least one occurrence in an UNGUARDED position
 //! (not under a short-circuit `&&`/`||` RHS), so evaluating it once up front adds no
 //! trap the original run did not already incur.
-//!
-//! Note: the Z3 value lemma alone does NOT reject `x*0 -> 0` (`forall x. x*0 = 0` is
-//! valid in the integer theory); its defect is the TOTALITY axis, caught by the
-//! non-erasure gate — not the value gate.
 
 use crate::ast::{BinOp, Expr, Stmt, Arm, Handle, HandleClause};
 use crate::ast::{is_array_builtin, is_map_builtin, is_set_builtin};
@@ -243,8 +246,11 @@ impl EGraph {
 // ---------------------------------------------------------------------------
 
 /// A candidate arithmetic identity `Bin(op, x, k) → x` (or `→ k`), validated
-/// before use. `keep_left` picks which operand survives; `erases` marks that the
-/// surviving side drops the other operand (the totality gate).
+/// before use. `result` picks which side survives; `erases` marks that the
+/// surviving side drops the other operand (the totality gate). The SMT lemma is
+/// GENERATED from these structured fields (`bv_lhs`/`bv_rhs`), not carried as a
+/// hand-written string — one source of truth, and it cannot drift from the fields
+/// the e-graph actually matches on.
 struct AlgRule {
     op: BinOp,
     /// the literal the OTHER operand must equal for the rule to fire
@@ -253,9 +259,6 @@ struct AlgRule {
     lit_on_right: bool,
     /// `Keep` → the non-literal operand survives; `Zero` → the whole term becomes `0`
     result: RuleResult,
-    /// SMT lemma sides over free var `x` (value axis)
-    lhs_smt: &'static str,
-    rhs_smt: &'static str,
     /// does the rewrite erase `x` (present in lhs, absent in rhs)? (totality axis)
     erases: bool,
 }
@@ -280,31 +283,84 @@ pub enum RuleVerdict {
 fn candidate_rules() -> Vec<AlgRule> {
     use BinOp::*;
     vec![
-        AlgRule { op: Add, lit: 0, lit_on_right: true, result: RuleResult::Keep, lhs_smt: "(+ x 0)", rhs_smt: "x", erases: false },
-        AlgRule { op: Add, lit: 0, lit_on_right: false, result: RuleResult::Keep, lhs_smt: "(+ 0 x)", rhs_smt: "x", erases: false },
-        AlgRule { op: Sub, lit: 0, lit_on_right: true, result: RuleResult::Keep, lhs_smt: "(- x 0)", rhs_smt: "x", erases: false },
-        AlgRule { op: Mul, lit: 1, lit_on_right: true, result: RuleResult::Keep, lhs_smt: "(* x 1)", rhs_smt: "x", erases: false },
-        AlgRule { op: Mul, lit: 1, lit_on_right: false, result: RuleResult::Keep, lhs_smt: "(* 1 x)", rhs_smt: "x", erases: false },
+        AlgRule { op: Add, lit: 0, lit_on_right: true, result: RuleResult::Keep, erases: false },
+        AlgRule { op: Add, lit: 0, lit_on_right: false, result: RuleResult::Keep, erases: false },
+        AlgRule { op: Sub, lit: 0, lit_on_right: true, result: RuleResult::Keep, erases: false },
+        AlgRule { op: Mul, lit: 1, lit_on_right: true, result: RuleResult::Keep, erases: false },
+        AlgRule { op: Mul, lit: 1, lit_on_right: false, result: RuleResult::Keep, erases: false },
         // erasing candidates — value-valid but drop `x` → REJECTED by the totality gate
-        AlgRule { op: Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero, lhs_smt: "(* x 0)", rhs_smt: "0", erases: true },
-        AlgRule { op: Mul, lit: 0, lit_on_right: false, result: RuleResult::Zero, lhs_smt: "(* 0 x)", rhs_smt: "0", erases: true },
+        AlgRule { op: Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero, erases: true },
+        AlgRule { op: Mul, lit: 0, lit_on_right: false, result: RuleResult::Zero, erases: true },
     ]
 }
 
-/// Validate a rule on all three-relevant axes. Value soundness is discharged by
-/// Z3 (the negation of `lhs = rhs` must be `unsat`); totality by the non-erasure
-/// check. `z3` is the solver path (reuse of the vc fork's plumbing).
-pub fn validate_rule_smt(lhs_smt: &str, rhs_smt: &str, erases: bool, z3: Option<&std::path::Path>) -> RuleVerdict {
-    if erases {
-        // a variable present in lhs and absent in rhs may drop a trap (DEC-LLL-026);
-        // the value lemma cannot see this, so reject structurally.
+/// SMT-LIB 64-bit two's-complement literal for `v`, matching the i64 the backend
+/// actually emits (`v as u64` is the exact two's-complement bit pattern).
+fn bv64(v: i64) -> String {
+    format!("(_ bv{} 64)", v as u64)
+}
+
+/// `(value, trap)` SMT terms for the rule's LHS `Bin(op, ·, ·)` over the free
+/// `x : (_ BitVec 64)`. `trap` is the op's SIGNED-overflow predicate — the exact
+/// fail-stop condition of the i64 backend (DEC-LLL-026), NOT unbounded `Int`.
+/// Returns `None` for an op outside the trap-modeled set {Add,Sub,Mul}: the caller
+/// then rejects the rule (fail-loud, DEC-LLL-015) rather than silently validate it
+/// under a value-only model — a future rule on Div/Mod/… must extend this first.
+fn bv_lhs(rule: &AlgRule) -> Option<(String, String)> {
+    use BinOp::*;
+    let k = bv64(rule.lit);
+    let (a, b) = if rule.lit_on_right { ("x".to_string(), k) } else { (k, "x".to_string()) };
+    let sides = match rule.op {
+        Add => (format!("(bvadd {a} {b})"), format!("(bvsaddo {a} {b})")),
+        Sub => (format!("(bvsub {a} {b})"), format!("(bvssubo {a} {b})")),
+        Mul => (format!("(bvmul {a} {b})"), format!("(bvsmulo {a} {b})")),
+        _ => return None,
+    };
+    Some(sides)
+}
+
+/// `(value, trap)` SMT terms for the rule's RHS. Both surviving shapes are
+/// trap-free constants over `x`: `Keep` → `x`, `Zero` → `0`.
+fn bv_rhs(rule: &AlgRule) -> (String, String) {
+    match rule.result {
+        RuleResult::Keep => ("x".to_string(), "false".to_string()),
+        RuleResult::Zero => (bv64(0), "false".to_string()),
+    }
+}
+
+/// Validate a rule on the three preservation axes. `z3` is the solver path (reuse
+/// of the vc fork's plumbing).
+///
+/// TOTALITY runs FIRST and independently of Z3: a rule that erases `x` may drop a
+/// trap incurred by an arbitrary trapping SUB-EXPRESSION bound to `x` (e.g. `a/b`
+/// with `b=0` under `x*0→0`) — the constant-`x` SMT model below cannot see that,
+/// so it must be caught structurally (DEC-LLL-026). This gate is load-bearing.
+///
+/// VALUE + TRAP are then discharged by Z3 over 64-bit two's-complement `x`
+/// (matching the i64 backend, NOT unbounded `Int`): the rule is enabled only if
+/// for EVERY `x` its lhs and rhs trap on exactly the same inputs AND agree in
+/// value — the negation `(∃x. trap_L ≠ trap_R ∨ val_L ≠ val_R)` must be `unsat`.
+/// This criterion is sound for both the fail-stop default and `--unchecked`
+/// (wrapping) builds, and is verdict-neutral on the current identity catalogue
+/// (identities never overflow ⇒ trap-free ⇒ both conjuncts already held).
+fn validate_rule_smt(rule: &AlgRule, z3: Option<&std::path::Path>) -> RuleVerdict {
+    if rule.erases {
         return RuleVerdict::RejectedErasing;
     }
     let z3 = match z3 {
         Some(p) => p,
         None => return RuleVerdict::RejectedNoZ3,
     };
-    let script = format!("(declare-const x Int)\n(assert (not (= {lhs_smt} {rhs_smt})))\n(check-sat)\n");
+    let (val_l, trap_l) = match bv_lhs(rule) {
+        Some(vt) => vt,
+        None => return RuleVerdict::RejectedValueUnsound,
+    };
+    let (val_r, trap_r) = bv_rhs(rule);
+    let script = format!(
+        "(declare-const x (_ BitVec 64))\n\
+         (assert (or (distinct {trap_l} {trap_r}) (distinct {val_l} {val_r})))\n\
+         (check-sat)\n"
+    );
     match crate::vc::run_z3(z3, &script) {
         Ok(out) if out.trim_start().starts_with("unsat") => RuleVerdict::Enabled,
         _ => RuleVerdict::RejectedValueUnsound,
@@ -315,7 +371,7 @@ fn enabled_rules() -> Vec<AlgRule> {
     let z3 = crate::vc::find_z3().ok();
     candidate_rules()
         .into_iter()
-        .filter(|r| validate_rule_smt(r.lhs_smt, r.rhs_smt, r.erases, z3.as_deref()) == RuleVerdict::Enabled)
+        .filter(|r| validate_rule_smt(r, z3.as_deref()) == RuleVerdict::Enabled)
         .collect()
 }
 
@@ -687,7 +743,8 @@ mod tests {
     fn erasing_rule_x_times_zero_is_rejected_by_the_totality_gate() {
         // `x*0 → 0` is VALUE-valid (∀x. x*0 = 0) yet erases `x` → must be rejected
         // regardless of Z3, on the totality axis (DEC-LLL-026).
-        let v = validate_rule_smt("(* x 0)", "0", true, crate::vc::find_z3().ok().as_deref());
+        let r = AlgRule { op: BinOp::Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero, erases: true };
+        let v = validate_rule_smt(&r, crate::vc::find_z3().ok().as_deref());
         assert_eq!(v, RuleVerdict::RejectedErasing);
     }
 
@@ -697,7 +754,8 @@ mod tests {
         if z3.is_none() {
             return; // z3 unavailable in this environment — the vc suite gates that
         }
-        let v = validate_rule_smt("(+ x 0)", "x", false, z3.as_deref());
+        let r = AlgRule { op: BinOp::Add, lit: 0, lit_on_right: true, result: RuleResult::Keep, erases: false };
+        let v = validate_rule_smt(&r, z3.as_deref());
         assert_eq!(v, RuleVerdict::Enabled);
     }
 
@@ -707,9 +765,53 @@ mod tests {
         if z3.is_none() {
             return;
         }
-        // a deliberately wrong (value-unsound) non-erasing rule: `x+0 → x+1`.
-        let v = validate_rule_smt("(+ x 0)", "(+ x 1)", false, z3.as_deref());
+        // a deliberately wrong (value-unsound) non-erasing rule: `x+5 → x`.
+        let r = AlgRule { op: BinOp::Add, lit: 5, lit_on_right: true, result: RuleResult::Keep, erases: false };
+        let v = validate_rule_smt(&r, z3.as_deref());
         assert_eq!(v, RuleVerdict::RejectedValueUnsound);
+    }
+
+    #[test]
+    fn unmodeled_op_is_rejected_fail_loud_even_when_value_valid() {
+        // `x/1 → x` is VALUE-valid on Int, but Div is NOT in the trap-modeled set
+        // {Add,Sub,Mul}: the oracle refuses to enable it rather than validate it
+        // under a value-only model (fail-loud, DEC-LLL-015). A future Div/Mod rule
+        // must extend `bv_lhs` with the euclidean value + div-by-zero / INT_MIN/-1
+        // trap before it can pass — this is the teeth that make that non-optional.
+        let z3 = crate::vc::find_z3().ok();
+        if z3.is_none() {
+            return;
+        }
+        let r = AlgRule { op: BinOp::Div, lit: 1, lit_on_right: true, result: RuleResult::Keep, erases: false };
+        let v = validate_rule_smt(&r, z3.as_deref());
+        assert_eq!(v, RuleVerdict::RejectedValueUnsound);
+    }
+
+    #[test]
+    fn trap_aware_oracle_is_verdict_neutral_on_the_current_catalogue() {
+        // Hardening the oracle from unbounded Int to trap-aware BitVec64 must not
+        // change a single verdict on today's rules: the 5 identities stay Enabled
+        // (they never overflow ⇒ trap-free), the 2 erasing stay RejectedErasing.
+        let z3 = crate::vc::find_z3().ok();
+        if z3.is_none() {
+            return;
+        }
+        let verdicts: Vec<_> = candidate_rules()
+            .iter()
+            .map(|r| validate_rule_smt(r, z3.as_deref()))
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                RuleVerdict::Enabled,
+                RuleVerdict::Enabled,
+                RuleVerdict::Enabled,
+                RuleVerdict::Enabled,
+                RuleVerdict::Enabled,
+                RuleVerdict::RejectedErasing,
+                RuleVerdict::RejectedErasing,
+            ]
+        );
     }
 
     #[test]
