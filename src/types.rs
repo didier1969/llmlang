@@ -64,8 +64,15 @@ pub struct HoleInfo {
     /// write, no verdict (soundness inviolable by construction). Empty when the
     /// part has no `ensures`.
     pub goal: Vec<String>,
-    /// The HYPOTHESES available at the hole (D2): the enclosing part's `requires`
-    /// clauses, rendered — the facts a completion may assume. Empty when none.
+    /// The HYPOTHESES available at the hole (D2): the facts a completion may assume.
+    /// The enclosing part's `requires` clauses, rendered, PLUS the facts in force
+    /// along the path to this hole (écart #2, REQ-LLL-059): each `let x = e` in scope
+    /// as `x == e`, and every enclosing `if`/`match` branch condition with its correct
+    /// polarity (a `then` arm ⇒ `c`, an `else` arm ⇒ `not c`, a `Cons` arm ⇒
+    /// `xs == h :: t`, …). Every entry is TRUE along the path (definitional for a
+    /// `let`; a positive branch condition holds inside its arm) and is dropped on a
+    /// shadowing rebind — DISPLAY-ONLY, so no obligation/Z3/cache/verdict is ever
+    /// produced. Empty when none.
     pub hypotheses: Vec<String>,
 }
 
@@ -159,6 +166,136 @@ pub fn render_contract_clause(e: &Expr) -> String {
     }
 }
 
+/// A DISPLAY-ONLY hypothesis threaded along the path to a hole (D2 écart #2,
+/// REQ-LLL-059): a `let` equality (`x == e`) or an enclosing branch's path
+/// condition (`c` / `not c` / `xs == h :: t`). `vars` over-approximates the names
+/// the text depends on, so a later (re)binding that SHADOWS one of them drops the
+/// now-stale fact — every surfaced hypothesis stays TRUE along the path. Pure
+/// feedback text: never an obligation, never Z3, never the cache. Soundness is
+/// inviolable by construction — a `?` part stays Incomplete and skips Z3; this
+/// only enriches the text of `HoleInfo.hypotheses`.
+#[derive(Clone)]
+struct PathFact {
+    text: String,
+    vars: HashSet<String>,
+}
+
+/// Free variables of a (checked, pure) expression — the names a rendered fact
+/// depends on. Lambda parameters and a `forall` binder shadow their body, so they
+/// are NOT free. Used to invalidate path facts on shadowing (over-approximation is
+/// safe: it can only DROP a still-true fact, never KEEP a stale one).
+fn collect_free_vars(e: &Expr, acc: &mut HashSet<String>) {
+    match e {
+        Expr::Var(n) => {
+            acc.insert(n.clone());
+        }
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => {}
+        Expr::ListLit(xs) | Expr::Tuple(xs) => {
+            for x in xs {
+                collect_free_vars(x, acc);
+            }
+        }
+        Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
+            collect_free_vars(a, acc);
+            collect_free_vars(b, acc);
+        }
+        Expr::Not(a) | Expr::Neg(a) | Expr::Proj(a, _) | Expr::Field(a, _) => {
+            collect_free_vars(a, acc);
+        }
+        Expr::Call(_, args) | Expr::EffCall(_, args) => {
+            for a in args {
+                collect_free_vars(a, acc);
+            }
+        }
+        Expr::Lambda(params, body) => {
+            let mut inner = HashSet::new();
+            collect_free_vars(body, &mut inner);
+            for (p, _) in params {
+                inner.remove(p);
+            }
+            acc.extend(inner);
+        }
+        Expr::RecordLit(_, fields) => {
+            for (_, fe) in fields {
+                collect_free_vars(fe, acc);
+            }
+        }
+        Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
+            // Contract-only in practice (a quantifier never reaches a `let` RHS / arm
+            // scrutinee), but the match must stay exhaustive over the master AST, which
+            // unified `forall`/`exists` onto `ForallDomain` and added the `Exists` variant.
+            match domain {
+                ForallDomain::Range(lo, hi) => {
+                    collect_free_vars(lo, acc);
+                    collect_free_vars(hi, acc);
+                }
+                ForallDomain::In(coll) => collect_free_vars(coll, acc),
+            }
+            let mut inner = HashSet::new();
+            collect_free_vars(body, &mut inner);
+            inner.remove(var);
+            acc.extend(inner);
+            // A witness (Exists only) sits OUTSIDE the binder scope — its free vars are free.
+            if let Expr::Exists { witness: Some(w), .. } = e {
+                collect_free_vars(w, acc);
+            }
+        }
+    }
+}
+
+/// Render `e` as an operand, parenthesising a compound form so the surrounding
+/// `not …` / `… == …` reads unambiguously (mirrors `render_contract_clause`'s own
+/// `atom` helper).
+fn render_operand(e: &Expr) -> String {
+    match e {
+        Expr::Bin(..) | Expr::Cons(..) | Expr::Neg(_) | Expr::Not(_) | Expr::Lambda(..) => {
+            format!("({})", render_contract_clause(e))
+        }
+        _ => render_contract_clause(e),
+    }
+}
+
+/// The names an arm pattern binds (for shadow-invalidation of enclosing facts).
+fn pattern_binds(p: &Pattern) -> Vec<String> {
+    match p {
+        Pattern::Var(v) => vec![v.clone()],
+        Pattern::Cons(h, t) => vec![h.clone(), t.clone()],
+        Pattern::Ctor(_, bs) | Pattern::Tuple(bs) => bs.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The POSITIVE path condition that holds inside a match arm — always TRUE there,
+/// because reaching the arm means the scrutinee matched this pattern (regardless of
+/// arm order). Only refutable patterns carry a discriminating fact; `Var`/`Wildcard`/
+/// `Tuple` (irrefutable) add nothing, so they return `None`. This IS the `if c`
+/// polarity: a `then` arm is `BoolLit(true)` ⇒ `c`, an `else` arm is `BoolLit(false)`
+/// ⇒ `not c` (the `if/then/else` sugar desugars to exactly this Bool match).
+fn arm_condition_text(scrut: &Expr, pat: &Pattern, ts: &Ty) -> Option<String> {
+    match (pat, ts) {
+        (Pattern::BoolLit(true), Ty::Bool) => Some(render_contract_clause(scrut)),
+        (Pattern::BoolLit(false), Ty::Bool) => Some(format!("not {}", render_operand(scrut))),
+        (Pattern::IntLit(k), Ty::Int) => Some(format!("{} == {k}", render_operand(scrut))),
+        (Pattern::Nil, Ty::List(_)) => Some(format!("{} == []", render_operand(scrut))),
+        (Pattern::Cons(h, t), Ty::List(_)) => {
+            Some(format!("{} == {h} :: {t}", render_operand(scrut)))
+        }
+        (Pattern::Ctor(c, bs), Ty::User(..)) if bs.is_empty() => {
+            Some(format!("{} == {c}", render_operand(scrut)))
+        }
+        (Pattern::Ctor(c, bs), Ty::User(..)) => {
+            Some(format!("{} == {c}({})", render_operand(scrut), bs.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+/// Drop every path fact that mentions `name` — invoked when `name` is (re)bound, so
+/// a fact carrying the OLD meaning of `name` is never surfaced as if still true.
+fn shadow_path_facts(facts: &mut Vec<PathFact>, name: &str) {
+    facts.retain(|f| !f.vars.contains(name));
+}
+
 /// Whether a `?` in the currently-checked expression is a recordable hole (a part
 /// body / example — the incremental-editing surface) or forbidden (an instance
 /// method body in v1). Contracts are typed by `type_of_pure`, which rejects holes
@@ -220,6 +357,11 @@ struct Ctx<'a> {
     hole_policy: HolePolicy,
     /// typed holes recorded while checking this part (drained into CheckedModule.holes).
     holes: Vec<HoleInfo>,
+    /// DISPLAY-ONLY hypotheses in force along the path currently being checked (D2
+    /// écart #2): `let` equalities + enclosing branch path conditions, snapshotted
+    /// into a hole's `hypotheses`. Pushed/popped by lexical scope; never touches Z3,
+    /// the cache, or a verdict.
+    path_facts: Vec<PathFact>,
 }
 
 impl Ctx<'_> {
@@ -865,6 +1007,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             captureless: false,
             hole_policy: HolePolicy::Record,
             holes: Vec::new(),
+            path_facts: Vec::new(),
         };
         // effect checking is row-based (REQ-LLL-018): each perform / effectful call
         // is validated against ctx.effect_allowed (the part's `via` row ∪ any effect
@@ -1017,6 +1160,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 // proof obligations) — a `?` here is rejected, not recorded (DEC-LLL-052).
                 hole_policy: HolePolicy::Reject,
                 holes: Vec::new(),
+                path_facts: Vec::new(),
             };
             let got = check_expr(&mut ctx, body, None)?;
             if got != want {
@@ -2886,6 +3030,19 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                 }
                 if name != "_" {
                     ctx.vars.last_mut().unwrap().insert(name.clone(), t);
+                    // D2 écart #2 (REQ-LLL-059): record the DISPLAY-ONLY equality
+                    // `name == e` so a later hole sees it as a hypothesis. Drop any
+                    // enclosing fact this (re)binding shadows first; skip a
+                    // self-referential rebind (`let n = n + 1`) — the two `n`s denote
+                    // different values, so no honest single-name equality exists.
+                    shadow_path_facts(&mut ctx.path_facts, name);
+                    let mut vars = HashSet::new();
+                    collect_free_vars(e, &mut vars);
+                    if !vars.contains(name.as_str()) {
+                        let text = format!("{name} == {}", render_contract_clause(e));
+                        vars.insert(name.clone());
+                        ctx.path_facts.push(PathFact { text, vars });
+                    }
                 }
             }
             Stmt::Yield(e) => {
@@ -2933,6 +3090,10 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                     _ => None,
                 };
                 for arm in arms {
+                    // D2 écart #2: the path facts in force are per-arm — save the
+                    // enclosing set and restore it after this arm, so a sibling arm
+                    // never inherits this arm's binders or path condition.
+                    let saved_facts = ctx.path_facts.clone();
                     ctx.vars.push(HashMap::new());
                     ctx.smaller.push(HashMap::new());
                     match (&arm.pattern, &ts) {
@@ -3024,6 +3185,24 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                             ))
                         }
                     }
+                    // D2 écart #2: invalidate any enclosing fact a pattern binder
+                    // shadows, then add this arm's positive path condition — TRUE here
+                    // because control reached this arm. Skip it when the scrutinee
+                    // mentions a rebound name (the equality would read one name as two
+                    // different values).
+                    let bound = pattern_binds(&arm.pattern);
+                    for b in &bound {
+                        shadow_path_facts(&mut ctx.path_facts, b);
+                    }
+                    let mut scrut_vars = HashSet::new();
+                    collect_free_vars(scrut, &mut scrut_vars);
+                    if !bound.iter().any(|b| scrut_vars.contains(b)) {
+                        if let Some(text) = arm_condition_text(scrut, &arm.pattern, &ts) {
+                            let mut vars = scrut_vars;
+                            vars.extend(bound.iter().cloned());
+                            ctx.path_facts.push(PathFact { text, vars });
+                        }
+                    }
                     if let Some(g) = &arm.guard {
                         let tg = check_expr(ctx, g, None)?;
                         if tg != Ty::Bool {
@@ -3032,10 +3211,18 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                 ctx.part.name
                             ));
                         }
+                        // a `when` guard holds whenever the arm body runs — a true fact.
+                        let mut vars = HashSet::new();
+                        collect_free_vars(g, &mut vars);
+                        ctx.path_facts.push(PathFact {
+                            text: render_contract_clause(g),
+                            vars,
+                        });
                     }
                     check_body(ctx, &arm.body, ret)?;
                     ctx.vars.pop();
                     ctx.smaller.pop();
+                    ctx.path_facts = saved_facts;
                 }
             }
             Stmt::Handle(h) => {
@@ -3115,15 +3302,19 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                 ctx.part.name
                             ));
                         }
+                        let saved_facts = ctx.path_facts.clone();
                         ctx.vars.push(HashMap::new());
                         ctx.smaller.push(HashMap::new());
                         ctx.vars
                             .last_mut()
                             .unwrap()
                             .insert(c.params[0].clone(), call_ty.clone());
+                        // D2 écart #2: the result binder may shadow an enclosing name.
+                        shadow_path_facts(&mut ctx.path_facts, &c.params[0]);
                         check_body(ctx, &c.body, ret)?;
                         ctx.vars.pop();
                         ctx.smaller.pop();
+                        ctx.path_facts = saved_facts;
                         continue;
                     }
                     let key = format!("{}.{}", h.effect, c.op);
@@ -3159,22 +3350,30 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                         let saved_vars = std::mem::replace(&mut ctx.vars, vec![scope]);
                         let saved_smaller =
                             std::mem::replace(&mut ctx.smaller, vec![HashMap::new()]);
+                        // capture-free: enclosing binders are out of scope, so their
+                        // path facts must not surface here — hide them for the clause.
+                        let saved_facts = std::mem::take(&mut ctx.path_facts);
                         let saved_capless = ctx.captureless;
                         ctx.captureless = true;
                         let r = check_body(ctx, &c.body, &op_ret);
                         ctx.captureless = saved_capless;
                         ctx.vars = saved_vars;
                         ctx.smaller = saved_smaller;
+                        ctx.path_facts = saved_facts;
                         r?;
                     } else {
+                        let saved_facts = ctx.path_facts.clone();
                         ctx.vars.push(HashMap::new());
                         ctx.smaller.push(HashMap::new());
                         for (bn, bt) in c.params.iter().zip(&params) {
                             ctx.vars.last_mut().unwrap().insert(bn.clone(), bt.clone());
+                            // D2 écart #2: an op param may shadow an enclosing name.
+                            shadow_path_facts(&mut ctx.path_facts, bn);
                         }
                         check_body(ctx, &c.body, ret)?;
                         ctx.vars.pop();
                         ctx.smaller.pop();
+                        ctx.path_facts = saved_facts;
                     }
                 }
                 if !seen_return {
@@ -3249,8 +3448,19 @@ fn check_expr(
             // clauses: no WP, no Z3, no cache, no verdict. Soundness untouched.
             let goal: Vec<String> =
                 ctx.part.ensures.iter().map(render_contract_clause).collect();
-            let hypotheses: Vec<String> =
-                ctx.part.requires.iter().map(render_contract_clause).collect();
+            // The hypotheses are the part's `requires` PLUS the facts in force along
+            // the path to this hole (D2 écart #2, REQ-LLL-059): `let` equalities and
+            // enclosing branch path conditions. Each was proven true along the path by
+            // construction (a `let` binding is definitional; a positive match/`if`
+            // condition holds inside its arm) and shadow-invalidated on rebinding —
+            // still DISPLAY-ONLY: no obligation, no Z3, no cache, no verdict.
+            let hypotheses: Vec<String> = ctx
+                .part
+                .requires
+                .iter()
+                .map(render_contract_clause)
+                .chain(ctx.path_facts.iter().map(|f| f.text.clone()))
+                .collect();
             ctx.holes.push(HoleInfo {
                 part: ctx.part.name.clone(),
                 line: ctx.part.line,
@@ -4095,11 +4305,21 @@ fn check_expr(
             // lambdas are pure (v1); check the body in a fresh scope holding the
             // lambda parameters (it may still read enclosing locals — codegen
             // emits a capturing closure).
+            let saved_facts = ctx.path_facts.clone();
             ctx.vars.push(params.iter().cloned().collect());
             ctx.smaller.push(HashMap::new());
+            // D2 écart #2: a lambda param may SHADOW an enclosing name; drop the now-stale
+            // facts (the body may still read OTHER enclosing locals, so keep those). Today a
+            // lambda-body hole is checked with `None` and thus rejected as "no fixed type"
+            // (never recorded), but this keeps the honesty invariant robust at EVERY binder
+            // site — a future codomain-propagating lambda check could not surface a false fact.
+            for (p, _) in params {
+                shadow_path_facts(&mut ctx.path_facts, p);
+            }
             let bt = check_expr(ctx, body, None)?;
             ctx.smaller.pop();
             ctx.vars.pop();
+            ctx.path_facts = saved_facts;
             let ptys = params.iter().map(|(_, t)| t.clone()).collect();
             Ty::Fun(ptys, Box::new(bt))
         }

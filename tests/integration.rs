@@ -4944,7 +4944,9 @@ fn typed_hole_goal_surfaces_for_a_nested_hole_req085() {
     // only a whole-body `yield ?`. Here `?` is one branch of an `if` under a contract. D2 v1
     // surfaces the PART-level `ensures` (the contract obligation), NOT a position-refined
     // weakest-precondition — and the `fix` text says the *part* must satisfy the goal, so the
-    // framing stays honest (`result` is the part's result, not the hole's value).
+    // framing stays honest (`result` is the part's result, not the hole's value). The hole is
+    // in the `then` branch of `if n > 0`, so écart #2 (REQ-LLL-059) adds the branch PATH
+    // CONDITION `n > 0` as a (display-only) hypothesis — a fact that holds along this path.
     let src = "module M:\n\n  part pick(n: Int) -> Int:\n    ensures result >= 0\n    if n > 0 then ? else 100\n";
     let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("nested hole checks");
     assert_eq!(cm.holes.len(), 1, "one nested hole recorded");
@@ -4955,7 +4957,11 @@ fn typed_hole_goal_surfaces_for_a_nested_hole_req085() {
         "typed by the if-branch context"
     );
     assert_eq!(h.goal, vec!["result >= 0".to_string()], "part-level ensures surfaces at the nested hole");
-    assert!(h.hypotheses.is_empty(), "no `requires` ⇒ empty hypotheses");
+    assert_eq!(
+        h.hypotheses,
+        vec!["n > 0".to_string()],
+        "the `then` branch path condition is a display-only hypothesis (écart #2)"
+    );
 }
 
 #[test]
@@ -5003,6 +5009,161 @@ fn check_exposes_hole_goal_and_hypotheses_req085() {
     assert!(jout.stderr.is_empty(), "json keeps stderr empty: {}", String::from_utf8_lossy(&jout.stderr));
     assert!(j.contains("\"goal\"") && j.contains("result >= lo"), "json hole carries the goal: {j}");
     assert!(j.contains("\"hypotheses\"") && j.contains("lo >= 0"), "json hole carries the hypotheses: {j}");
+}
+
+// ---- D2 écart #2 : hypothèses de chemin (let-equalities + path conditions) — REQ-LLL-059 ----
+
+#[test]
+fn hole_hypotheses_add_let_equalities_along_path_req059() {
+    // écart #2 (REQ-LLL-059): a hole under `let x = e` sees `x == e` as a DISPLAY-ONLY
+    // hypothesis, in ADDITION to the part's `requires`. This is honest — a `let` binding is
+    // a definitional equality that holds along the path — and it never emits an obligation,
+    // touches Z3, or writes the cache (the part stays Incomplete, skips Z3).
+    let src = "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    requires b > 0\n    let s = a + b\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("checks");
+    assert_eq!(
+        cm.holes[0].hypotheses,
+        vec!["b > 0".to_string(), "s == a + b".to_string()],
+        "the `requires` first, then the in-scope let equality"
+    );
+
+    // a rebinding of `x` DROPS the stale `x == a + 1`, keeping only the live value — a
+    // retained string would otherwise be a lie (shadowing IS accepted by the checker).
+    let reb = "module M:\n\n  part g(a: Int) -> Int:\n    let x = a + 1\n    let x = a + 2\n    yield ?\n";
+    let cg = types::check_module(parser::parse_module(reb).expect("parse")).expect("checks");
+    assert_eq!(
+        cg.holes[0].hypotheses,
+        vec!["x == a + 2".to_string()],
+        "rebinding invalidates the stale equality — only the live one is honest"
+    );
+
+    // a self-referential rebind emits NO equality: the LHS and RHS `n` denote different
+    // values, so `n == n + 1` would be false; the fact is skipped, never invented.
+    let sr = "module M:\n\n  part h(n: Int) -> Int:\n    let n = n + 1\n    yield ?\n";
+    let ch = types::check_module(parser::parse_module(sr).expect("parse")).expect("checks");
+    assert!(
+        ch.holes[0].hypotheses.is_empty(),
+        "self-referential rebind is skipped — no false `n == n + 1`"
+    );
+}
+
+#[test]
+fn hole_hypotheses_add_branch_path_conditions_req059() {
+    // écart #2: an enclosing `if`/`match` branch contributes its POSITIVE path condition
+    // (true inside the arm) as a display-only hypothesis, with the correct polarity —
+    // a `then` arm ⇒ `c`, an `else` arm ⇒ `not c`, a `match` arm ⇒ the pattern equality.
+    // then-branch: the condition holds
+    let then_src = "module M:\n\n  part p(n: Int) -> Int:\n    if n > 0 then ? else 0\n";
+    let ct = types::check_module(parser::parse_module(then_src).expect("parse")).expect("checks");
+    assert_eq!(ct.holes[0].hypotheses, vec!["n > 0".to_string()], "then-branch ⇒ the condition");
+
+    // else-branch: the NEGATION holds (correct polarity)
+    let else_src = "module M:\n\n  part p(n: Int) -> Int:\n    if n > 0 then 0 else ?\n";
+    let ce = types::check_module(parser::parse_module(else_src).expect("parse")).expect("checks");
+    assert_eq!(
+        ce.holes[0].hypotheses,
+        vec!["not (n > 0)".to_string()],
+        "else-branch ⇒ the negation"
+    );
+
+    // a `match` Cons arm: the scrutinee equals the destructured `head :: tail`
+    let cons_src =
+        "module M:\n\n  part q(xs: List[Int]) -> Int:\n    match xs:\n      []        -> yield 0\n      y :: rest -> yield ?\n";
+    let cc = types::check_module(parser::parse_module(cons_src).expect("parse")).expect("checks");
+    assert_eq!(
+        cc.holes[0].hypotheses,
+        vec!["xs == y :: rest".to_string()],
+        "Cons arm ⇒ the list equality"
+    );
+
+    // shadow ACROSS a match: the Cons head rebinds `n`, so the enclosing `m == n + 1` is
+    // DROPPED (now stale) — only the fresh, honest arm condition on the NEW `n` remains.
+    let sh = "module M:\n\n  part r(n: Int, xs: List[Int]) -> Int:\n    let m = n + 1\n    match xs:\n      []     -> yield m\n      n :: t -> yield ?\n";
+    let cs = types::check_module(parser::parse_module(sh).expect("parse")).expect("checks");
+    assert_eq!(
+        cs.holes[0].hypotheses,
+        vec!["xs == n :: t".to_string()],
+        "a pattern binder shadows `n`, dropping the stale enclosing `m == n + 1`"
+    );
+}
+
+#[test]
+fn hole_path_hypotheses_are_one_shared_source_for_check_and_suggest_req059() {
+    // écart #2 enriches `HoleInfo.hypotheses` at the SINGLE construction site in the checker.
+    // `check` (via `CheckedModule.holes`) and `suggest` (which iterates the very same
+    // `cm.holes`) therefore read ONE coherent record — the path facts cannot diverge between
+    // the two surfaces. `suggest` stays consultative: it proves nothing about the hole itself.
+    let src = "module M:\n\n  part clamp(lo: Int) -> Int:\n    requires lo >= 0\n    let base = lo + 1\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("hole checks");
+    assert_eq!(cm.holes.len(), 1, "one hole recorded");
+    let h = &cm.holes[0];
+    assert_eq!(
+        h.hypotheses,
+        vec!["lo >= 0".to_string(), "base == lo + 1".to_string()],
+        "requires then the path fact — both present on the shared record"
+    );
+    // suggest enumerates the SAME hole record (same part + line) — one shared source.
+    let sugs = synth::suggest(&cm, None, 4).expect("suggest");
+    assert_eq!(sugs.len(), 1, "one hole → one suggestion record");
+    assert_eq!(
+        (sugs[0].part.as_str(), sugs[0].line),
+        (h.part.as_str(), h.line),
+        "check and suggest read the same HoleInfo"
+    );
+}
+
+#[test]
+fn check_surfaces_path_hypotheses_end_to_end_req059() {
+    // écart #2 E2E: `check` (human + json) carries the path hypotheses — a `let` equality AND
+    // an enclosing branch condition — alongside the expected type. The verdict stays
+    // incomplete (exit 2) with stderr empty: pure display, no proof attempted, soundness core
+    // untouched.
+    let dir = tempdir().join("path-hyps");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  part f(n: Int) -> Int:\n    let d = n + 1\n    if n > 0 then ? else 0\n";
+    let f = dir.join("p.lll");
+    std::fs::write(&f, src).unwrap();
+
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "incomplete → exit 2: {so}");
+    assert!(so.contains("assuming:"), "human output shows the hypotheses: {so}");
+    assert!(
+        so.contains("d == n + 1") && so.contains("n > 0"),
+        "both the let equality and the branch condition surface: {so}"
+    );
+
+    let jout = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&jout.stdout);
+    assert_eq!(jout.status.code(), Some(2), "json incomplete → exit 2: {j}");
+    assert!(jout.stderr.is_empty(), "json keeps stderr empty: {}", String::from_utf8_lossy(&jout.stderr));
+    assert!(
+        j.contains("d == n + 1") && j.contains("n > 0"),
+        "json carries both path hypotheses: {j}"
+    );
+}
+
+#[test]
+fn lambda_body_hole_is_rejected_so_no_path_fact_can_leak_req059() {
+    // The one binder site where a path fact could be a LIE: a lambda param shadows an
+    // enclosing `let`. LLL lambdas synthesise (the body is checked with no expected type),
+    // so a `?` in a lambda body is REJECTED as "no fixed type" — exactly like a bare
+    // `let x = ?` — and therefore NEVER recorded. Hence the enclosing `let x = a + 1` can
+    // never surface as a (false) `x == a + 1` hypothesis at a lambda-body hole. This pins
+    // that structural safety so a future codomain-propagating lambda check can't regress it.
+    let src = "module M:\n\n  part mp(g: (Int) -> Int, xs: List[Int]) -> List[Int]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield g(h) :: mp(g, t)\n\n  part caller(a: Int) -> List[Int]:\n    let x = a + 1\n    yield mp(\\(x: Int) -> ?, [1, 2, 3])\n";
+    let err = types::check_module(parser::parse_module(src).expect("parse")).unwrap_err();
+    assert!(
+        err.contains("no fixed type"),
+        "a lambda-body hole is rejected (never recorded ⇒ no path fact leaks): {err}"
+    );
 }
 
 // ---- synthèse de complétion de trou : `lll suggest` (REQ-LLL-086) ----
