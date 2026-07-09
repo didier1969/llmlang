@@ -1593,6 +1593,51 @@ fn erp_ledger_value_objects_verify_and_run() {
 }
 
 #[test]
+fn aps3d_maintenance_rule_kernel_verifies_and_runs() {
+    // DEC-LLL-066 (vertical APS3D) : le noyau d'évaluation des règles de maintenance
+    // d'APS3D (lib/aps3d/rules/engine.ex) porté en llmlang VÉRIFIÉ — la couche domaine
+    // volatile, la plomberie YAML/DB/GenServer restant en Elixir. Prouve : `cond_holds`
+    // EXHAUSTIF (une condition non traitée = erreur compile, vs le fallback silencieux
+    // engine.ex:225 qui rend une règle inerte), `severity` bornée [0,3] déchargée par
+    // Z3 (14 obligations), terminaison de `all_hold`/`evaluate`/`len`. E2E : sur un
+    // équipement usé à 95 % / 20 j, les règles critical_wear (usure>90) ET preventive
+    // (usure>75 ∧ jours<30) matchent → 2 actions ; + severity({95,5})=3 ⇒ main = 5.
+    let (_, m) = loader::load_program("examples/aps3d_maintenance_rules.lll").expect("load");
+    let cm = types::check_module(m).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(
+        report.ok(),
+        "APS3D maintenance kernel must verify over Z3: {:?}",
+        failures(&report)
+    );
+
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("aps3d.rs");
+    let bin = dir.join("aps3d_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "APS3D kernel Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "=> 5",
+        "E2E: 2 règles maintenance matchent (2 actions) + severity 3 = 5, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn date_smart_constructor_static_gate_rejects_out_of_range_literal() {
     // DEC-LLL-063: the LOOSE compile-time gate on `mk_date` (requires 1<=m<=12, 1<=d<=31 —
     // inline bounds are the only fragment `requires` allows, DEC-LLL-017) makes an out-of-range
