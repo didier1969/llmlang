@@ -148,6 +148,17 @@ fn desugar_exprs(xs: Vec<Expr>, recs: &Recs) -> Result<Vec<Expr>, String> {
     xs.into_iter().map(|x| desugar_expr(x, recs)).collect()
 }
 
+/// Desugar the bounds/collection of a quantifier domain (shared by `forall`/`exists`).
+fn desugar_domain(domain: ForallDomain, recs: &Recs) -> Result<ForallDomain, String> {
+    Ok(match domain {
+        ForallDomain::Range(lo, hi) => ForallDomain::Range(
+            Box::new(desugar_expr(*lo, recs)?),
+            Box::new(desugar_expr(*hi, recs)?),
+        ),
+        ForallDomain::In(coll) => ForallDomain::In(Box::new(desugar_expr(*coll, recs)?)),
+    })
+}
+
 fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
     Ok(match e {
         Expr::RecordLit(name, fields) => {
@@ -201,13 +212,12 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
         Expr::Field(a, n) => Expr::Field(Box::new(desugar_expr(*a, recs)?), n),
         Expr::Forall { var, domain, body } => Expr::Forall {
             var,
-            domain: match domain {
-                ForallDomain::Range(lo, hi) => ForallDomain::Range(
-                    Box::new(desugar_expr(*lo, recs)?),
-                    Box::new(desugar_expr(*hi, recs)?),
-                ),
-                ForallDomain::In(coll) => ForallDomain::In(Box::new(desugar_expr(*coll, recs)?)),
-            },
+            domain: desugar_domain(domain, recs)?,
+            body: Box::new(desugar_expr(*body, recs)?),
+        },
+        Expr::Exists { var, domain, body } => Expr::Exists {
+            var,
+            domain: desugar_domain(domain, recs)?,
             body: Box::new(desugar_expr(*body, recs)?),
         },
         leaf @ (Expr::IntLit(_)
@@ -1251,6 +1261,9 @@ impl Parser {
         if self.peek() == &Tok::Forall {
             return self.forall_expr();
         }
+        if self.peek() == &Tok::Exists {
+            return self.exists_expr();
+        }
         self.or_expr()
     }
     /// A bounded universal quantifier (REQ-LLL-087). Two surface forms, disambiguated by the
@@ -1263,6 +1276,21 @@ impl Parser {
     /// or `:`); the body is a full expression.
     fn forall_expr(&mut self) -> Result<Expr, String> {
         self.eat(Tok::Forall)?;
+        let (var, domain, body) = self.quant_tail()?;
+        Ok(Expr::Forall { var, domain, body: Box::new(body) })
+    }
+    /// A bounded existential quantifier (REQ-LLL-089) — the DUAL of `forall`, sharing the exact
+    /// same surface grammar (`exists <id> in <lo> .. <hi>: <body>` or `exists <id> in <coll>:
+    /// <body>`) and the same checker-side position/fragment rules.
+    fn exists_expr(&mut self) -> Result<Expr, String> {
+        self.eat(Tok::Exists)?;
+        let (var, domain, body) = self.quant_tail()?;
+        Ok(Expr::Exists { var, domain, body: Box::new(body) })
+    }
+    /// Shared tail `<id> in <domain>: <body>` for both quantifiers (REQ-LLL-087/089). The
+    /// domain expressions are additive (they terminate cleanly at `..` or `:`); the body is a
+    /// full expression.
+    fn quant_tail(&mut self) -> Result<(String, ForallDomain, Expr), String> {
         let var = self.ident()?;
         self.eat(Tok::In)?;
         let first = self.add_expr()?;
@@ -1275,11 +1303,7 @@ impl Parser {
         };
         self.eat(Tok::Colon)?;
         let body = self.expr()?;
-        Ok(Expr::Forall {
-            var,
-            domain,
-            body: Box::new(body),
-        })
+        Ok((var, domain, body))
     }
     fn or_expr(&mut self) -> Result<Expr, String> {
         let mut e = self.and_expr()?;

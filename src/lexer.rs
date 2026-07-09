@@ -83,7 +83,8 @@ pub enum Tok {
                // token only ever reaches here as a genuine projection operator.
     DotDot,    // bounded-range separator `lo .. hi` (REQ-LLL-087 T1 `forall`)
     Forall,    // bounded universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1)
-    In,        // range binder keyword in `forall i in …` (REQ-LLL-087 T1)
+    Exists,    // bounded existential quantifier `exists i in lo .. hi: body` (REQ-LLL-089)
+    In,        // range binder keyword in `forall`/`exists i in …` (REQ-LLL-087 T1 / 089)
 }
 
 #[derive(Debug, Clone)]
@@ -385,6 +386,7 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
         "then" => Tok::Then,
         "else" => Tok::Else,
         "forall" => Tok::Forall,
+        "exists" => Tok::Exists,
         "in" => Tok::In,
         _ if dotted => Tok::Dotted(w.to_string()),
         _ => Tok::Ident(w.to_string()),

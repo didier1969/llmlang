@@ -5588,6 +5588,101 @@ fn forall_ensures_module_builds_and_runs_req087_t1() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("=> 1"), "runtime concordance: {}", String::from_utf8_lossy(&out.stdout));
 }
 
+// ---- bounded `exists`, the DUAL of `forall` (REQ-LLL-089) — Tranche 1: CONSUME (Skolem) ----
+
+#[test]
+fn exists_in_requires_forced_witness_is_usable_req089() {
+    // REQ-LLL-089 CONSUME: an `exists` requires is ASSUMED by SKOLEMIZATION — a fresh witness
+    // `w` with `guard(w) ∧ body(w)` as hypotheses (the sound dual of a `forall` requires'
+    // ground instantiation). Range `0 .. 1` forces the only witness to `w = 0`, so the assumed
+    // `get(a, 0) == 7` IS usable: `ensures result == 7` (with `result = get(a, 0)`) verifies.
+    let (code, out, _) = check_lll_src(
+        "089-forced",
+        "module M:\n\n  part f(a: Array[Int]) -> Int:\n    requires length(a) > 0\n    requires exists i in 0 .. 1: get(a, i) == 7\n    ensures result == 7\n    yield get(a, 0)\n",
+    );
+    assert_eq!(code, Some(0), "the forced witness is assumed by Skolemization and usable: {out}");
+}
+
+#[test]
+fn exists_in_requires_does_not_pin_the_witness_req089() {
+    // REQ-LLL-089 CONSUME soundness KEYSTONE: the Skolem witness is a FRESH, unconstrained
+    // constant — it is NOT pinned to any particular index (the dual of the `forall` fresh-const
+    // never being pinned to a single witness). Assuming `exists i in 0 .. 3: get(a, i) == 7`
+    // does NOT entail `get(a, 0) == 7` (the witness could be 1 or 2), so `ensures result == 7`
+    // must FAIL with a counterexample. Were the witness over-constrained to index 0, this would
+    // verify FALSELY — the exact unsound direction.
+    let (code, out, _) = check_lll_src(
+        "089-keystone",
+        "module M:\n\n  part g(a: Array[Int]) -> Int:\n    requires length(a) > 5\n    requires exists i in 0 .. 3: get(a, i) == 7\n    ensures result == 7\n    yield get(a, 0)\n",
+    );
+    assert_eq!(code, Some(1), "an existential does not pin the witness to index 0: {out}");
+    assert!(out.contains("ensures"), "the failure is the over-strong ensures: {out}");
+}
+
+#[test]
+fn exists_in_requires_over_map_pinned_key_assumed_req089() {
+    // REQ-LLL-089 CONSUME over a Map `in` domain: the witness `w` ranges over the KEYS under the
+    // membership guard `select(m, w) != none`. The body pins the key (`k == 5`), so the assumed
+    // `lookup(m, 5) == 42` follows and `ensures result == 42` verifies (its `lookup(m, 5)`
+    // key-present obligation discharged by `requires haskey(m, 5)`).
+    let (code, out, _) = check_lll_src(
+        "089-map",
+        "module M:\n\n  part h(m: Map[Int, Int]) -> Int:\n    requires haskey(m, 5)\n    requires exists k in m: lookup(m, k) == 42 and k == 5\n    ensures result == 42\n    yield lookup(m, 5)\n",
+    );
+    assert_eq!(code, Some(0), "a pinned-key existential over map keys is assumed: {out}");
+}
+
+#[test]
+fn exists_in_requires_over_set_member_assumed_req089() {
+    // REQ-LLL-089 CONSUME over a Set `in` domain: the witness ranges over the MEMBERS under the
+    // membership guard. A satisfiable `exists x in s: x > 0` is assumed soundly (the element sort
+    // resolves and the Skolemization does not make the trivial `ensures` unprovable).
+    let (code, out, _) = check_lll_src(
+        "089-set",
+        "module M:\n\n  part h(s: Set[Int]) -> Bool:\n    requires exists x in s: x > 0\n    ensures result == true\n    yield true\n",
+    );
+    assert_eq!(code, Some(0), "an existential over set members is assumed: {out}");
+}
+
+#[test]
+fn exists_in_ensures_proof_is_deferred_req089() {
+    // REQ-LLL-089 boundary (Tranche 1): PROVING an existential (`ensures exists …`) is DEFERRED
+    // to Tranche 2 — fail LOUD (DEC-LLL-015), never a silent skip. `exists` is currently sound
+    // to ASSUME (a `requires`, Skolemized) but not yet to PROVE.
+    let (code, _out, err) = check_lll_src(
+        "089-defer",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures exists i in 0 .. 3: get(result, i) == 7\n    yield array(7, 0, 0)\n",
+    );
+    assert_ne!(code, Some(0), "proving an existential ensures is deferred, not silently accepted");
+    assert!(err.contains("deferred") && err.contains("existential"), "explicit deferral error: {err}");
+}
+
+#[test]
+fn exists_in_measure_is_rejected_req089() {
+    // REQ-LLL-089: `exists` reaches `requires`/`ensures`, but a `measure` stays an `Int`
+    // expression over parameters (a quantifier is `Bool`) — rejected with a clear message,
+    // exactly as a `forall` measure is.
+    let (code, _out, err) = check_lll_src(
+        "089-measure",
+        "module M:\n\n  part f(a: Array[Int], n: Int) -> Int:\n    measure exists i in 0 .. length(a): get(a, i) > 0\n    yield n\n",
+    );
+    assert_ne!(code, Some(0), "an `exists` in a `measure` is rejected");
+    assert!(err.contains("measure"), "the error names the measure rule: {err}");
+}
+
+#[test]
+fn nested_exists_forall_is_rejected_req089() {
+    // REQ-LLL-089 RED LINE: nested/alternating quantifiers are outside the v1 fragment. An
+    // `exists` whose body contains a `forall` is rejected at check time (the Skolemization /
+    // fresh-const machinery only sees quantifier-free-bodied top-level quantifiers).
+    let (code, _out, err) = check_lll_src(
+        "089-nested",
+        "module M:\n\n  part f(a: Array[Int]) -> Int:\n    requires exists i in 0 .. 3: forall j in 0 .. 3: get(a, j) > i\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "nested/alternating quantifiers are rejected");
+    assert!(err.contains("quantifier"), "explicit nesting error: {err}");
+}
+
 #[test]
 fn check_precedence_failed_dominates_incomplete_holes() {
     // REQ-LLL-059 / DEC-LLL-052: the check exit-code precedence is failed(1) > incomplete(2) >

@@ -86,7 +86,8 @@ pub fn render_contract_clause(e: &Expr) -> String {
     }
     match e {
         Expr::Hole => "?".to_string(),
-        Expr::Forall { var, domain, body } => {
+        Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
+            let kw = if matches!(e, Expr::Exists { .. }) { "exists" } else { "forall" };
             let dom = match domain {
                 ForallDomain::Range(lo, hi) => format!(
                     "{} .. {}",
@@ -95,7 +96,7 @@ pub fn render_contract_clause(e: &Expr) -> String {
                 ),
                 ForallDomain::In(coll) => render_contract_clause(coll),
             };
-            format!("forall {var} in {dom}: {}", render_contract_clause(body))
+            format!("{kw} {var} in {dom}: {}", render_contract_clause(body))
         }
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => v.to_string(),
@@ -2113,43 +2114,46 @@ fn check_examples_inner(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
 }
 
 /// True iff `e` contains NO `forall` anywhere (self included).
-fn forall_free(e: &Expr) -> bool {
+/// True iff `e` contains NO quantifier (`forall` or `exists`) anywhere — used to reject
+/// nested/alternating quantifiers and to keep a `measure` quantifier-free (REQ-LLL-087/089).
+fn quantifier_free(e: &Expr) -> bool {
     let mut ok = true;
     e.walk(&mut |x| {
-        if matches!(x, Expr::Forall { .. }) {
+        if matches!(x, Expr::Forall { .. } | Expr::Exists { .. }) {
             ok = false;
         }
     });
     ok
 }
 
-/// A bounded `forall` is legal ONLY as the ENTIRE `requires` or `ensures` clause, and its
-/// bounds/body must be quantifier-free (REQ-LLL-087 T1 ensures + A1 requires). This rejects,
-/// at check time, the RED-LINE forms the fresh-const proof cannot handle: a `forall` buried
-/// in a compound clause (`A and forall …`) — which the vcgen could not eliminate — and
-/// nested/alternating quantifiers (`forall i: forall j: …`). Everything the proof machinery
-/// sees is thus a top-level, single, quantifier-free-bodied `forall`.
-fn forall_position_ok(clause: &Expr) -> Result<(), String> {
+/// A bounded quantifier (`forall`/`exists`) is legal ONLY as the ENTIRE `requires` or
+/// `ensures` clause, and its bounds/body must be quantifier-free (REQ-LLL-087 T1 + REQ-LLL-089).
+/// This rejects, at check time, the RED-LINE forms the fresh-const proof / Skolemization /
+/// finite-disjunction cannot handle: a quantifier buried in a compound clause (`A and forall …`)
+/// — which the vcgen could not eliminate — and nested/alternating quantifiers (`forall i:
+/// exists j: …`). Everything the proof machinery sees is thus a top-level, single,
+/// quantifier-free-bodied `forall` or `exists`.
+fn quantifier_position_ok(clause: &Expr) -> Result<(), String> {
     match clause {
-        Expr::Forall { domain, body, .. } => {
+        Expr::Forall { domain, body, .. } | Expr::Exists { domain, body, .. } => {
             let dom_qf = match domain {
-                ForallDomain::Range(lo, hi) => forall_free(lo) && forall_free(hi),
-                ForallDomain::In(coll) => forall_free(coll),
+                ForallDomain::Range(lo, hi) => quantifier_free(lo) && quantifier_free(hi),
+                ForallDomain::In(coll) => quantifier_free(coll),
             };
-            if !dom_qf || !forall_free(body) {
+            if !dom_qf || !quantifier_free(body) {
                 Err("nested or alternating quantifiers are outside the v1 fragment — a \
-                     `forall` body and domain must be quantifier-free (REQ-LLL-087)"
+                     `forall`/`exists` body and domain must be quantifier-free (REQ-LLL-087/089)"
                     .into())
             } else {
                 Ok(())
             }
         }
         other => {
-            if forall_free(other) {
+            if quantifier_free(other) {
                 Ok(())
             } else {
-                Err("a `forall` must be the ENTIRE `requires`/`ensures` clause, not a \
-                     sub-expression (REQ-LLL-087 Tranche 1)"
+                Err("a `forall`/`exists` must be the ENTIRE `requires`/`ensures` clause, not a \
+                     sub-expression (REQ-LLL-087/089)"
                     .into())
             }
         }
@@ -2203,7 +2207,7 @@ fn check_contracts(
     };
     for r in &part.requires {
         no_calls(r, "requires")?;
-        forall_position_ok(r).map_err(|e| format!("part `{}` requires: {e}", part.name))?;
+        quantifier_position_ok(r).map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         let t = type_of_pure(r, &params, None, ctors, records, typarams)
             .map_err(|e| format!("part `{}` requires: {e}", part.name))?;
         if t != Ty::Bool {
@@ -2212,7 +2216,7 @@ fn check_contracts(
     }
     for r in &part.ensures {
         no_calls(r, "ensures")?;
-        forall_position_ok(r).map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
+        quantifier_position_ok(r).map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors, records, typarams)
             .map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         if t != Ty::Bool {
@@ -2221,10 +2225,10 @@ fn check_contracts(
     }
     for m in &part.measure {
         no_calls(m, "measure")?;
-        if !forall_free(m) {
+        if !quantifier_free(m) {
             return Err(format!(
-                "part `{}`: a `forall` may not appear in a `measure` — a measure component is \
-                 an `Int` expression over parameters (REQ-LLL-087)",
+                "part `{}`: a `forall`/`exists` may not appear in a `measure` — a measure \
+                 component is an `Int` expression over parameters (REQ-LLL-087/089)",
                 part.name
             ));
         }
@@ -2292,7 +2296,7 @@ fn type_of_pure(
         // check rejects a quantified measure — no bespoke guard needed here. In a `requires`
         // (`result` is `None`) the body may not reference `result` (the `Var("result")` path
         // rejects that), keeping the clause a property of the parameters only.
-        Expr::Forall { var, domain, body } => {
+        Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
             // The binder's type comes from the domain: an `Int` index for a range, the KEY
             // type of a `Map` / the ELEMENT type of a `Set` for an `in` domain. The
             // quantifiable body fragment is arith + `get`/`length` on Seq/Array +
@@ -2335,8 +2339,8 @@ fn type_of_pure(
             let body_ty = type_of_pure(body, &inner, result, ctors, records, typarams)?;
             if body_ty != Ty::Bool {
                 return Err(format!(
-                    "a `forall` body must be `Bool` (got `{body_ty:?}`) — it states a \
-                     property of each element in the domain (REQ-LLL-087)"
+                    "a `forall`/`exists` body must be `Bool` (got `{body_ty:?}`) — it states a \
+                     property of the elements in the domain (REQ-LLL-087/089)"
                 ));
             }
             Ty::Bool
@@ -3178,13 +3182,13 @@ fn check_expr(
     expected: Option<&Ty>,
 ) -> Result<Ty, String> {
     Ok(match e {
-        // A `forall` is the MIRROR of a hole: contract-only (`ensures`), so it is rejected
-        // in term position exactly as a hole is rejected in a contract (REQ-LLL-087 T1). A
-        // contract `forall` never reaches this fn (typed by `type_of_pure`).
-        Expr::Forall { .. } => {
+        // A quantifier is the MIRROR of a hole: contract-only (`requires`/`ensures`), so it is
+        // rejected in term position exactly as a hole is rejected in a contract (REQ-LLL-087 T1
+        // / REQ-LLL-089). A contract quantifier never reaches this fn (typed by `type_of_pure`).
+        Expr::Forall { .. } | Expr::Exists { .. } => {
             return Err(format!(
-                "part `{}`: a `forall` is not allowed in a part body — a bounded quantifier \
-                 lives in an `ensures` clause only (REQ-LLL-087)",
+                "part `{}`: a `forall`/`exists` is not allowed in a part body — a bounded \
+                 quantifier lives in a `requires`/`ensures` clause only (REQ-LLL-087/089)",
                 ctx.part.name
             ))
         }

@@ -374,9 +374,19 @@ fn setup_part_emit<'a>(
         }
     }
     for r in &reqs {
-        if !matches!(r, Expr::Forall { .. }) {
+        if !matches!(r, Expr::Forall { .. } | Expr::Exists { .. }) {
             let t = em.tr(r, &env, None)?;
             em.hyps.push(t);
+        }
+    }
+    // A quantified `exists` requires (REQ-LLL-089 consume) is SKOLEMIZED: assuming `∃x∈D. P(x)`
+    // introduces a fresh witness with the guard + body as hypotheses — the sound DUAL of a
+    // `forall` requires' ground-instantiation registration. Done AFTER the non-quantified
+    // requires are asserted so the witness body is translated in the full hypothesis context.
+    // (An `exists` requires that must be PROVED at a call site is handled — or deferred — there.)
+    for r in &reqs {
+        if let Expr::Exists { var, domain, body } = r {
+            em.skolemize_exists(var, domain, body, &env)?;
         }
     }
     Ok((em, env))
@@ -484,6 +494,17 @@ fn gen_instance_law_obligations(
     Ok(out)
 }
 
+/// Inline class-method calls inside a quantifier domain (shared by `forall`/`exists`).
+fn inline_domain(domain: &ForallDomain, class: &Class, inst: &Instance) -> Result<ForallDomain, String> {
+    Ok(match domain {
+        ForallDomain::Range(lo, hi) => ForallDomain::Range(
+            Box::new(inline_methods(lo, class, inst)?),
+            Box::new(inline_methods(hi, class, inst)?),
+        ),
+        ForallDomain::In(coll) => ForallDomain::In(Box::new(inline_methods(coll, class, inst)?)),
+    })
+}
+
 /// Replace every class-method call in `e` with the instance's concrete definition,
 /// beta-reduced at the (already-inlined) call arguments (REQ-LLL-048 slice A). v1
 /// instance methods are lambdas, so a call inlines by substituting the lambda
@@ -572,15 +593,12 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         ),
         Expr::Forall { var, domain, body } => Expr::Forall {
             var: var.clone(),
-            domain: match domain {
-                ForallDomain::Range(lo, hi) => ForallDomain::Range(
-                    Box::new(inline_methods(lo, class, inst)?),
-                    Box::new(inline_methods(hi, class, inst)?),
-                ),
-                ForallDomain::In(coll) => {
-                    ForallDomain::In(Box::new(inline_methods(coll, class, inst)?))
-                }
-            },
+            domain: inline_domain(domain, class, inst)?,
+            body: Box::new(inline_methods(body, class, inst)?),
+        },
+        Expr::Exists { var, domain, body } => Expr::Exists {
+            var: var.clone(),
+            domain: inline_domain(domain, class, inst)?,
             body: Box::new(inline_methods(body, class, inst)?),
         },
         Expr::Lambda(ps, body) => {
@@ -639,7 +657,7 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
                 Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
         }
-        Expr::Forall { var, domain, body } => {
+        Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
             // the DOMAIN (range bounds or the Map/Set collection) is OUTSIDE the binder's
             // scope; the body is INSIDE, so the binder `var` shadows a same-named entry in
             // `map` (capture avoidance, exactly like `Lambda` above).
@@ -656,7 +674,12 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
             } else {
                 Box::new(subst_vars(body, map))
             };
-            Expr::Forall { var: var.clone(), domain, body }
+            let var = var.clone();
+            if matches!(e, Expr::Exists { .. }) {
+                Expr::Exists { var, domain, body }
+            } else {
+                Expr::Forall { var, domain, body }
+            }
         }
     }
 }
@@ -952,6 +975,60 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
+    /// SKOLEMIZE an ASSUMED bounded `exists` (REQ-LLL-089 consumption) — the sound DUAL of
+    /// `forall` ground instantiation ([`instantiate_forall_at`]). Introduce ONE genuinely
+    /// fresh witness constant `w` (unconstrained beyond what we state) and push
+    /// `domain_guard(w)` and `body[var:=w]` as hypotheses: assuming `∃x∈D. P(x)` yields a
+    /// named witness with `D(w)` and `P(w)` (standard Skolemization). The body is translated
+    /// with `instantiating = true` so its OWN `get`/`lookup` accesses add NEITHER an
+    /// obligation NOR a further instance — we are ASSUMING the fact, not proving access safety
+    /// (the witness satisfies the guard by construction). This is the exact MIRROR of the
+    /// PROVE side, where `instantiating = false` keeps the per-disjunct access obligations LIVE
+    /// (they ARE the safety check). One witness per assumed `exists` occurrence ⇒ deterministic
+    /// and terminating; never `assert exists` (DEC-LLL-015).
+    fn skolemize_exists(
+        &mut self,
+        var: &str,
+        domain: &ForallDomain,
+        body: &Expr,
+        env: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let sort = self.forall_binder_sort(domain, env)?;
+        let w = self.fresh(&sort);
+        let was = self.instantiating;
+        self.instantiating = true;
+        let guard = self.domain_guard(domain, &w, env)?;
+        let mut benv = env.clone();
+        benv.insert(var.to_string(), w);
+        let body_s = self.tr(body, &benv, None)?;
+        self.instantiating = was;
+        self.hyps.push(guard);
+        self.hyps.push(body_s);
+        Ok(())
+    }
+
+    /// PROVE a bounded `exists` obligation — the DUAL of the `forall` fresh-const proof
+    /// (REQ-LLL-089). Tranche 1 (this commit): proving an existential is DEFERRED — fail LOUD
+    /// (DEC-LLL-015), never a silent skip, so an `exists` is currently sound to ASSUME (a
+    /// `requires`, Skolemized) but not yet to PROVE. Tranche 2 replaces this body with the
+    /// FINITE-DISJUNCTION encoding `body(lo) ∨ … ∨ body(hi-1)` for CONCRETE integer bounds
+    /// (symbolic bounds / Map-Set domains stay deferred — the genuine soundness wall).
+    fn oblige_exists(
+        &mut self,
+        descr: &str,
+        _var: &str,
+        _domain: &ForallDomain,
+        _body: &Expr,
+        _env: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        Err(format!(
+            "part `{}`: {descr} — proving an existential (`exists … : …`) is deferred to \
+             REQ-LLL-089 Tranche 2; `exists` is currently supported only where it is ASSUMED \
+             (a `requires`, consumed by Skolemization) (DEC-LLL-015)",
+            self.part.name
+        ))
+    }
+
     /// The expected type for an equality operand that is a constructor APPLICATION,
     /// taken from its SIBLING operand's static type (REQ-LLL-081). A polymorphic
     /// `Some(x)` (`x : Tv_a`) is sort-ambiguous to Z3 4.16 until qualified
@@ -1089,7 +1166,13 @@ impl<'a> Emit<'a> {
                     env2.insert("result".into(), t);
                     for (i, ens) in self.part.ensures.clone().iter().enumerate() {
                         let descr = format!("ensures #{} holds at yield", i + 1);
-                        if let Expr::Forall { var, domain, body } = ens {
+                        if let Expr::Exists { var, domain, body } = ens {
+                            // PROVE a bounded existential `ensures` (REQ-LLL-089). Tranche 1:
+                            // deferred (fail-loud); Tranche 2: finite disjunction for concrete
+                            // bounds. Consuming a callee's `exists` ensures is Skolemized at the
+                            // call site, independent of this prove side.
+                            self.oblige_exists(&descr, var, domain, body, &env2)?;
+                        } else if let Expr::Forall { var, domain, body } = ens {
                             // PROVE a bounded universal by FRESH-CONST universal
                             // generalization (REQ-LLL-087): a fresh, otherwise-unconstrained
                             // binder `i0` stands for "any" element of the domain, so proving
@@ -1271,16 +1354,16 @@ impl<'a> Emit<'a> {
         expected: Option<&Ty>,
     ) -> Result<String, String> {
         Ok(match e {
-            // A `forall` is NEVER translated as a term: the vcgen eliminates it BEFORE `tr`
-            // — by fresh-const generalization when proving an `ensures` (`oblige_ensures`)
-            // and by ground instantiation when a caller assumes one (`instantiate_forall_at`).
-            // The checker guarantees a `forall` only appears as a whole ensures clause, so
-            // reaching here means a bug upstream — fail LOUDLY, never emit `assert forall`
-            // (REQ-LLL-087, DEC-LLL-015).
-            Expr::Forall { .. } => {
+            // A quantifier is NEVER translated as a term: the vcgen eliminates it BEFORE `tr`
+            // — `forall` by fresh-const generalization / ground instantiation (REQ-LLL-087),
+            // `exists` by Skolemization / finite disjunction (REQ-LLL-089). The checker
+            // guarantees a quantifier only appears as a whole contract clause, so reaching
+            // here means a bug upstream — fail LOUDLY, never emit `assert forall`/`assert
+            // exists` (REQ-LLL-087/089, DEC-LLL-015).
+            Expr::Forall { .. } | Expr::Exists { .. } => {
                 return Err(
-                    "vcgen: reached a `forall` in term position — a bounded quantifier is \
-                     eliminated at the ensures boundary, never encoded to Z3 (REQ-LLL-087)"
+                    "vcgen: reached a quantifier in term position — a bounded quantifier is \
+                     eliminated at the contract boundary, never encoded to Z3 (REQ-LLL-087/089)"
                         .into(),
                 )
             }
@@ -1855,7 +1938,12 @@ impl<'a> Emit<'a> {
                 // prove callee requires at this call site
                 for (i, req) in callee.requires.clone().iter().enumerate() {
                     let descr = format!("requires #{} of `{name}` holds at call site", i + 1);
-                    if let Expr::Forall { var, domain, body } = req {
+                    if let Expr::Exists { var, domain, body } = req {
+                        // PROVE a quantified `exists` requires at the call site (REQ-LLL-089).
+                        // Tranche 1: deferred (fail-loud); Tranche 2: finite disjunction for
+                        // concrete bounds. `cenv` binds the callee's params to the ARGUMENTS.
+                        self.oblige_exists(&descr, var, domain, body, &cenv)?;
+                    } else if let Expr::Forall { var, domain, body } = req {
                         // PROVE a quantified `requires` by FRESH-CONST universal
                         // generalization — the SAME sound encoding as a quantified `ensures`
                         // proof (REQ-LLL-087 A1/A2). A fresh, otherwise-unconstrained `i0`
@@ -1942,7 +2030,14 @@ impl<'a> Emit<'a> {
                 let mut eenv = cenv.clone();
                 eenv.insert("result".into(), r.clone());
                 for ens in callee.ensures.clone() {
-                    if matches!(ens, Expr::Forall { .. }) {
+                    if let Expr::Exists { var, domain, body } = &ens {
+                        // a callee's quantified `exists` ensures is CONSUMED by SKOLEMIZATION at
+                        // the call site (REQ-LLL-089): assuming `∃x∈D. P(x)` over the havoc'd
+                        // result `r` (bound in `eenv`) introduces a fresh witness with the guard
+                        // + body as hypotheses — the sound dual of the `forall` on-demand ground
+                        // instantiation just below. Never `assert exists` (DEC-LLL-015).
+                        self.skolemize_exists(var, domain, body, &eenv)?;
+                    } else if matches!(ens, Expr::Forall { .. }) {
                         // a quantified `ensures` is NOT assumed as a term (we never emit
                         // `assert forall`): record it with the call-site env, keyed by the
                         // havoc'd result `r`, and instantiate it on-demand at each

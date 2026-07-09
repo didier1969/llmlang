@@ -590,6 +590,22 @@ impl<'a> Norm<'a> {
                 self.env.pop();
                 format!("(forall {dom_h} {body_h})")
             }
+            Expr::Exists { var, domain, body } => {
+                // the existential DUAL (REQ-LLL-089): same α-normalized, domain-tagged shape
+                // as `forall`, but a distinct `exists` head — a `forall` and an `exists` over
+                // the same domain/body are DIFFERENT properties, so they must not collide in
+                // the content-hash (DEC-LLL-020).
+                let dom_h = match domain {
+                    ForallDomain::Range(lo, hi) => {
+                        format!("(range {} {})", self.expr(lo), self.expr(hi))
+                    }
+                    ForallDomain::In(coll) => format!("(in {})", self.expr(coll)),
+                };
+                self.env.push(var.clone());
+                let body_h = self.expr(body);
+                self.env.pop();
+                format!("(exists {dom_h} {body_h})")
+            }
             Expr::Lambda(params, body) => {
                 // lambda params are binders → de Bruijn; param types are part of
                 // the definition's identity (REQ-LLL-009)

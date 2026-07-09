@@ -588,6 +588,22 @@ pub enum Expr {
         domain: ForallDomain,
         body: Box<Expr>,
     },
+    /// A BOUNDED existential quantifier (REQ-LLL-089) — the DUAL of [`Expr::Forall`],
+    /// sharing its [`ForallDomain`] and the same CONTRACT-ONLY, quantifier-free-body
+    /// fragment and position rule (whole `requires`/`ensures` clause only). It is NEVER
+    /// emitted to Z3 as `assert exists`: when ASSUMED it is eliminated by SKOLEMIZATION
+    /// (one fresh witness constant `w` with `domain_guard(w) ∧ body[var:=w]` — the sound
+    /// dual of `forall` ground instantiation), and when PROVED over CONCRETE integer bounds
+    /// it is eliminated by FINITE DISJUNCTION `body(lo) ∨ … ∨ body(hi-1)` (REQ-LLL-089
+    /// Tranche 2). Proving an existential over a SYMBOLIC bound or a Map/Set domain is the
+    /// genuine soundness wall (witness synthesis / `assert forall` of the negation) and is
+    /// deferred (DEC-LLL-015: fail-loud, never a silent skip). The binder name is normalized
+    /// in `contract_hash` so α-equivalent quantifiers converge (DEC-LLL-020).
+    Exists {
+        var: String,
+        domain: ForallDomain,
+        body: Box<Expr>,
+    },
 }
 
 /// The finite domain a [`Expr::Forall`] binder ranges over (REQ-LLL-087). Each domain
@@ -630,7 +646,7 @@ impl Expr {
                     e.walk(f);
                 }
             }
-            Expr::Forall { domain, body, .. } => {
+            Expr::Forall { domain, body, .. } | Expr::Exists { domain, body, .. } => {
                 match domain {
                     ForallDomain::Range(lo, hi) => {
                         lo.walk(f);
