@@ -572,6 +572,24 @@ pub enum Expr {
     /// (requires/ensures/measure) so `contract_hash` never contains one. Part of
     /// identity like any other node (DEC-LLL-020): filling it is a new definition.
     Hole,
+    /// A BOUNDED universal quantifier `forall <var> in <lo> .. <hi>: <body>` (REQ-LLL-087
+    /// Tranche 1). CONTRACT-ONLY and, more precisely, `ensures`-only — the mirror of
+    /// [`Expr::Hole`] (term-only): rejected in `requires`/`measure` and in term position.
+    /// `var` binds an `Int` index over the HALF-OPEN range `[lo, hi)`; `body` is a `Bool`
+    /// over the quantifiable fragment (arith, `get`/`length` on Seq/Array, ADT
+    /// projections). It is NEVER emitted to Z3 as `assert forall`: the vcgen eliminates it
+    /// by FRESH-CONST universal generalization when PROVING an `ensures`, and by
+    /// deterministic GROUND instantiation (at each syntactic `get`) when a caller ASSUMES
+    /// it (DEC-LLL-015: zero triggers, zero matching-loops, decidable QF fragment). The
+    /// binder name is normalized in `contract_hash` so α-equivalent quantifiers converge
+    /// (DEC-LLL-020). Domain is Seq/Array only — a cons-list has no native `length`
+    /// (DEC-LLL-043), so `length`/`get` on one is already an honest error.
+    Forall {
+        var: String,
+        lo: Box<Expr>,
+        hi: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 impl Expr {
@@ -595,6 +613,11 @@ impl Expr {
                 for (_, e) in fields {
                     e.walk(f);
                 }
+            }
+            Expr::Forall { lo, hi, body, .. } => {
+                lo.walk(f);
+                hi.walk(f);
+                body.walk(f);
             }
             _ => {}
         }

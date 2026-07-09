@@ -261,6 +261,21 @@ struct Emit<'a> {
     /// `(_ is nil)` tester, which is ambiguous once two `(Lst _)` instantiations
     /// coexist — the generic type-changing `map` case (REQ-LLL-007).
     sorts: HashMap<String, String>,
+    /// Havoc'd callee-result term → the callee's `forall` ensures clauses paired with the
+    /// call-site env in which to translate them (REQ-LLL-087 T1 consumption). The env binds
+    /// the callee's params to the actual arguments and `result` to the havoc'd term, so a
+    /// range bound like `0 .. n` (n a callee param) instantiates correctly. A quantified
+    /// `ensures` cannot be assumed as a plain term, so at the call site we RECORD it here
+    /// instead of pushing a hypothesis; each syntactic `get(r, k)` on that result then emits
+    /// ONE ground instance `guard(k) => body(k)` (`instantiate_forall_at`). Deterministic,
+    /// finite (one per occurrence), guard-retained — never `assert forall`, never an
+    /// unconditional out-of-bounds fact.
+    forall_ens: HashMap<String, Vec<(Expr, HashMap<String, String>)>>,
+    /// True only while translating a `forall` instance body (`instantiate_forall_at`): a
+    /// `get` in that body is a STATEMENT of the callee's proven fact, not a fresh access,
+    /// so it emits NO bounds obligation and triggers NO further instantiation (which would
+    /// not terminate). Guarantees the ground-instantiation pass is a single finite step.
+    instantiating: bool,
 }
 
 /// Shared preamble: declare the part's params (and `given` methods) as fresh
@@ -283,6 +298,8 @@ fn setup_part_emit<'a>(
         obls: Vec::new(),
         fresh: 0,
         sorts: HashMap::new(),
+        forall_ens: HashMap::new(),
+        instantiating: false,
     };
     // params
     let mut env: HashMap<String, String> = HashMap::new();
@@ -410,6 +427,8 @@ fn gen_instance_law_obligations(
             obls: Vec::new(),
             fresh: 0,
             sorts: HashMap::new(),
+            forall_ens: HashMap::new(),
+            instantiating: false,
         };
         let mut env: HashMap<String, String> = HashMap::new();
         for (bn, bt) in &law.binders {
@@ -526,6 +545,12 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
                 .map(|a| inline_methods(a, class, inst))
                 .collect::<Result<_, _>>()?,
         ),
+        Expr::Forall { var, lo, hi, body } => Expr::Forall {
+            var: var.clone(),
+            lo: Box::new(inline_methods(lo, class, inst)?),
+            hi: Box::new(inline_methods(hi, class, inst)?),
+            body: Box::new(inline_methods(body, class, inst)?),
+        },
         Expr::Lambda(ps, body) => {
             Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
         }
@@ -581,6 +606,21 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
             } else {
                 Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
+        }
+        Expr::Forall { var, lo, hi, body } => {
+            // the range bounds `lo`/`hi` are OUTSIDE the binder's scope; the body is INSIDE,
+            // so the binder `var` shadows a same-named entry in `map` (capture avoidance,
+            // exactly like `Lambda` above).
+            let lo = Box::new(subst_vars(lo, map));
+            let hi = Box::new(subst_vars(hi, map));
+            let body = if map.contains_key(var.as_str()) {
+                let mut inner = map.clone();
+                inner.remove(var.as_str());
+                Box::new(subst_vars(body, &inner))
+            } else {
+                Box::new(subst_vars(body, map))
+            };
+            Expr::Forall { var: var.clone(), lo, hi, body }
         }
     }
 }
@@ -788,6 +828,35 @@ impl<'a> Emit<'a> {
         });
     }
 
+    /// GROUND-INSTANTIATE the quantified callee `ensures` recorded for result term `a`, at
+    /// one concrete index `idx` (REQ-LLL-087 T1 consumption). For `forall v in lo .. hi:
+    /// body`, push the hypothesis `guard(idx) => body[v := idx]`. The range guard is
+    /// RETAINED: dropping it would let the caller prove an UNCONDITIONAL fact about a
+    /// possibly out-of-bounds index — the unsound direction (§5.2 of the design). Never
+    /// `assert forall`; one instance per syntactic `get` occurrence ⇒ deterministic and
+    /// terminating. Runs with `instantiating = true` so the body's own `get`s add neither a
+    /// bounds obligation nor a further instance.
+    fn instantiate_forall_at(&mut self, a: &str, idx: &str) -> Result<(), String> {
+        let Some(foralls) = self.forall_ens.get(a).cloned() else {
+            return Ok(());
+        };
+        let was = self.instantiating;
+        self.instantiating = true;
+        for (f, eenv) in &foralls {
+            if let Expr::Forall { var, lo, hi, body } = f {
+                let lo_s = self.tr(lo, eenv, None)?;
+                let hi_s = self.tr(hi, eenv, None)?;
+                let mut benv = eenv.clone();
+                benv.insert(var.clone(), idx.to_string());
+                let body_s = self.tr(body, &benv, None)?;
+                let guard = format!("(and (<= {lo_s} {idx}) (< {idx} {hi_s}))");
+                self.hyps.push(format!("(=> {guard} {body_s})"));
+            }
+        }
+        self.instantiating = was;
+        Ok(())
+    }
+
     /// The expected type for an equality operand that is a constructor APPLICATION,
     /// taken from its SIBLING operand's static type (REQ-LLL-081). A polymorphic
     /// `Some(x)` (`x : Tv_a`) is sort-ambiguous to Z3 4.16 until qualified
@@ -924,11 +993,36 @@ impl<'a> Emit<'a> {
                     let mut env2 = env.clone();
                     env2.insert("result".into(), t);
                     for (i, ens) in self.part.ensures.clone().iter().enumerate() {
-                        let goal = self.tr(ens, &env2, None)?;
-                        self.oblige(
-                            format!("ensures #{} holds at yield", i + 1),
-                            goal,
-                        );
+                        let descr = format!("ensures #{} holds at yield", i + 1);
+                        if let Expr::Forall { var, lo, hi, body } = ens {
+                            // PROVE a bounded universal by FRESH-CONST universal
+                            // generalization (REQ-LLL-087 T1): a fresh, otherwise-
+                            // unconstrained index `i0` stands for "any" index in `[lo, hi)`,
+                            // so proving `body(i0)` UNDER the guard proves it for every
+                            // index. Quantifier-free — no `assert forall` ever reaches Z3
+                            // (DEC-LLL-015). `i0` is genuinely fresh (`self.fresh`), so it
+                            // is UNconstrained beyond the guard — the soundness invariant
+                            // (over-constraining it would prove `∀` from a single witness).
+                            // The guard is pushed as a HYPOTHESIS (not folded into the goal)
+                            // so the body's OWN `get(result, i0)` bounds obligation is
+                            // discharged by it — and a range that OVERRUNS the array
+                            // (`0 .. length(result)+1`) leaves that obligation unmet, a
+                            // sound rejection. Scoped: truncated back after this clause.
+                            let lo_s = self.tr(lo, &env2, None)?;
+                            let hi_s = self.tr(hi, &env2, None)?;
+                            let i0 = self.fresh("Int");
+                            let guard = format!("(and (<= {lo_s} {i0}) (< {i0} {hi_s}))");
+                            let mut benv = env2.clone();
+                            benv.insert(var.clone(), i0);
+                            let saved = self.hyps.len();
+                            self.hyps.push(guard);
+                            let body_s = self.tr(body, &benv, None)?;
+                            self.oblige(descr, body_s);
+                            self.hyps.truncate(saved);
+                        } else {
+                            let goal = self.tr(ens, &env2, None)?;
+                            self.oblige(descr, goal);
+                        }
                     }
                 }
                 Stmt::Match(scrut, arms) => {
@@ -1082,6 +1176,19 @@ impl<'a> Emit<'a> {
         expected: Option<&Ty>,
     ) -> Result<String, String> {
         Ok(match e {
+            // A `forall` is NEVER translated as a term: the vcgen eliminates it BEFORE `tr`
+            // — by fresh-const generalization when proving an `ensures` (`oblige_ensures`)
+            // and by ground instantiation when a caller assumes one (`instantiate_forall_at`).
+            // The checker guarantees a `forall` only appears as a whole ensures clause, so
+            // reaching here means a bug upstream — fail LOUDLY, never emit `assert forall`
+            // (REQ-LLL-087, DEC-LLL-015).
+            Expr::Forall { .. } => {
+                return Err(
+                    "vcgen: reached a `forall` in term position — a bounded quantifier is \
+                     eliminated at the ensures boundary, never encoded to Z3 (REQ-LLL-087)"
+                        .into(),
+                )
+            }
             // Defensive (DEC-LLL-052): a holey part is marked Incomplete and SKIPPED
             // before obligation generation, so the encoder must never reach a hole. If
             // it does, fail LOUDLY — never silently encode a hole into an obligation.
@@ -1388,13 +1495,23 @@ impl<'a> Emit<'a> {
                     "get" => {
                         let a = self.tr(&args[0], env, None)?;
                         let i = self.tr(&args[1], env, None)?;
-                        // BOUNDS obligation: 0 <= i < length(a). Discharged here → the
-                        // panic branch of `a[i]` in codegen is provably dead in
-                        // verified code (mirrors the div-by-zero obligation).
-                        self.oblige(
-                            "array index in bounds".into(),
-                            format!("(and (<= 0 {i}) (< {i} (seq.len {a})))"),
-                        );
+                        // While STATING a callee's proven `forall` fact (`instantiating`),
+                        // a `get` is not a fresh access: emit no bounds obligation and do
+                        // not recurse into instantiation (REQ-LLL-087 T1 — keeps the ground
+                        // pass a single finite step).
+                        if !self.instantiating {
+                            // BOUNDS obligation: 0 <= i < length(a). Discharged here → the
+                            // panic branch of `a[i]` in codegen is provably dead in
+                            // verified code (mirrors the div-by-zero obligation).
+                            self.oblige(
+                                "array index in bounds".into(),
+                                format!("(and (<= 0 {i}) (< {i} (seq.len {a})))"),
+                            );
+                            // GROUND-INSTANTIATE any quantified callee `ensures` on this
+                            // result at THIS index — the caller derives `guard(i) =>
+                            // body(i)` (REQ-LLL-087 T1 consumption).
+                            self.instantiate_forall_at(&a, &i)?;
+                        }
                         format!("(seq.nth {a} {i})")
                     }
                     "set" => {
@@ -1694,8 +1811,21 @@ impl<'a> Emit<'a> {
                 let mut eenv = cenv.clone();
                 eenv.insert("result".into(), r.clone());
                 for ens in callee.ensures.clone() {
-                    let a = self.tr_contract(&ens, &eenv)?;
-                    self.hyps.push(a);
+                    if matches!(ens, Expr::Forall { .. }) {
+                        // a quantified `ensures` is NOT assumed as a term (we never emit
+                        // `assert forall`): record it with the call-site env, keyed by the
+                        // havoc'd result `r`, and instantiate it on-demand at each
+                        // `get(r, k)` in the caller's goal (`instantiate_forall_at`) —
+                        // deterministic ground instantiation that keeps the range guard
+                        // (REQ-LLL-087 T1 consumption).
+                        self.forall_ens
+                            .entry(r.clone())
+                            .or_default()
+                            .push((ens, eenv.clone()));
+                    } else {
+                        let a = self.tr_contract(&ens, &eenv)?;
+                        self.hyps.push(a);
+                    }
                 }
                 r
             }

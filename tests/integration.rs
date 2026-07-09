@@ -5123,6 +5123,234 @@ fn empty_list_contract_module_builds_req087_t0() {
     assert!(b.status.success(), "builds: {}", String::from_utf8_lossy(&b.stderr));
 }
 
+// ---- contrats expressifs Tranche 1 : `forall` borné en `ensures` (REQ-LLL-087) ----
+
+/// Helper: `lll check --no-cache <src>` in a fresh dir, returns (exit_code, stdout, stderr).
+fn check_lll_src(tag: &str, src: &str) -> (Option<i32>, String, String) {
+    let dir = tempdir().join(tag);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("m.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn forall_ensures_over_array_proves_by_fresh_const_req087_t1() {
+    // REQ-LLL-087 T1: a bounded `forall` in `ensures` is PROVED by fresh-const universal
+    // generalization — a fresh, unconstrained index under the range guard — never an
+    // `assert forall` to Z3. An all-positive array satisfies `forall i in 0..len: get>0`.
+    let (code, out, _) = check_lll_src(
+        "t1-proof",
+        "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n",
+    );
+    assert_eq!(code, Some(0), "fresh-const proof verifies: {out}");
+}
+
+#[test]
+fn forall_ensures_consumed_by_caller_derives_indexed_fact_req087_t1() {
+    // REQ-LLL-087 T1 CONSUMPTION (§5.3): a caller indexing a result whose callee proved a
+    // quantified `ensures` derives the per-index fact by GROUND instantiation (guard kept),
+    // never `assert forall`. `use_it` proves `result > 0` ONLY because `get(xs,0) > 0` is
+    // instantiated from `all_pos`'s `forall` — it would fail without the consumption pass.
+    let (code, out, _) = check_lll_src(
+        "t1-consume",
+        "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures length(result) == 3\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n\n  part use_it() -> Int:\n    ensures result > 0\n    let xs = all_pos()\n    yield get(xs, 0)\n",
+    );
+    assert_eq!(code, Some(0), "caller derives the indexed fact by instantiation: {out}");
+}
+
+#[test]
+fn forall_false_for_some_index_is_rejected_req087_t1() {
+    // REQ-LLL-087 T1 soundness — the fresh index is UNconstrained (never over-constrained to
+    // a single witness): a `forall i in 0..len: get>0` true for SOME indices only
+    // (`array(1,0,3)`) is REJECTED with a counterexample, never proved from index 0.
+    let (code, out, _) = check_lll_src(
+        "t1-someidx",
+        "module M:\n\n  part has_zero() -> Array[Int]:\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 0, 3)\n",
+    );
+    assert_eq!(code, Some(1), "a `forall` false at one index is not provable: {out}");
+    assert!(out.contains("ensures"), "the failure is the quantified ensures: {out}");
+}
+
+#[test]
+fn forall_consumption_keeps_the_range_guard_req087_t1() {
+    // REQ-LLL-087 T1 soundness KEYSTONE (§5.2): the ground instance RETAINS the range guard.
+    // `pos_prefix` proves `forall i in 0..2: get>0` on `[1,2,-3,-4]` (prefix only). A caller
+    // reading index 3 — IN array bounds (len 4) but OUTSIDE the `forall` range [0,2) — must
+    // NOT derive `get(xs,3) > 0`: the instance `guard(3) => …` is vacuous (3 ≮ 2). Were the
+    // guard dropped, `probe` would verify FALSELY (the unsound direction). It must FAIL, while
+    // `pos_prefix` itself verifies (so the failure isolates the retained guard).
+    let (code, out, _) = check_lll_src(
+        "t1-guard",
+        "module M:\n\n  part pos_prefix() -> Array[Int]:\n    ensures length(result) == 4\n    ensures forall i in 0 .. 2: get(result, i) > 0\n    yield array(1, 2, -3, -4)\n\n  part probe() -> Int:\n    ensures result > 0\n    let xs = pos_prefix()\n    yield get(xs, 3)\n",
+    );
+    assert_eq!(code, Some(1), "out-of-range access is not derivable — guard retained: {out}");
+    assert!(out.contains("pos_prefix") && out.contains("proved"), "the callee verifies: {out}");
+    assert!(out.contains("probe") && out.contains("FAILED"), "only the caller fails: {out}");
+}
+
+#[test]
+fn forall_range_overrunning_the_array_is_rejected_req087_t1() {
+    // REQ-LLL-087 T1 soundness — PROOF-side mirror of guard-retention. A range that overruns
+    // the array (`0 .. length(result) + 1`) admits `i0 = length(result)`; the body's OWN
+    // `get(result, i0)` bounds obligation (`i0 < seq.len`) is then UNMET, so it cannot
+    // discharge. This is the exact point a `<`/`<=` slip or a guard-fold would let someone
+    // quantify past the array and prove a fact about `seq.nth` out of range — it must FAIL.
+    let (code, out, _) = check_lll_src(
+        "t1-overrun",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures forall i in 0 .. length(result) + 1: get(result, i) > 0\n    yield array(1, 2, 3)\n",
+    );
+    assert_eq!(code, Some(1), "a range past the array end leaves the bounds obligation unmet: {out}");
+    assert!(out.contains("in bounds"), "the failure is the out-of-range index access: {out}");
+}
+
+#[test]
+fn forall_verdict_is_cache_stable_req087_t1() {
+    // REQ-LLL-087 T1 identity/determinism (DEC-LLL-020/021): a quantified `ensures` lives in
+    // `contract_hash` (α-canonicalized), so ground instantiation is deterministic and the
+    // verdict is cacheable — a second check with the cache ON replays it as a hit.
+    let dir = tempdir().join("t1-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("c.lll");
+    std::fs::write(&f, "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n").unwrap();
+    let run = || {
+        let o = std::process::Command::new(bin).args(["check", f.to_str().unwrap()]).output().unwrap();
+        (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let (c1, o1) = run();
+    let (c2, o2) = run();
+    assert_eq!(c1, Some(0), "first pass verifies: {o1}");
+    assert_eq!(c2, Some(0), "second pass verifies identically: {o2}");
+    assert!(o2.contains("cache hit"), "the quantified verdict replays from cache: {o2}");
+}
+
+#[test]
+fn forall_over_cons_list_is_an_honest_error_req087_t1() {
+    // REQ-LLL-087 T1 domain frontier (DEC-LLL-043): a cons-list has NO native `length`/`get`,
+    // so quantifying over one is an HONEST error at the `length`/`get` term — never a bespoke
+    // recursive predicate (which would reopen the GRAPHE matching-loop failure).
+    let (code, _out, err) = check_lll_src(
+        "t1-conslist",
+        "module M:\n\n  part f(xs: List[Int]) -> Int:\n    ensures forall i in 0 .. length(xs): get(xs, i) > 0\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "a cons-list is outside the quantifiable domain");
+    assert!(err.contains("Array") || err.contains("length"), "honest domain error: {err}");
+}
+
+#[test]
+fn forall_in_requires_is_rejected_ensures_only_req087_t1() {
+    // REQ-LLL-087 T1 is `ensures`-ONLY in v1 (`forall`-in-`requires` is sound but deferred).
+    let (code, _out, err) = check_lll_src(
+        "t1-requires",
+        "module M:\n\n  part f(a: Array[Int]) -> Int:\n    requires forall i in 0 .. length(a): get(a, i) > 0\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "a `forall` in `requires` is rejected in v1");
+    assert!(err.contains("ensures"), "the error names the ensures-only rule: {err}");
+}
+
+#[test]
+fn forall_nested_or_compound_is_rejected_req087_t1() {
+    // REQ-LLL-087 T1 RED LINE: nested/alternating quantifiers, and a `forall` buried in a
+    // compound clause (`A and forall …`) — which the fresh-const proof cannot eliminate — are
+    // rejected at check time, not silently approximated.
+    let (nested, _o1, e1) = check_lll_src(
+        "t1-nested",
+        "module M:\n\n  part f(a: Array[Int]) -> Bool:\n    ensures forall i in 0 .. length(a): forall j in 0 .. length(a): get(a, i) == get(a, j)\n    yield true\n",
+    );
+    assert_ne!(nested, Some(0), "nested/alternating quantifiers are rejected");
+    assert!(e1.contains("quantifier") || e1.contains("REQ-LLL-087"), "explicit nesting error: {e1}");
+    let (compound, _o2, e2) = check_lll_src(
+        "t1-compound",
+        "module M:\n\n  part f(a: Array[Int]) -> Bool:\n    ensures (length(a) > 0) and (forall i in 0 .. length(a): get(a, i) > 0)\n    yield true\n",
+    );
+    assert_ne!(compound, Some(0), "a `forall` in a compound clause is rejected");
+    assert!(e2.contains("ENTIRE") || e2.contains("sub-expression"), "explicit position error: {e2}");
+}
+
+#[test]
+fn forall_in_term_position_is_rejected_req087_t1() {
+    // REQ-LLL-087 T1: a `forall` is the MIRROR of a hole — contract-only. In a part body's
+    // term position it is rejected (a hole is rejected in a contract, symmetrically).
+    let (code, _out, err) = check_lll_src(
+        "t1-term",
+        "module M:\n\n  part f() -> Bool:\n    yield forall i in 0 .. 3: i > 0\n",
+    );
+    assert_ne!(code, Some(0), "a `forall` is not a term");
+    assert!(err.contains("forall") || err.contains("body"), "explicit term-position error: {err}");
+}
+
+#[test]
+fn unbounded_forall_is_a_parse_error_req087_t1() {
+    // REQ-LLL-087 T1: an UNBOUNDED `forall x: P(x)` (no `in lo .. hi`) is a parse error — the
+    // grammar admits only the bounded form, so an unbounded quantifier never reaches Z3.
+    let (code, _out, err) = check_lll_src(
+        "t1-unbounded",
+        "module M:\n\n  part f() -> Int:\n    ensures forall x: x > 0\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "an unbounded `forall` does not parse");
+    assert!(err.contains("In") || err.contains("expected"), "parse error at the missing range: {err}");
+}
+
+#[test]
+fn forall_empty_range_is_vacuously_true_req087_t1() {
+    // REQ-LLL-087 T1: an empty range `0 .. 0` quantifies over nothing — vacuously true, so the
+    // `ensures` verifies with no constraint on the (here empty) array.
+    let (code, out, _) = check_lll_src(
+        "t1-vacuous",
+        "module M:\n\n  part f() -> Array[Int]:\n    ensures forall i in 0 .. 0: get(result, i) > 0\n    yield array()\n",
+    );
+    assert_eq!(code, Some(0), "an empty-range `forall` is vacuously true: {out}");
+}
+
+#[test]
+fn alpha_equivalent_foralls_share_contract_hash_req087_t1() {
+    // REQ-LLL-087 T1 identity (DEC-LLL-020): the binder is α-normalized, so `forall i …` and
+    // `forall j …` are the SAME definition (same content-hash), while a different RANGE is a
+    // different definition. The binder name is not part of identity; the range is.
+    let dir = tempdir().join("t1-hash");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let mk = |name: &str, src: &str| {
+        let f = dir.join(name);
+        std::fs::write(&f, src).unwrap();
+        let out = std::process::Command::new(bin).args(["hash", f.to_str().unwrap()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let hi = mk("i.lll", "module M:\n\n  part f() -> Array[Int]:\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n");
+    let hj = mk("j.lll", "module M:\n\n  part f() -> Array[Int]:\n    ensures forall j in 0 .. length(result): get(result, j) > 0\n    yield array(1, 2, 3)\n");
+    let hk = mk("k.lll", "module M:\n\n  part f() -> Array[Int]:\n    ensures forall i in 1 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n");
+    assert_eq!(hi, hj, "α-equivalent quantifiers share identity");
+    assert_ne!(hi, hk, "a different range is a different definition");
+}
+
+#[test]
+fn forall_ensures_module_builds_and_runs_req087_t1() {
+    // REQ-LLL-087 T1 concordance (DEC-LLL-017/026): a quantified `ensures` is COMPILE-TIME
+    // scaffolding — erased at codegen. The module builds and runs, `get(xs,0)` yielding `1`.
+    let dir = tempdir().join("t1-run");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("r.lll");
+    std::fs::write(&f, "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures length(result) == 3\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n\n  part main() -> Int:\n    ensures result > 0\n    let xs = all_pos()\n    yield get(xs, 0)\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["run", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "builds+runs: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("=> 1"), "runtime concordance: {}", String::from_utf8_lossy(&out.stdout));
+}
+
 #[test]
 fn check_precedence_failed_dominates_incomplete_holes() {
     // REQ-LLL-059 / DEC-LLL-052: the check exit-code precedence is failed(1) > incomplete(2) >

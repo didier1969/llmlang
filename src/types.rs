@@ -86,6 +86,12 @@ pub fn render_contract_clause(e: &Expr) -> String {
     }
     match e {
         Expr::Hole => "?".to_string(),
+        Expr::Forall { var, lo, hi, body } => format!(
+            "forall {var} in {} .. {}: {}",
+            render_contract_clause(lo),
+            render_contract_clause(hi),
+            render_contract_clause(body)
+        ),
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => v.to_string(),
         Expr::RatLit(n, d) => {
@@ -2101,6 +2107,46 @@ fn check_examples_inner(ctx: &mut Ctx, part: &Part) -> Result<(), String> {
     Ok(())
 }
 
+/// True iff `e` contains NO `forall` anywhere (self included).
+fn forall_free(e: &Expr) -> bool {
+    let mut ok = true;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Forall { .. }) {
+            ok = false;
+        }
+    });
+    ok
+}
+
+/// A bounded `forall` is legal ONLY as the ENTIRE `ensures` clause, and its bounds/body
+/// must be quantifier-free (REQ-LLL-087 T1). This rejects, at check time, the RED-LINE
+/// forms the fresh-const proof cannot handle: a `forall` buried in a compound clause
+/// (`A and forall …`) — which the vcgen could not eliminate — and nested/alternating
+/// quantifiers (`forall i: forall j: …`). Everything the proof machinery sees is thus a
+/// top-level, single, quantifier-free-bodied `forall`.
+fn forall_position_ok(clause: &Expr) -> Result<(), String> {
+    match clause {
+        Expr::Forall { lo, hi, body, .. } => {
+            if !forall_free(lo) || !forall_free(hi) || !forall_free(body) {
+                Err("nested or alternating quantifiers are outside the v1 fragment — a \
+                     `forall` body and bounds must be quantifier-free (REQ-LLL-087)"
+                    .into())
+            } else {
+                Ok(())
+            }
+        }
+        other => {
+            if forall_free(other) {
+                Ok(())
+            } else {
+                Err("a `forall` must be the ENTIRE `ensures` clause, not a sub-expression \
+                     (REQ-LLL-087 Tranche 1)"
+                    .into())
+            }
+        }
+    }
+}
+
 fn check_contracts(
     part: &Part,
     callables: &HashSet<String>,
@@ -2156,6 +2202,7 @@ fn check_contracts(
     }
     for r in &part.ensures {
         no_calls(r, "ensures")?;
+        forall_position_ok(r).map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         let t = type_of_pure(r, &params, Some(part.ret.clone()), ctors, records, typarams)
             .map_err(|e| format!("part `{}` ensures: {e}", part.name))?;
         if t != Ty::Bool {
@@ -2222,6 +2269,42 @@ fn type_of_pure(
                  is a term-position placeholder only (DEC-LLL-052)"
                     .into(),
             )
+        }
+        // A BOUNDED universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1).
+        Expr::Forall { var, lo, hi, body } => {
+            // `ensures`-ONLY: `result` is `Some` exactly in an `ensures` clause (it is what
+            // makes `result` referenceable), so its absence = requires/measure ⇒ reject.
+            // `forall`-in-`requires` is sound but deferred; a `measure` stays Int-on-params.
+            if result.is_none() {
+                return Err(
+                    "a `forall` may appear only in an `ensures` clause, not in \
+                     requires/measure (REQ-LLL-087 Tranche 1)"
+                        .into(),
+                );
+            }
+            // half-open range `[lo, hi)` over an `Int` index
+            let lo_ty = type_of_pure(lo, vars, result.clone(), ctors, records, typarams)?;
+            let hi_ty = type_of_pure(hi, vars, result.clone(), ctors, records, typarams)?;
+            if lo_ty != Ty::Int || hi_ty != Ty::Int {
+                return Err(format!(
+                    "a `forall` range bound must be `Int` (got `{lo_ty:?}` .. `{hi_ty:?}`) — \
+                     the index ranges over `lo .. hi` (REQ-LLL-087)"
+                ));
+            }
+            // bind the index as `Int`, require a `Bool` body. The quantifiable fragment is
+            // arith + `get`/`length` on Seq/Array + ADT projections; a cons-list has NO
+            // native `get`/`length`, so indexing one is already an honest error here
+            // (DEC-LLL-043) — no bespoke domain check needed.
+            let mut inner = vars.clone();
+            inner.insert(var.clone(), Ty::Int);
+            let body_ty = type_of_pure(body, &inner, result, ctors, records, typarams)?;
+            if body_ty != Ty::Bool {
+                return Err(format!(
+                    "a `forall` body must be `Bool` (got `{body_ty:?}`) — it states a \
+                     property of each index in the range (REQ-LLL-087)"
+                ));
+            }
+            Ty::Bool
         }
         Expr::RecordLit(..) => {
             unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)")
@@ -3060,6 +3143,16 @@ fn check_expr(
     expected: Option<&Ty>,
 ) -> Result<Ty, String> {
     Ok(match e {
+        // A `forall` is the MIRROR of a hole: contract-only (`ensures`), so it is rejected
+        // in term position exactly as a hole is rejected in a contract (REQ-LLL-087 T1). A
+        // contract `forall` never reaches this fn (typed by `type_of_pure`).
+        Expr::Forall { .. } => {
+            return Err(format!(
+                "part `{}`: a `forall` is not allowed in a part body — a bounded quantifier \
+                 lives in an `ensures` clause only (REQ-LLL-087)",
+                ctx.part.name
+            ))
+        }
         Expr::Hole => {
             // A typed hole `?` (CPT-LLL-002, DEC-LLL-052). Term position only: a `?` in
             // an instance method body carries `Reject` policy and errors here; a

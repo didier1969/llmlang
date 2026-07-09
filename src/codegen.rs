@@ -2088,6 +2088,14 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             )
         }
         Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
+        // A `forall` is CONTRACT-ONLY (`ensures`), and contracts are erased at codegen
+        // (DEC-LLL-017): the checker rejects a `forall` in term position, so it can never
+        // reach the body lowering. Fail LOUD rather than emit anything (REQ-LLL-087 T1).
+        Expr::Forall { .. } => {
+            return Err("codegen: reached a `forall` — quantifiers are contract-only \
+                        (ensures) and erased at codegen (REQ-LLL-087)"
+                .into())
+        }
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => format!("{v}i64"),
         // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already

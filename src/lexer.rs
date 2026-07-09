@@ -81,6 +81,9 @@ pub enum Tok {
     Dot,       // positional projection `e.0` (REQ-LLL-070). A `.`+letter glues into a
                // `Dotted` name and a `.`+digit-after-digits is a decimal, so a `Dot`
                // token only ever reaches here as a genuine projection operator.
+    DotDot,    // bounded-range separator `lo .. hi` (REQ-LLL-087 T1 `forall`)
+    Forall,    // bounded universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1)
+    In,        // range binder keyword in `forall i in …` (REQ-LLL-087 T1)
 }
 
 #[derive(Debug, Clone)]
@@ -190,12 +193,17 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                 i += 1;
             }
             '.' => {
-                // positional projection `e.0` (REQ-LLL-070). A qualified name
-                // (`.`+letter) is glued in `lex_word` and a decimal (`<digits>.<digits>`)
-                // is consumed in the number arm, so any `.` reaching this dispatch is a
-                // genuine projection operator.
-                push(out, Tok::Dot);
-                i += 1;
+                // `..` is the bounded-range separator (REQ-LLL-087 T1). Checked BEFORE the
+                // single-`.` projection: a decimal (`<digits>.<digits>`) is consumed in the
+                // number arm and a qualified name (`.`+letter) in `lex_word`, so a `.` here
+                // is either a range `..` or a genuine projection operator.
+                if i + 1 < b.len() && b[i + 1] == b'.' {
+                    push(out, Tok::DotDot);
+                    i += 2;
+                } else {
+                    push(out, Tok::Dot);
+                    i += 1;
+                }
             }
             '-' => {
                 if i + 1 < b.len() && b[i + 1] == b'>' {
@@ -376,6 +384,8 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
         "if" => Tok::If,
         "then" => Tok::Then,
         "else" => Tok::Else,
+        "forall" => Tok::Forall,
+        "in" => Tok::In,
         _ if dotted => Tok::Dotted(w.to_string()),
         _ => Tok::Ident(w.to_string()),
     };

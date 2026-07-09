@@ -199,6 +199,12 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
         Expr::Lambda(ps, body) => Expr::Lambda(ps, Box::new(desugar_expr(*body, recs)?)),
         Expr::Proj(a, i) => Expr::Proj(Box::new(desugar_expr(*a, recs)?), i),
         Expr::Field(a, n) => Expr::Field(Box::new(desugar_expr(*a, recs)?), n),
+        Expr::Forall { var, lo, hi, body } => Expr::Forall {
+            var,
+            lo: Box::new(desugar_expr(*lo, recs)?),
+            hi: Box::new(desugar_expr(*hi, recs)?),
+            body: Box::new(desugar_expr(*body, recs)?),
+        },
         leaf @ (Expr::IntLit(_)
         | Expr::RatLit(..)
         | Expr::BoolLit(_)
@@ -1237,7 +1243,31 @@ impl Parser {
 
     // ---- expressions, precedence climbing ----
     pub fn expr(&mut self) -> Result<Expr, String> {
+        if self.peek() == &Tok::Forall {
+            return self.forall_expr();
+        }
         self.or_expr()
+    }
+    /// A bounded universal quantifier `forall <id> in <lo> .. <hi>: <body>` (REQ-LLL-087
+    /// T1). Surface-only well-formedness here (binder, half-open range, body); it is the
+    /// CHECKER that restricts it to `ensures` position and the `Int`/`Bool`/Seq fragment.
+    /// The bounds are additive expressions (they terminate cleanly at `..` then `:`), the
+    /// body is a full expression.
+    fn forall_expr(&mut self) -> Result<Expr, String> {
+        self.eat(Tok::Forall)?;
+        let var = self.ident()?;
+        self.eat(Tok::In)?;
+        let lo = self.add_expr()?;
+        self.eat(Tok::DotDot)?;
+        let hi = self.add_expr()?;
+        self.eat(Tok::Colon)?;
+        let body = self.expr()?;
+        Ok(Expr::Forall {
+            var,
+            lo: Box::new(lo),
+            hi: Box::new(hi),
+            body: Box::new(body),
+        })
     }
     fn or_expr(&mut self) -> Result<Expr, String> {
         let mut e = self.and_expr()?;
