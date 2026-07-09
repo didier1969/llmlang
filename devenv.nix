@@ -25,13 +25,22 @@
   };
 
   # Postgres reproductible pour le vertical APS3D (étape 2 : swap SQLite→Postgres) —
-  # débloque le gate infra sans docker. `devenv up` démarre le service ; les tests
-  # cargo s'y connectent via DATABASE_URL.
+  # débloque le gate infra sans docker. `devenv up` démarre le service ; l'exemple
+  # `aps3d_rules_persist_pg.lll` s'y connecte via une conn-string EXPLICITE et
+  # SANS credentials machine-spécifiques :
+  #     host=127.0.0.1 port=5442 user=aps3d dbname=aps3d_rules
+  # - port 5442 (pas le 5432 par défaut, souvent déjà occupé — évite l'auto-bump
+  #   non-déterministe de devenv, garde la conn-string committée reproductible) ;
+  # - rôle applicatif `aps3d` (pas le superuser = nom d'utilisateur OS, non portable)
+  #   créé au premier `initdb` par `initialScript` ; auth `trust` en local → pas de
+  #   mot de passe. Le port/rôle sont du CONFIG backend-spécifique : le CONTRAT
+  #   (ops/types de l'effet `Db`) est identique à std/db.lll — seule la config diffère.
   services.postgres = {
     enable = true;
     initialDatabases = [ { name = "aps3d_rules"; } ];
+    initialScript = "CREATE ROLE aps3d WITH LOGIN SUPERUSER;";
     listen_addresses = "127.0.0.1";
-    port = 5432;
+    port = 5442;
   };
 
   enterShell = ''

@@ -97,6 +97,21 @@ step 1 of the staged self-hosting plan (DEC-LLL-024). List construction uses
 the cons expression `h :: t` (DEC-LLL-027) — the exact mirror of the pattern,
 and `[1, 2]` hashes identically to `1 :: 2 :: []`.
 
+## Verified persistence — interchangeable backends (DEC-LLL-066)
+
+`std/db_json.lll` is the normalized, backend-agnostic contract (the `Json` result
+ADT + pure destructors). Two backends honor it *identically*: `std/db.lll` (SQLite
+via a built-in `lll_db_runtime`) and `std/db_pg.lll` (PostgreSQL via `lll_pg_runtime`).
+Each backend carries its own `depends`, and `depends` propagate transitively through
+`import` — so a program swaps SQLite→Postgres by changing **one import line** (the
+domain, the contract, and the dependency list are untouched; only the `Db.open`
+connection literal, which is backend-specific config, differs). Both effects are named
+`Db`, so importing both is a `duplicate effect` compile error — the swap is mutually
+exclusive by construction. See `examples/aps3d_rules_persist.lll` (SQLite) and its twin
+`examples/aps3d_rules_persist_pg.lll` (Postgres) — the same verified domain kernel, the
+same three verified facts, over either backend (`devenv up`, then
+`LLL_PG_URL=1 cargo test` runs the live Postgres roundtrip).
+
 ## Imports & mutual recursion (wave 3)
 
 `import "relative/path.lll"` merges the imported file's parts into one flat

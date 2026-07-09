@@ -520,6 +520,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // at check-time instead of a confusing rustc error inside the generated
     // `lll_actor_runtime` module.
     let mut uses_actor_runtime = false;
+    let mut uses_pg_runtime = false;
     for ed in &module.effects {
         if !effect_names.insert(ed.name.clone()) {
             return Err(format!("duplicate effect `{}`", ed.name));
@@ -545,6 +546,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 validate_extern_path(&ed.name, &op.name, path, &declared_crates)?;
                 if path.starts_with("lll_actor_runtime::") {
                     uses_actor_runtime = true;
+                }
+                if path.starts_with("lll_pg_runtime::") {
+                    uses_pg_runtime = true;
                 }
             }
             // foreign-signature guard (REQ-LLL-042, DEC-LLL-045): an `as (T,…) -> R`
@@ -804,6 +808,19 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 ));
             }
         }
+    }
+    // DEC-LLL-066 étape 2: the emitted `lll_pg_runtime` glue (`emit_pg_runtime`,
+    // codegen.rs) `use`s the `postgres` crate. Without an explicit `depends postgres`
+    // the generated module fails to link with a cryptic rustc error deep in emitted
+    // code — catch it here at check-time instead (DEC-LLL-015 fail-stop), exactly as
+    // the actor runtime enforces `depends tokio`.
+    if uses_pg_runtime && !module.deps.iter().any(|d| d.crate_name == "postgres") {
+        return Err(
+            "an `lll_pg_runtime` extern op is used but no `depends postgres \"<version>\"` is \
+             declared — the built-in Postgres runtime needs a real postgres dependency \
+             (DEC-LLL-066 étape 2)"
+                .to_string(),
+        );
     }
     // classify `via` rows (REQ-LLL-026 item 3, DEC-LLL-038): an UPPERCASE name is
     // a concrete effect (must be declared); a lowercase name is a ROW VARIABLE that
@@ -1643,6 +1660,27 @@ fn validate_extern_path(
         return Err(format!(
             "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_db_runtime` path \
              — only {DB_RUNTIME_PATHS:?} are built in (REQ-LLL-066)"
+        ));
+    }
+    // DEC-LLL-066 étape 2 : the emitted `lll_pg_runtime` glue (src/codegen.rs
+    // `emit_pg_runtime`) is the exact TWIN of the SQLite whitelist — same op set, a
+    // narrow EXACT list of built-in Postgres paths, NOT an open escape hatch. Keeping
+    // the two path sets identical is what makes the effect signatures interchangeable.
+    const PG_RUNTIME_PATHS: &[&str] = &[
+        "lll_pg_runtime::open",
+        "lll_pg_runtime::exec",
+        "lll_pg_runtime::query",
+        "lll_pg_runtime::begin",
+        "lll_pg_runtime::commit",
+        "lll_pg_runtime::rollback",
+    ];
+    if root == "lll_pg_runtime" {
+        if PG_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_pg_runtime` path \
+             — only {PG_RUNTIME_PATHS:?} are built in (DEC-LLL-066 étape 2)"
         ));
     }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends

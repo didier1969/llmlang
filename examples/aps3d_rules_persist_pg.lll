@@ -1,13 +1,15 @@
-import "../std/db.lll"
+import "../std/db_pg.lll"
 import "aps3d_maintenance_kernel.lll"
 
 module Aps3d.Persist:
 
-  # Étape 1 du vertical APS3D (DEC-LLL-066) : les règles de maintenance PERSISTÉES
-  # en SQLite, RELUES par une requête, reconstruites en `Rule` TYPÉES, puis
-  # évaluées par le noyau VÉRIFIÉ (Aps3d.Kernel, importé). La plomberie DB reste à
-  # la frontière d'effet (l'effet `Db`, std/db.lll) ; le domaine est pur et prouvé.
-  # Chaque `1` imprimé = un fait vérifié au runtime sur les données rechargées.
+  # DEC-LLL-066 étape 2 : le JUMEAU Postgres de aps3d_rules_persist.lll. Une SEULE ligne
+  # diffère (l'import du backend : `db.lll` → `db_pg.lll`) + l'argument de `Db.open` (config
+  # backend-spécifique : conn-string libpq vs `:memory:`). Aucune ligne `depends` : elles
+  # suivent transitivement l'import du backend. C'est la démonstration du swap — le domaine
+  # pur/prouvé
+  # (noyau Aps3d.Kernel importé) et toute la logique de reconstruction typée ne changent pas.
+  # Le contrat (effet `Db`, `Json`, destructeurs) est le même ; seul le backend diffère.
   #
   # Schéma : rules(kind, threshold, horizon). kind 0 = WearAbove, 1 = DaysBelow.
 
@@ -33,7 +35,7 @@ module Aps3d.Persist:
       h :: t -> yield row_to_rule(h) :: rows_to_rules(t)
 
   part main() -> Int via IO, Db:
-    let db = Db.open(":memory:")
+    let db = Db.open("host=127.0.0.1 port=5442 user=aps3d dbname=aps3d_rules")
     let sd = Db.exec(db, "DROP TABLE IF EXISTS rules")
     let s0 = Db.exec(db, "CREATE TABLE rules (kind INTEGER, threshold INTEGER, horizon INTEGER)")
     let s1 = Db.exec(db, "INSERT INTO rules VALUES (0, 90, 3)")

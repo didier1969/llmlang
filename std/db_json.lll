@@ -1,0 +1,56 @@
+depends serde_json "1.0.150"
+
+module Std.DbJson:
+
+  # DEC-LLL-066 étape 3 : le CONTRAT normalisé, PARTAGÉ, backend-agnostique de la
+  # persistance vérifiée. Le `Json` ADT (résultat marshallé d'un `query`) + ses
+  # destructeurs PURS vivent ici, dans UN seul fichier canonique, importé à l'identique
+  # par CHAQUE backend (std/db.lll = SQLite, std/db_pg.lll = Postgres). C'est le cœur de
+  # l'interchangeabilité (directive 3) : les deux backends produisent EXACTEMENT la même
+  # forme (un Array de lignes-Array de cellules scalaires), donc ces destructeurs — et le
+  # domaine qui les appelle — ne changent pas d'une ligne quand on swappe de backend.
+  #
+  # Un résultat de query est un ARRAY de LIGNES ; chaque ligne un ARRAY de CELLULES scalaires
+  # en ordre de colonne (lignes-en-arrays-positionnels — le marshalling Object nommé est
+  # différé, DEC-LLL-061).
+  type Json = JNull | JBool(Bool) | JStr(List[Int]) | JNum(Int) | JArr(List[Json])
+
+  # les éléments d'un JSON Array (une liste de lignes, ou la liste de cellules d'une ligne) ;
+  # [] pour un non-array.
+  part unarr(j: Json) -> List[Json]:
+    match j:
+      JArr(xs) -> yield xs
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JStr(s)  -> yield []
+      JNum(n)  -> yield []
+
+  # l'Int porté par un JNum ; une sentinelle pour les autres formes (un décalage de schéma
+  # sort comme cette valeur hors-bande, pas comme un 0 silencieux).
+  part unnum(j: Json) -> Int:
+    match j:
+      JNum(n)  -> yield n
+      JNull    -> yield 0 - 1
+      JBool(b) -> yield 0 - 2
+      JStr(s)  -> yield 0 - 3
+      JArr(xs) -> yield 0 - 4
+
+  # le i-ème élément d'une liste cellule/ligne (0-based) ; JNull au-delà de la fin.
+  # La récursion structurale sur la liste termine.
+  part nth(xs: List[Json], i: Int) -> Json:
+    match xs:
+      []     -> yield JNull
+      h :: t ->
+        match i == 0:
+          true  -> yield h
+          false -> yield nth(t, i - 1)
+
+  # nombre de lignes d'un résultat de query.
+  part count(rows: List[Json]) -> Int:
+    match rows:
+      []     -> yield 0
+      h :: t -> yield 1 + count(t)
+
+  # l'Int dans la colonne `col` d'une ligne (un JArr de cellules).
+  part cell_int(row: Json, col: Int) -> Int:
+    yield unnum(nth(unarr(row), col))

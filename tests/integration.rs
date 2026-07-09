@@ -6502,6 +6502,98 @@ fn aps3d_rules_persist_roundtrip_via_cargo() {
 }
 
 #[test]
+fn aps3d_rules_persist_pg_checks_and_wires() {
+    // DEC-LLL-066 étape 2/3 (tier « check », SANS Postgres) : le JUMEAU Postgres de
+    // l'exemple APS3D (`import "../std/db_pg.lll"`) passe `lll check` — Z3 vérifie le MÊME
+    // domaine pur, et le check exerce le CÂBLAGE de la nouvelle surface : la whitelist des
+    // chemins `lll_pg_runtime::…` (types.rs) ET la propagation transitive de `depends
+    // postgres` depuis le backend (l'exemple n'a AUCUNE ligne depends). C'est le test qui
+    // empêche la pourriture silencieuse du runtime PG sans exiger de service live ni réseau.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("check")
+        .arg("--no-cache")
+        .arg("examples/aps3d_rules_persist_pg.lll")
+        .current_dir(repo)
+        .output()
+        .expect("run lll check");
+    assert!(
+        out.status.success(),
+        "PG example must check (Z3 domain + pg whitelist + transitive depends):\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn pg_runtime_requires_depends_postgres() {
+    // DEC-LLL-066 étape 2 : le pendant fail-loud de l'enforcement (types.rs). Un module qui
+    // bind un op à `lll_pg_runtime::…` SANS `depends postgres` dans le graphe d'import doit
+    // échouer AU CHECK (DEC-LLL-015), pas plus tard par une erreur rustc cryptique au fond
+    // du code généré — exactement comme l'actor runtime exige `depends tokio`. Ici l'effet
+    // est déclaré INLINE (sans importer std/db_pg.lll, qui PORTE la dépendance) précisément
+    // pour isoler l'absence de dépendance.
+    let src = "module PgNoDep:\n\n  effect Db:\n    open(List[Int]) -> Int = extern \"lll_pg_runtime::open\" as (str) -> i64\n\n  part main() -> Int via Db:\n    yield Db.open(\"x\")\n";
+    let dir = tempdir();
+    let f = dir.join("pg_no_dep.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("check")
+        .arg("--no-cache")
+        .arg(&f)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run lll check");
+    assert!(
+        !out.status.success(),
+        "a lll_pg_runtime op without `depends postgres` must be a compile error"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("depends postgres"),
+        "expected a `depends postgres` enforcement error, got:\nstderr={err}\nstdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn aps3d_rules_persist_pg_roundtrip_gated() {
+    // DEC-LLL-066 étape 2 (tier « live », GATÉ sur `LLL_PG_URL`) : le VRAI roundtrip contre
+    // Postgres. Skippé par défaut (ni le CI ni un `cargo test` nu n'ont de service PG) ; pour
+    // l'exécuter, `devenv up` puis `LLL_PG_URL=1 cargo test` — l'exemple se connecte à la
+    // conn-string déterministe de devenv.nix (127.0.0.1:5442, rôle `aps3d`, db `aps3d_rules`).
+    // All-ones = 2 règles matchent sur les données rechargées DE POSTGRES + 3 lignes revenues
+    // + severity bornée = 3. C'est la preuve que le swap SQLite→Postgres marche end-to-end
+    // sur le vrai backend (mêmes ops, même domaine, résultat identique à la version SQLite).
+    if std::env::var("LLL_PG_URL").is_err() {
+        eprintln!(
+            "aps3d_rules_persist_pg_roundtrip_gated: SKIP (set LLL_PG_URL after `devenv up` to run \
+             the live Postgres roundtrip)"
+        );
+        return;
+    }
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg("examples/aps3d_rules_persist_pg.lll")
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "APS3D Postgres roundtrip E2E failed:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 3, "every APS3D persisted-rule invariant must hold over Postgres (3 ones):\n{stdout}");
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no APS3D persisted-rule invariant may fail over Postgres:\n{stdout}"
+    );
+}
+
+#[test]
 fn db_file_persists_across_connections_via_cargo() {
     // REQ-LLL-066 / DEC-LLL-064: the durability proof. Data written through ONE connection
     // is flushed to DISK, so a SECOND connection opened on the same file path reads it back

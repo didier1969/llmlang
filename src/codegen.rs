@@ -253,6 +253,112 @@ mod lll_db_runtime {
     );
 }
 
+/// DEC-LLL-066 étape 2 (swap SQLite→Postgres) : le runtime Postgres, émis iff un op
+/// bind à `lll_pg_runtime::…` — le JUMEAU exact de `emit_db_runtime`, backend différent.
+/// Le CONTRAT est identique (mêmes ops/types d'effet, même forme de retour : un Array de
+/// lignes-Array de cellules scalaires → même marshalleur `Json`, mêmes destructeurs purs),
+/// donc un module passe de l'un à l'autre en changeant SEULEMENT la ligne d'import (std/db.lll
+/// ↔ std/db_pg.lll) — l'interchangeabilité au niveau module (directive 3, DEC-LLL-066). Le
+/// client `postgres` (blocking, sync) reflète le pattern sync de `rusqlite` : `Client: Send`
+/// → `Mutex<HashMap<..>>` est `Sync`. Fautes DB fail-stop (DEC-LLL-026). `postgres` est
+/// USER-déclaré (`depends postgres "…"`) et EXIGÉ au check (types.rs, comme `depends tokio`).
+fn emit_pg_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_pg_runtime {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    // handle -> live client. `postgres::Client` is `Send` (it drives a background
+    // connection task), so `Mutex<HashMap<..>>` is `Sync` and lives in a `static` behind
+    // `OnceLock` — the exact shape of the SQLite table (Client methods take `&mut self`,
+    // so ops lock and `get_mut`, vs rusqlite's interior-mutable `&self`).
+    fn table() -> &'static Mutex<HashMap<i64, postgres::Client>> {
+        static T: OnceLock<Mutex<HashMap<i64, postgres::Client>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    static NEXT: AtomicI64 = AtomicI64::new(0);
+
+    // an EXPLICIT libpq-style connection string (`host=… port=… user=… dbname=…`) — the
+    // ONE place the backend differs from SQLite's file path: it is CONFIG, not contract.
+    // `trust` auth locally → no password. Fail-stop on a bad connection (DEC-LLL-026).
+    pub fn open(conn: &str) -> i64 {
+        let client = postgres::Client::connect(conn, postgres::NoTls)
+            .unwrap_or_else(|e| panic!("lll_pg_runtime::open `{conn}`: {e}"));
+        let h = NEXT.fetch_add(1, Ordering::SeqCst);
+        table().lock().unwrap().insert(h, client);
+        h
+    }
+
+    // DDL / INSERT / UPDATE / DELETE (or a multi-statement batch) via `batch_execute`
+    // (no bound params in v1). Returns 0 — an EXPLICIT named divergence from SQLite's
+    // `changes()` row-count: `batch_execute` reports none; the value is performed for
+    // effect and discarded by callers (the effect signature is `-> Int`, kept identical).
+    pub fn exec(h: i64, sql: &str) -> i64 {
+        let mut g = table().lock().unwrap();
+        let client = g.get_mut(&h).unwrap_or_else(|| panic!("lll_pg_runtime::exec: invalid db handle {h}"));
+        client.batch_execute(sql).unwrap_or_else(|e| panic!("lll_pg_runtime::exec `{sql}`: {e}"));
+        0
+    }
+
+    // a read query -> a JSON Array of rows; each row a JSON Array of scalar cells in
+    // column order — the SAME shape `lll_db_runtime::query` returns, so the `Json`
+    // marshaller and the pure destructors are backend-AGNOSTIC. Cells map BY PG column
+    // type name; an unmodeled type fail-stops (narrow built-in surface, never a silent
+    // coercion — DEC-LLL-026). The `bundled` schema here is INTEGER/TEXT only.
+    pub fn query(h: i64, sql: &str) -> serde_json::Value {
+        let mut g = table().lock().unwrap();
+        let client = g.get_mut(&h).unwrap_or_else(|| panic!("lll_pg_runtime::query: invalid db handle {h}"));
+        let qrows = client.query(sql, &[]).unwrap_or_else(|e| panic!("lll_pg_runtime::query `{sql}`: {e}"));
+        let mut rows: Vec<serde_json::Value> = Vec::with_capacity(qrows.len());
+        for row in &qrows {
+            let mut cells: Vec<serde_json::Value> = Vec::with_capacity(row.len());
+            for i in 0..row.len() {
+                let ty = row.columns()[i].type_().name().to_string();
+                let cell_err = |e: postgres::Error| -> ! {
+                    panic!("lll_pg_runtime::query cell {i} (`{ty}`): {e}")
+                };
+                let jv = match ty.as_str() {
+                    "int2" => row.try_get::<_, Option<i16>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(|n| serde_json::Value::Number((n as i64).into())).unwrap_or(serde_json::Value::Null),
+                    "int4" => row.try_get::<_, Option<i32>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(|n| serde_json::Value::Number((n as i64).into())).unwrap_or(serde_json::Value::Null),
+                    "int8" => row.try_get::<_, Option<i64>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(|n| serde_json::Value::Number(n.into())).unwrap_or(serde_json::Value::Null),
+                    "float4" => row.try_get::<_, Option<f32>>(i).unwrap_or_else(|e| cell_err(e))
+                        .and_then(|f| serde_json::Number::from_f64(f as f64)).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                    "float8" => row.try_get::<_, Option<f64>>(i).unwrap_or_else(|e| cell_err(e))
+                        .and_then(serde_json::Number::from_f64).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                    "bool" => row.try_get::<_, Option<bool>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
+                    "text" | "varchar" | "bpchar" | "name" => row.try_get::<_, Option<String>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+                    other => panic!("lll_pg_runtime::query: unsupported column type `{other}` (col {i}) — narrow built-in surface (REQ-LLL-066)"),
+                };
+                cells.push(jv);
+            }
+            rows.push(serde_json::Value::Array(cells));
+        }
+        serde_json::Value::Array(rows)
+    }
+
+    // ACID transaction control via raw SQL on the same client; the returned 0 is an
+    // ignored placeholder (op performed for effect) — mirrors the SQLite txn helper.
+    fn txn(h: i64, cmd: &str) -> i64 {
+        let mut g = table().lock().unwrap();
+        let client = g.get_mut(&h).unwrap_or_else(|| panic!("lll_pg_runtime::{cmd}: invalid db handle {h}"));
+        client.batch_execute(cmd).unwrap_or_else(|e| panic!("lll_pg_runtime::{cmd}: {e}"));
+        0
+    }
+    pub fn begin(h: i64) -> i64 { txn(h, "BEGIN") }
+    pub fn commit(h: i64) -> i64 { txn(h, "COMMIT") }
+    pub fn rollback(h: i64) -> i64 { txn(h, "ROLLBACK") }
+}
+"#,
+    );
+}
+
 /// The op-anchored typed FFI shim name for a dotted op key `Eff.op` (REQ-LLL-041,
 /// slice 038b): `Eff.op` → `__lll_ffi_Eff_op`. A perform of an `= extern` op lowers
 /// to a call of this uniquely-named adapter, so a boundary signature/arity mismatch
@@ -469,6 +575,11 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // module with FFI `as`-marshalling was proven by the session-11 probe before this.
     if extern_ops.values().any(|p| p.starts_with("lll_db_runtime::")) {
         emit_db_runtime(&mut out);
+    }
+    // DEC-LLL-066 étape 2 : le runtime Postgres (jumeau du SQLite), émis iff un op y bind.
+    // Le checker whitelist les chemins `lll_pg_runtime::…` exacts (types.rs).
+    if extern_ops.values().any(|p| p.starts_with("lll_pg_runtime::")) {
+        emit_pg_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning
