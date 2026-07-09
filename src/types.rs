@@ -57,6 +57,87 @@ pub struct HoleInfo {
     pub expected: Option<Ty>,
     /// in-scope binders (params + lets + pattern binders) at the hole, with types.
     pub scope: Vec<(String, Ty)>,
+    /// The LOGICAL GOAL at the hole (D2, REQ-LLL-085): the enclosing part's
+    /// `ensures` clauses, rendered to source-faithful text — the post-condition
+    /// the completion must help establish, beyond its type. Pure display of an
+    /// already-checked contract fact: no weakest-precondition, no Z3, no cache
+    /// write, no verdict (soundness inviolable by construction). Empty when the
+    /// part has no `ensures`.
+    pub goal: Vec<String>,
+    /// The HYPOTHESES available at the hole (D2): the enclosing part's `requires`
+    /// clauses, rendered — the facts a completion may assume. Empty when none.
+    pub hypotheses: Vec<String>,
+}
+
+/// Render a contract-fragment expression to source-faithful text for the typed-hole
+/// goal/hypotheses feedback (D2, REQ-LLL-085). Display only — DERIVED from the text
+/// of truth (DEC-LLL-020), never an identity. Total over every `Expr` variant (a
+/// contract is a restricted fragment, but this stays total so it can never panic);
+/// compound operands are parenthesised so the rendering is unambiguous for an LLM.
+pub fn render_contract_clause(e: &Expr) -> String {
+    // wrap a child in parens when it is itself compound, so precedence is explicit
+    fn atom(e: &Expr) -> String {
+        match e {
+            Expr::Bin(..) | Expr::Cons(..) | Expr::Neg(_) | Expr::Not(_) | Expr::Lambda(..) => {
+                format!("({})", render_contract_clause(e))
+            }
+            _ => render_contract_clause(e),
+        }
+    }
+    match e {
+        Expr::Hole => "?".to_string(),
+        Expr::Unit => "()".to_string(),
+        Expr::IntLit(v) => v.to_string(),
+        Expr::RatLit(n, d) => {
+            if *d == 1 {
+                n.to_string()
+            } else {
+                format!("{n}/{d}")
+            }
+        }
+        Expr::BoolLit(v) => v.to_string(),
+        Expr::Var(n) => n.clone(),
+        Expr::ListLit(items) => {
+            let xs: Vec<String> = items.iter().map(render_contract_clause).collect();
+            format!("[{}]", xs.join(", "))
+        }
+        Expr::Cons(h, t) => format!("{} :: {}", atom(h), atom(t)),
+        Expr::Tuple(items) => {
+            let xs: Vec<String> = items.iter().map(render_contract_clause).collect();
+            format!("({})", xs.join(", "))
+        }
+        Expr::Proj(a, i) => format!("{}.{i}", atom(a)),
+        Expr::Field(a, name) => format!("{}.{name}", atom(a)),
+        Expr::Neg(a) => format!("-{}", atom(a)),
+        Expr::Not(a) => format!("not {}", atom(a)),
+        Expr::Bin(op, a, b) => {
+            let sym = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "div",
+                BinOp::Mod => "mod",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::And => "and",
+                BinOp::Or => "or",
+            };
+            format!("{} {sym} {}", atom(a), atom(b))
+        }
+        Expr::Call(n, args) | Expr::EffCall(n, args) => {
+            let xs: Vec<String> = args.iter().map(render_contract_clause).collect();
+            format!("{n}({})", xs.join(", "))
+        }
+        Expr::Lambda(params, body) => {
+            let ps: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+            format!("\\({}) -> {}", ps.join(", "), render_contract_clause(body))
+        }
+        Expr::RecordLit(..) => "{ .. }".to_string(),
+    }
 }
 
 /// Whether a `?` in the currently-checked expression is a recordable hole (a part
@@ -2955,11 +3036,21 @@ fn check_expr(
                 }
             }
             scope.sort_by(|a, b| a.0.cmp(&b.0));
+            // D2 (REQ-LLL-085): surface the logical goal — the enclosing part's
+            // `ensures` (post-condition to establish) and `requires` (facts to
+            // assume) — rendered to text. Pure read of already-checked contract
+            // clauses: no WP, no Z3, no cache, no verdict. Soundness untouched.
+            let goal: Vec<String> =
+                ctx.part.ensures.iter().map(render_contract_clause).collect();
+            let hypotheses: Vec<String> =
+                ctx.part.requires.iter().map(render_contract_clause).collect();
             ctx.holes.push(HoleInfo {
                 part: ctx.part.name.clone(),
                 line: ctx.part.line,
                 expected: expected.cloned(),
                 scope,
+                goal,
+                hypotheses,
             });
             // Checking-position-only (LLL has no inference): a hole with no fixed
             // type is an honest error, exactly like the empty list `[]`.

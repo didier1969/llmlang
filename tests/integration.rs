@@ -4780,6 +4780,71 @@ fn typed_hole_scope_includes_let_and_pattern_binders() {
 }
 
 #[test]
+fn typed_hole_records_logical_goal_and_hypotheses_req085() {
+    // D2 (REQ-LLL-085): beyond the expected TYPE, a hole surfaces its LOGICAL GOAL — the
+    // enclosing part's `ensures` (post-condition the fill must help establish) and `requires`
+    // (facts it may assume) — rendered to source-faithful text. Pure display of already-checked
+    // contract clauses: no weakest-precondition, no Z3, no cache; the verdict stays Incomplete.
+    let src = "module M:\n\n  part safe(a: Int, b: Int) -> Int:\n    requires b > 0\n    ensures result >= a\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("hole checks");
+    let h = &cm.holes[0];
+    assert_eq!(h.goal, vec!["result >= a".to_string()], "goal = rendered `ensures`");
+    assert_eq!(h.hypotheses, vec!["b > 0".to_string()], "hypotheses = rendered `requires`");
+    // a part with NO contract records an empty goal — the field is honest, never invented:
+    let plain = "module M:\n\n  part g(n: Int) -> Int:\n    yield ?\n";
+    let cg = types::check_module(parser::parse_module(plain).expect("parse")).expect("checks");
+    assert!(cg.holes[0].goal.is_empty(), "no `ensures` ⇒ empty goal");
+    assert!(cg.holes[0].hypotheses.is_empty(), "no `requires` ⇒ empty hypotheses");
+}
+
+#[test]
+fn render_contract_clause_is_source_faithful_req085() {
+    // The D2 renderer turns a checked contract Expr back into unambiguous source-like text
+    // (DERIVED from the text of truth, DEC-LLL-020). Precedence is made explicit by
+    // parenthesising compound operands, and `result` renders as itself.
+    let src = "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    ensures result == a * b + 1\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("checks");
+    // `a * b` binds tighter than `+`; both compound operands are parenthesised:
+    assert_eq!(cm.holes[0].goal, vec!["result == ((a * b) + 1)".to_string()]);
+}
+
+#[test]
+fn check_exposes_hole_goal_and_hypotheses_req085() {
+    // D2 (REQ-LLL-085) end-to-end (CLI): a `?` in a part with `requires`/`ensures` makes
+    // `check --format=json` carry the logical goal (rendered ensures) and hypotheses (rendered
+    // requires) alongside expected_type, and the human `check` prints them. The verdict stays
+    // incomplete (exit 2) with stderr empty — no proof attempted, no false verification (D2 is
+    // pure display; the soundness core is untouched).
+    let dir = tempdir().join("hole-goal");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  part clamp(x: Int, lo: Int) -> Int:\n    requires lo >= 0\n    ensures result >= lo\n    yield ?\n";
+    let f = dir.join("goal.lll");
+    std::fs::write(&f, src).unwrap();
+
+    // human check: exit 2, prints the goal + the hypotheses
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "incomplete → exit 2: {so}");
+    assert!(so.contains("goal:") && so.contains("result >= lo"), "human output shows the goal: {so}");
+    assert!(so.contains("assuming:") && so.contains("lo >= 0"), "human output shows the hypotheses: {so}");
+
+    // check --format=json: goal + hypotheses arrays present, stderr empty
+    let jout = std::process::Command::new(bin)
+        .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&jout.stdout);
+    assert_eq!(jout.status.code(), Some(2), "json incomplete → exit 2: {j}");
+    assert!(jout.stderr.is_empty(), "json keeps stderr empty: {}", String::from_utf8_lossy(&jout.stderr));
+    assert!(j.contains("\"goal\"") && j.contains("result >= lo"), "json hole carries the goal: {j}");
+    assert!(j.contains("\"hypotheses\"") && j.contains("lo >= 0"), "json hole carries the hypotheses: {j}");
+}
+
+#[test]
 fn check_precedence_failed_dominates_incomplete_holes() {
     // REQ-LLL-059 / DEC-LLL-052: the check exit-code precedence is failed(1) > incomplete(2) >
     // verified(0). A module holding BOTH a holey part (incomplete) AND a part with an

@@ -48,6 +48,15 @@ pub struct Diagnostic {
     /// the LLM's completion menu (`var` = name, `value` = type).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scope: Vec<Assignment>,
+    /// For a typed-hole diagnostic (D2, REQ-LLL-085): the LOGICAL GOAL — the
+    /// enclosing part's `ensures` clauses, rendered. The post-condition the
+    /// completion must help establish, beyond its type. Empty when no `ensures`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub goal: Vec<String>,
+    /// For a typed-hole diagnostic (D2): the HYPOTHESES available — the enclosing
+    /// part's `requires` clauses, rendered — the facts a completion may assume.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hypotheses: Vec<String>,
 }
 
 /// The `lll check --format=json` payload: the overall verdict plus every
@@ -96,6 +105,8 @@ impl Diagnostic {
             counterexample: Vec::new(),
             expected_type: None,
             scope: Vec::new(),
+            goal: Vec::new(),
+            hypotheses: Vec::new(),
         }
     }
 
@@ -113,6 +124,18 @@ impl Diagnostic {
             Some(t) => format!("hole `?` in part `{}`: expected type {t}", h.part),
             None => format!("hole `?` in part `{}`", h.part),
         };
+        // D2 (REQ-LLL-085): if the enclosing part carries an `ensures`, the fill has
+        // a logical goal, not just a type — point the LLM at it.
+        let fix = if h.goal.is_empty() {
+            "fill this `?` with a term of the expected type; the in-scope bindings are \
+             listed in `scope`"
+                .to_string()
+        } else {
+            "fill this `?` with a term of the expected type; it must let the part satisfy \
+             the goal in `goal`, assuming the facts in `hypotheses`; the in-scope bindings \
+             are listed in `scope`"
+                .to_string()
+        };
         Diagnostic {
             code: "LLL-H0001".to_string(),
             severity: "hole".to_string(),
@@ -120,14 +143,12 @@ impl Diagnostic {
             message,
             line: Some(h.line),
             part: Some(h.part.clone()),
-            fix: Some(
-                "fill this `?` with a term of the expected type; the in-scope bindings are \
-                 listed in `scope`"
-                    .to_string(),
-            ),
+            fix: Some(fix),
             counterexample: Vec::new(),
             expected_type: expected,
             scope,
+            goal: h.goal.clone(),
+            hypotheses: h.hypotheses.clone(),
         }
     }
 
@@ -159,6 +180,8 @@ impl Diagnostic {
             counterexample,
             expected_type: None,
             scope: Vec::new(),
+            goal: Vec::new(),
+            hypotheses: Vec::new(),
         }
     }
 }

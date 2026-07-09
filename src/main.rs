@@ -973,5 +973,14 @@ fn print_holes(cm: &types::CheckedModule) {
                 h.scope.iter().map(|(n, t)| format!("{n}: {t}")).collect();
             println!("      in scope: {}", binders.join(", "));
         }
+        // D2 (REQ-LLL-085): the logical goal (part `ensures`) the fill must help
+        // establish, and the hypotheses (`requires`) it may assume. Pure display of
+        // already-checked contract facts — no proof, no Z3, no cache.
+        if !h.goal.is_empty() {
+            println!("      goal: {}", h.goal.join("  ∧  "));
+        }
+        if !h.hypotheses.is_empty() {
+            println!("      assuming: {}", h.hypotheses.join("  ∧  "));
+        }
     }
 }
