@@ -5772,6 +5772,46 @@ fn nested_exists_forall_is_rejected_req089() {
 }
 
 #[test]
+fn exists_in_requires_proved_at_call_site_by_disjunction_req089() {
+    // REQ-LLL-089 Tranche 2 — the CALL-SITE requires-prove path (distinct from prove-at-yield):
+    // a caller passing `arr` to `needs` must PROVE `needs`'s concrete-bound `requires exists` by
+    // finite disjunction OVER THE ARGUMENT (the mirror of `forall_in_requires_proved_at_call_
+    // site_…`). `array(1, 7, 2)` discharges it (index 1 is 7); `array(1, 2, 3)` does NOT and the
+    // bad call is rejected AT THE CALL SITE, never admitted.
+    let (good, o1, _) = check_lll_src(
+        "089-callreq-good",
+        "module M:\n\n  part needs(a: Array[Int]) -> Int:\n    requires exists i in 0 .. 3: get(a, i) == 7\n    yield 0\n\n  part good() -> Int:\n    let arr = array(1, 7, 2)\n    yield needs(arr)\n",
+    );
+    assert_eq!(good, Some(0), "the caller proves the existential requires at the call site: {o1}");
+    let (bad, o2, _) = check_lll_src(
+        "089-callreq-bad",
+        "module M:\n\n  part needs(a: Array[Int]) -> Int:\n    requires exists i in 0 .. 3: get(a, i) == 7\n    yield 0\n\n  part bad() -> Int:\n    let arr = array(1, 2, 3)\n    yield needs(arr)\n",
+    );
+    assert_eq!(bad, Some(1), "a call whose argument satisfies no index is rejected: {o2}");
+    assert!(o2.contains("requires") && o2.contains("call site"), "the failure is the call-site requires: {o2}");
+}
+
+#[test]
+fn exists_in_contract_module_builds_and_runs_req089() {
+    // REQ-LLL-089 concordance (DEC-LLL-017/026) — the DUAL of `forall_ensures_module_builds_and_
+    // runs`: a quantified `exists` is COMPILE-TIME scaffolding, ERASED at codegen (it never
+    // reaches the body lowering). A module using `exists` in an `ensures` builds and runs;
+    // `get(xs, 1)` yields `7`, confirming the contract quantifier left no runtime trace.
+    let dir = tempdir().join("089-run");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("r.lll");
+    std::fs::write(&f, "module M:\n\n  part finds() -> Array[Int]:\n    ensures length(result) == 3\n    ensures exists i in 0 .. 3: get(result, i) == 7\n    yield array(0, 7, 0)\n\n  part main() -> Int:\n    let xs = finds()\n    yield get(xs, 1)\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["run", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "builds+runs: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("=> 7"), "runtime concordance (exists erased): {}", String::from_utf8_lossy(&out.stdout));
+}
+
+#[test]
 fn check_precedence_failed_dominates_incomplete_holes() {
     // REQ-LLL-059 / DEC-LLL-052: the check exit-code precedence is failed(1) > incomplete(2) >
     // verified(0). A module holding BOTH a holey part (incomplete) AND a part with an
