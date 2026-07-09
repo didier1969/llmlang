@@ -215,10 +215,14 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
             domain: desugar_domain(domain, recs)?,
             body: Box::new(desugar_expr(*body, recs)?),
         },
-        Expr::Exists { var, domain, body } => Expr::Exists {
+        Expr::Exists { var, domain, body, witness } => Expr::Exists {
             var,
             domain: desugar_domain(domain, recs)?,
             body: Box::new(desugar_expr(*body, recs)?),
+            witness: match witness {
+                Some(w) => Some(Box::new(desugar_expr(*w, recs)?)),
+                None => None,
+            },
         },
         leaf @ (Expr::IntLit(_)
         | Expr::RatLit(..)
@@ -1285,7 +1289,18 @@ impl Parser {
     fn exists_expr(&mut self) -> Result<Expr, String> {
         self.eat(Tok::Exists)?;
         let (var, domain, body) = self.quant_tail()?;
-        Ok(Expr::Exists { var, domain, body: Box::new(body) })
+        // An OPTIONAL `witness <expr>` proof term (REQ-LLL-089 T3), EXISTS-ONLY (a universal has
+        // no witness — `witness` is parsed here, not in the shared `quant_tail`). The body parse
+        // above stops cleanly at the `witness` keyword (not an operator), so this peek is
+        // unambiguous. The witness is a term in the OUTER scope, checked quantifier-free / at the
+        // binder's type by `type_of_pure`.
+        let witness = if self.peek() == &Tok::Witness {
+            self.eat(Tok::Witness)?;
+            Some(Box::new(self.expr()?))
+        } else {
+            None
+        };
+        Ok(Expr::Exists { var, domain, body: Box::new(body), witness })
     }
     /// Shared tail `<id> in <domain>: <body>` for both quantifiers (REQ-LLL-087/089). The
     /// domain expressions are additive (they terminate cleanly at `..` or `:`); the body is a

@@ -385,7 +385,9 @@ fn setup_part_emit<'a>(
     // requires are asserted so the witness body is translated in the full hypothesis context.
     // (An `exists` requires that must be PROVED at a call site is handled — or deferred — there.)
     for r in &reqs {
-        if let Expr::Exists { var, domain, body } = r {
+        if let Expr::Exists { var, domain, body, .. } = r {
+            // CONSUME ignores any `witness` (REQ-LLL-089 T3): a fresh Skolem witness is sound and
+            // complete regardless — the witness clause only aids the PROVE side.
             em.skolemize_exists(var, domain, body, &env)?;
         }
     }
@@ -596,10 +598,14 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
             domain: inline_domain(domain, class, inst)?,
             body: Box::new(inline_methods(body, class, inst)?),
         },
-        Expr::Exists { var, domain, body } => Expr::Exists {
+        Expr::Exists { var, domain, body, witness } => Expr::Exists {
             var: var.clone(),
             domain: inline_domain(domain, class, inst)?,
             body: Box::new(inline_methods(body, class, inst)?),
+            witness: match witness {
+                Some(w) => Some(Box::new(inline_methods(w, class, inst)?)),
+                None => None,
+            },
         },
         Expr::Lambda(ps, body) => {
             Expr::Lambda(ps.clone(), Box::new(inline_methods(body, class, inst)?))
@@ -657,7 +663,7 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
                 Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
         }
-        Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
+        Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             // the DOMAIN (range bounds or the Map/Set collection) is OUTSIDE the binder's
             // scope; the body is INSIDE, so the binder `var` shadows a same-named entry in
             // `map` (capture avoidance, exactly like `Lambda` above).
@@ -675,8 +681,12 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
                 Box::new(subst_vars(body, map))
             };
             let var = var.clone();
-            if matches!(e, Expr::Exists { .. }) {
-                Expr::Exists { var, domain, body }
+            if let Expr::Exists { witness, .. } = e {
+                // the `exists` witness (REQ-LLL-089 T3) is OUTSIDE the binder scope (it may not
+                // reference `var`), so it is substituted with the FULL `map` — unlike the body,
+                // which shadows `var`.
+                let witness = witness.as_ref().map(|w| Box::new(subst_vars(w, map)));
+                Expr::Exists { var, domain, body, witness }
             } else {
                 Expr::Forall { var, domain, body }
             }
@@ -1014,17 +1024,42 @@ impl<'a> Emit<'a> {
     /// obligation IS the per-index safety check — sound, over-approximating to "all candidate
     /// indices accessible" (incomplete, never unsound; the exact MIRROR of the CONSUME side's
     /// `instantiating = true`). A SYMBOLIC bound (`length(xs)`, a param, arithmetic), a Map/Set
-    /// `in` domain, or a width over the finite-expansion cap is the genuine soundness wall
-    /// (witness synthesis / `assert forall` of the negation) and is DEFERRED — fail LOUD
-    /// (DEC-LLL-015), never a silent skip.
+    /// `in` domain, or a width over the finite-expansion cap is the genuine soundness wall for
+    /// an UNWITNESSED existential (witness synthesis / `assert forall` of the negation) and is
+    /// DEFERRED — fail LOUD (DEC-LLL-015), never a silent skip. A user-supplied `witness`
+    /// (Tranche 3, handled at the top of this fn) crosses that wall soundly for EVERY domain: it
+    /// needs neither search nor `assert forall`, only a GROUND `guard(w) ∧ body(w)` discharge.
     fn oblige_exists(
         &mut self,
         descr: &str,
         var: &str,
         domain: &ForallDomain,
         body: &Expr,
+        witness: Option<&Expr>,
         env: &HashMap<String, String>,
     ) -> Result<(), String> {
+        // REQ-LLL-089 T3 — a user-PROVIDED `witness`. Proving `∃v∈D. P(v)` with an explicit
+        // term `w` for `v` becomes the discharge of a GROUND obligation `guard(w) ∧ P[v:=w]`:
+        // sound, decidable, and it crosses the SYMBOLIC-bound / Map-Set wall WITHOUT witness
+        // synthesis and WITHOUT ever emitting `assert forall`/`assert exists` (the negation Z3
+        // refutes is ground). The whole feature's soundness rests on `instantiating == false`
+        // here: `P[v:=w]` is then translated with its OWN `get`/`lookup` access obligations LIVE,
+        // so a witness that indexes OUT OF the array (or names a key ABSENT from the map) is
+        // REJECTED — never a silent `seq.nth` junk read. Two independent, both-proven conditions:
+        // `guard(w)` binds `w` to the DOMAIN; the access obligation binds it to the ARRAY/MAP.
+        if let Some(w) = witness {
+            debug_assert!(
+                !self.instantiating,
+                "oblige_exists witness path must run with obligations LIVE (soundness keystone)"
+            );
+            let w_s = self.tr(w, env, None)?;
+            let guard = self.domain_guard(domain, &w_s, env)?;
+            let mut benv = env.clone();
+            benv.insert(var.to_string(), w_s);
+            let body_s = self.tr(body, &benv, None)?;
+            self.oblige(descr.to_string(), format!("(and {guard} {body_s})"));
+            return Ok(());
+        }
         // Generous but DoS-safe: a real concrete existential is small (`0 .. 10`); a wide or
         // symbolic one falls to the deferred path rather than exploding the goal (REQ-LLL-089).
         const MAX_EXISTS_WIDTH: i64 = 256;
@@ -1217,12 +1252,14 @@ impl<'a> Emit<'a> {
                     env2.insert("result".into(), t);
                     for (i, ens) in self.part.ensures.clone().iter().enumerate() {
                         let descr = format!("ensures #{} holds at yield", i + 1);
-                        if let Expr::Exists { var, domain, body } = ens {
-                            // PROVE a bounded existential `ensures` (REQ-LLL-089). Tranche 1:
-                            // deferred (fail-loud); Tranche 2: finite disjunction for concrete
-                            // bounds. Consuming a callee's `exists` ensures is Skolemized at the
-                            // call site, independent of this prove side.
-                            self.oblige_exists(&descr, var, domain, body, &env2)?;
+                        if let Expr::Exists { var, domain, body, witness } = ens {
+                            // PROVE a bounded existential `ensures` (REQ-LLL-089). T2: finite
+                            // disjunction for concrete bounds; T3: a user-supplied `witness`
+                            // discharges a GROUND `guard(w) ∧ body(w)` (any domain); else the
+                            // symbolic/Map-Set case is deferred (fail-loud). Consuming a callee's
+                            // `exists` ensures is Skolemized at the call site, independent of this
+                            // prove side.
+                            self.oblige_exists(&descr, var, domain, body, witness.as_deref(), &env2)?;
                         } else if let Expr::Forall { var, domain, body } = ens {
                             // PROVE a bounded universal by FRESH-CONST universal
                             // generalization (REQ-LLL-087): a fresh, otherwise-unconstrained
@@ -1989,11 +2026,14 @@ impl<'a> Emit<'a> {
                 // prove callee requires at this call site
                 for (i, req) in callee.requires.clone().iter().enumerate() {
                     let descr = format!("requires #{} of `{name}` holds at call site", i + 1);
-                    if let Expr::Exists { var, domain, body } = req {
+                    if let Expr::Exists { var, domain, body, witness } = req {
                         // PROVE a quantified `exists` requires at the call site (REQ-LLL-089).
-                        // Tranche 1: deferred (fail-loud); Tranche 2: finite disjunction for
-                        // concrete bounds. `cenv` binds the callee's params to the ARGUMENTS.
-                        self.oblige_exists(&descr, var, domain, body, &cenv)?;
+                        // T2: finite disjunction for concrete bounds; T3: a user-supplied
+                        // `witness` discharges a GROUND `guard(w) ∧ body(w)` (any domain); else
+                        // the symbolic/Map-Set case is deferred (fail-loud). `cenv` binds the
+                        // callee's params to the ARGUMENTS, so the witness (written over the
+                        // callee's params) is evaluated at the actual argument terms.
+                        self.oblige_exists(&descr, var, domain, body, witness.as_deref(), &cenv)?;
                     } else if let Expr::Forall { var, domain, body } = req {
                         // PROVE a quantified `requires` by FRESH-CONST universal
                         // generalization — the SAME sound encoding as a quantified `ensures`
@@ -2081,7 +2121,7 @@ impl<'a> Emit<'a> {
                 let mut eenv = cenv.clone();
                 eenv.insert("result".into(), r.clone());
                 for ens in callee.ensures.clone() {
-                    if let Expr::Exists { var, domain, body } = &ens {
+                    if let Expr::Exists { var, domain, body, .. } = &ens {
                         // a callee's quantified `exists` ensures is CONSUMED by SKOLEMIZATION at
                         // the call site (REQ-LLL-089): assuming `∃x∈D. P(x)` over the havoc'd
                         // result `r` (bound in `eenv`) introduces a fresh witness with the guard

@@ -590,7 +590,7 @@ impl<'a> Norm<'a> {
                 self.env.pop();
                 format!("(forall {dom_h} {body_h})")
             }
-            Expr::Exists { var, domain, body } => {
+            Expr::Exists { var, domain, body, witness } => {
                 // the existential DUAL (REQ-LLL-089): same α-normalized, domain-tagged shape
                 // as `forall`, but a distinct `exists` head — a `forall` and an `exists` over
                 // the same domain/body are DIFFERENT properties, so they must not collide in
@@ -604,7 +604,17 @@ impl<'a> Norm<'a> {
                 self.env.push(var.clone());
                 let body_h = self.expr(body);
                 self.env.pop();
-                format!("(exists {dom_h} {body_h})")
+                // The proof witness (REQ-LLL-089 T3) AFFECTS the verdict — `witness k1` may
+                // verify where `witness k2` fails — so it is part of the definition's identity
+                // (DEC-LLL-020, cache soundness): two witnesses = two definitions. It lives
+                // OUTSIDE the binder scope (hashed after `env.pop`). A distinct `(witness …)` tag
+                // (absent when there is no witness) keeps a witnessed and a bare existential
+                // apart in the content-hash.
+                let wit_h = match witness {
+                    Some(w) => format!(" (witness {})", self.expr(w)),
+                    None => String::new(),
+                };
+                format!("(exists {dom_h} {body_h}{wit_h})")
             }
             Expr::Lambda(params, body) => {
                 // lambda params are binders → de Bruijn; param types are part of

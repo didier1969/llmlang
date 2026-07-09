@@ -596,13 +596,25 @@ pub enum Expr {
     /// dual of `forall` ground instantiation), and when PROVED over CONCRETE integer bounds
     /// it is eliminated by FINITE DISJUNCTION `body(lo) ∨ … ∨ body(hi-1)` (REQ-LLL-089
     /// Tranche 2). Proving an existential over a SYMBOLIC bound or a Map/Set domain is the
-    /// genuine soundness wall (witness synthesis / `assert forall` of the negation) and is
-    /// deferred (DEC-LLL-015: fail-loud, never a silent skip). The binder name is normalized
-    /// in `contract_hash` so α-equivalent quantifiers converge (DEC-LLL-020).
+    /// genuine soundness wall (witness synthesis / `assert forall` of the negation) — UNLESS a
+    /// `witness` is supplied (Tranche 3, below). The binder name is normalized in
+    /// `contract_hash` so α-equivalent quantifiers converge (DEC-LLL-020).
     Exists {
         var: String,
         domain: ForallDomain,
         body: Box<Expr>,
+        /// An OPTIONAL user-provided proof witness (REQ-LLL-089 Tranche 3): `exists v in D:
+        /// body witness <expr>`. When present it supplies the concrete term for `v`, so PROVING
+        /// the existential becomes the discharge of a GROUND obligation
+        /// `domain_guard(witness) ∧ body[v:=witness]` (decidable, sound) — this crosses the
+        /// SYMBOLIC-bound / Map-Set wall WITHOUT witness synthesis and WITHOUT ever emitting
+        /// `assert forall`/`assert exists` to Z3 (DEC-LLL-015). The witness lives in the OUTER
+        /// scope (it may NOT reference `v` — it provides its value), types at the binder's type,
+        /// and is quantifier-free. It is part of the content-hash: a different witness can flip
+        /// the verdict, so it is a different definition (DEC-LLL-020, cache soundness). Ignored
+        /// on the CONSUME side (a fresh Skolem witness stays sound regardless).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        witness: Option<Box<Expr>>,
     },
 }
 
@@ -655,6 +667,12 @@ impl Expr {
                     ForallDomain::In(coll) => coll.walk(f),
                 }
                 body.walk(f);
+                // an `exists` witness (REQ-LLL-089 T3) is part of the expression — walk it so
+                // every structural pass (contract fragment checks, container collection, …)
+                // sees it. It lives OUTSIDE the binder scope.
+                if let Expr::Exists { witness: Some(w), .. } = self {
+                    w.walk(f);
+                }
             }
             _ => {}
         }

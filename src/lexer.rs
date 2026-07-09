@@ -84,6 +84,7 @@ pub enum Tok {
     DotDot,    // bounded-range separator `lo .. hi` (REQ-LLL-087 T1 `forall`)
     Forall,    // bounded universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1)
     Exists,    // bounded existential quantifier `exists i in lo .. hi: body` (REQ-LLL-089)
+    Witness,   // optional proof witness of an `exists`: `… : body witness <expr>` (REQ-LLL-089 T3)
     In,        // range binder keyword in `forall`/`exists i in …` (REQ-LLL-087 T1 / 089)
 }
 
@@ -387,6 +388,7 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
         "else" => Tok::Else,
         "forall" => Tok::Forall,
         "exists" => Tok::Exists,
+        "witness" => Tok::Witness,
         "in" => Tok::In,
         _ if dotted => Tok::Dotted(w.to_string()),
         _ => Tok::Ident(w.to_string()),

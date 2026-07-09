@@ -86,7 +86,7 @@ pub fn render_contract_clause(e: &Expr) -> String {
     }
     match e {
         Expr::Hole => "?".to_string(),
-        Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
+        Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             let kw = if matches!(e, Expr::Exists { .. }) { "exists" } else { "forall" };
             let dom = match domain {
                 ForallDomain::Range(lo, hi) => format!(
@@ -96,7 +96,14 @@ pub fn render_contract_clause(e: &Expr) -> String {
                 ),
                 ForallDomain::In(coll) => render_contract_clause(coll),
             };
-            format!("{kw} {var} in {dom}: {}", render_contract_clause(body))
+            // an `exists` proof witness (REQ-LLL-089 T3) renders back to its surface form.
+            let wit = match e {
+                Expr::Exists { witness: Some(w), .. } => {
+                    format!(" witness {}", render_contract_clause(w))
+                }
+                _ => String::new(),
+            };
+            format!("{kw} {var} in {dom}: {}{wit}", render_contract_clause(body))
         }
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => v.to_string(),
@@ -2140,9 +2147,16 @@ fn quantifier_position_ok(clause: &Expr) -> Result<(), String> {
                 ForallDomain::Range(lo, hi) => quantifier_free(lo) && quantifier_free(hi),
                 ForallDomain::In(coll) => quantifier_free(coll),
             };
-            if !dom_qf || !quantifier_free(body) {
+            // an `exists` witness (REQ-LLL-089 T3) is a ground proof term — it too must be
+            // quantifier-free (a witness is not a place to smuggle a nested quantifier).
+            let wit_qf = match clause {
+                Expr::Exists { witness: Some(w), .. } => quantifier_free(w),
+                _ => true,
+            };
+            if !dom_qf || !quantifier_free(body) || !wit_qf {
                 Err("nested or alternating quantifiers are outside the v1 fragment — a \
-                     `forall`/`exists` body and domain must be quantifier-free (REQ-LLL-087/089)"
+                     `forall`/`exists` body, domain and `witness` must be quantifier-free \
+                     (REQ-LLL-087/089)"
                     .into())
             } else {
                 Ok(())
@@ -2296,7 +2310,7 @@ fn type_of_pure(
         // check rejects a quantified measure — no bespoke guard needed here. In a `requires`
         // (`result` is `None`) the body may not reference `result` (the `Var("result")` path
         // rejects that), keeping the clause a property of the parameters only.
-        Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
+        Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             // The binder's type comes from the domain: an `Int` index for a range, the KEY
             // type of a `Map` / the ELEMENT type of a `Set` for an `in` domain. The
             // quantifiable body fragment is arith + `get`/`length` on Seq/Array +
@@ -2335,13 +2349,27 @@ fn type_of_pure(
                 }
             };
             let mut inner = vars.clone();
-            inner.insert(var.clone(), var_ty);
-            let body_ty = type_of_pure(body, &inner, result, ctors, records, typarams)?;
+            inner.insert(var.clone(), var_ty.clone());
+            let body_ty = type_of_pure(body, &inner, result.clone(), ctors, records, typarams)?;
             if body_ty != Ty::Bool {
                 return Err(format!(
                     "a `forall`/`exists` body must be `Bool` (got `{body_ty:?}`) — it states a \
                      property of the elements in the domain (REQ-LLL-087/089)"
                 ));
+            }
+            // An `exists` proof witness (REQ-LLL-089 T3) must type at the binder's type. It is
+            // checked in the OUTER `vars` (NOT `inner`): the witness PROVIDES the binder's value,
+            // so it may NOT reference the binder — a witness mentioning `var` is an honest
+            // unbound-name error here. In a `requires` (`result` is `None`) a witness that
+            // references `result` is likewise rejected by the `Var("result")` path.
+            if let Expr::Exists { witness: Some(w), .. } = e {
+                let wit_ty = type_of_pure(w, vars, result, ctors, records, typarams)?;
+                if wit_ty != var_ty {
+                    return Err(format!(
+                        "an `exists … witness <expr>` must have the binder's type (`{var_ty:?}`), \
+                         got `{wit_ty:?}` — the witness supplies the bound value (REQ-LLL-089)"
+                    ));
+                }
             }
             Ty::Bool
         }

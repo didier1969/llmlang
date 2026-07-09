@@ -5757,6 +5757,228 @@ fn exists_single_element_range_proved_req089() {
     assert_eq!(code, Some(0), "a single-element existential range verifies: {out}");
 }
 
+// ---- bounded `exists` — Tranche 3: PROVE by user-provided `witness` (crosses the wall) ----
+
+#[test]
+fn exists_witness_over_symbolic_bound_proved_req089() {
+    // REQ-LLL-089 T3: a SYMBOLIC-bound existential — the T2 wall — is PROVED by a user-supplied
+    // `witness`. `exists i in 0 .. length(a): get(a, i) == 7 witness k` discharges the GROUND
+    // obligation `guard(k) ∧ get(a, k) == 7`: the domain guard `0 <= k < length(a)` and the body
+    // (with its own access obligation) all follow from the requires. No synthesis, no
+    // `assert forall` — the negation Z3 refutes is ground.
+    let (code, out, _) = check_lll_src(
+        "089-wit-sym",
+        "module M:\n\n  part f(a: Array[Int], k: Int) -> Bool:\n    requires 0 <= k\n    requires k < length(a)\n    requires get(a, k) == 7\n    ensures exists i in 0 .. length(a): get(a, i) == 7 witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(0), "a symbolic-bound existential is proved by an explicit witness: {out}");
+}
+
+#[test]
+fn exists_witness_out_of_domain_is_rejected_req089() {
+    // REQ-LLL-089 T3 soundness: the DOMAIN guard is part of the goal, so a witness OUTSIDE the
+    // domain is rejected. Domain `0 .. k` with witness `k` gives guard `0 <= k < k` — always
+    // false — so the existential is NOT provable even though `get(a, k) == 7` holds. A witness
+    // must lie in the domain it claims to inhabit.
+    let (code, out, _) = check_lll_src(
+        "089-wit-outdom",
+        "module M:\n\n  part f(a: Array[Int], k: Int) -> Bool:\n    requires 0 <= k\n    requires k < length(a)\n    requires get(a, k) == 7\n    ensures exists i in 0 .. k: get(a, i) == 7 witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(1), "a witness outside the domain guard is rejected: {out}");
+    assert!(out.contains("ensures"), "the failing obligation is the existential ensures: {out}");
+}
+
+#[test]
+fn exists_witness_out_of_array_bounds_is_rejected_req089() {
+    // REQ-LLL-089 T3 soundness KEYSTONE: `body(witness)` is translated with obligations LIVE
+    // (`instantiating = false`), so the witness's OWN `get(a, k)` access obligation `k < length(a)`
+    // FIRES separately from the domain guard. Here the witness lies in the domain (`0 <= k < n`)
+    // but NOTHING bounds `k < length(a)` — so the access obligation is unmet and the proof is
+    // REJECTED. A witness that indexes out of the array can never masquerade as a valid one (no
+    // silent `seq.nth` junk read). The domain guard binds `k` to the DOMAIN; the access
+    // obligation binds it to the ARRAY — two distinct conditions.
+    let (code, out, _) = check_lll_src(
+        "089-wit-oob",
+        "module M:\n\n  part f(a: Array[Int], n: Int, k: Int) -> Bool:\n    requires 0 <= k\n    requires k < n\n    ensures exists i in 0 .. n: get(a, i) == get(a, i) witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(1), "a witness out of array bounds is rejected by the access obligation: {out}");
+    assert!(out.contains("array index in bounds"), "the access obligation is what rejects it: {out}");
+}
+
+#[test]
+fn exists_witness_body_false_is_rejected_req089() {
+    // REQ-LLL-089 T3 soundness: an in-domain, in-bounds witness whose BODY is false is rejected.
+    // `get(a, k) == 3` (from requires) contradicts the body `get(a, k) == 7`, so `guard(k) ∧
+    // body(k)` is unprovable — the witness must actually satisfy the predicate.
+    let (code, out, _) = check_lll_src(
+        "089-wit-false",
+        "module M:\n\n  part f(a: Array[Int], k: Int) -> Bool:\n    requires 0 <= k\n    requires k < length(a)\n    requires get(a, k) == 3\n    ensures exists i in 0 .. length(a): get(a, i) == 7 witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(1), "a witness whose body is false is rejected: {out}");
+    assert!(out.contains("ensures"), "the failing obligation is the existential ensures: {out}");
+}
+
+#[test]
+fn exists_witness_over_map_domain_proved_req089() {
+    // REQ-LLL-089 T3 over a Map `in` domain (a T2 wall — Map/Set proofs are deferred without a
+    // witness). Guard `select(m, k) != none` (from `haskey`) plus the body `lookup(m, k) == 42`
+    // (its key-present obligation discharged by the same `haskey`) prove `exists key in m:
+    // lookup(m, key) == 42 witness k`.
+    let (code, out, _) = check_lll_src(
+        "089-wit-map",
+        "module M:\n\n  part f(m: Map[Int, Int], k: Int) -> Bool:\n    requires haskey(m, k)\n    requires lookup(m, k) == 42\n    ensures exists key in m: lookup(m, key) == 42 witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(0), "a witness over a Map `in` domain is proved: {out}");
+}
+
+#[test]
+fn exists_witness_over_set_domain_proved_req089() {
+    // REQ-LLL-089 T3 over a Set `in` domain. `member(s, k)` is a total query (fires NO
+    // obligation), so the ONLY thing binding `k ∈ s` is the domain guard conjunct in the goal
+    // (`select(s, k) != none`) — the sole enforcement for a Set witness. Under `member(s, k)`
+    // and `k > 0`, `exists x in s: x > 0 witness k` is proved.
+    let (code, out, _) = check_lll_src(
+        "089-wit-set",
+        "module M:\n\n  part f(s: Set[Int], k: Int) -> Bool:\n    requires member(s, k)\n    requires k > 0\n    ensures exists x in s: x > 0 witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(0), "a witness over a Set `in` domain is proved: {out}");
+}
+
+#[test]
+fn exists_witness_over_set_non_member_is_rejected_req089() {
+    // REQ-LLL-089 T3 Set soundness KEYSTONE: since `member` fires no obligation, the guard-in-goal
+    // is the SOLE membership enforcement. Without `member(s, k)` in context, `select(s, k) != none`
+    // is unprovable (the witness need not be in the set), so `exists x in s: x > 0 witness k` is
+    // REJECTED even though `k > 0` holds — a non-member witness cannot fake set membership.
+    let (code, out, _) = check_lll_src(
+        "089-wit-set-non",
+        "module M:\n\n  part f(s: Set[Int], k: Int) -> Bool:\n    requires k > 0\n    ensures exists x in s: x > 0 witness k\n    yield true\n",
+    );
+    assert_eq!(code, Some(1), "a non-member witness is rejected by the membership guard: {out}");
+    assert!(out.contains("ensures"), "the failing obligation is the existential ensures: {out}");
+}
+
+#[test]
+fn exists_witness_proves_callee_requires_at_call_site_req089() {
+    // REQ-LLL-089 T3 at the OTHER prove site: a callee's quantified `exists` requires is PROVED at
+    // the CALL SITE by its `witness`, evaluated over the ARGUMENTS (`cenv` binds the callee params
+    // `a`, `k` to `array(0, 7, 0)`, `1`). Witness `1`: guard `0 <= 1 < 3`, access `1 < 3`, body
+    // `get(a, 1) == 7` — all hold — so the call is admitted.
+    let (code, out, _) = check_lll_src(
+        "089-wit-call-ok",
+        "module M:\n\n  part need(a: Array[Int], k: Int) -> Int:\n    requires exists i in 0 .. length(a): get(a, i) == 7 witness k\n    yield 0\n\n  part call_ok() -> Int:\n    let a = array(0, 7, 0)\n    yield need(a, 1)\n",
+    );
+    assert_eq!(code, Some(0), "a callee's `exists` requires is proved at the call site by its witness: {out}");
+}
+
+#[test]
+fn exists_witness_wrong_at_call_site_is_rejected_req089() {
+    // REQ-LLL-089 T3 call-site soundness: the same callee, called with `k = 0`, makes the witness
+    // `0` — body `get(a, 0) == 7` is false for `array(0, 7, 0)` — so the callee's `requires` is
+    // NOT proven and the call is REJECTED. The witness is checked against the ACTUAL arguments.
+    let (code, out, _) = check_lll_src(
+        "089-wit-call-bad",
+        "module M:\n\n  part need(a: Array[Int], k: Int) -> Int:\n    requires exists i in 0 .. length(a): get(a, i) == 7 witness k\n    yield 0\n\n  part call_bad() -> Int:\n    let a = array(0, 7, 0)\n    yield need(a, 0)\n",
+    );
+    assert_eq!(code, Some(1), "a wrong witness at the call site is rejected: {out}");
+    assert!(out.contains("requires"), "the failing obligation is the callee `requires`: {out}");
+}
+
+#[test]
+fn exists_witness_is_part_of_identity_and_flips_verdict_req089() {
+    // REQ-LLL-089 T3 CACHE SOUNDNESS (DEC-LLL-020): the witness AFFECTS the verdict, so it MUST be
+    // part of the content-hash — else a cached verdict for one witness would be served for another
+    // (a false proof). Verdict-behavioral keystone: the SAME module with `witness 0` VERIFIES
+    // (`get(a, 0) == 7`) while `witness 1` FAILS (`get(a, 1) == 3 ≠ 7`) — and their `contract_hash`
+    // DIFFERS, so the two are distinct definitions and no stale cache can cross them.
+    let w0 = "module M:\n\n  part f(a: Array[Int]) -> Bool:\n    requires length(a) >= 2\n    requires get(a, 0) == 7\n    requires get(a, 1) == 3\n    ensures exists i in 0 .. length(a): get(a, i) == 7 witness 0\n    yield true\n";
+    let w1 = "module M:\n\n  part f(a: Array[Int]) -> Bool:\n    requires length(a) >= 2\n    requires get(a, 0) == 7\n    requires get(a, 1) == 3\n    ensures exists i in 0 .. length(a): get(a, i) == 7 witness 1\n    yield true\n";
+    // α-EQUIVALENCE: renaming the binder `i` → `j` (witness unchanged) must NOT change the hash —
+    // the binder is de-Bruijn-normalized, the witness lives outside its scope.
+    let w0_alpha = "module M:\n\n  part f(a: Array[Int]) -> Bool:\n    requires length(a) >= 2\n    requires get(a, 0) == 7\n    requires get(a, 1) == 3\n    ensures exists j in 0 .. length(a): get(a, j) == 7 witness 0\n    yield true\n";
+
+    let (_, h0) = full(w0);
+    let (_, h1) = full(w1);
+    let (_, ha) = full(w0_alpha);
+    assert_ne!(
+        h0.contract_hash["f"], h1.contract_hash["f"],
+        "a different witness is a different definition (cache soundness, DEC-LLL-020)"
+    );
+    assert_eq!(
+        h0.contract_hash["f"], ha.contract_hash["f"],
+        "renaming the binder is α-equivalent — the witness is hashed outside its scope"
+    );
+    assert!(verify_src(w0).ok(), "witness 0 satisfies the body (get(a, 0) == 7)");
+    assert!(
+        !verify_src(w1).ok(),
+        "witness 1 does NOT (get(a, 1) == 3) — a stale cache from witness 0 would be UNSOUND"
+    );
+}
+
+#[test]
+fn exists_witness_contract_is_erased_and_program_runs_req089() {
+    // REQ-LLL-089 T3 CODEGEN: a witnessed `exists` is a CONTRACT (verified statically), erased at
+    // codegen exactly like any quantifier — the emitted Rust carries no trace of it. The module
+    // verifies (via the witness) AND compiles AND runs: `main` calls `f(array(0, 7, 0), 1)` (whose
+    // witnessed requires-free contract holds) and prints `get(a, 1) == 7`.
+    let src = "module M:\n\n  part f(a: Array[Int], k: Int) -> Int:\n    requires 0 <= k\n    requires k < length(a)\n    requires get(a, k) == 7\n    ensures exists i in 0 .. length(a): get(a, i) == 7 witness k\n    yield get(a, k)\n\n  part main() -> Int via IO:\n    let a = array(0, 7, 0)\n    yield IO.print(f(a, 1))\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(report.ok(), "a witnessed-exists module verifies: {:?}", failures(&report));
+
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("wit.rs");
+    let bin = dir.join("wit_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "witnessed-exists Rust failed to compile (quantifier not erased?):\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains('7'), "the program must print 7, got: {stdout}");
+}
+
+#[test]
+fn exists_witness_malformed_is_rejected_at_check_req089() {
+    // REQ-LLL-089 T3 checker discipline: a witness is a GROUND term of the BINDER's type in the
+    // OUTER scope. Three malformed witnesses are rejected at CHECK time (never reaching the
+    // verifier) with a clear error — each a distinct guard.
+
+    // (1) WRONG TYPE: a `Bool` witness for an `Int` binder — the `wit_ty != var_ty` check.
+    let (c1, _o1, e1) = check_lll_src(
+        "089-wit-badty",
+        "module M:\n\n  part f() -> Bool:\n    ensures exists i in 0 .. 3: i == 0 witness true\n    yield true\n",
+    );
+    assert_ne!(c1, Some(0), "a wrong-typed witness is rejected at check time");
+    assert!(e1.contains("binder's type"), "wrong-typed witness error: {e1}");
+
+    // (2) REFERENCES THE BINDER: the witness is typed in the OUTER scope (it PROVIDES the
+    // binder's value), so naming the binder `i` is an honest unbound-variable error.
+    let (c2, _o2, e2) = check_lll_src(
+        "089-wit-selfref",
+        "module M:\n\n  part f() -> Bool:\n    ensures exists i in 0 .. 3: i == 0 witness i\n    yield true\n",
+    );
+    assert_ne!(c2, Some(0), "a witness referencing the binder is rejected");
+    assert!(e2.contains("unknown variable `i`"), "self-referential witness error: {e2}");
+
+    // (3) QUANTIFIER INSIDE THE WITNESS: a witness must be quantifier-free (the `wit_qf` guard in
+    // `quantifier_position_ok`) — no smuggling a nested quantifier through the witness slot.
+    let (c3, _o3, e3) = check_lll_src(
+        "089-wit-nestq",
+        "module M:\n\n  part f() -> Bool:\n    ensures exists i in 0 .. 3: i == 0 witness forall j in 0 .. 1: j == 0\n    yield true\n",
+    );
+    assert_ne!(c3, Some(0), "a quantifier inside the witness is rejected");
+    assert!(e3.contains("quantifier-free"), "nested-quantifier witness error: {e3}");
+}
+
 #[test]
 fn exists_over_pure_arithmetic_body_proved_req089() {
     // REQ-LLL-089 Tranche 2: the canonical concrete existential — pure arithmetic on the binder,
