@@ -3800,6 +3800,130 @@ fn mcp_serve_speaks_jsonrpc_initialize_list_and_errors() {
 }
 
 #[test]
+fn mcp_tools_call_lll_check_renders_each_verdict_req082() {
+    // REQ-LLL-082: the `tools/call` path (serve → call_tool → respond → the whole
+    // `lll_check` branch that renders PartVerdict::{Proved,Failed,Incomplete} + the
+    // module-level verdict line) had ZERO coverage — the existing mcp test stops at
+    // initialize/tools/list. Each `lll mcp` process is bound to one file, so one spawn
+    // per module state; `.current_dir(&dir)` isolates the `.lll-cache` WRITE that
+    // `lll_check` performs (vc::verify) inside the tempdir instead of racing the shared
+    // crate-root cache. No serde_json dep — substring assertions on the JSON envelope.
+    use std::io::Write;
+    let cases: [(&str, &str, &str); 3] = [
+        // (tag, source, expected substring in the tools/call reply envelope)
+        ("proved", "module M:\n\n  part main() -> Int:\n    ensures result == 0\n    yield 0\n", "ALL PROVED"),
+        ("failed", "module M:\n\n  part main() -> Int:\n    ensures result == 1\n    yield 0\n", "FAILED"),
+        ("holey", "module M:\n\n  part main() -> Int:\n    yield ?\n", "INCOMPLETE"),
+    ];
+    for (tag, src, want) in cases {
+        let dir = tempdir().join(format!("mcp-call-{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lll = dir.join("m.lll");
+        std::fs::write(&lll, src).unwrap();
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .args(["mcp", lll.to_str().unwrap()])
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n\
+                  {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"lll_check\",\"arguments\":{}}}\n",
+            )
+            .unwrap();
+        drop(stdin); // EOF → serve loop terminates
+        let out = child.wait_with_output().unwrap();
+        let so = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "[{tag}] serve exits cleanly: {}", String::from_utf8_lossy(&out.stderr));
+        let lines: Vec<&str> = so.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "[{tag}] one reply per request: {so}");
+        // reply[1] is the tools/call result; the rendered check text is embedded
+        // (JSON-escaped, ASCII verdict words survive intact) in the single envelope line.
+        assert!(lines[1].contains(want), "[{tag}] tools/call lll_check must render `{want}`: {}", lines[1]);
+    }
+}
+
+#[test]
+fn mcp_tools_call_lll_part_renders_existing_part_detail_req082() {
+    // REQ-LLL-082: `call_tool`'s lll_part SUCCESS branch (identity hashes, verdict,
+    // contracts, deps, rationale, source slice) had no coverage — only the unknown-part
+    // rejection was pinned. Invoke it over JSON-RPC for a REAL part and assert the
+    // detail surface an LLM consumes, and that a happy path is NOT an error envelope.
+    use std::io::Write;
+    let dir = tempdir().join("mcp-call-part");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("m.lll");
+    std::fs::write(&lll, "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n").unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["mcp", lll.to_str().unwrap()])
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"lll_part\",\"arguments\":{\"part\":\"inc\"}}}\n",
+        )
+        .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "serve exits cleanly: {}", String::from_utf8_lossy(&out.stderr));
+    let reply = so.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    // the rendered part detail is embedded (JSON-escaped) in the single reply envelope.
+    assert!(reply.contains("part `inc`"), "names the part: {reply}");
+    assert!(reply.contains("def-hash") && reply.contains("contract-hash"), "shows identity hashes: {reply}");
+    assert!(reply.contains("ensures") && reply.contains("source"), "shows contract + source slice: {reply}");
+    assert!(!reply.contains("isError"), "happy path is not an error envelope: {reply}");
+}
+
+#[test]
+fn audit_repl_dispatches_read_only_commands_req082() {
+    // REQ-LLL-082: the `lll audit` REPL START is pinned, but its COMMAND dispatch
+    // (help / defs / show / contract / hash / deps) — real read-only explainability
+    // logic — had no coverage. Pipe a command sequence over stdin and assert each
+    // branch's output. `.current_dir(&dir)` keeps any cache/rationale lookup inside
+    // the tempdir; `q` closes the loop with a clean exit 0.
+    use std::io::Write;
+    let dir = tempdir().join("audit-repl");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lll = dir.join("m.lll");
+    std::fs::write(
+        &lll,
+        "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n\n  part twice(x: Int) -> Int:\n    yield inc(inc(x))\n",
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["audit", lll.to_str().unwrap()])
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(b"help\ndefs\nshow inc\ncontract inc\nhash inc\ndeps twice\nq\n")
+        .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "audit exits cleanly on `q`: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(so.contains("commands:") && so.contains("rationale"), "help lists commands: {so}");
+    assert!(so.contains("inc") && so.contains("twice"), "defs lists both parts: {so}");
+    assert!(so.contains("ensures"), "contract shows the ensures clause: {so}");
+    assert!(so.contains("def-hash") && so.contains("contract-hash"), "hash shows both identities: {so}");
+    assert!(so.contains("contract"), "deps shows the dependency `inc` with its contract hash: {so}");
+}
+
+#[test]
 fn check_format_json_emits_structured_diagnostics_with_counterexample() {
     // REQ-LLL-033: the LLM channel — `lll check --format=json` yields structured,
     // repair-oriented diagnostics (codes, did-you-mean fixes, and for a failed
