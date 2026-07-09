@@ -6565,6 +6565,13 @@ fn aps3d_rules_persist_pg_roundtrip_gated() {
     // All-ones = 2 règles matchent sur les données rechargées DE POSTGRES + 3 lignes revenues
     // + severity bornée = 3. C'est la preuve que le swap SQLite→Postgres marche end-to-end
     // sur le vrai backend (mêmes ops, même domaine, résultat identique à la version SQLite).
+    //
+    // GAP CI CONNU (DEC-LLL-066 étape 4) : le Rust émis par `emit_pg_runtime` n'est compilé
+    // QUE par ce test (`lll check` ne fait pas de codegen ; `emit_db_runtime` SQLite, lui, est
+    // couvert par défaut via aps3d_rules_persist_roundtrip_via_cargo sans service live). Une
+    // coquille future dans le Rust émis PG resterait donc verte en CI par défaut — inhérent au
+    // besoin d'une crate `postgres` + d'un Postgres live. Exécuter ce test lors d'un changement
+    // du runtime PG.
     if std::env::var("LLL_PG_URL").is_err() {
         eprintln!(
             "aps3d_rules_persist_pg_roundtrip_gated: SKIP (set LLL_PG_URL after `devenv up` to run \
