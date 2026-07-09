@@ -86,12 +86,17 @@ pub fn render_contract_clause(e: &Expr) -> String {
     }
     match e {
         Expr::Hole => "?".to_string(),
-        Expr::Forall { var, lo, hi, body } => format!(
-            "forall {var} in {} .. {}: {}",
-            render_contract_clause(lo),
-            render_contract_clause(hi),
-            render_contract_clause(body)
-        ),
+        Expr::Forall { var, domain, body } => {
+            let dom = match domain {
+                ForallDomain::Range(lo, hi) => format!(
+                    "{} .. {}",
+                    render_contract_clause(lo),
+                    render_contract_clause(hi)
+                ),
+                ForallDomain::In(coll) => render_contract_clause(coll),
+            };
+            format!("forall {var} in {dom}: {}", render_contract_clause(body))
+        }
         Expr::Unit => "()".to_string(),
         Expr::IntLit(v) => v.to_string(),
         Expr::RatLit(n, d) => {
@@ -2126,10 +2131,14 @@ fn forall_free(e: &Expr) -> bool {
 /// sees is thus a top-level, single, quantifier-free-bodied `forall`.
 fn forall_position_ok(clause: &Expr) -> Result<(), String> {
     match clause {
-        Expr::Forall { lo, hi, body, .. } => {
-            if !forall_free(lo) || !forall_free(hi) || !forall_free(body) {
+        Expr::Forall { domain, body, .. } => {
+            let dom_qf = match domain {
+                ForallDomain::Range(lo, hi) => forall_free(lo) && forall_free(hi),
+                ForallDomain::In(coll) => forall_free(coll),
+            };
+            if !dom_qf || !forall_free(body) {
                 Err("nested or alternating quantifiers are outside the v1 fragment — a \
-                     `forall` body and bounds must be quantifier-free (REQ-LLL-087)"
+                     `forall` body and domain must be quantifier-free (REQ-LLL-087)"
                     .into())
             } else {
                 Ok(())
@@ -2278,33 +2287,56 @@ fn type_of_pure(
                     .into(),
             )
         }
-        // A BOUNDED universal quantifier `forall i in lo .. hi: body` (REQ-LLL-087 T1
-        // ensures; A1 extends it to `requires`). A `measure` must be `Int`, and a `forall`
-        // is `Bool`, so the measure loop's Int check rejects a quantified measure — no
-        // bespoke guard needed here. In a `requires` (`result` is `None`) the body may not
-        // reference `result` (the `Var("result")` path rejects that), keeping the clause a
-        // property of the parameters only.
-        Expr::Forall { var, lo, hi, body } => {
-            // half-open range `[lo, hi)` over an `Int` index
-            let lo_ty = type_of_pure(lo, vars, result.clone(), ctors, records, typarams)?;
-            let hi_ty = type_of_pure(hi, vars, result.clone(), ctors, records, typarams)?;
-            if lo_ty != Ty::Int || hi_ty != Ty::Int {
-                return Err(format!(
-                    "a `forall` range bound must be `Int` (got `{lo_ty:?}` .. `{hi_ty:?}`) — \
-                     the index ranges over `lo .. hi` (REQ-LLL-087)"
-                ));
-            }
-            // bind the index as `Int`, require a `Bool` body. The quantifiable fragment is
-            // arith + `get`/`length` on Seq/Array + ADT projections; a cons-list has NO
-            // native `get`/`length`, so indexing one is already an honest error here
+        // A BOUNDED universal quantifier (REQ-LLL-087 T1 ensures; A1 requires; A2 Map/Set).
+        // A `measure` must be `Int`, and a `forall` is `Bool`, so the measure loop's Int
+        // check rejects a quantified measure — no bespoke guard needed here. In a `requires`
+        // (`result` is `None`) the body may not reference `result` (the `Var("result")` path
+        // rejects that), keeping the clause a property of the parameters only.
+        Expr::Forall { var, domain, body } => {
+            // The binder's type comes from the domain: an `Int` index for a range, the KEY
+            // type of a `Map` / the ELEMENT type of a `Set` for an `in` domain. The
+            // quantifiable body fragment is arith + `get`/`length` on Seq/Array +
+            // `lookup`/`haskey` on Map + `member` on Set + ADT projections; a cons-list has
+            // NO native `get`/`length`, so indexing one is already an honest error
             // (DEC-LLL-043) — no bespoke domain check needed.
+            let var_ty = match domain {
+                ForallDomain::Range(lo, hi) => {
+                    // half-open range `[lo, hi)` over an `Int` index
+                    let lo_ty = type_of_pure(lo, vars, result.clone(), ctors, records, typarams)?;
+                    let hi_ty = type_of_pure(hi, vars, result.clone(), ctors, records, typarams)?;
+                    if lo_ty != Ty::Int || hi_ty != Ty::Int {
+                        return Err(format!(
+                            "a `forall` range bound must be `Int` (got `{lo_ty:?}` .. `{hi_ty:?}`) \
+                             — the index ranges over `lo .. hi` (REQ-LLL-087)"
+                        ));
+                    }
+                    Ty::Int
+                }
+                ForallDomain::In(coll) => {
+                    // `forall v in coll`: the binder ranges over the KEYS of a `Map[K, V]` or
+                    // the MEMBERS of a `Set[T]`, chosen by the static type of `coll` (A2).
+                    let coll_ty =
+                        type_of_pure(coll, vars, result.clone(), ctors, records, typarams)?;
+                    match coll_ty {
+                        Ty::Map(k, _) => *k,
+                        Ty::Set(e) => *e,
+                        other => {
+                            return Err(format!(
+                                "a `forall … in <coll>` domain must be a `Map` (keys) or a `Set` \
+                                 (members), got `{other:?}` — use `forall i in lo .. hi` to range \
+                                 over an `Int` index instead (REQ-LLL-087)"
+                            ))
+                        }
+                    }
+                }
+            };
             let mut inner = vars.clone();
-            inner.insert(var.clone(), Ty::Int);
+            inner.insert(var.clone(), var_ty);
             let body_ty = type_of_pure(body, &inner, result, ctors, records, typarams)?;
             if body_ty != Ty::Bool {
                 return Err(format!(
                     "a `forall` body must be `Bool` (got `{body_ty:?}`) — it states a \
-                     property of each index in the range (REQ-LLL-087)"
+                     property of each element in the domain (REQ-LLL-087)"
                 ));
             }
             Ty::Bool

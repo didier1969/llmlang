@@ -5314,6 +5314,118 @@ fn forall_in_measure_is_rejected_req087_t1_a1() {
 }
 
 #[test]
+fn forall_over_map_keys_proves_by_fresh_const_req087_a2() {
+    // REQ-LLL-087 A2: `forall k in <map>: P` quantifies over a Map's KEYS. It is PROVED by
+    // fresh-const generalization under the membership guard `select(m, k) != none` — the same
+    // shape as a range `forall`, with `haskey` in place of the range bounds. `pos_map` proves
+    // every stored value is positive; the fresh key's own `lookup` key-present obligation is
+    // discharged by the guard (mirror of the array bounds obligation).
+    let (code, out, _) = check_lll_src(
+        "a2-map-proof",
+        "module M:\n\n  part pos_map() -> Map[Int, Int]:\n    ensures forall k in result: lookup(result, k) > 0\n    yield insert(insert(map(), 1, 5), 2, 6)\n",
+    );
+    assert_eq!(code, Some(0), "a membership `forall` over map keys verifies: {out}");
+}
+
+#[test]
+fn forall_over_map_keys_bad_value_is_rejected_req087_a2() {
+    // REQ-LLL-087 A2 soundness: the fresh key is UNconstrained (never a single witness). A map
+    // with one non-positive value (`2 -> 0`) does NOT satisfy `forall k: lookup > 0` and is
+    // REJECTED, never proved from the positive keys.
+    let (code, out, _) = check_lll_src(
+        "a2-map-badval",
+        "module M:\n\n  part has_zero() -> Map[Int, Int]:\n    ensures forall k in result: lookup(result, k) > 0\n    yield insert(insert(map(), 1, 5), 2, 0)\n",
+    );
+    assert_eq!(code, Some(1), "a map with a non-positive value is not provable: {out}");
+}
+
+#[test]
+fn forall_over_map_keys_consumed_by_caller_req087_a2() {
+    // REQ-LLL-087 A2 CONSUMPTION: a caller indexing a result map whose callee proved a
+    // membership `forall` derives the per-key fact by GROUND instantiation at `lookup(m, 1)`
+    // (guard kept), never `assert forall`. `use_it` proves `result > 0` ONLY because
+    // `lookup(m, 1) > 0` is instantiated from `pos_map`'s `forall`.
+    let (code, out, _) = check_lll_src(
+        "a2-map-consume",
+        "module M:\n\n  part pos_map() -> Map[Int, Int]:\n    ensures haskey(result, 1)\n    ensures forall k in result: lookup(result, k) > 0\n    yield insert(map(), 1, 5)\n\n  part use_it() -> Int:\n    ensures result > 0\n    let m = pos_map()\n    yield lookup(m, 1)\n",
+    );
+    assert_eq!(code, Some(0), "the caller derives the per-key fact by instantiation: {out}");
+}
+
+#[test]
+fn forall_in_requires_over_map_assumed_req087_a2() {
+    // REQ-LLL-087 A2 assume side: a quantified `requires` over a Map's keys is instantiated at
+    // each `lookup(m, k)` in the body (guard `haskey` retained). `f` derives `lookup(m, 1) > 0`
+    // from the assumed `forall`, discharging `result > 0`.
+    let (code, out, _) = check_lll_src(
+        "a2-map-req",
+        "module M:\n\n  part f(m: Map[Int, Int]) -> Int:\n    requires forall k in m: lookup(m, k) > 0\n    requires haskey(m, 1)\n    ensures result > 0\n    yield lookup(m, 1)\n",
+    );
+    assert_eq!(code, Some(0), "the body derives the per-key fact from the assumed requires: {out}");
+}
+
+#[test]
+fn forall_over_set_members_proves_by_fresh_const_req087_a2() {
+    // REQ-LLL-087 A2: `forall x in <set>: P` quantifies over a Set's MEMBERS, proved by
+    // fresh-const generalization under the membership guard `select(s, x) != none`. Every
+    // member of `{3, 7}` is positive.
+    let (code, out, _) = check_lll_src(
+        "a2-set-proof",
+        "module M:\n\n  part pos_set() -> Set[Int]:\n    ensures forall x in result: x > 0\n    yield add(add(emptyset(), 3), 7)\n",
+    );
+    assert_eq!(code, Some(0), "a membership `forall` over set members verifies: {out}");
+}
+
+#[test]
+fn forall_over_set_members_bad_element_is_rejected_req087_a2() {
+    // REQ-LLL-087 A2 soundness: a set containing `0` does NOT satisfy `forall x: x > 0` and is
+    // rejected, never proved from the positive members.
+    let (code, out, _) = check_lll_src(
+        "a2-set-badval",
+        "module M:\n\n  part has_zero() -> Set[Int]:\n    ensures forall x in result: x > 0\n    yield add(add(emptyset(), 3), 0)\n",
+    );
+    assert_eq!(code, Some(1), "a set with a non-positive member is not provable: {out}");
+}
+
+#[test]
+fn forall_over_set_members_keeps_membership_guard_req087_a2() {
+    // REQ-LLL-087 A2 soundness KEYSTONE (membership guard retention): `probe` assumes
+    // `forall x in s: x > 0` but does NOT establish `member(s, e)` — so the ground instance
+    // `member(s, e) => e > 0` is vacuous and `e > 0` is NOT derivable. Were the guard dropped,
+    // `probe` would verify FALSELY. It must FAIL. (Adding `requires member(s, e)` makes it
+    // verify — the positive is `forall_in_requires_over_set_member_assumed`, below.)
+    let (code, out, _) = check_lll_src(
+        "a2-set-noguard",
+        "module M:\n\n  part probe(s: Set[Int], e: Int) -> Int:\n    requires forall x in s: x > 0\n    ensures result > 0\n    yield e\n",
+    );
+    assert_eq!(code, Some(1), "without `member(s, e)` the property is not derivable — guard kept: {out}");
+}
+
+#[test]
+fn forall_in_requires_over_set_member_assumed_req087_a2() {
+    // REQ-LLL-087 A2 assume side (set): with `requires member(s, e)` established, the ground
+    // instance `member(s, e) => e > 0` fires (two-pass setup keys the `forall` before the
+    // `member` requires is translated), so `e > 0` follows and `result > 0` verifies.
+    let (code, out, _) = check_lll_src(
+        "a2-set-req",
+        "module M:\n\n  part probe(s: Set[Int], e: Int) -> Int:\n    requires forall x in s: x > 0\n    requires member(s, e)\n    ensures result > 0\n    yield e\n",
+    );
+    assert_eq!(code, Some(0), "a known member inherits the quantified property: {out}");
+}
+
+#[test]
+fn forall_domain_must_be_map_or_set_req087_a2() {
+    // REQ-LLL-087 A2: a `forall … in <coll>` domain (no `..`) must be a Map or a Set — an
+    // `Int` is rejected with a message pointing at the range form.
+    let (code, _out, err) = check_lll_src(
+        "a2-wrongdom",
+        "module M:\n\n  part f(n: Int) -> Int:\n    requires forall k in n: k > 0\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "a non-collection `in` domain is rejected");
+    assert!(err.contains("Map") && err.contains("Set"), "the error names the Map/Set rule: {err}");
+}
+
+#[test]
 fn forall_nested_or_compound_is_rejected_req087_t1() {
     // REQ-LLL-087 T1 RED LINE: nested/alternating quantifiers, and a `forall` buried in a
     // compound clause (`A and forall …`) — which the fresh-const proof cannot eliminate — are

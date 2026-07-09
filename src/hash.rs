@@ -572,18 +572,23 @@ impl<'a> Norm<'a> {
                 };
                 format!("(call {target} {})", xs.join(" "))
             }
-            Expr::Forall { var, lo, hi, body } => {
-                // a bounded quantifier `forall v in lo .. hi: body` (REQ-LLL-087 T1). The
-                // bounds are OUTSIDE the binder scope; the binder `v` is de-Bruijn'd in the
-                // body so α-equivalent quantifiers (`forall i …` vs `forall j …`) converge
-                // to the SAME content-hash (DEC-LLL-020), while a different range or body
-                // changes it.
-                let lo_h = self.expr(lo);
-                let hi_h = self.expr(hi);
+            Expr::Forall { var, domain, body } => {
+                // a bounded quantifier (REQ-LLL-087). The DOMAIN (range bounds or the
+                // Map/Set collection) is OUTSIDE the binder scope; the binder `v` is
+                // de-Bruijn'd in the body so α-equivalent quantifiers (`forall i …` vs
+                // `forall j …`) converge to the SAME content-hash (DEC-LLL-020), while a
+                // different domain kind, domain, or body changes it. The `range`/`in` tag
+                // keeps the two domain forms distinct in the hash.
+                let dom_h = match domain {
+                    ForallDomain::Range(lo, hi) => {
+                        format!("(range {} {})", self.expr(lo), self.expr(hi))
+                    }
+                    ForallDomain::In(coll) => format!("(in {})", self.expr(coll)),
+                };
                 self.env.push(var.clone());
                 let body_h = self.expr(body);
                 self.env.pop();
-                format!("(forall {lo_h} {hi_h} {body_h})")
+                format!("(forall {dom_h} {body_h})")
             }
             Expr::Lambda(params, body) => {
                 // lambda params are binders → de Bruijn; param types are part of

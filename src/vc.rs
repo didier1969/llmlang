@@ -349,17 +349,21 @@ fn setup_part_emit<'a>(
             env.insert(mn.clone(), c);
         }
     }
-    // requires as hypotheses. A quantified `requires` (REQ-LLL-087 T1 A1) is NEVER
-    // asserted as a `forall` (we do not emit `assert forall`): it is REGISTERED for
-    // deterministic ground instantiation at each `get(container, k)` in the body, keyed by
-    // the container it indexes — exactly the assume-side of a callee's quantified `ensures`.
-    // The caller PROVED it at the call site (fresh-const generalization), so assuming its
-    // ground instances `guard(k) => body(k)` is sound. A `requires` that indexes no bare-Var
+    // requires as hypotheses. A quantified `requires` (REQ-LLL-087 A1/A2) is NEVER asserted
+    // as a `forall` (we do not emit `assert forall`): it is REGISTERED for deterministic
+    // ground instantiation at each `get`/`lookup`/`member` in the body, keyed by the
+    // container it indexes — exactly the assume-side of a callee's quantified `ensures`. The
+    // caller PROVED it at the call site (fresh-const generalization), so assuming its ground
+    // instances `guard(k) => body(k)` is sound. A `requires` that indexes no bare-Var
     // container simply contributes no hypothesis (we assume less — sound, never unsound).
+    // TWO passes so textual order among `requires` never matters: register every quantified
+    // `requires` FIRST, then translate the non-quantified ones. A non-quantified requires
+    // that mentions `get`/`lookup`/`member` (e.g. `requires member(s, e)`) then triggers
+    // instantiation of an already-registered `forall` regardless of which came first.
     let reqs = part.requires.clone();
     for r in &reqs {
-        if let Expr::Forall { body, .. } = r {
-            for cname in get_container_vars(body) {
+        if let Expr::Forall { domain, body, .. } = r {
+            for cname in forall_container_vars(domain, body) {
                 if let Some(sym) = env.get(&cname) {
                     em.forall_ens
                         .entry(sym.clone())
@@ -367,7 +371,10 @@ fn setup_part_emit<'a>(
                         .push((r.clone(), env.clone()));
                 }
             }
-        } else {
+        }
+    }
+    for r in &reqs {
+        if !matches!(r, Expr::Forall { .. }) {
             let t = em.tr(r, &env, None)?;
             em.hyps.push(t);
         }
@@ -563,10 +570,17 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
                 .map(|a| inline_methods(a, class, inst))
                 .collect::<Result<_, _>>()?,
         ),
-        Expr::Forall { var, lo, hi, body } => Expr::Forall {
+        Expr::Forall { var, domain, body } => Expr::Forall {
             var: var.clone(),
-            lo: Box::new(inline_methods(lo, class, inst)?),
-            hi: Box::new(inline_methods(hi, class, inst)?),
+            domain: match domain {
+                ForallDomain::Range(lo, hi) => ForallDomain::Range(
+                    Box::new(inline_methods(lo, class, inst)?),
+                    Box::new(inline_methods(hi, class, inst)?),
+                ),
+                ForallDomain::In(coll) => {
+                    ForallDomain::In(Box::new(inline_methods(coll, class, inst)?))
+                }
+            },
             body: Box::new(inline_methods(body, class, inst)?),
         },
         Expr::Lambda(ps, body) => {
@@ -625,12 +639,16 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
                 Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
         }
-        Expr::Forall { var, lo, hi, body } => {
-            // the range bounds `lo`/`hi` are OUTSIDE the binder's scope; the body is INSIDE,
-            // so the binder `var` shadows a same-named entry in `map` (capture avoidance,
-            // exactly like `Lambda` above).
-            let lo = Box::new(subst_vars(lo, map));
-            let hi = Box::new(subst_vars(hi, map));
+        Expr::Forall { var, domain, body } => {
+            // the DOMAIN (range bounds or the Map/Set collection) is OUTSIDE the binder's
+            // scope; the body is INSIDE, so the binder `var` shadows a same-named entry in
+            // `map` (capture avoidance, exactly like `Lambda` above).
+            let domain = match domain {
+                ForallDomain::Range(lo, hi) => {
+                    ForallDomain::Range(Box::new(subst_vars(lo, map)), Box::new(subst_vars(hi, map)))
+                }
+                ForallDomain::In(coll) => ForallDomain::In(Box::new(subst_vars(coll, map))),
+            };
             let body = if map.contains_key(var.as_str()) {
                 let mut inner = map.clone();
                 inner.remove(var.as_str());
@@ -638,7 +656,7 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
             } else {
                 Box::new(subst_vars(body, map))
             };
-            Expr::Forall { var: var.clone(), lo, hi, body }
+            Expr::Forall { var: var.clone(), domain, body }
         }
     }
 }
@@ -846,14 +864,75 @@ impl<'a> Emit<'a> {
         });
     }
 
-    /// GROUND-INSTANTIATE the quantified callee `ensures` recorded for result term `a`, at
-    /// one concrete index `idx` (REQ-LLL-087 T1 consumption). For `forall v in lo .. hi:
-    /// body`, push the hypothesis `guard(idx) => body[v := idx]`. The range guard is
-    /// RETAINED: dropping it would let the caller prove an UNCONDITIONAL fact about a
-    /// possibly out-of-bounds index — the unsound direction (§5.2 of the design). Never
-    /// `assert forall`; one instance per syntactic `get` occurrence ⇒ deterministic and
-    /// terminating. Runs with `instantiating = true` so the body's own `get`s add neither a
-    /// bounds obligation nor a further instance.
+    /// The SOUND domain guard for a `forall` binder set to concrete term `idx`, under `env`
+    /// (REQ-LLL-087). `Range(lo, hi)` → `lo <= idx && idx < hi`; `In(coll)` →
+    /// `select(coll, idx) != none` — the SAME membership test `haskey`/`member` emit. This
+    /// guard is what every ground instantiation RETAINS and what a fresh-const proof pushes
+    /// as a hypothesis; dropping it is the unsound direction (a fact about an element outside
+    /// the domain). Centralized here so the assume side and the prove side cannot drift.
+    fn domain_guard(
+        &mut self,
+        domain: &ForallDomain,
+        idx: &str,
+        env: &HashMap<String, String>,
+    ) -> Result<String, String> {
+        Ok(match domain {
+            ForallDomain::Range(lo, hi) => {
+                let lo_s = self.tr(lo, env, None)?;
+                let hi_s = self.tr(hi, env, None)?;
+                format!("(and (<= {lo_s} {idx}) (< {idx} {hi_s}))")
+            }
+            ForallDomain::In(coll) => {
+                let c = self.tr(coll, env, None)?;
+                format!("(not (= (select {c} {idx}) none))")
+            }
+        })
+    }
+
+    /// The SMT sort of a `forall` binder: `Int` for a range, else the KEY (map) / ELEMENT
+    /// (set) sort of the `in` collection — the first argument of its `(Array K (Maybe V))`
+    /// sort. Fails LOUD (never a silent skip) if the collection's sort is unavailable, since
+    /// the fresh-const proof cannot declare its binder without it (DEC-LLL-015).
+    fn forall_binder_sort(
+        &self,
+        domain: &ForallDomain,
+        env: &HashMap<String, String>,
+    ) -> Result<String, String> {
+        match domain {
+            ForallDomain::Range(..) => Ok("Int".to_string()),
+            ForallDomain::In(coll) => {
+                // Prefer the STATIC type (`result` → the part's return type, a param → its
+                // declared type): a `result` bound to a complex yield term (a `store`-chain)
+                // has no registered `sorts` entry, but its map/set type is known. Fall back
+                // to the term's recorded sort for any other shape.
+                let csort = self
+                    .operand_ty(coll)
+                    .map(|t| smt_ty(&t))
+                    .or_else(|| self.sort_of(coll, env))
+                    .ok_or_else(|| {
+                        format!(
+                            "part `{}`: cannot determine the key/element sort of a `forall … in \
+                             <coll>` domain (REQ-LLL-087)",
+                            self.part.name
+                        )
+                    })?;
+                array_key_sort(&csort).ok_or_else(|| {
+                    format!(
+                        "part `{}`: `forall … in <coll>` domain is not a Map/Set sort (`{csort}`) \
+                         (REQ-LLL-087)",
+                        self.part.name
+                    )
+                })
+            }
+        }
+    }
+
+    /// GROUND-INSTANTIATE the quantified `forall` recorded for container term `a`, at one
+    /// concrete index/key `idx` (REQ-LLL-087 consumption). Push the hypothesis
+    /// `guard(idx) => body[v := idx]` with the DOMAIN guard RETAINED (see [`domain_guard`]).
+    /// Never `assert forall`; one instance per syntactic `get`/`lookup`/`member` occurrence ⇒
+    /// deterministic and terminating. Runs with `instantiating = true` so the body's own
+    /// `get`/`lookup`s add neither an obligation nor a further instance.
     fn instantiate_forall_at(&mut self, a: &str, idx: &str) -> Result<(), String> {
         let Some(foralls) = self.forall_ens.get(a).cloned() else {
             return Ok(());
@@ -861,13 +940,11 @@ impl<'a> Emit<'a> {
         let was = self.instantiating;
         self.instantiating = true;
         for (f, eenv) in &foralls {
-            if let Expr::Forall { var, lo, hi, body } = f {
-                let lo_s = self.tr(lo, eenv, None)?;
-                let hi_s = self.tr(hi, eenv, None)?;
+            if let Expr::Forall { var, domain, body } = f {
+                let guard = self.domain_guard(domain, idx, eenv)?;
                 let mut benv = eenv.clone();
                 benv.insert(var.clone(), idx.to_string());
                 let body_s = self.tr(body, &benv, None)?;
-                let guard = format!("(and (<= {lo_s} {idx}) (< {idx} {hi_s}))");
                 self.hyps.push(format!("(=> {guard} {body_s})"));
             }
         }
@@ -1012,24 +1089,24 @@ impl<'a> Emit<'a> {
                     env2.insert("result".into(), t);
                     for (i, ens) in self.part.ensures.clone().iter().enumerate() {
                         let descr = format!("ensures #{} holds at yield", i + 1);
-                        if let Expr::Forall { var, lo, hi, body } = ens {
+                        if let Expr::Forall { var, domain, body } = ens {
                             // PROVE a bounded universal by FRESH-CONST universal
-                            // generalization (REQ-LLL-087 T1): a fresh, otherwise-
-                            // unconstrained index `i0` stands for "any" index in `[lo, hi)`,
-                            // so proving `body(i0)` UNDER the guard proves it for every
-                            // index. Quantifier-free — no `assert forall` ever reaches Z3
-                            // (DEC-LLL-015). `i0` is genuinely fresh (`self.fresh`), so it
-                            // is UNconstrained beyond the guard — the soundness invariant
+                            // generalization (REQ-LLL-087): a fresh, otherwise-unconstrained
+                            // binder `i0` stands for "any" element of the domain, so proving
+                            // `body(i0)` UNDER the domain guard proves it for every element.
+                            // Quantifier-free — no `assert forall` ever reaches Z3
+                            // (DEC-LLL-015). `i0` is genuinely fresh (`self.fresh`), so it is
+                            // UNconstrained beyond the guard — the soundness invariant
                             // (over-constraining it would prove `∀` from a single witness).
                             // The guard is pushed as a HYPOTHESIS (not folded into the goal)
-                            // so the body's OWN `get(result, i0)` bounds obligation is
-                            // discharged by it — and a range that OVERRUNS the array
-                            // (`0 .. length(result)+1`) leaves that obligation unmet, a
-                            // sound rejection. Scoped: truncated back after this clause.
-                            let lo_s = self.tr(lo, &env2, None)?;
-                            let hi_s = self.tr(hi, &env2, None)?;
-                            let i0 = self.fresh("Int");
-                            let guard = format!("(and (<= {lo_s} {i0}) (< {i0} {hi_s}))");
+                            // so the body's OWN `get(result, i0)` bounds / key-present
+                            // obligation is discharged by it — and a range that OVERRUNS the
+                            // array (`0 .. length(result)+1`) leaves that obligation unmet, a
+                            // sound rejection. The binder sort is `Int` for a range, else the
+                            // Map key / Set element sort. Scoped: truncated after this clause.
+                            let sort = self.forall_binder_sort(domain, &env2)?;
+                            let i0 = self.fresh(&sort);
+                            let guard = self.domain_guard(domain, &i0, &env2)?;
                             let mut benv = env2.clone();
                             benv.insert(var.clone(), i0);
                             let saved = self.hyps.len();
@@ -1617,15 +1694,24 @@ impl<'a> Emit<'a> {
                     "lookup" => {
                         let m = self.tr(&args[0], env, None)?;
                         let k = self.tr(&args[1], env, None)?;
-                        // KEY-PRESENT obligation: `(select m k)` is not `none`. `Maybe`
-                        // has exactly none/some, so "not none" ⟺ "some" (Z3 4.16's
-                        // parametric-datatype tester `(_ is some)` is unreliable, the
-                        // `= none` form is robust). Discharged here → the `none` case is
-                        // dead, so the runtime `.unwrap()` is a fail-stop backstop.
-                        self.oblige(
-                            "map key is present".into(),
-                            format!("(not (= (select {m} {k}) none))"),
-                        );
+                        // While STATING a proven `forall` fact (`instantiating`), a `lookup`
+                        // is not a fresh access: emit no key-present obligation and do not
+                        // recurse into instantiation (REQ-LLL-087 A2 — keeps the ground pass
+                        // a single finite step, mirror of the `get` arm).
+                        if !self.instantiating {
+                            // KEY-PRESENT obligation: `(select m k)` is not `none`. `Maybe`
+                            // has exactly none/some, so "not none" ⟺ "some" (Z3 4.16's
+                            // parametric-datatype tester `(_ is some)` is unreliable, the
+                            // `= none` form is robust). Discharged here → the `none` case is
+                            // dead, so the runtime `.unwrap()` is a fail-stop backstop.
+                            self.oblige(
+                                "map key is present".into(),
+                                format!("(not (= (select {m} {k}) none))"),
+                            );
+                            // GROUND-INSTANTIATE any quantified `forall` over this map at THIS
+                            // key — the caller derives `guard(k) => body(k)` (A2 consumption).
+                            self.instantiate_forall_at(&m, &k)?;
+                        }
                         format!("(val (select {m} {k}))")
                     }
                     "haskey" => {
@@ -1670,6 +1756,14 @@ impl<'a> Emit<'a> {
                     "member" => {
                         let s = self.tr(&args[0], env, None)?;
                         let x = self.tr(&args[1], env, None)?;
+                        // GROUND-INSTANTIATE any quantified `forall` over this set at THIS
+                        // element (A2 consumption): the caller derives `member(s,x) =>
+                        // body(x)`, so under a known `member(s,x)` it gets `body(x)`. Membership
+                        // itself is a total query (no obligation). Suppressed while STATING a
+                        // proven fact (`instantiating`), mirror of `get`/`lookup`.
+                        if !self.instantiating {
+                            self.instantiate_forall_at(&s, &x)?;
+                        }
                         format!("(not (= (select {s} {x}) none))")
                     }
                     _ => unreachable!("is_set_builtin covers emptyset/add/member"),
@@ -1761,19 +1855,18 @@ impl<'a> Emit<'a> {
                 // prove callee requires at this call site
                 for (i, req) in callee.requires.clone().iter().enumerate() {
                     let descr = format!("requires #{} of `{name}` holds at call site", i + 1);
-                    if let Expr::Forall { var, lo, hi, body } = req {
+                    if let Expr::Forall { var, domain, body } = req {
                         // PROVE a quantified `requires` by FRESH-CONST universal
                         // generalization — the SAME sound encoding as a quantified `ensures`
-                        // proof (REQ-LLL-087 T1 A1). A fresh, otherwise-unconstrained `i0`
-                        // stands for "any" index in `[lo, hi)`; the guard is pushed as a
+                        // proof (REQ-LLL-087 A1/A2). A fresh, otherwise-unconstrained `i0`
+                        // stands for "any" element of the domain; the guard is pushed as a
                         // scoped HYPOTHESIS (not folded into the goal) so the body's own
-                        // `get(a, i0)` bounds obligation is discharged by it. `cenv` binds the
+                        // `get`/`lookup` obligation is discharged by it. `cenv` binds the
                         // callee's params to the ARGUMENT terms, so this proves the property
                         // of the actual arguments. Never `assert forall` (DEC-LLL-015).
-                        let lo_s = self.tr(lo, &cenv, None)?;
-                        let hi_s = self.tr(hi, &cenv, None)?;
-                        let i0 = self.fresh("Int");
-                        let guard = format!("(and (<= {lo_s} {i0}) (< {i0} {hi_s}))");
+                        let sort = self.forall_binder_sort(domain, &cenv)?;
+                        let i0 = self.fresh(&sort);
+                        let guard = self.domain_guard(domain, &i0, &cenv)?;
                         let mut benv = cenv.clone();
                         benv.insert(var.clone(), i0);
                         let saved = self.hyps.len();
@@ -1879,26 +1972,57 @@ impl<'a> Emit<'a> {
     }
 }
 
-/// The bare-`Var` names that appear as the CONTAINER (first argument) of a `get(c, _)`
-/// inside a quantified clause body — the containers a `forall` indexes. Used to KEY a
-/// quantified `requires` for on-demand ground instantiation (REQ-LLL-087 T1 A1 assume side),
-/// mirroring how a quantified `ensures` is keyed by its havoc'd result term. A non-`Var`
-/// container (e.g. a nested `get`) is skipped: keying is a relevance heuristic, so missing
-/// one only forgoes a hypothesis (sound), never fabricates one.
-fn get_container_vars(body: &Expr) -> Vec<String> {
+/// The bare-`Var` container names a quantified `requires` indexes, used to KEY it for
+/// on-demand ground instantiation (REQ-LLL-087 A1/A2 assume side), mirroring how a quantified
+/// `ensures` is keyed by its havoc'd result term. For an `In(coll)` domain the authoritative
+/// container is the domain collection itself; additionally, any `get`/`lookup`/`member`
+/// container in the body is collected so the instance fires at the actual access site. A
+/// non-`Var` container is skipped: keying is a relevance heuristic, so missing one only
+/// forgoes a hypothesis (sound), never fabricates one.
+fn forall_container_vars(domain: &ForallDomain, body: &Expr) -> Vec<String> {
     let mut out = Vec::new();
+    let mut push = |name: &str| {
+        if !out.iter().any(|n| n == name) {
+            out.push(name.to_string());
+        }
+    };
+    if let ForallDomain::In(coll) = domain {
+        if let Expr::Var(name) = coll.as_ref() {
+            push(name);
+        }
+    }
     body.walk(&mut |x| {
         if let Expr::Call(f, args) = x {
-            if f == "get" && !args.is_empty() {
+            if matches!(f.as_str(), "get" | "lookup" | "member" | "haskey") && !args.is_empty() {
                 if let Expr::Var(name) = &args[0] {
-                    if !out.contains(name) {
-                        out.push(name.clone());
-                    }
+                    push(name);
                 }
             }
         }
     });
     out
+}
+
+/// The KEY (map) / ELEMENT (set) sort inside a `(Array K (Maybe V))` collection sort — its
+/// first type argument, read as one balanced s-expression token (REQ-LLL-087 A2). `None` if
+/// `sort` is not an `(Array …)` form. Handles a compound key sort (`(Seq Int)`) too.
+fn array_key_sort(sort: &str) -> Option<String> {
+    let inner = sort.strip_prefix("(Array ")?;
+    let mut depth = 0usize;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+            }
+            ' ' if depth == 0 => return Some(inner[..i].to_string()),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Every component of a measure tuple is bounded below by 0 — the well-founded

@@ -572,24 +572,40 @@ pub enum Expr {
     /// (requires/ensures/measure) so `contract_hash` never contains one. Part of
     /// identity like any other node (DEC-LLL-020): filling it is a new definition.
     Hole,
-    /// A BOUNDED universal quantifier `forall <var> in <lo> .. <hi>: <body>` (REQ-LLL-087
-    /// Tranche 1). CONTRACT-ONLY and, more precisely, `ensures`-only — the mirror of
-    /// [`Expr::Hole`] (term-only): rejected in `requires`/`measure` and in term position.
-    /// `var` binds an `Int` index over the HALF-OPEN range `[lo, hi)`; `body` is a `Bool`
-    /// over the quantifiable fragment (arith, `get`/`length` on Seq/Array, ADT
+    /// A BOUNDED universal quantifier (REQ-LLL-087). CONTRACT-ONLY — the mirror of
+    /// [`Expr::Hole`] (term-only): rejected in `measure` and in term position, allowed in
+    /// `requires`/`ensures` (Tranche 1 ensures + A1 requires). `var` binds over a FINITE
+    /// [`ForallDomain`]; `body` is a `Bool` over the quantifiable fragment (arith,
+    /// `get`/`length` on Seq/Array, `lookup`/`haskey` on Map, `member` on Set, ADT
     /// projections). It is NEVER emitted to Z3 as `assert forall`: the vcgen eliminates it
-    /// by FRESH-CONST universal generalization when PROVING an `ensures`, and by
-    /// deterministic GROUND instantiation (at each syntactic `get`) when a caller ASSUMES
-    /// it (DEC-LLL-015: zero triggers, zero matching-loops, decidable QF fragment). The
-    /// binder name is normalized in `contract_hash` so α-equivalent quantifiers converge
-    /// (DEC-LLL-020). Domain is Seq/Array only — a cons-list has no native `length`
-    /// (DEC-LLL-043), so `length`/`get` on one is already an honest error.
+    /// by FRESH-CONST universal generalization when PROVING, and by deterministic GROUND
+    /// instantiation (at each syntactic `get`/`lookup`/`member`) when it is ASSUMED
+    /// (DEC-LLL-015: zero triggers, zero matching-loops, decidable QF fragment). The binder
+    /// name is normalized in `contract_hash` so α-equivalent quantifiers converge
+    /// (DEC-LLL-020).
     Forall {
         var: String,
-        lo: Box<Expr>,
-        hi: Box<Expr>,
+        domain: ForallDomain,
         body: Box<Expr>,
     },
+}
+
+/// The finite domain a [`Expr::Forall`] binder ranges over (REQ-LLL-087). Each domain
+/// carries its own SOUND range guard, retained at every ground instantiation:
+/// - `Range(lo, hi)` — an `Int` index over the half-open range `[lo, hi)`; guard
+///   `lo <= i && i < hi`, consumed at each `get(a, i)` on a Seq/Array (Tranche 1).
+/// - `In(coll)` — the KEYS of a `Map[K, V]` or the MEMBERS of a `Set[T]`, resolved by the
+///   static type of `coll` (A2); guard `select(coll, k) != none`, consumed at each
+///   `lookup(coll, k)` (map) or `member(coll, k)` (set). One node covers both because the
+///   guard and encoding are identical — only the binder's type and the trigger site differ.
+///
+/// The domain is always FINITE and the guard quantifier-free, so a `forall` never becomes an
+/// `assert forall` to Z3: it is proved by fresh-const generalization and assumed by ground
+/// instantiation, both under the domain's guard.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ForallDomain {
+    Range(Box<Expr>, Box<Expr>),
+    In(Box<Expr>),
 }
 
 impl Expr {
@@ -614,9 +630,14 @@ impl Expr {
                     e.walk(f);
                 }
             }
-            Expr::Forall { lo, hi, body, .. } => {
-                lo.walk(f);
-                hi.walk(f);
+            Expr::Forall { domain, body, .. } => {
+                match domain {
+                    ForallDomain::Range(lo, hi) => {
+                        lo.walk(f);
+                        hi.walk(f);
+                    }
+                    ForallDomain::In(coll) => coll.walk(f),
+                }
                 body.walk(f);
             }
             _ => {}

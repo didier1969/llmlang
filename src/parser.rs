@@ -199,10 +199,15 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
         Expr::Lambda(ps, body) => Expr::Lambda(ps, Box::new(desugar_expr(*body, recs)?)),
         Expr::Proj(a, i) => Expr::Proj(Box::new(desugar_expr(*a, recs)?), i),
         Expr::Field(a, n) => Expr::Field(Box::new(desugar_expr(*a, recs)?), n),
-        Expr::Forall { var, lo, hi, body } => Expr::Forall {
+        Expr::Forall { var, domain, body } => Expr::Forall {
             var,
-            lo: Box::new(desugar_expr(*lo, recs)?),
-            hi: Box::new(desugar_expr(*hi, recs)?),
+            domain: match domain {
+                ForallDomain::Range(lo, hi) => ForallDomain::Range(
+                    Box::new(desugar_expr(*lo, recs)?),
+                    Box::new(desugar_expr(*hi, recs)?),
+                ),
+                ForallDomain::In(coll) => ForallDomain::In(Box::new(desugar_expr(*coll, recs)?)),
+            },
             body: Box::new(desugar_expr(*body, recs)?),
         },
         leaf @ (Expr::IntLit(_)
@@ -1248,24 +1253,31 @@ impl Parser {
         }
         self.or_expr()
     }
-    /// A bounded universal quantifier `forall <id> in <lo> .. <hi>: <body>` (REQ-LLL-087
-    /// T1). Surface-only well-formedness here (binder, half-open range, body); it is the
-    /// CHECKER that restricts it to `ensures` position and the `Int`/`Bool`/Seq fragment.
-    /// The bounds are additive expressions (they terminate cleanly at `..` then `:`), the
-    /// body is a full expression.
+    /// A bounded universal quantifier (REQ-LLL-087). Two surface forms, disambiguated by the
+    /// `..` after the domain expression:
+    /// - `forall <id> in <lo> .. <hi>: <body>` — a half-open `Int` range (Tranche 1);
+    /// - `forall <id> in <coll>: <body>` — the keys of a `Map`/members of a `Set` (A2),
+    ///   resolved by the static type of `<coll>` in the CHECKER.
+    /// Surface-only well-formedness here; the checker restricts position (requires/ensures)
+    /// and the fragment. The domain expressions are additive (they terminate cleanly at `..`
+    /// or `:`); the body is a full expression.
     fn forall_expr(&mut self) -> Result<Expr, String> {
         self.eat(Tok::Forall)?;
         let var = self.ident()?;
         self.eat(Tok::In)?;
-        let lo = self.add_expr()?;
-        self.eat(Tok::DotDot)?;
-        let hi = self.add_expr()?;
+        let first = self.add_expr()?;
+        let domain = if self.peek() == &Tok::DotDot {
+            self.eat(Tok::DotDot)?;
+            let hi = self.add_expr()?;
+            ForallDomain::Range(Box::new(first), Box::new(hi))
+        } else {
+            ForallDomain::In(Box::new(first))
+        };
         self.eat(Tok::Colon)?;
         let body = self.expr()?;
         Ok(Expr::Forall {
             var,
-            lo: Box::new(lo),
-            hi: Box::new(hi),
+            domain,
             body: Box::new(body),
         })
     }
