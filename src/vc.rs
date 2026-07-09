@@ -778,6 +778,12 @@ impl<'a> Emit<'a> {
             Expr::Call(name, args) if !args.is_empty() && self.cm.ctors.contains_key(name) => {
                 self.operand_ty(sibling)
             }
+            // an empty `[]` / `array()` at an equality anchor adopts the sibling's static
+            // type so the ListLit/array arm emits a typed `(as nil (Lst T))` /
+            // `(as seq.empty (Seq T))` instead of a sort-ambiguous bare term (REQ-LLL-087 T0).
+            // The checker has already rejected an untyped empty elsewhere.
+            Expr::ListLit(xs) if xs.is_empty() => self.operand_ty(sibling),
+            Expr::Call(name, args) if name == "array" && args.is_empty() => self.operand_ty(sibling),
             _ => None,
         }
     }
@@ -1111,7 +1117,19 @@ impl<'a> Emit<'a> {
                 None => return Err(format!("vcgen: unbound `{n}`")),
             },
             Expr::ListLit(items) => {
-                let mut t = "nil".to_string();
+                // the terminal `nil`: annotated `(as nil (Lst T))` when the context fixes
+                // `List[T]` (an equality anchor `result == []` / `result == [1]`,
+                // REQ-LLL-087 T0) so an INLINED literal is well-sorted even when the sibling
+                // is itself a typed `nil`; otherwise the bare `nil`, whose sort Z3 infers
+                // structurally from the `cons` head — the pre-existing behaviour, unchanged.
+                let mut t = match expected {
+                    Some(t @ Ty::List(_)) => {
+                        let term = format!("(as nil {})", smt_ty(t));
+                        self.sorts.insert(term.clone(), smt_ty(t));
+                        term
+                    }
+                    _ => "nil".to_string(),
+                };
                 for i in items.iter().rev() {
                     let it = self.tr(i, env, None)?;
                     t = format!("(cons {it} {t})");

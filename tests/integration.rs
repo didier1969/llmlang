@@ -4864,6 +4864,79 @@ fn check_exposes_hole_goal_and_hypotheses_req085() {
     assert!(j.contains("\"hypotheses\"") && j.contains("lo >= 0"), "json hole carries the hypotheses: {j}");
 }
 
+// ---- contrats expressifs Tranche 0 : `[]` / `array()` vides en contrat (REQ-LLL-087) ----
+
+#[test]
+fn empty_list_at_equality_anchor_in_contract_verifies_and_stays_sound_req087_t0() {
+    // REQ-LLL-087 Tranche 0: an empty `[]` is admitted in a contract ONLY at an (in)equality
+    // anchor, which fixes its element type from the concrete sibling (here `result: List[Int]`).
+    // `result == []` with `yield []` VERIFIES; with `yield [1]` it is REJECTED (the `ensures` is
+    // false) — no arbitrary sort, soundness preserved (DEC-LLL-015/026).
+    let ok = "module M:\n\n  part e() -> List[Int]:\n    ensures result == []\n    yield []\n";
+    let (cm, hm) = full(ok);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`result == []` with `yield []` verifies"
+    );
+
+    let bad = "module M:\n\n  part e() -> List[Int]:\n    ensures result == []\n    yield [1]\n";
+    let (cmb, hmb) = full(bad);
+    let dirb = tempdir();
+    assert!(
+        !vc::verify(&cmb, &hmb, &dirb, false).expect("verify runs").ok(),
+        "`result == []` with `yield [1]` is REJECTED (ensures is false)"
+    );
+}
+
+#[test]
+fn empty_array_at_equality_anchor_in_contract_verifies_req087_t0() {
+    // REQ-LLL-087 Tranche 0: same admission for an empty `array()` — the equality anchor fixes
+    // the Seq element sort from the sibling `result: Array[Int]` (parallel to `[]`).
+    let ok = "module M:\n\n  part e() -> Array[Int]:\n    ensures result == array()\n    yield array()\n";
+    let (cm, hm) = full(ok);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`result == array()` with `yield array()` verifies"
+    );
+}
+
+#[test]
+fn empty_list_in_contract_without_equality_anchor_is_an_honest_error_req087_t0() {
+    // REQ-LLL-087 Tranche 0 boundary: an empty `[]` whose element type is NOT fixed by an
+    // equality anchor (here compared against a non-list `result: Int`) is an honest compile
+    // error — never an arbitrary sort (DEC-LLL-015). The v1 ban is LIFTED only at an anchor.
+    let bad = "module M:\n\n  part f() -> Int:\n    ensures result == []\n    yield 0\n";
+    let err = types::check_module(parser::parse_module(bad).expect("parse"))
+        .expect_err("`[]` compared with a non-list is rejected");
+    assert!(err.to_lowercase().contains("list"), "error names the list-anchor requirement: {err}");
+}
+
+#[test]
+fn empty_list_contract_module_builds_req087_t0() {
+    // REQ-LLL-087 Tranche 0 concordance (DEC-LLL-026): a module using `result == []` in a
+    // contract verifies AND builds — the SMT model `(as nil (Lst Int))` concords with the
+    // runtime empty list, exactly like a non-empty literal already in production.
+    let dir = tempdir().join("t0-build");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  part e() -> List[Int]:\n    ensures result == []\n    yield []\n\n  part main() -> Int:\n    yield 0\n";
+    let f = dir.join("t0.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "verifies: {}", String::from_utf8_lossy(&out.stdout));
+    let b = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["build", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(b.status.success(), "builds: {}", String::from_utf8_lossy(&b.stderr));
+}
+
 #[test]
 fn check_precedence_failed_dominates_incomplete_holes() {
     // REQ-LLL-059 / DEC-LLL-052: the check exit-code precedence is failed(1) > incomplete(2) >

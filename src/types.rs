@@ -2193,6 +2193,17 @@ fn check_contracts(
 }
 
 /// Pure expression typing over a fixed variable environment (contracts).
+/// A syntactically-empty list literal `[]` (REQ-LLL-087 T0).
+fn is_empty_list_lit(e: &Expr) -> bool {
+    matches!(e, Expr::ListLit(xs) if xs.is_empty())
+}
+
+/// A syntactically-empty array literal `array()` (REQ-LLL-087 T0). Mirrors how
+/// `type_of_pure` detects the array primitive (a `Call` to the builtin name).
+fn is_empty_array_lit(e: &Expr) -> bool {
+    matches!(e, Expr::Call(n, args) if n == "array" && args.is_empty())
+}
+
 fn type_of_pure(
     e: &Expr,
     vars: &HashMap<String, Ty>,
@@ -2269,6 +2280,42 @@ fn type_of_pure(
                 return Err("`not` needs Bool".into());
             }
             Ty::Bool
+        }
+        // Empty collection literals (`[]`, `array()`) carry no element type of their own.
+        // In a contract they are admitted ONLY at an (in)equality anchor, which fixes the
+        // element type from the concrete sibling operand (REQ-LLL-087 T0). Anywhere else an
+        // empty literal stays an honest error (its type is not determined — the operand
+        // recurses into the ListLit/array arm below and is rejected there, DEC-LLL-015).
+        Expr::Bin(op @ (BinOp::Eq | BinOp::Ne), a, b)
+            if is_empty_list_lit(a)
+                || is_empty_list_lit(b)
+                || is_empty_array_lit(a)
+                || is_empty_array_lit(b) =>
+        {
+            let a_empty = is_empty_list_lit(a) || is_empty_array_lit(a);
+            let b_empty = is_empty_list_lit(b) || is_empty_array_lit(b);
+            if a_empty && b_empty {
+                return Err(format!(
+                    "part contract: `{op:?}` between two empty collection literals has no type \
+                     anchor — annotate one side so its element type is fixed"
+                ));
+            }
+            let (empty, other) = if a_empty { (a.as_ref(), b.as_ref()) } else { (b.as_ref(), a.as_ref()) };
+            let t_other = type_of_pure(other, vars, result, ctors, records, typarams)?;
+            match &t_other {
+                Ty::List(_) if is_empty_list_lit(empty) => Ty::Bool,
+                Ty::Array(_) if is_empty_array_lit(empty) => Ty::Bool,
+                _ if is_empty_list_lit(empty) => {
+                    return Err(format!(
+                        "empty list `[]` can only be compared with a `List[T]` in a contract, not `{t_other}`"
+                    ))
+                }
+                _ => {
+                    return Err(format!(
+                        "empty `array()` can only be compared with an `Array[T]` in a contract, not `{t_other}`"
+                    ))
+                }
+            }
         }
         Expr::Bin(op, a, b) => {
             let ta = type_of_pure(a, vars, result.clone(), ctors, records, typarams)?;
