@@ -7238,3 +7238,66 @@ fn rational_avoids_the_float_trap() {
         failures(&verify_src(src))
     );
 }
+
+#[test]
+fn no_args_prints_usage_to_stderr_and_exits_nonzero() {
+    // REQ-LLL-082 item 3: the `usage()` text (main.rs) was the last un-gated CLI
+    // surface — invoked from `dispatch`'s catch-all arm (`_ => Err(usage())`) both
+    // for zero args and for an unrecognized verb, then bubbled to `main`, which
+    // writes it to STDERR as `error: {e}` and exits 1 (never a silent/0 no-op —
+    // consistent with the fail-loud posture in DEC-LLL-015/017). Assert the verb
+    // list stays in sync with the real subcommands so this text can't silently rot.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .current_dir(repo)
+        .output()
+        .expect("run lll with no args");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "no-args must fail-stop with exit 1, not succeed or exit silently:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "usage text must go to stderr, not stdout: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("error: usage:"),
+        "expected `error: usage:` prefix on stderr, got:\n{stderr}"
+    );
+    for verb in ["check", "build", "run", "hash", "rename", "dedup", "mcp", "audit"] {
+        assert!(
+            stderr.contains(verb),
+            "usage text must list `{verb}` among the commands:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn unknown_verb_also_prints_usage_to_stderr_and_exits_nonzero() {
+    // Same catch-all arm as above (`_ => Err(usage())`), reached this time via an
+    // unrecognized verb rather than zero args — both dead ends land on the same
+    // fail-stop usage text (REQ-LLL-082 item 3).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("frobnicate")
+        .current_dir(repo)
+        .output()
+        .expect("run lll with an unknown verb");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "unknown verb must fail-stop with exit 1:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("error: usage:"),
+        "expected `error: usage:` prefix on stderr, got:\n{stderr}"
+    );
+}
