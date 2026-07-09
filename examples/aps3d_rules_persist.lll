@@ -1,0 +1,52 @@
+import "../std/db.lll"
+import "aps3d_maintenance_kernel.lll"
+
+depends serde_json "1.0.150"
+depends rusqlite "0.39.0" features "bundled"
+
+module Aps3d.Persist:
+
+  # Étape 1 du vertical APS3D (DEC-LLL-066) : les règles de maintenance PERSISTÉES
+  # en SQLite, RELUES par une requête, reconstruites en `Rule` TYPÉES, puis
+  # évaluées par le noyau VÉRIFIÉ (Aps3d.Kernel, importé). La plomberie DB reste à
+  # la frontière d'effet (l'effet `Db`, std/db.lll) ; le domaine est pur et prouvé.
+  # Chaque `1` imprimé = un fait vérifié au runtime sur les données rechargées.
+  #
+  # Schéma : rules(kind, threshold, horizon). kind 0 = WearAbove, 1 = DaysBelow.
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  # kind 0 → WearAbove(t) ; sinon DaysBelow(t).
+  part mk_cond(kind: Int, t: Int) -> Condition:
+    match kind == 0:
+      true  -> yield WearAbove(t)
+      false -> yield DaysBelow(t)
+
+  # une ligne (kind, threshold, horizon) → une règle mono-condition typée.
+  part row_to_rule(row: Json) -> Rule:
+    yield Rule(mk_cond(cell_int(row, 0), cell_int(row, 1)) :: [], Schedule(cell_int(row, 2)))
+
+  # reconstruit la liste de règles typées depuis les lignes. Récursion structurale.
+  part rows_to_rules(rows: List[Json]) -> List[Rule]:
+    match rows:
+      []     -> yield []
+      h :: t -> yield row_to_rule(h) :: rows_to_rules(t)
+
+  part main() -> Int via IO, Db:
+    let db = Db.open(":memory:")
+    let s0 = Db.exec(db, "CREATE TABLE rules (kind INTEGER, threshold INTEGER, horizon INTEGER)")
+    let s1 = Db.exec(db, "INSERT INTO rules VALUES (0, 90, 3)")
+    let s2 = Db.exec(db, "INSERT INTO rules VALUES (0, 75, 14)")
+    let s3 = Db.exec(db, "INSERT INTO rules VALUES (1, 7, 1)")
+    let rows = unarr(Db.query(db, "SELECT kind, threshold, horizon FROM rules ORDER BY threshold"))
+    let rules = rows_to_rules(rows)
+    let facts = Facts(95, 20)
+    # 1. deux règles matchent sur l'équipement rechargé (95>90 et 95>75 ; 20 pas <7).
+    let a = IO.print(flag(len(evaluate(rules, facts)) == 2))
+    # 2. exactement les 3 règles insérées sont revenues.
+    let b = IO.print(flag(count(rows) == 3))
+    # 3. la sévérité prouvée-bornée [0,3] vaut 3 (usure > 90).
+    yield IO.print(flag(severity(facts) == 3))

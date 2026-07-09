@@ -1,0 +1,76 @@
+module Aps3d.Kernel:
+
+  # Noyau PUR d'évaluation des règles de maintenance d'APS3D, porté en llmlang
+  # vérifié (vertical APS3D — DEC-LLL-066). Réplique la logique de
+  # lib/aps3d/rules/engine.ex (condition_matches? / rule_matches? / evaluate_rules).
+  # Aucun `main` : module-bibliothèque, importé par le démo pur ET le démo
+  # persistant (une seule source de vérité — la thèse DRY, DEC-LLL-020).
+  #
+  # Gain démontré vs l'Elixir : le fallback `condition_matches?(_, _) -> false`
+  # (engine.ex:225) rend SILENCIEUSEMENT inerte une condition mal orthographiée ;
+  # ici le match sur `Condition` est EXHAUSTIF → erreur de compile (DEC-LLL-015).
+
+  # Faits agrégés d'un équipement (comparaisons ENTIÈRES — zéro flottant).
+  type Facts = {max_wear: Int, min_days: Int}
+
+  # Les conditions réellement testées par le moteur (engine.ex:207-219).
+  type Condition = WearAbove(Int) | DaysBelow(Int)
+
+  # Les actions émises : Alert(niveau) | Schedule(horizon_jours).
+  type Action = Alert(Int) | Schedule(Int)
+
+  # Une règle = conjonction de conditions → une action.
+  type Rule = {conds: List[Condition], act: Action}
+
+  # Évaluation d'UNE condition. Match EXHAUSTIF : aucun fallback silencieux.
+  part cond_holds(c: Condition, f: Facts) -> Bool:
+    match c:
+      WearAbove(t) -> yield f.max_wear > t
+      DaysBelow(t) -> yield f.min_days < t
+
+  # Conjonction : toutes les conditions tiennent. Récursion structurale (termine).
+  part all_hold(cs: List[Condition], f: Facts) -> Bool:
+    match cs:
+      []     -> yield true
+      c :: r ->
+        match cond_holds(c, f):
+          true  -> yield all_hold(r, f)
+          false -> yield false
+
+  # Une règle matche ssi toutes ses conditions tiennent.
+  part matches(rl: Rule, f: Facts) -> Bool:
+    yield all_hold(rl.conds, f)
+
+  # Le NOYAU : les actions des règles qui matchent, dans l'ordre de priorité.
+  part evaluate(rules: List[Rule], f: Facts) -> List[Action]:
+    match rules:
+      []      -> yield []
+      rl :: r ->
+        match matches(rl, f):
+          true  -> yield rl.act :: evaluate(r, f)
+          false -> yield evaluate(r, f)
+
+  # Longueur d'une liste d'actions (récursion structurale).
+  part len(xs: List[Action]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield 1 + len(t)
+
+  # Classification de sévérité : un contrat MÉTIER prouvé — la sévérité est
+  # TOUJOURS dans [0,3] quelle que soit l'entrée (classe de bug « hors bornes »
+  # éliminée PAR PREUVE, pas par test).
+  part severity(f: Facts) -> Int:
+    ensures result >= 0
+    ensures result <= 3
+    match f.min_days < 7:
+      true  -> yield 3
+      false ->
+        match f.max_wear > 90:
+          true  -> yield 3
+          false ->
+            match f.max_wear > 75:
+              true  ->
+                match f.min_days < 30:
+                  true  -> yield 2
+                  false -> yield 0
+              false -> yield 0

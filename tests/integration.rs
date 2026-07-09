@@ -6473,6 +6473,35 @@ fn erp_persist_ledger_roundtrip_via_cargo() {
 }
 
 #[test]
+fn aps3d_rules_persist_roundtrip_via_cargo() {
+    // DEC-LLL-066 (vertical APS3D, étape 1) : les règles de maintenance PERSISTÉES en
+    // SQLite, RELUES par une requête, reconstruites en `Rule` TYPÉES et évaluées par le
+    // noyau VÉRIFIÉ (Aps3d.Kernel, importé — zéro duplication). La plomberie DB reste à
+    // la frontière d'effet (`Db`, std/db.lll) ; le domaine est pur et prouvé. All-ones =
+    // 2 règles matchent sur les données rechargées + 3 lignes revenues + severity bornée
+    // = 3. Exercise le `lll_db_runtime` rusqlite(bundled) + l'import inter-modules.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg("examples/aps3d_rules_persist.lll")
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "APS3D rules persistence E2E failed:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(ones, 3, "every APS3D persisted-rule invariant must hold (3 ones expected):\n{stdout}");
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no APS3D persisted-rule invariant may fail at runtime:\n{stdout}"
+    );
+}
+
+#[test]
 fn db_file_persists_across_connections_via_cargo() {
     // REQ-LLL-066 / DEC-LLL-064: the durability proof. Data written through ONE connection
     // is flushed to DISK, so a SECOND connection opened on the same file path reads it back
