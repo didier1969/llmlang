@@ -311,6 +311,23 @@ fn ffi_extern_effect_verifies_and_runs() {
 }
 
 #[test]
+fn extern_result_is_havocd_so_its_value_cannot_be_pinned() {
+    // DEC-LLL-017 soundness FRONTIER (FFI havoc boundary): a foreign `extern` result is
+    // UNCONSTRAINED in the proof — the verifier never assumes the Rust function's behaviour. So
+    // `ensures result == x` over `Cmp.pick(x, y)` (bound to `std::cmp::max`) is NOT provable,
+    // even though `max` sometimes returns `x`: the havoc'd result may be anything. It MUST fail
+    // to compile (an undischarged obligation, DEC-LLL-015) — proving otherwise would let a
+    // caller trust unverified foreign semantics. The dual (a bound `Cmp.pick` still verifies its
+    // OWN havoc'd obligations) is `ffi_extern_effect_verifies_and_runs`, above.
+    let (code, out, _) = check_lll_src(
+        "extern-havoc",
+        "module M:\n\n  effect Cmp:\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part f(x: Int, y: Int) -> Int via Cmp:\n    ensures result == x\n    yield Cmp.pick(x, y)\n",
+    );
+    assert_eq!(code, Some(1), "a havoc'd extern result cannot be pinned to a value: {out}");
+    assert!(out.contains("ensures"), "the failure is the unprovable ensures over the extern: {out}");
+}
+
+#[test]
 fn ffi_import_derives_extern_block_from_rust_signatures() {
     // REQ-LLL-022 tranche 2 (DEC-LLL-033): the LLM-efficient layer — `lll ffi-import`
     // MECHANICALLY derives the `effect … = extern` block from Rust signatures, so
@@ -4940,6 +4957,52 @@ fn suggest_json_contract_and_is_side_effect_free_req086() {
     assert_eq!(chk.status.code(), Some(2), "module stays Incomplete after suggest");
 }
 
+#[test]
+fn suggested_completion_applied_to_text_closes_the_verify_loop_req059_umbrella() {
+    // REQ-LLL-059 UMBRELLA coherence (generate↔verify↔repair): the typed-holes pieces compose
+    // into ONE working loop end-to-end. A holey part (1) `check`s Incomplete (exit 2, the C3
+    // verdict of REQ-059/085); (2) `lll suggest` proposes a Z3-PROVED completion (REQ-086); (3)
+    // applying that completion to the TEXT (the source is the truth — DEC-LLL-020) and
+    // re-`check`ing VERIFIES (exit 0). This pins that a proposed completion is not merely
+    // plausible but actually discharges the contract — the umbrella's reason to exist.
+    let dir = tempdir().join("umbrella-loop");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let holey = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+    let f = dir.join("m.lll");
+    std::fs::write(&f, holey).unwrap();
+
+    // (1) the holey module is Incomplete — never proved, never cached (exit 2).
+    let chk0 = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(chk0.status.code(), Some(2), "holey part is Incomplete");
+
+    // (2) suggest proposes a proved completion for the hole (`acc`, the only one entailing
+    //     `result >= acc`).
+    let sug = std::process::Command::new(bin)
+        .args(["suggest", "--format=json", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let j = String::from_utf8_lossy(&sug.stdout);
+    assert!(j.contains("\"acc\""), "suggest proposes `acc`: {j}");
+
+    // (3) apply the proposed completion to the TEXT and re-check → it VERIFIES (exit 0). The
+    //     loop closes: propose → apply → prove.
+    std::fs::write(&f, holey.replace("yield ?", "yield acc")).unwrap();
+    let chk1 = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(
+        chk1.status.code(),
+        Some(0),
+        "the applied suggestion verifies: {}",
+        String::from_utf8_lossy(&chk1.stdout)
+    );
+}
+
 // ---- explication d'échec : hypothèses suffisantes vérifiées par Z3 (REQ-LLL-088) ----
 
 #[test]
@@ -5223,8 +5286,15 @@ fn forall_verdict_is_cache_stable_req087_t1() {
     let bin = env!("CARGO_BIN_EXE_lll");
     let f = dir.join("c.lll");
     std::fs::write(&f, "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n").unwrap();
+    // Run in the test's OWN dir: the proof cache is CWD-relative (`.lll-cache`), so without an
+    // isolated `current_dir` every parallel `check` shares the crate-root cache and this
+    // cache-hit assertion races (fixed to be deterministic, mirrors the `suggest` E2E test).
     let run = || {
-        let o = std::process::Command::new(bin).args(["check", f.to_str().unwrap()]).output().unwrap();
+        let o = std::process::Command::new(bin)
+            .current_dir(&dir)
+            .args(["check", f.to_str().unwrap()])
+            .output()
+            .unwrap();
         (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
     };
     let (c1, o1) = run();
