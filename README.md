@@ -65,6 +65,20 @@ lll mcp    <f.lll>              read-only MCP server (stdio) over the audit surf
 
 ## Setup
 
+### Recommended: Nix + devenv (reproducible)
+
+One command pins Rust, **Z3 4.16.0**, gcc, and a Postgres service — no vendored
+binary, no version drift (`LLL_Z3` is set automatically):
+
+```
+devenv shell            # enter the pinned environment
+cargo build && cargo test
+lll check examples/demo.lll
+devenv up               # start Postgres (for the APS3D persistence vertical)
+```
+
+### Fallback: system toolchain
+
 Rust ≥1.75 and a Z3 binary (`vendor/z3/bin/z3`, `$LLL_Z3`, or on PATH):
 
 ```

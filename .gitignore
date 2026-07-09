@@ -6,3 +6,8 @@
 
 # Agent worktrees / local tooling state
 .claude/
+
+# devenv / nix — état local ignoré, devenv.lock committé (reproductibilité)
+/.devenv/
+/.devenv.flake.nix
+/.direnv/
