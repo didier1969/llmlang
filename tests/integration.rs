@@ -3431,6 +3431,200 @@ fn cons_pattern_head_that_is_a_constructor_gets_an_actionable_diagnostic_req110(
     );
 }
 
+// ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the
+// `measure`/`ensures` fragment. Positives prove the feature works; the three negative
+// controls (per the pre-landing soundness review) are the real load-bearing checks —
+// they prove the definitional axioms are CONSISTENT (never prove a false goal), that a
+// non-decreasing measure still fails, and that list `len` never conflates with `seq.len`.
+//
+// AXIOM BACKBONE — do NOT delete any positive as "redundant with the ensures test": each
+// of the three definitional axioms has exactly one test that goes `unknown` (fails) if the
+// axiom is dropped, and each positive additionally proves E-matching fires through
+// CONGRUENCE (the goal carries `len(p_xs)` with `p_xs = cons(h,t)` a separate hypothesis,
+// not the literal cons term):
+//   · nil axiom  len(nil)=0        → `repl`'s base case (n==0 ⇒ length([])==0)
+//   · cons axiom len(cons)=1+len(t)→ `inter` measure decrease AND `repl`'s step
+//   · len≥0 axiom                  → `nn` (non-negativity ensures)
+// If E-matching ever regresses these go `unknown` and catch it.
+
+#[test]
+fn list_length_measure_proves_termination_req101() {
+    // POSITIVE (measure): NON-structural recursion (each call fixes one argument) that only
+    // terminates by `measure length(xs) + length(ys)`. The decrease uses the `len` cons
+    // axiom (len(cons h t) = 1 + len(t)) — no induction, E-matched.
+    let src = r#"module M:
+
+  part inter(xs: List[Int], ys: List[Int]) -> Int:
+    measure length(xs) + length(ys)
+    match xs:
+      [] ->
+        match ys:
+          []      -> yield 0
+          b :: yt -> yield b + inter(xs, yt)
+      a :: xt -> yield a + inter(xt, ys)
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list-length measure must prove termination: {:?}", failures(&report));
+}
+
+#[test]
+fn list_length_ensures_on_result_and_non_negativity_verify_req101() {
+    // POSITIVE (ensures): the exact length of a constructed list, AND non-negativity — the
+    // latter exercises the `len >= 0` axiom, the former the cons axiom across the recursive
+    // call's assumed ensures.
+    let exact = r#"module M:
+
+  part repl(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    ensures length(result) == n
+    match n:
+      0 -> yield []
+      _ -> yield 0 :: repl(n - 1)
+"#;
+    let nonneg = r#"module M:
+
+  part nn(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    ensures length(result) >= 0
+    match n:
+      0 -> yield []
+      _ -> yield 0 :: nn(n - 1)
+"#;
+    assert!(verify_src(exact).ok(), "exact list-length ensures must verify");
+    assert!(verify_src(nonneg).ok(), "list-length non-negativity ensures must verify");
+}
+
+#[test]
+fn list_length_requires_propagates_across_call_site_req101() {
+    // POSITIVE (cross-part): a callee `requires length(xs) == 3` is discharged at the call
+    // site using the producer's `ensures length(result) == n` — list `len` flows through the
+    // havoc'd result and the argument binding, well-sorted, across parts.
+    let src = r#"module M:
+
+  part repl(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    ensures length(result) == n
+    match n:
+      0 -> yield []
+      _ -> yield 0 :: repl(n - 1)
+
+  part needsLen(xs: List[Int]) -> Int:
+    requires length(xs) == 3
+    ensures result == 7
+    yield 7
+
+  part driver() -> Int:
+    ensures result == 7
+    yield needsLen(repl(3))
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list-length requires must propagate across call sites: {:?}", failures(&report));
+}
+
+#[test]
+fn list_length_false_ensures_is_rejected_req101() {
+    // CONTROL 1 (consistency): a genuinely FALSE list-length ensures must be REJECTED with
+    // the axioms live. If the definitional axioms were inconsistent they would prove
+    // everything (including this), so its rejection is the "axioms didn't explode" check.
+    let src = r#"module M:
+
+  part bad(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    ensures length(result) == n + 1
+    match n:
+      0 -> yield []
+      _ -> yield 0 :: bad(n - 1)
+"#;
+    assert!(!verify_src(src).ok(), "a false list-length ensures must be rejected (axiom consistency)");
+}
+
+#[test]
+fn list_length_non_decreasing_measure_is_rejected_req101() {
+    // CONTROL 2 (bogus decrease): `measure length(xs)` while recursing on `xs` UNCHANGED —
+    // the measure does not decrease, so termination must FAIL. If the axioms let Z3 "prove"
+    // a fake decrease, the termination guarantee would collapse silently.
+    let src = r#"module M:
+
+  part loopy(xs: List[Int]) -> Int:
+    measure length(xs)
+    match xs:
+      []     -> yield 0
+      h :: t -> yield loopy(xs)
+"#;
+    assert!(!verify_src(src).ok(), "a non-decreasing list-length measure must be rejected");
+}
+
+#[test]
+fn list_length_and_array_length_stay_sort_distinct_req101() {
+    // CONTROL 3 (sort hygiene): a List `length` and an Array `length` in the SAME contract.
+    // The list lowers to the abstract `len_Int`, the array to native `seq.len`; if they were
+    // conflated, the list term would be an ill-sorted `(seq.len (Lst …))` and Z3 would reject
+    // it. Proving therefore confirms the two encodings stay distinct and well-sorted.
+    let src = r#"module M:
+
+  part hygiene(xs: List[Int], a: Array[Int]) -> Int:
+    requires length(xs) == 5
+    requires length(a) == 5
+    ensures result == 5
+    yield length(a)
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list len and array len must coexist well-sorted: {:?}", failures(&report));
+}
+
+#[test]
+fn list_length_coexists_with_bounded_forall_and_annotates_terminal_nil_req101_req113() {
+    // COMBINED (closes the pre-landing review's open loop): a bounded `forall`-over-array
+    // (REQ-087, ELIMINATED at the contract boundary — never asserted) and a list `length`
+    // (REQ-101, whose definitional `len` axioms ARE the system's first asserted `forall`)
+    // in the SAME part. Two independent obligations: `get(a,0) > 0` rides the forall, and
+    // `length(result) >= 0` rides the `len >= 0` axiom. Proving confirms the asserted list
+    // axioms do NOT interfere with the forall's fresh-const elimination (consistent axioms
+    // cannot corrupt a consistent context — the interaction can only cost completeness).
+    //
+    // It also pins REQ-LLL-113: the result `0 :: []` has a TERMINAL bare `nil`, which is
+    // sort-ambiguous for the parametric `Lst` datatype. Before the fix, `(len (cons 0 nil))`
+    // made Z3 report `unknown constant nil` and REJECT this valid part (false rejection,
+    // fail-closed). The fix annotates the terminal `(as nil (Lst Int))` from the head sort.
+    let src = r#"module M:
+
+  part combo(a: Array[Int]) -> List[Int]:
+    requires length(a) > 0
+    requires forall i in 0 .. length(a): get(a, i) > 0
+    ensures get(a, 0) > 0
+    ensures length(result) >= 0
+    yield 0 :: []
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list-len axioms must coexist with a bounded array forall and a terminal nil: {:?}", failures(&report));
+}
+
+#[test]
+fn cons_with_terminal_nil_literal_under_length_is_well_sorted_req113() {
+    // REQ-LLL-113 regression (minimal): `yield 0 :: []` (and the `[1]` literal form) with an
+    // `ensures length(result) == 1`. The terminal `nil` must be sort-annotated so Z3 does not
+    // choke on `(len (cons 0 nil))` with "unknown constant nil". Both surface spellings — the
+    // cons `0 :: []` and the list literal `[1]` — exercise the two fixed lowering sites.
+    let via_cons = r#"module M:
+
+  part one() -> List[Int]:
+    ensures length(result) == 1
+    yield 0 :: []
+"#;
+    let via_literal = r#"module M:
+
+  part one() -> List[Int]:
+    ensures length(result) == 1
+    yield [1]
+"#;
+    assert!(verify_src(via_cons).ok(), "`0 :: []` under length must be well-sorted (cons site)");
+    assert!(verify_src(via_literal).ok(), "`[1]` under length must be well-sorted (list-literal site)");
+}
+
 #[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference

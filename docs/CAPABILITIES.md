@@ -42,6 +42,7 @@ Test names are `tests/integration.rs` functions unless prefixed `lib:`
 | Contracts (`requires`/`ensures`), false-ensures rejection with counter-model | `gcd_fully_verifies`, `false_ensures_is_rejected_with_model` | `demo.lll` |
 | Exhaustive `match`, division safety (Euclidean, non-zero divisor) | `non_exhaustive_match_is_rejected`, `unguarded_division_is_rejected`, `guarded_division_verifies`, `lib:opsem::tests::only_div_mod_require_nonzero_divisor` | `isqrt_fast.lll` |
 | Termination (`measure` / structural list recursion) | `gcd_fully_verifies`, `forall_ensures_over_array_proves_by_fresh_const_req087_t1` | `demo.lll` |
+| **List length in contracts** (`length(xs)` in `measure`/`requires`/`ensures`; abstract axiomatized `len`, cross-part propagation, sort-distinct from array `seq.len`, false-ensures/bogus-decrease rejected) — REQ-LLL-101, amends `DEC-LLL-017` | `list_length_measure_proves_termination_req101`, `list_length_ensures_on_result_and_non_negativity_verify_req101`, `list_length_requires_propagates_across_call_site_req101`, `list_length_false_ensures_is_rejected_req101`, `list_length_non_decreasing_measure_is_rejected_req101`, `list_length_and_array_length_stay_sort_distinct_req101` | — |
 | Hash identity (Blake3, α-normalized) + hash-preserving `rename` | `hashing_is_deterministic`, `alpha_equivalent_defs_share_hash`, `rename_preserves_hash_and_utf8`, `cross_file_rename_repoints_call_sites_and_preserves_identity` | — |
 | Incremental proofs (contract-tracked cache) | `callers_hash_is_rename_invariant_but_proof_tracks_contracts`, `forall_verdict_is_cache_stable_req087_t1` | — |
 | Bounded `forall` (proved by fresh-const, unsound directions rejected) | `forall_ensures_over_array_proves_by_fresh_const_req087_t1`, `forall_false_for_some_index_is_rejected_req087_t1`, `forall_consumption_keeps_the_range_guard_req087_t1` | — |
@@ -94,6 +95,12 @@ operator/external input**, not on unwritten engineering (`CPT-LLL-012`, 2026-07-
 
 ## v1 restrictions (documented, not hidden)
 
-Int/Bool/List[Int]/Array[Int] + user & parametric ADTs; `measure` over Int params;
-no calls inside contracts (restricted decidable fragment, `DEC-LLL-017`); overflow is
+Int/Bool/List[Int]/Array[Int] + user & parametric ADTs; contracts (`requires`/
+`ensures`/`measure`) admit `length(...)` on lists and arrays but no other calls
+(`DEC-LLL-017`, amendé REQ-LLL-101). Le fragment reste décidable **sauf** quand une
+longueur de liste est employée : elle abaisse vers une fonction abstraite `len`
+axiomatisée (`len(nil)=0`, `len(cons)=1+len(tail)`, `len≥0`) — premiers quantificateurs
+du système → fragment **semi-décidable, CONTENU** aux seuls scripts list-length et
+**fail-closed** (un but falsifiable revient `unknown`, donc rejeté sans contre-modèle ;
+les scripts sans liste restent quantifier-free avec contre-modèles). Overflow is
 fail-stop at runtime, not statically excluded. See `README.md` for the full list.

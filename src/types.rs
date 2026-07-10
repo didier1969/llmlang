@@ -2582,24 +2582,46 @@ fn check_contracts(
                 part.name
             ));
         }
-        // v1: measure over Int params only (keeps SMT fragment free of recursive defs)
-        let mut bad = None;
-        m.walk(&mut |x| {
-            if let Expr::Var(v) = x {
-                if matches!(params.get(v), Some(Ty::List(_))) && bad.is_none() {
-                    bad = Some(v.clone());
-                }
-            }
-        });
-        if let Some(v) = bad {
-            return Err(format!(
-                "part `{}`: measure may not mention List parameter `{v}` in v1 \
-                 (list recursion must be structural)",
-                part.name
-            ));
-        }
+        // REQ-LLL-101 (DEC-LLL-017 amendment): a measure component is an Int expression
+        // over parameters, where a List parameter may appear ONLY as the argument of
+        // `length(...)` — which lowers to the abstract, axiom-constrained `len` (vc.rs).
+        // A bare List elsewhere is still rejected (it is not an Int and cannot decrease).
+        measure_list_only_under_length(m, &params)
+            .map_err(|e| format!("part `{}` measure: {e}", part.name))?;
     }
     Ok(())
+}
+
+/// REQ-LLL-101 (DEC-LLL-017 amendment): a `measure` component may reference a `List`
+/// parameter ONLY as the direct argument of `length(...)`. A bare list anywhere else is
+/// rejected — it is not an `Int` and carries no decreasing measure. This is defense in
+/// depth: the Int-typing of the measure plus `no_calls` already force any list to sit
+/// under a spec term, and `length` is the only list→Int spec term, but an explicit,
+/// well-messaged guard keeps the soundness-relevant boundary legible.
+fn measure_list_only_under_length(e: &Expr, params: &HashMap<String, Ty>) -> Result<(), String> {
+    match e {
+        // `length(<list-param>)` is the admitted use — do not flag the direct list arg,
+        // but still recurse into a non-trivial argument to catch a deeper illegal list.
+        Expr::Call(n, args) if n == "length" && args.len() == 1 => match &args[0] {
+            Expr::Var(v) if matches!(params.get(v), Some(Ty::List(_))) => Ok(()),
+            other => measure_list_only_under_length(other, params),
+        },
+        Expr::Var(v) if matches!(params.get(v), Some(Ty::List(_))) => Err(format!(
+            "list parameter `{v}` may appear only inside `length(...)` (REQ-LLL-101); \
+             a bare list is not an Int measure"
+        )),
+        Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
+            measure_list_only_under_length(a, params)?;
+            measure_list_only_under_length(b, params)
+        }
+        Expr::Call(_, args) | Expr::ListLit(args) | Expr::Tuple(args) => {
+            for a in args {
+                measure_list_only_under_length(a, params)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Pure expression typing over a fixed variable environment (contracts).
@@ -2866,10 +2888,14 @@ fn type_of_pure(
                 if args.len() != 1 {
                     return Err("`length` takes 1 argument".into());
                 }
-                if !matches!(type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)?, Ty::Array(_)) {
-                    return Err("`length` needs an Array".into());
+                // REQ-LLL-101 (DEC-LLL-017 amendment): `length` is admitted on a `List`
+                // as well as an `Array`. On a cons-list it lowers to an ABSTRACT `len`
+                // uninterpreted function constrained by definitional axioms (vc.rs); on a
+                // Seq-backed array it stays the native `seq.len`.
+                match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
+                    Ty::Array(_) | Ty::List(_) => Ty::Int,
+                    _ => return Err("`length` needs a List or Array".into()),
                 }
-                Ty::Int
             }
             "get" => {
                 if args.len() != 2 {

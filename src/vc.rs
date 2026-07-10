@@ -1181,6 +1181,15 @@ impl<'a> Emit<'a> {
     /// never a silent obligation skip (DEC-LLL-015/017).
     fn sort_of(&self, e: &Expr, env: &HashMap<String, String>) -> Option<String> {
         match e {
+            // `result` needs the sort of the return whose ensures we are translating so
+            // `length(result)` on a `List` dispatches to the abstract `len` (REQ-LLL-101).
+            // At a CALL SITE the callee's `result` is bound in `env` to the havoc'd result
+            // term (its sort recorded there), so consult `env` FIRST; only the part's OWN
+            // ensures leaves `result` unbound, where the part's declared return sort applies.
+            Expr::Var(n) if n == "result" => env
+                .get(n)
+                .and_then(|term| self.sorts.get(term).cloned())
+                .or_else(|| Some(smt_ty(&self.part.ret))),
             Expr::IntLit(_) => Some(smt_ty(&Ty::Int)),
             Expr::RatLit(..) => Some(smt_ty(&Ty::Rational)),
             Expr::BoolLit(_) => Some(smt_ty(&Ty::Bool)),
@@ -1543,7 +1552,16 @@ impl<'a> Emit<'a> {
                         self.sorts.insert(term.clone(), smt_ty(t));
                         term
                     }
-                    _ => "nil".to_string(),
+                    // No expected list type: recover the element sort from the first item so
+                    // the terminal nil is annotated `(as nil (Lst E))`. A bare `nil` is
+                    // sort-ambiguous for the parametric `Lst` datatype — Z3 rejects it as an
+                    // "unknown constant" once `(cons e … nil)` lands inside a `len`
+                    // application (REQ-LLL-113 under REQ-LLL-101). No inferable sort → bare
+                    // `nil` (the pre-existing behaviour, unchanged; strictly an improvement).
+                    _ => match items.first().and_then(|e| self.sort_of(e, env)) {
+                        Some(es) => format!("(as nil (Lst {es}))"),
+                        None => "nil".to_string(),
+                    },
                 };
                 for i in items.iter().rev() {
                     let it = self.tr(i, env, None)?;
@@ -1554,6 +1572,16 @@ impl<'a> Emit<'a> {
             Expr::Cons(h, t) => {
                 let hh = self.tr(h, env, None)?;
                 let tt = self.tr(t, env, None)?;
+                // An EMPTY tail (`h :: []`) translates to a bare `nil` — sort-ambiguous for
+                // the parametric `Lst` datatype (the ListLit arm cannot infer a sort from an
+                // empty literal). Annotate it from the head's sort so `(cons hd nil)` is
+                // well-sorted inside a `len` application (REQ-LLL-113 under REQ-LLL-101).
+                // Nested `h :: g :: []` is handled by recursion: the inner cons annotates its
+                // own terminal first, so the outer `tt` is never the bare literal.
+                let tt = match (tt.as_str(), self.sort_of(h, env)) {
+                    ("nil", Some(hs)) => format!("(as nil (Lst {hs}))"),
+                    _ => tt,
+                };
                 format!("(cons {hh} {tt})")
             }
             Expr::Tuple(items) => {
@@ -1774,7 +1802,28 @@ impl<'a> Emit<'a> {
                     }
                     "length" => {
                         let a = self.tr(&args[0], env, None)?;
-                        format!("(seq.len {a})")
+                        // REQ-LLL-101 (DEC-LLL-017 amendment): dispatch on the argument's
+                        // STATIC sort so a cons-list `(Lst E)` NEVER shares Z3's `seq.len`
+                        // (that is control #3, sort hygiene). ONLY a positively-identified
+                        // `(Lst E)` list uses the abstract, axiom-backed `len_<E>`; every
+                        // other case — a Seq-backed array, OR a sort `sort_of` cannot pin
+                        // down — keeps the native `seq.len`, EXACTLY the pre-REQ-101 behavior
+                        // (backward compatible). A List that slipped through unrecognized
+                        // would emit an ill-sorted `(seq.len …)` on a `(Lst …)` term → Z3
+                        // rejects LOUD, never a silent unsoundness.
+                        match self.sort_of(&args[0], env) {
+                            Some(s) if s.starts_with("(Lst ") => {
+                                let elem = lst_elem_sort(&s).ok_or_else(|| {
+                                    format!(
+                                        "part `{}`: cannot recover the element sort of `{s}` \
+                                         for list length",
+                                        self.part.name
+                                    )
+                                })?;
+                                format!("({} {a})", list_len_fn(&elem))
+                            }
+                            _ => format!("(seq.len {a})"),
+                        }
                     }
                     "get" => {
                         let a = self.tr(&args[0], env, None)?;
@@ -2379,6 +2428,86 @@ fn pattern_cond(
 const LIST_DECL: &str =
     "(declare-datatypes ((Lst 1)) ((par (T) ((nil) (cons (head T) (tail (Lst T)))))))";
 
+/// REQ-LLL-101 (DEC-LLL-017 amendment). Turn an SMT element-sort string into a valid,
+/// stable SMT identifier suffix so the abstract list-length function has a name unique
+/// per element sort — `Int` → `Int`, `(Lst Int)` → `Lst_Int`, `(Tup2 Int Int)` →
+/// `Tup2_Int_Int`. Collisions (never expected for real sorts) would surface as a Z3
+/// re-declaration error, i.e. LOUD, never silent unsoundness.
+fn mangle_sort(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_us = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+            prev_us = false;
+        } else if !prev_us {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// The abstract list-length function name for a given element sort (REQ-LLL-101).
+fn list_len_fn(elem: &str) -> String {
+    format!("len_{}", mangle_sort(elem))
+}
+
+/// Recover the element sort `E` from a list sort string `(Lst E)` (REQ-LLL-101). `E`
+/// may itself be compound (`(Lst (Lst Int))` → `(Lst Int)`).
+fn lst_elem_sort(s: &str) -> Option<String> {
+    let inner = s.strip_prefix("(Lst ")?.strip_suffix(')')?;
+    Some(inner.trim().to_string())
+}
+
+/// Collect every list element sort `E` mentioned as `(Lst E)` in an SMT fragment
+/// (REQ-LLL-101), capturing a compound `E` by paren-balance. Over-collection is
+/// harmless: the preamble only emits a `len` for a sort whose `len_<E>` is referenced.
+fn collect_list_elem_sorts(text: &str, out: &mut std::collections::BTreeSet<String>) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = text[i..].find("(Lst ") {
+        let start = i + pos + 5; // first char after "(Lst "
+        let mut depth = 1i32; // inside the "(Lst" paren
+        let mut j = start;
+        while j < bytes.len() && depth > 0 {
+            match bytes[j] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                break;
+            }
+            j += 1;
+        }
+        if j <= bytes.len() {
+            let elem = text[start..j].trim().to_string();
+            if !elem.is_empty() {
+                out.insert(elem);
+            }
+        }
+        i = start;
+    }
+}
+
+/// The abstract list-length declaration and its DEFINITIONAL axioms for one element
+/// sort (REQ-LLL-101, DEC-LLL-017 amendment). Conservative by construction (they match
+/// the runtime length exactly), so they add NO power to prove a false goal; the two
+/// quantified axioms are E-matched (`:pattern`) to stay in a tractable fragment and
+/// expose `len(tail) < len(cons h tail)` WITHOUT induction. Non-negativity carries the
+/// nat-ness a `measure` / a `length(result) >= 0` fact needs.
+fn list_len_decl_and_axioms(elem: &str, fname: &str) -> String {
+    format!(
+        "(declare-fun {fname} ((Lst {elem})) Int)\n\
+         (assert (= ({fname} (as nil (Lst {elem}))) 0))\n\
+         (assert (forall ((h {elem}) (t (Lst {elem}))) \
+           (! (= ({fname} (cons h t)) (+ 1 ({fname} t))) :pattern (({fname} (cons h t))))))\n\
+         (assert (forall ((xs (Lst {elem}))) \
+           (! (>= ({fname} xs) 0) :pattern (({fname} xs)))))"
+    )
+}
+
 // Parametric option datatype (REQ-LLL-037, DEC-LLL-043): a map is `(Array K
 // (Maybe V))`, so an absent key reads as `none` and a present one as `(some v)`.
 // Self-contained (references only its own param) — ordering vs Lst/user datatypes
@@ -2702,6 +2831,30 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     if uses_list || dt_decls.iter().any(|d| d.contains("(Lst")) {
         s.push_str(LIST_DECL);
         s.push('\n');
+        // REQ-LLL-101 (DEC-LLL-017 amendment): the abstract list-length `len_<E>` per
+        // element sort ACTUALLY used with `length` on a cons-list, with its definitional
+        // axioms. Emitted globally (definitional truths, asserted once) right after the
+        // datatype it depends on. Only sorts whose `len_<E>` is referenced are emitted.
+        let mut elems: std::collections::BTreeSet<String> = Default::default();
+        for o in obls {
+            for text in o.decls.iter().chain(o.hyps.iter()).chain(std::iter::once(&o.goal)) {
+                collect_list_elem_sorts(text, &mut elems);
+            }
+        }
+        for elem in &elems {
+            let fname = list_len_fn(elem);
+            let referenced = obls.iter().any(|o| {
+                o.decls
+                    .iter()
+                    .chain(o.hyps.iter())
+                    .chain(std::iter::once(&o.goal))
+                    .any(|t| t.contains(&format!("({fname} ")))
+            });
+            if referenced {
+                s.push_str(&list_len_decl_and_axioms(elem, &fname));
+                s.push('\n');
+            }
+        }
     }
     // the parametric Maybe wraps a map's values so an absent key is `none` and map
     // equality stays extensional (REQ-LLL-037, DEC-LLL-043). Self-contained.
