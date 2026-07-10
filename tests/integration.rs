@@ -6673,6 +6673,113 @@ fn aps3d_rules_persist_pg_roundtrip_gated() {
 }
 
 #[test]
+fn aps3d_rules_multi_checks_and_wires() {
+    // REQ-LLL-094 (Voie C, tier « check », SANS Postgres) : le démo « deux backends vivants »
+    // (`import "../std/db_multi.lll"`) passe `lll check`. Z3 vérifie le MÊME domaine pur, et le
+    // check exerce le CÂBLAGE de la surface unifiée : la whitelist des chemins
+    // `lll_db_multi_runtime::…` (types.rs) ET la propagation transitive des DEUX depends
+    // (rusqlite + postgres) portés par le backend (l'exemple n'a AUCUNE ligne depends). C'est le
+    // garde-fou anti-pourriture-silencieuse du runtime unifié sans exiger de service live.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("check")
+        .arg("--no-cache")
+        .arg("examples/aps3d_rules_multi.lll")
+        .current_dir(repo)
+        .output()
+        .expect("run lll check");
+    assert!(
+        out.status.success(),
+        "multi-backend example must check (Z3 domain + db_multi whitelist + both transitive depends):\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn db_multi_runtime_requires_both_depends() {
+    // REQ-LLL-094 : le pendant fail-loud (types.rs). Le runtime UNIFIÉ porte les DEUX backends,
+    // donc un op qui y bind sans `depends rusqlite` OU sans `depends postgres` doit échouer AU
+    // CHECK (DEC-LLL-015) — pas plus tard par une erreur rustc au fond du code émis. Effet
+    // déclaré INLINE (sans importer std/db_multi.lll qui PORTE les deux deps) pour isoler chaque
+    // absence. C'est le coût assumé de la sélection runtime : les deux crates sont EXIGÉS.
+    let base_op =
+        "  effect Db:\n    open(List[Int]) -> Int = extern \"lll_db_multi_runtime::open\" as (str) -> i64\n\n  part main() -> Int via Db:\n    yield Db.open(\"sqlite::memory:\")\n";
+    let cases = [
+        // (préambule depends présent, fragment attendu dans l'erreur)
+        ("depends postgres \"0.19.10\"\n\n", "depends rusqlite"),
+        ("depends rusqlite \"0.39.0\" features \"bundled\"\n\n", "depends postgres"),
+    ];
+    let dir = tempdir();
+    for (i, (deps, want)) in cases.iter().enumerate() {
+        let src = format!("{deps}module MultiNoDep:\n\n{base_op}");
+        let f = dir.join(format!("multi_no_dep_{i}.lll"));
+        std::fs::write(&f, &src).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .arg("check")
+            .arg("--no-cache")
+            .arg(&f)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("run lll check");
+        assert!(
+            !out.status.success(),
+            "a lll_db_multi_runtime op missing `{want}` must be a compile error"
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(want),
+            "expected a `{want}` enforcement error, got:\nstderr={err}\nstdout={}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+#[test]
+fn aps3d_rules_multi_two_live_backends_gated() {
+    // REQ-LLL-094 (tier « live », GATÉ sur `LLL_PG_URL`) : la PREUVE de la capacité que le
+    // module-swap ne peut PAS donner — DEUX backends VIVANTS dans un MÊME programme. L'exemple
+    // ouvre un handle SQLite (`sqlite::memory:`) ET un handle Postgres (db `aps3d_rules_multi`),
+    // écrit une règle DISTINCTE dans chacun (seuil 90 vs 75), relit de chacun, et prouve
+    // l'isolation. All-ones (4) = SQLite vivant + Postgres vivant EN MÊME TEMPS + chacun rend SES
+    // propres données. Skippé par défaut (pas de PG en CI) ; pour l'exécuter : `devenv up` (crée
+    // aussi la base `aps3d_rules_multi`) puis `LLL_PG_URL=1 cargo test`.
+    //
+    // GAP CI CONNU (identique au roundtrip PG) : le Rust émis par `emit_db_multi_runtime` n'est
+    // compilé QUE par ce test gaté (`lll check` ne fait pas de codegen). Exécuter ce test lors
+    // d'un changement du runtime unifié.
+    if std::env::var("LLL_PG_URL").is_err() {
+        eprintln!(
+            "aps3d_rules_multi_two_live_backends_gated: SKIP (set LLL_PG_URL after `devenv up` to \
+             run the two-live-backends proof)"
+        );
+        return;
+    }
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg("examples/aps3d_rules_multi.lll")
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "two-live-backends E2E failed:\nstdout={stdout}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ones = stdout.lines().filter(|l| l.trim() == "1").count();
+    assert_eq!(
+        ones, 4,
+        "both backends must be live in one program with isolated data (4 ones):\n{stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l.trim() == "0"),
+        "no two-live-backends invariant may fail:\n{stdout}"
+    );
+}
+
+#[test]
 fn db_file_persists_across_connections_via_cargo() {
     // REQ-LLL-066 / DEC-LLL-064: the durability proof. Data written through ONE connection
     // is flushed to DISK, so a SECOND connection opened on the same file path reads it back

@@ -37,7 +37,10 @@
   #   (ops/types de l'effet `Db`) est identique à std/db.lll — seule la config diffère.
   services.postgres = {
     enable = true;
-    initialDatabases = [ { name = "aps3d_rules"; } ];
+    # `aps3d_rules` : le vertical single-backend (aps3d_rules_persist_pg.lll).
+    # `aps3d_rules_multi` : la base Postgres du démo « deux backends vivants » (Voie C,
+    #   aps3d_rules_multi.lll / REQ-LLL-094) — isolée pour ne pas croiser le single-backend.
+    initialDatabases = [ { name = "aps3d_rules"; } { name = "aps3d_rules_multi"; } ];
     initialScript = "CREATE ROLE aps3d WITH LOGIN SUPERUSER;";
     listen_addresses = "127.0.0.1";
     port = 5442;

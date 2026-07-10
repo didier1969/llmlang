@@ -1,0 +1,36 @@
+import "db_json.lll"
+
+depends rusqlite "0.39.0" features "bundled"
+depends postgres "0.19.10"
+
+module Std.DbMulti:
+
+  # REQ-LLL-094 (Voie C, réponse au « oui » de DEC-LLL-067) : le backend UNIFIÉ. Là où
+  # std/db.lll et std/db_pg.lll choisissent le backend au BUILD (par la ligne d'import — les
+  # deux `effect Db` sont mutuellement exclusifs via la garde `duplicate effect`), CE module
+  # bind aux ops d'un runtime built-in UNIFIÉ (src/codegen.rs `emit_db_multi_runtime`) dont le
+  # handle est un `enum { Sqlite | Postgres }`. Le backend est choisi au RUNTIME par le schéma
+  # de la conn-string passée à `open` :
+  #   - `Db.open("sqlite::memory:")`        → SQLite en mémoire (le reste après `sqlite:` est le
+  #     chemin rusqlite : `:memory:` ou un fichier),
+  #   - `Db.open("host=… dbname=…")`        → Postgres (toute chaîne SANS préfixe `sqlite:`).
+  # Deux `open` de schémas DIFFÉRENTS = DEUX backends VIVANTS dans un même programme — la
+  # capacité que le module-swap ne peut PAS donner (un seul `effect Db` à la fois).
+  #
+  # Le CONTRAT est identique à db.lll/db_pg.lll : mêmes noms d'ops, mêmes signatures, même
+  # `Json` ADT (importé de db_json.lll), mêmes destructeurs purs — donc le domaine (pur, prouvé)
+  # est inchangé. Soundness inchangée : tout est derrière la frontière havoc (DEC-LLL-017), Z3
+  # ne raisonne jamais sur le handle foreign, le système de types n'est pas touché.
+  #
+  # Coût ASSUMÉ de la sélection au runtime : les DEUX crates (rusqlite + postgres) sont toujours
+  # liés — les deux `depends` ci-dessus sont EXIGÉS au check (types.rs, REQ-LLL-094). C'est le
+  # prix d'avoir les deux backends disponibles au runtime, là où un module mono-backend n'en lie
+  # qu'un. Choisir ce module = payer ce prix EN ÉCHANGE de la sélection runtime / multi-backend.
+
+  effect Db:
+    open(List[Int]) -> Int = extern "lll_db_multi_runtime::open" as (str) -> i64
+    exec(Int, List[Int]) -> Int = extern "lll_db_multi_runtime::exec" as (i64, str) -> i64
+    query(Int, List[Int]) -> Json = extern "lll_db_multi_runtime::query" as (i64, str) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum, Array -> JArr ]
+    begin(Int) -> Int = extern "lll_db_multi_runtime::begin"
+    commit(Int) -> Int = extern "lll_db_multi_runtime::commit"
+    rollback(Int) -> Int = extern "lll_db_multi_runtime::rollback"

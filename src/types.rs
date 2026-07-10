@@ -521,6 +521,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // `lll_actor_runtime` module.
     let mut uses_actor_runtime = false;
     let mut uses_pg_runtime = false;
+    let mut uses_db_multi_runtime = false;
     for ed in &module.effects {
         if !effect_names.insert(ed.name.clone()) {
             return Err(format!("duplicate effect `{}`", ed.name));
@@ -549,6 +550,9 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 }
                 if path.starts_with("lll_pg_runtime::") {
                     uses_pg_runtime = true;
+                }
+                if path.starts_with("lll_db_multi_runtime::") {
+                    uses_db_multi_runtime = true;
                 }
             }
             // foreign-signature guard (REQ-LLL-042, DEC-LLL-045): an `as (T,…) -> R`
@@ -819,6 +823,24 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             "an `lll_pg_runtime` extern op is used but no `depends postgres \"<version>\"` is \
              declared — the built-in Postgres runtime needs a real postgres dependency \
              (DEC-LLL-066 étape 2)"
+                .to_string(),
+        );
+    }
+    // REQ-LLL-094 (Voie C): the emitted `lll_db_multi_runtime` glue (`emit_db_multi_runtime`,
+    // codegen.rs) carries BOTH backends, so it `use`s `rusqlite` AND `postgres`. Both must be
+    // declared or the generated module fails to link — catch it here (DEC-LLL-015 fail-stop).
+    // This is the assumed cost of runtime selection: a multi-backend program links both crates.
+    if uses_db_multi_runtime && !module.deps.iter().any(|d| d.crate_name == "rusqlite") {
+        return Err(
+            "an `lll_db_multi_runtime` extern op is used but no `depends rusqlite \"<version>\"` \
+             is declared — the unified multi-backend runtime links BOTH backends (REQ-LLL-094)"
+                .to_string(),
+        );
+    }
+    if uses_db_multi_runtime && !module.deps.iter().any(|d| d.crate_name == "postgres") {
+        return Err(
+            "an `lll_db_multi_runtime` extern op is used but no `depends postgres \"<version>\"` \
+             is declared — the unified multi-backend runtime links BOTH backends (REQ-LLL-094)"
                 .to_string(),
         );
     }
@@ -1681,6 +1703,26 @@ fn validate_extern_path(
         return Err(format!(
             "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_pg_runtime` path \
              — only {PG_RUNTIME_PATHS:?} are built in (DEC-LLL-066 étape 2)"
+        ));
+    }
+    // REQ-LLL-094 (Voie C) : the unified multi-backend runtime (src/codegen.rs
+    // `emit_db_multi_runtime`) — the SAME op set again, so its `effect Db` signature is
+    // interchangeable with db.lll/db_pg.lll. A narrow EXACT list, not an open escape hatch.
+    const DB_MULTI_RUNTIME_PATHS: &[&str] = &[
+        "lll_db_multi_runtime::open",
+        "lll_db_multi_runtime::exec",
+        "lll_db_multi_runtime::query",
+        "lll_db_multi_runtime::begin",
+        "lll_db_multi_runtime::commit",
+        "lll_db_multi_runtime::rollback",
+    ];
+    if root == "lll_db_multi_runtime" {
+        if DB_MULTI_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_db_multi_runtime` \
+             path — only {DB_MULTI_RUNTIME_PATHS:?} are built in (REQ-LLL-094)"
         ));
     }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends

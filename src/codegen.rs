@@ -359,6 +359,167 @@ mod lll_pg_runtime {
     );
 }
 
+/// DEC-LLL-066 / REQ-LLL-094 (Voie C, réponse au « oui » de DEC-LLL-067) : le runtime
+/// UNIFIÉ, émis iff un op bind à `lll_db_multi_runtime::…`. Là où db.lll/db_pg.lll
+/// choisissent le backend au BUILD (par la ligne d'import ; effets `Db` mutuellement
+/// exclusifs via la garde `duplicate effect`), CE runtime porte les DEUX backends en
+/// même temps : le handle est un `enum Backend { Sqlite | Postgres }` et `open` DISPATCHE
+/// sur le schéma de la conn-string. Deux `open` de schémas différents = deux backends
+/// VIVANTS dans un même programme — la capacité que le module-swap ne peut PAS donner.
+/// Soundness INCHANGÉE : c'est du pur runtime derrière la frontière havoc (DEC-LLL-017),
+/// Z3 ne raisonne jamais sur le handle foreign, le système de types n'est pas touché ;
+/// même catégorie qu'`emit_pg_runtime`. Coût assumé : les DEUX crates (rusqlite + postgres)
+/// sont toujours liés (exigés au check, types.rs) — le prix de la sélection au runtime.
+fn emit_db_multi_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_db_multi_runtime {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    // un handle = UN backend vivant, choisi au runtime par le schéma de la conn-string.
+    // Les deux variantes coexistent dans la MÊME table — d'où « deux backends vivants ».
+    enum Backend {
+        Sqlite(rusqlite::Connection),
+        Postgres(postgres::Client),
+    }
+
+    fn table() -> &'static Mutex<HashMap<i64, Backend>> {
+        static T: OnceLock<Mutex<HashMap<i64, Backend>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    static NEXT: AtomicI64 = AtomicI64::new(0);
+
+    // DISPATCH runtime : un préfixe `sqlite:` ouvre SQLite (le reste est le chemin rusqlite —
+    // `:memory:` ou un fichier) ; TOUTE autre chaîne est une conn-string libpq Postgres. Deux
+    // handles de schémas différents = deux backends vivants dans un même programme (impossible
+    // par module-swap : `effect Db` en double = `duplicate effect`). Fail-stop (DEC-LLL-026).
+    pub fn open(conn: &str) -> i64 {
+        let backend = if let Some(path) = conn.strip_prefix("sqlite:") {
+            let c = if path == ":memory:" || path.is_empty() {
+                rusqlite::Connection::open_in_memory()
+            } else {
+                rusqlite::Connection::open(path)
+            }
+            .unwrap_or_else(|e| panic!("lll_db_multi_runtime::open sqlite `{path}`: {e}"));
+            Backend::Sqlite(c)
+        } else {
+            let c = postgres::Client::connect(conn, postgres::NoTls)
+                .unwrap_or_else(|e| panic!("lll_db_multi_runtime::open postgres `{conn}`: {e}"));
+            Backend::Postgres(c)
+        };
+        let h = NEXT.fetch_add(1, Ordering::SeqCst);
+        table().lock().unwrap().insert(h, backend);
+        h
+    }
+
+    // marshalle un `rusqlite::Row`-set en Array de lignes-Array de cellules (schéma INTEGER/
+    // REAL/TEXT/BLOB — même contrat que `lll_db_runtime::query`).
+    fn query_sqlite(conn: &rusqlite::Connection, sql: &str) -> serde_json::Value {
+        let mut stmt = conn.prepare(sql).unwrap_or_else(|e| panic!("lll_db_multi_runtime::query prepare `{sql}`: {e}"));
+        let ncols = stmt.column_count();
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        let mut qrows = stmt.query([]).unwrap_or_else(|e| panic!("lll_db_multi_runtime::query exec `{sql}`: {e}"));
+        while let Some(row) = qrows.next().unwrap_or_else(|e| panic!("lll_db_multi_runtime::query row: {e}")) {
+            let mut cells: Vec<serde_json::Value> = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                let vr = row.get_ref(i).unwrap_or_else(|e| panic!("lll_db_multi_runtime::query cell {i}: {e}"));
+                let jv = match vr {
+                    rusqlite::types::ValueRef::Null => serde_json::Value::Null,
+                    rusqlite::types::ValueRef::Integer(n) => serde_json::Value::Number(n.into()),
+                    rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null),
+                    rusqlite::types::ValueRef::Text(t) => {
+                        serde_json::Value::String(String::from_utf8_lossy(t).into_owned())
+                    }
+                    rusqlite::types::ValueRef::Blob(b) => {
+                        serde_json::Value::String(String::from_utf8_lossy(b).into_owned())
+                    }
+                };
+                cells.push(jv);
+            }
+            rows.push(serde_json::Value::Array(cells));
+        }
+        serde_json::Value::Array(rows)
+    }
+
+    // marshalle un `postgres` result-set — cellules PAR nom de type PG, type non modélisé
+    // fail-stop (surface built-in étroite — même contrat que `lll_pg_runtime::query`).
+    fn query_pg(client: &mut postgres::Client, sql: &str) -> serde_json::Value {
+        let qrows = client.query(sql, &[]).unwrap_or_else(|e| panic!("lll_db_multi_runtime::query `{sql}`: {e}"));
+        let mut rows: Vec<serde_json::Value> = Vec::with_capacity(qrows.len());
+        for row in &qrows {
+            let mut cells: Vec<serde_json::Value> = Vec::with_capacity(row.len());
+            for i in 0..row.len() {
+                let ty = row.columns()[i].type_().name().to_string();
+                let cell_err = |e: postgres::Error| -> ! {
+                    panic!("lll_db_multi_runtime::query cell {i} (`{ty}`): {e}")
+                };
+                let jv = match ty.as_str() {
+                    "int2" => row.try_get::<_, Option<i16>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(|n| serde_json::Value::Number((n as i64).into())).unwrap_or(serde_json::Value::Null),
+                    "int4" => row.try_get::<_, Option<i32>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(|n| serde_json::Value::Number((n as i64).into())).unwrap_or(serde_json::Value::Null),
+                    "int8" => row.try_get::<_, Option<i64>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(|n| serde_json::Value::Number(n.into())).unwrap_or(serde_json::Value::Null),
+                    "float4" => row.try_get::<_, Option<f32>>(i).unwrap_or_else(|e| cell_err(e))
+                        .and_then(|f| serde_json::Number::from_f64(f as f64)).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                    "float8" => row.try_get::<_, Option<f64>>(i).unwrap_or_else(|e| cell_err(e))
+                        .and_then(serde_json::Number::from_f64).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                    "bool" => row.try_get::<_, Option<bool>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null),
+                    "text" | "varchar" | "bpchar" | "name" => row.try_get::<_, Option<String>>(i).unwrap_or_else(|e| cell_err(e))
+                        .map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+                    other => panic!("lll_db_multi_runtime::query: unsupported column type `{other}` (col {i}) — narrow built-in surface (REQ-LLL-094)"),
+                };
+                cells.push(jv);
+            }
+            rows.push(serde_json::Value::Array(cells));
+        }
+        serde_json::Value::Array(rows)
+    }
+
+    // exec/query/txn DISPATCHENT sur la variante du handle — la MÊME signature d'effet `Db`
+    // pilote l'un ou l'autre backend selon le handle passé (donc le schéma d'`open`).
+    pub fn exec(h: i64, sql: &str) -> i64 {
+        let mut g = table().lock().unwrap();
+        match g.get_mut(&h).unwrap_or_else(|| panic!("lll_db_multi_runtime::exec: invalid db handle {h}")) {
+            Backend::Sqlite(c) => {
+                c.execute_batch(sql).unwrap_or_else(|e| panic!("lll_db_multi_runtime::exec `{sql}`: {e}"));
+                c.changes() as i64
+            }
+            Backend::Postgres(c) => {
+                c.batch_execute(sql).unwrap_or_else(|e| panic!("lll_db_multi_runtime::exec `{sql}`: {e}"));
+                0
+            }
+        }
+    }
+
+    pub fn query(h: i64, sql: &str) -> serde_json::Value {
+        let mut g = table().lock().unwrap();
+        match g.get_mut(&h).unwrap_or_else(|| panic!("lll_db_multi_runtime::query: invalid db handle {h}")) {
+            Backend::Sqlite(c) => query_sqlite(c, sql),
+            Backend::Postgres(c) => query_pg(c, sql),
+        }
+    }
+
+    fn txn(h: i64, cmd: &str) -> i64 {
+        let mut g = table().lock().unwrap();
+        match g.get_mut(&h).unwrap_or_else(|| panic!("lll_db_multi_runtime::{cmd}: invalid db handle {h}")) {
+            Backend::Sqlite(c) => { c.execute_batch(cmd).unwrap_or_else(|e| panic!("lll_db_multi_runtime::{cmd}: {e}")); 0 }
+            Backend::Postgres(c) => { c.batch_execute(cmd).unwrap_or_else(|e| panic!("lll_db_multi_runtime::{cmd}: {e}")); 0 }
+        }
+    }
+    pub fn begin(h: i64) -> i64 { txn(h, "BEGIN") }
+    pub fn commit(h: i64) -> i64 { txn(h, "COMMIT") }
+    pub fn rollback(h: i64) -> i64 { txn(h, "ROLLBACK") }
+}
+"#,
+    );
+}
+
 /// The op-anchored typed FFI shim name for a dotted op key `Eff.op` (REQ-LLL-041,
 /// slice 038b): `Eff.op` → `__lll_ffi_Eff_op`. A perform of an `= extern` op lowers
 /// to a call of this uniquely-named adapter, so a boundary signature/arity mismatch
@@ -580,6 +741,11 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // Le checker whitelist les chemins `lll_pg_runtime::…` exacts (types.rs).
     if extern_ops.values().any(|p| p.starts_with("lll_pg_runtime::")) {
         emit_pg_runtime(&mut out);
+    }
+    // REQ-LLL-094 (Voie C) : le runtime UNIFIÉ multi-backend, émis iff un op y bind. Il porte
+    // les deux backends à la fois (handle enum) → sélection au runtime + deux backends vivants.
+    if extern_ops.values().any(|p| p.starts_with("lll_db_multi_runtime::")) {
+        emit_db_multi_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

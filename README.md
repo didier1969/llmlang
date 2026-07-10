@@ -112,6 +112,19 @@ exclusive by construction. See `examples/aps3d_rules_persist.lll` (SQLite) and i
 same three verified facts, over either backend (`devenv up`, then
 `LLL_PG_URL=1 cargo test` runs the live Postgres roundtrip).
 
+**Runtime backend selection — two backends live at once (REQ-LLL-094).** Build-time swap
+is mutually exclusive by design (two `effect Db` = `duplicate effect`). When you need to
+pick the backend *at runtime*, or run *both at once*, `std/db_multi.lll` binds the same
+`effect Db` contract to a unified runtime whose handle is a `{Sqlite | Postgres}` union:
+`Db.open` dispatches on the connection scheme (`sqlite:<path>` → SQLite, any libpq string →
+Postgres). `examples/aps3d_rules_multi.lll` opens a SQLite handle **and** a Postgres handle
+in the *same* program, writes distinct rules to each, reads each back, and proves the data
+stays isolated — the capability module-swap cannot give. This is *DB runtime dispatch*, not
+a general type-system feature: soundness is untouched (it is pure runtime behind the
+DEC-LLL-017 havoc boundary; Z3 never reasons about the foreign handle). The cost of runtime
+selection is that both backend crates are always linked (both `depends` required). Run the
+live two-backends proof with `devenv up`, then `LLL_PG_URL=1 cargo test`.
+
 ## Imports & mutual recursion (wave 3)
 
 `import "relative/path.lll"` merges the imported file's parts into one flat
