@@ -7,6 +7,10 @@ The intent graph (vision, pillars, decisions `DEC-LLL-001..026`) lives in Axon
 SOLL, project code `LLL`. The text is the single source of truth; hashes,
 proof caches and the rationale index are derived artifacts.
 
+**Every capability below is backed by a test or example you can re-run** — see
+[`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for the claim→proof map, the honest
+scorecard, and the gated boundary.
+
 ## v1 kernel — what works today
 
 ```
