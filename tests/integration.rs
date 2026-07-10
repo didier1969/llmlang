@@ -1056,6 +1056,40 @@ fn typeclass_over_effect_phantom_handle_threads_backend_tag() {
 }
 
 #[test]
+fn typeclass_effectful_method_result_is_havoc_not_functional_uf() {
+    // REQ-LLL-095 (le test PORTEUR du traitement vc) : le résultat d'une méthode effectful est
+    // HAVOC par appel, JAMAIS une UF fonctionnelle. La preuve discriminante : une obligation
+    // atteignable UNIQUEMENT si deux appels de `emit` DIFFÈRENT. Sous une UF fonctionnelle
+    // (l'unsoundness qu'on interdit), `emit(w,n) == emit(w,n)` serait prouvablement vrai → la
+    // branche `false` morte → aucune obligation de division → VÉRIFIE. Sous le havoc par appel
+    // correct, les deux appels sont des consts fraîches distinctes → la branche `false` est vive
+    // → l'obligation `n != 0` est INDÉMONTRABLE → la vérification ÉCHOUE. Ce test devient ROUGE
+    // à l'instant où quelqu'un régresse les méthodes effectful vers une UF (le `continue` de
+    // vc.rs qui saute la déclaration d'UF pour une méthode effectful).
+    let src = "module Sound:\n\n  class Logger[h]:\n    emit(h, Int) -> Int via IO\n\n  part bad(w: h, n: Int) -> Int via IO given Logger[h]:\n    match emit(w, n) == emit(w, n):\n      true  -> yield 0\n      false -> yield 10 div n\n";
+    assert!(
+        !verify_src(src).ok(),
+        "an obligation dischargeable ONLY via `emit(x) == emit(x)` must NOT discharge — an \
+         effectful method result is havoc per call, never a functional UF (soundness)"
+    );
+}
+
+#[test]
+fn typeclass_over_effect_wrong_phantom_instance_body_still_rejected() {
+    // REQ-LLL-095 : `unify_left_vars` est plus permissif que l'ancien `got != want` strict — il
+    // ACCEPTE un retour phantom (`Handle[h]`) contre son tag concret. Il ne doit PAS accepter un
+    // vrai mismatch : ici `write` doit rendre `Int` mais le corps rend `true` (Bool). La var libre
+    // de `got` (le slot phantom) peut se lier, mais le slot Bool≠Int reste un rejet.
+    let src = "module T:\n\n  type Console = Console\n  type Handle[h] = Handle(Int)\n\n  class Sink[h]:\n    open(h, Int) -> Handle[h] via IO\n    write(Handle[h], Int) -> Int via IO\n\n  instance Sink[Console]:\n    open = \\(w: Console, c: Int) -> Handle(c)\n    write = \\(hnd: Handle[Console], x: Int) -> true\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a wrong phantom-instance body must still be rejected");
+    assert!(
+        err.contains("has type") && err.contains("requires"),
+        "expected an instance signature-mismatch error, got: {err}"
+    );
+}
+
+#[test]
 fn typeclass_law_over_effectful_method_is_rejected() {
     // REQ-LLL-095 N1 (invariant PORTEUR — miroir du « never assert forall » de REQ-LLL-048) :
     // le résultat d'une méthode effectful est HAVOC (DEC-LLL-017) ; une `law` qui le référence
