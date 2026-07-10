@@ -1,0 +1,25 @@
+module Gen.T18:
+
+  type Console = Console
+  type Silent = Silent
+  type Handle[h] = Handle(Int)
+
+  class Sink[h]:
+    open(h, Int) -> Handle[h] via IO
+    write(Handle[h], Int) -> Int via IO
+
+  instance Sink[Console]:
+    open = \(w: Console, c: Int) -> Handle(c)
+    write = \(hnd: Handle[Console], x: Int) -> IO.print(x)
+
+  instance Sink[Silent]:
+    open = \(w: Silent, c: Int) -> Handle(c)
+    write = \(hnd: Handle[Silent], x: Int) -> x
+
+  part run(w: h, x: Int) -> Int via IO given Sink[h]:
+    let hnd = open(w, 0)
+    yield write(hnd, x)
+
+  part main() -> Int via IO:
+    let a = run(Console, 7)
+    yield run(Silent, 9)

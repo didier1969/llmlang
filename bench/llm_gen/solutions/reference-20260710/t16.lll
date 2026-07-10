@@ -1,0 +1,16 @@
+module Gen.T16:
+
+  part all_pos() -> Array[Int]:
+    ensures length(result) == 3
+    ensures forall i in 0 .. length(result): get(result, i) > 0
+    yield array(1, 2, 3)
+
+  part first7(a: Array[Int]) -> Int:
+    requires length(a) > 0
+    requires exists i in 0 .. 1: get(a, i) == 7
+    ensures result == 7
+    yield get(a, 0)
+
+  part main() -> Int via IO:
+    let xs = all_pos()
+    yield IO.print(get(xs, 0))

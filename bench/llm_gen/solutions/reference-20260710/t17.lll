@@ -1,0 +1,16 @@
+module Gen.T17:
+
+  class Eq[a]:
+    eq(a, a) -> Bool
+    law reflexive(x: a): eq(x, x)
+
+  instance Eq[Int]:
+    eq = \(x: Int, y: Int) -> x == y
+
+  part same(x: a, y: a) -> Bool given Eq[a]:
+    yield eq(x, y)
+
+  part main() -> Int via IO:
+    match same(1, 1):
+      true  -> yield IO.print(1)
+      false -> yield IO.print(0)

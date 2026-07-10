@@ -1,0 +1,19 @@
+module Gen.T19:
+
+  part bump(by: Int) -> Int via State:
+    let cur = State.get()
+    let nu  = cur + by
+    let _   = State.put(nu)
+    yield nu
+
+  part total() -> Int via State:
+    let _ = bump(10)
+    let _ = bump(20)
+    yield bump(12)
+
+  part run() -> Int:
+    handle total() with State from 0:
+      return r -> yield r
+
+  part main() -> Int via IO:
+    yield IO.print(run())

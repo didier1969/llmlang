@@ -1,0 +1,14 @@
+depends ffi_enum "1.0.0" from "../../../../tests/fixtures/ffi_enum"
+
+module Gen.T20:
+
+  type Sign = Neg | Zero | Pos
+
+  effect Cmp:
+    sign_of(Int) -> Sign = extern "ffi_enum::sign_of" as (i64) -> enum ffi_enum::Sign [ Neg -> Neg, Zero -> Zero, Pos -> Pos ]
+    sign_to_int(Sign) -> Int = extern "ffi_enum::sign_to_int" as (enum ffi_enum::Sign [ Neg -> Neg, Zero -> Zero, Pos -> Pos ]) -> i64
+
+  part main() -> Int via IO, Cmp:
+    let s = Cmp.sign_of(0 - 7)
+    let back = Cmp.sign_to_int(s)
+    yield IO.print(back)

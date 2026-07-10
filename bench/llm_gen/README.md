@@ -27,6 +27,7 @@ Success rate = verified solutions / tasks. Record: model id, date, pass@1.
 | 2026-07-02 | claude-sonnet-5  | 15/15             | isolated (prompt-only, no repo access) |
 | 2026-07-02 | claude-opus-4-8  | 13/15             | isolated; failures: t1 (pattern-binder scope), t8 (`True` capitalized) |
 | 2026-07-02 | claude-haiku-4-5 | 12/15             | isolated; failures: t5+t10 (`let _ =` discard), t8 (`True` capitalized) |
+| 2026-07-10 | reference (opus, authored) | 7/7 (t16–t22) | **ceiling reference** for the post-07-02 surface (`solutions/reference-20260710/`); FAMILIARITY BIAS (compiler author) — this proves task well-formedness + authorability-to-verified, NOT model capability. The isolated third-party run is gated on REQ-LLL-013 (external model access). |
 
 ## Failure analysis (n=45 third-party solutions)
 
@@ -48,3 +49,26 @@ both hint messages ship in the checker. Re-scoring the UNCHANGED solutions
 under language v1.3: claude-haiku-4-5 12/15 → **14/15** (t5/t10 now valid);
 remaining failures (t8 `True`, opus t1 binder scope) now fail with a
 did-you-mean hint, feeding the repair loop.
+
+## Post-2026-07-02 surface (t16–t22) — friction analysis (REQ-LLL-097)
+
+The v1-kernel suite (t1–t15) covered ~20 % of the language shipped by 2026-07-10.
+Tasks **t16–t22** extend the instrument to the surface added since: bounded
+quantifiers, pure typeclasses + laws, **typeclass over effect** (Voie A), algebraic
+effects/handlers, FFI foreign-enum binding, `Db` persistence, parametric ADTs.
+Reference solutions (`solutions/reference-20260710/`) were authored **and**
+`lll check`-verified (7/7). **Caveat:** these carry the same familiarity bias as
+`claude-fable-5` — a pass rate proves the tasks are well-formed and the surface is
+authorable-to-verified, not that a third-party model can do it (that measurement is
+REQ-LLL-013, gated on external model access). The value here is the **authoring
+friction**, the directive-1 (LLM-first) signal:
+
+| finding | task | severity | note |
+|---|---|---|---|
+| a quantified `ensures` over `Array` does NOT bound its length — indexing the result at a call site needs an explicit `ensures length(result) == n` (or `>= 1`), else `get` fails index-in-bounds with an empty-array counter-model | t16 | ergonomic trap | the single most likely LLM miss; a did-you-mean hint on the call-site failure would help (candidate REQ) |
+| stdlib-dependent surface needs deep relative imports (`import "../../../../std/db.lll"`) — the bench's self-contained-module assumption breaks | t21, t22 | minor | path friction only; a workspace/import-root resolution (wave 4) would remove it |
+| **witness-tag terseness (Voie A) — the deferred question, now answered** | t18 | none | the reusable generic part is **3 lines**; the witness threading adds ~2 tokens (`w: h` + `w` into `open`) plus ~1 nullary-tag token per call site. Negligible, and more LLM-legible than the rejected alternative (a nonexistent `let: Ty` annotation + bidirectional inference). **No sugar warranted** for the delivered surface. |
+
+**Net:** zero contract-semantics failures on the new surface either — the verified
+fragment stays the easy path. The only real ergonomic trap is the quantifier/length
+coupling (t16); everything else authored cleanly on the first pass.

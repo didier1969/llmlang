@@ -47,4 +47,41 @@ algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can)
   (`lo*lo`, `(result+1)*(result+1)`) cost nothing and never overflow — only
   expressions in the BODY execute.
 
+## Surface beyond the v1 kernel (post-2026-07-02 — needed for tasks t16+)
+
+If a task asks for one of these, use the exact grammar below. Everything above
+still holds (contracts, Euclidean `div`/`mod`, exhaustive `match`, `measure`).
+
+- **Bounded quantifiers in contracts** over `Array[Int]` (built-ins `array(…)`,
+  `length(a)`, `get(a, i)`):
+  - `ensures forall i in 0 .. length(result): <Bool over get(result, i)>`
+  - `requires exists i in <lo> .. <hi>: <Bool over get(a, i)>`
+  - A quantified `ensures` does NOT bound the length — to index the result at a
+    call site you must ALSO `ensures length(result) == <n>` (or `>= 1`).
+- **User ADTs & parametric ADTs**: `type Cmd = Inc | Dec | Set(Int)`;
+  `type Handle[h] = Handle(Int)`. `Option[a]`/`Result[a, e]` via
+  `import "std/option.lll"` / `"std/result.lll"` (`Some`/`None`/`Ok`/`Err`,
+  helpers `get_or`, `is_none`, `map_opt`, `and_then`).
+- **Typeclasses**: `class Eq[a]:` with method sigs (`eq(a, a) -> Bool`) and
+  optional `law name(x: a): <Bool>` (proved by Z3; a law may reference PURE
+  methods only). `instance Eq[Int]: eq = \(x: Int, y: Int) -> x == y`. A generic
+  part constrains with `given Eq[a]` and is verified ONCE, abstractly:
+  `part same(x: a, y: a) -> Bool given Eq[a]: yield eq(x, y)`.
+- **Typeclass over an effect** (interchangeable effectful resource): a class
+  method may carry `via <Effect>`; its result is havoc per call (no law over it).
+  The backend type is resolved by a WITNESS argument and threaded through a
+  phantom handle: `open(w: h, …) -> Handle[h] via IO` binds `h` from `w`,
+  `write(Handle[h], …)` recovers it; call as `run(Console, 7)`.
+- **Algebraic effects & handlers**: built-in `State` (`State.get()`/`State.put(n)`)
+  and `Reader` (`Reader.ask()`) are tail-resumptive (no `resume`). Install with
+  `handle <expr> with State from <init>:` then `return r -> yield r`; the handling
+  part becomes PURE.
+- **FFI**: `depends <crate> "<ver>" [from "<path>"]`; bind an op with
+  `name(…) -> T = extern "crate::fn" as (<rust tys>) -> <rust ty>`. A foreign enum
+  marshals BY NAME: `… as enum crate::E [ LllVar -> RustVar, … ]` (nullary or
+  single scalar payload).
+- **Persistence**: `import "std/db.lll"`, effect `Db`; `Db.open(conn)`,
+  `Db.exec(db, sql)`, `Db.query(db, sql)`; turn a query result into rows with
+  `unarr(…)` and read a cell with `cell_int(row, col)`.
+
 Output ONLY the `.lll` module, no commentary.

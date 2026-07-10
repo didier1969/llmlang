@@ -1,0 +1,15 @@
+import "../../../../std/db.lll"
+
+module Gen.T21:
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part main() -> Int via IO, Db:
+    let db = Db.open(":memory:")
+    let s0 = Db.exec(db, "CREATE TABLE t (v INTEGER)")
+    let s1 = Db.exec(db, "INSERT INTO t VALUES (42)")
+    let rows = unarr(Db.query(db, "SELECT v FROM t"))
+    yield IO.print(flag(count(rows) == 1))

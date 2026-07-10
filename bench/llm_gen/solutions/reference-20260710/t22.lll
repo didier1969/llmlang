@@ -1,0 +1,17 @@
+import "../../../../std/option.lll"
+
+module Gen.T22:
+
+  part flag(b: Bool) -> Int:
+    match b:
+      true  -> yield 1
+      false -> yield 0
+
+  part safe_head(xs: List[Int]) -> Option[Int]:
+    match xs:
+      []     -> yield None
+      h :: t -> yield Some(h)
+
+  part main() -> Int via IO:
+    let a = IO.print(flag(get_or(safe_head(7 :: []), 0) == 7))
+    yield IO.print(flag(is_none(safe_head([]))))
