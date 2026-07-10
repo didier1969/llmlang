@@ -3323,6 +3323,32 @@ fn self_host_pipeline_source_to_execution_verifies() {
 }
 
 #[test]
+fn self_host_eval_div_is_meta_circularly_div_safe() {
+    // REQ-LLL-105 / DEC-LLL-024 Étape 2: the thesis-aligned self-hosting point — a self-hosted
+    // evaluator for a mini-language WITH division. Euclidean `div` requires a provably non-zero
+    // divisor (DEC-LLL-026), so the meta-evaluator written in llmlang must ITSELF discharge the
+    // object language's div-by-zero obligation — META-CIRCULAR verification. The guard binds the
+    // divisor to a `let` and matches `== 0`, giving `vb != 0` on the false branch; Z3 discharges
+    // the `div`. Runtime: eval((2*5)/(1+1)) = 5, eval(10/0) = 0 (guarded). Guards
+    // examples/self_host_eval_div.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_eval_div.lll"),
+    )
+    .expect("read self_host_eval_div.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the guarded self-hosted div evaluator must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("5\n0"), "expected 5 then 0 (guarded div-by-zero), got: {out}");
+    // negative control: WITHOUT the guard, the meta-evaluator's `div` is REJECTED — the verified
+    // language does not let its own interpreter ignore div-by-zero (the point of the exercise).
+    let no_guard = "module NoGuard:\n\n  type Expr = Lit(Int) | Div(Expr, Expr)\n\n  part eval(e: Expr) -> Int:\n    match e:\n      Lit(n)    -> yield n\n      Div(a, b) -> yield eval(a) div eval(b)\n";
+    assert!(
+        !verify_src(no_guard).ok(),
+        "an unguarded self-hosted `div` must fail — the divisor is not provably non-zero"
+    );
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
