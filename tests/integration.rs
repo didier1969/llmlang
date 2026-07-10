@@ -3246,6 +3246,26 @@ fn self_hosting_constant_folder_verifies_and_preserves_semantics() {
 }
 
 #[test]
+fn self_host_lexer_verifies_and_runs() {
+    // REQ-LLL-100 / DEC-LLL-024 Étape 2 (self-hosting, parser-first): the LEXER of the
+    // mini-`Expr` language (paired with self_host_constfold.lll), written in llmlang and
+    // verified by the real Z3 pipeline — structural recursion over the codepoint list
+    // (string = List[Int], DEC-LLL-030) proves termination + exhaustiveness for free.
+    // Correctness isn't expressible as a contract (DEC-LLL-017), so it's DEMONSTRATED at
+    // runtime: lex("3*4+-5") → 6 tokens, signature 3+300+4+100+200+5 = 612. Guards the
+    // dogfood module examples/self_host_lexer.lll. Slice-1 = single-digit numbers; a
+    // multi-digit number needs a list-length measure v1 lacks (logged self-hosting gap).
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_lexer.lll"),
+    )
+    .expect("read self_host_lexer.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting lexer must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("6\n612"), "expected 6 tokens then signature 612, got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only

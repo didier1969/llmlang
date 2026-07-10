@@ -1,0 +1,54 @@
+module SelfHost.Lexer:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : le LEXER du mini-langage
+  # `Expr` (apparié à self_host_constfold.lll), écrit EN llmlang et vérifié par le
+  # vrai pipeline Z3. Une string = List[Int] de codepoints Unicode (DEC-LLL-030) —
+  # un littéral "3*4" désucre en cette liste. Récursion STRUCTURALE sur la queue
+  # (`h :: t` → lex(t)) → terminaison PROUVÉE gratis ; le match est prouvé exhaustif.
+  #
+  # Slice-1 = chiffres SIMPLES (0..9). Un nombre multi-chiffres exigerait de
+  # consommer plusieurs codepoints d'un coup puis de récurser sur un reste plus
+  # court — une terminaison par LONGUEUR-DE-LISTE que v1 n'exprime pas (`measure`
+  # est Int-only, la récursion structurale est tail-only). C'est le PREMIER gap
+  # d'expressivité self-hosting (loggé en SOLL), pas un échec de cette tranche.
+
+  type Tok = TNum(Int) | TPlus | TMinus | TStar
+
+  # un codepoint → un token (ou skip). Récursion structurale sur `t`.
+  # 43='+', 45='-', 42='*', 32=' ', 48..57='0'..'9'.
+  part lex(s: List[Int]) -> List[Tok]:
+    match s:
+      []     -> yield []
+      h :: t ->
+        match h:
+          43 -> yield TPlus :: lex(t)
+          45 -> yield TMinus :: lex(t)
+          42 -> yield TStar :: lex(t)
+          d when d >= 48 and d <= 57 -> yield TNum(d - 48) :: lex(t)
+          _  -> yield lex(t)                       # espace / inconnu : skip
+
+  # ---- différentiel runtime (la préservation n'est pas exprimable en contrat,
+  # DEC-LLL-017) : on lexe une chaîne connue et on PROUVE le résultat à l'exécution.
+
+  part tok_count(ts: List[Tok]) -> Int:
+    match ts:
+      []     -> yield 0
+      h :: t -> yield 1 + tok_count(t)
+
+  # un code par KIND (le nombre pour TNum) : la signature encode toute la séquence.
+  part tok_val(x: Tok) -> Int:
+    match x:
+      TNum(n) -> yield n
+      TPlus   -> yield 100
+      TMinus  -> yield 200
+      TStar   -> yield 300
+
+  part tok_sig(ts: List[Tok]) -> Int:
+    match ts:
+      []     -> yield 0
+      h :: t -> yield tok_val(h) + tok_sig(t)
+
+  part main() -> Int via IO:
+    let toks = lex("3*4+-5")             # [TNum(3), TStar, TNum(4), TPlus, TMinus, TNum(5)]
+    let c = IO.print(tok_count(toks))    # 6 tokens
+    yield IO.print(tok_sig(toks))        # 3 + 300 + 4 + 100 + 200 + 5 = 612
