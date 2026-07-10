@@ -1149,6 +1149,17 @@ impl Parser {
             Tok::Ident(h) => {
                 self.pos += 1;
                 if self.peek() == &Tok::ColonColon {
+                    // A cons-pattern head is always a binder or `[]`; a constructor there
+                    // (capitalized bareword) cannot match the head element — the parser would
+                    // otherwise take `TLet` as a fresh binder that shadows the constructor,
+                    // producing a baffling "shadows … — rename it" downstream. Guide the author
+                    // to the head-bind + match idiom instead (REQ-LLL-110).
+                    if h.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        return Err(self.err(&format!(
+                            "a cons-pattern head must be a binder or `[]`, not the constructor \
+                             `{h}`; bind the head and match it: `h :: rest` then `match h: {h} -> …`"
+                        )));
+                    }
                     self.pos += 1;
                     let t = self.ident()?;
                     Ok(Pattern::Cons(h, t))
@@ -1164,6 +1175,15 @@ impl Parser {
                         }
                     }
                     self.eat(Tok::RParen)?;
+                    // Same gap the other way: `Ctor(x) :: t` in head position. Without this the
+                    // caller reports the opaque "expected Arrow, found ColonColon" (REQ-LLL-110).
+                    if self.peek() == &Tok::ColonColon {
+                        return Err(self.err(&format!(
+                            "a cons-pattern head must be a binder or `[]`, not the constructor \
+                             `{h}(…)`; bind the head and match it: `h :: rest` then \
+                             `match h: {h}(…) -> …`"
+                        )));
+                    }
                     Ok(Pattern::Ctor(h, binders))
                 } else if h.chars().next().is_some_and(|c| c.is_uppercase()) {
                     // a capitalized bareword is a nullary constructor

@@ -3411,6 +3411,27 @@ fn self_host_let_text_lexes_identifiers_and_resolves_names_end_to_end() {
 }
 
 #[test]
+fn cons_pattern_head_that_is_a_constructor_gets_an_actionable_diagnostic_req110() {
+    // REQ-LLL-110 (dogfooding follow-through of REQ-LLL-111): a cons-pattern head must be a
+    // binder or `[]` — a constructor there cannot match the head element. Before the fix,
+    // `A(v) :: rest` gave the opaque "expected Arrow, found ColonColon" and `A :: rest` silently
+    // bound `A` then tripped a downstream "shadows … — rename it". Both now yield a targeted
+    // parse error pointing at the head-bind + `match h` idiom. Guards src/parser.rs::pattern.
+    let nullary = "module M:\n\n  type T = A | B\n\n  part f(xs: List[T]) -> Int:\n    match xs:\n      [] -> yield 0\n      A :: rest -> yield 1\n";
+    let payload = "module M:\n\n  type T = A(Int) | B\n\n  part f(xs: List[T]) -> Int:\n    match xs:\n      [] -> yield 0\n      A(v) :: rest -> yield v\n";
+    let e1 = parser::parse_module(nullary).unwrap_err();
+    assert!(
+        e1.contains("cons-pattern head must be a binder") && e1.contains("match h: A ->"),
+        "nullary ctor cons-head should get the actionable message, got: {e1}"
+    );
+    let e2 = parser::parse_module(payload).unwrap_err();
+    assert!(
+        e2.contains("cons-pattern head must be a binder") && e2.contains("A(…)"),
+        "payload ctor cons-head should get the actionable message, got: {e2}"
+    );
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
