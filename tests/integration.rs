@@ -1018,6 +1018,82 @@ fn typeclass_given_and_effect_generic_combine_and_run() {
 }
 
 #[test]
+fn typeclass_over_effect_generic_part_monomorphizes_over_effectful_instances() {
+    // REQ-LLL-095 slice 1 (Voie A — typeclass-over-effect) : une méthode de classe PORTE un
+    // effet (`via IO`) ; UNE instance effectful (`Console` imprime) + UNE instance pure
+    // (`Silent`). Un SEUL part générique `run … given Logger[h]` est vérifié UNE fois
+    // abstraitement (le résultat de la méthode effectful est HAVOC — aucune obligation fausse
+    // déchargée), puis MONOMORPHISÉ sur les deux instances. Le type-backend `h` se résout par le
+    // TÉMOIN-tag (`w: h`, arg valeur `Console`/`Silent`) — la résolution par arguments EXISTANTE.
+    // C'est le cœur de la directive 3 : la même machinerie que `class Eq`, mais sur des méthodes
+    // effectful (pas juste des lambdas pures).
+    let src = "module L:\n\n  type Console = Console\n  type Silent = Silent\n\n  class Logger[h]:\n    emit(h, Int) -> Int via IO\n\n  instance Logger[Console]:\n    emit = \\(w: Console, x: Int) -> IO.print(x)\n\n  instance Logger[Silent]:\n    emit = \\(w: Silent, x: Int) -> x\n\n  part run(w: h, n: Int) -> Int via IO given Logger[h]:\n    yield emit(w, n)\n\n  part main() -> Int via IO:\n    let a = run(Console, 7)\n    yield run(Silent, 9)\n";
+    assert!(
+        verify_src(src).ok(),
+        "a typeclass-over-effect generic part must verify (effectful method result is havoc)"
+    );
+    let out = build_run(src);
+    assert!(out.contains('7'), "the Console (effectful) instance must print 7:\n{out}");
+    assert!(out.contains("=> 9"), "the Silent (pure) instance returns 9:\n{out}");
+}
+
+#[test]
+fn typeclass_over_effect_phantom_handle_threads_backend_tag() {
+    // REQ-LLL-095 slice « ressource à ÉTAT » : le mécanisme TÉMOIN-TAG + `Handle[h]` PHANTOM.
+    // `open(w: h, …) -> Handle[h]` lie `h` depuis le témoin `w` (résolution par arguments) et le
+    // retour `Handle[h]` PROPAGE le tag ; `write(hnd: Handle[h], …)` récupère `h` depuis l'arg
+    // handle. Un SEUL part générique `run … given Sink[h]` enchaîne open→write, monomorphisé sur
+    // deux ressources (Console effectful / Silent pur). C'est le point que l'advisor a nommé le
+    // plus risqué (un type-var présent seulement dans le RETOUR d'`open`, résolu par le témoin).
+    let src = "module S:\n\n  type Console = Console\n  type Silent = Silent\n  type Handle[h] = Handle(Int)\n\n  class Sink[h]:\n    open(h, Int) -> Handle[h] via IO\n    write(Handle[h], Int) -> Int via IO\n\n  instance Sink[Console]:\n    open = \\(w: Console, c: Int) -> Handle(c)\n    write = \\(hnd: Handle[Console], x: Int) -> IO.print(x)\n\n  instance Sink[Silent]:\n    open = \\(w: Silent, c: Int) -> Handle(c)\n    write = \\(hnd: Handle[Silent], x: Int) -> x\n\n  part run(w: h, x: Int) -> Int via IO given Sink[h]:\n    let hnd = open(w, 0)\n    yield write(hnd, x)\n\n  part main() -> Int via IO:\n    let a = run(Console, 7)\n    yield run(Silent, 9)\n";
+    assert!(
+        verify_src(src).ok(),
+        "a phantom-Handle stateful resource with witness-tag resolution must verify"
+    );
+    let out = build_run(src);
+    assert!(out.contains('7'), "the Console sink must print 7:\n{out}");
+    assert!(out.contains("=> 9"), "the Silent sink returns 9:\n{out}");
+}
+
+#[test]
+fn typeclass_law_over_effectful_method_is_rejected() {
+    // REQ-LLL-095 N1 (invariant PORTEUR — miroir du « never assert forall » de REQ-LLL-048) :
+    // le résultat d'une méthode effectful est HAVOC (DEC-LLL-017) ; une `law` qui le référence
+    // prétendrait PROUVER une propriété sur une valeur étrangère. `emit(x,0) == emit(x,0)` est
+    // exactement l'énoncé UNSOUND (faux pour un vrai effet non-déterministe) → erreur de compile.
+    let src = "module Bad:\n\n  class Logger[h]:\n    emit(h, Int) -> Int via IO\n    law idem(x: h): emit(x, 0) == emit(x, 0)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m)
+        .expect_err("a law referencing an effectful method must be a compile error");
+    assert!(
+        err.contains("effectful") && err.contains("law"),
+        "expected a law/effectful soundness-fence error, got: {err}"
+    );
+}
+
+#[test]
+fn typeclass_over_effect_duplicate_instance_rejected() {
+    // REQ-LLL-095 (cohérence, sur le chemin EFFECTFUL) : deux instances pour le même
+    // (classe, type) restent ambiguës pour une résolution `given` — rejetées, exactement comme
+    // pour une classe pure. Confirme que la cohérence tient aussi quand les méthodes portent un
+    // effet (le chemin de coherence est partagé, mais la régression doit être verrouillée).
+    let src = "module T:\n\n  type Console = Console\n\n  class Logger[h]:\n    emit(h, Int) -> Int via IO\n\n  instance Logger[Console]:\n    emit = \\(w: Console, x: Int) -> IO.print(x)\n\n  instance Logger[Console]:\n    emit = \\(w: Console, x: Int) -> x\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("duplicate effectful instance must be rejected");
+    assert!(err.contains("duplicate instance"), "expected coherence error, got: {err}");
+}
+
+#[test]
+fn typeclass_method_via_undeclared_effect_is_rejected() {
+    // REQ-LLL-095 N2 : une méthode de classe qui déclare `via <Effect>` inexistant est rejetée
+    // à l'enregistrement de la classe — même règle que le `via` d'un `part` (types.rs).
+    let src = "module Bad:\n\n  class Logger[h]:\n    emit(h, Int) -> Int via Bogus\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a method via an undeclared effect must be rejected");
+    assert!(err.contains("Bogus") && err.contains("not a declared effect"), "got: {err}");
+}
+
+#[test]
 fn typeclass_instance_missing_method_rejected() {
     // REQ-LLL-050: untested branch — an instance that omits a method the class
     // requires (distinct from `eq` not being a class member at all).

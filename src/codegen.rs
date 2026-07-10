@@ -1137,7 +1137,7 @@ fn given_methods_map(
     let mut out = std::collections::HashMap::new();
     for (cname, tv) in given {
         if let Some(class) = classes.iter().find(|c| c.name == *cname) {
-            for (mn, _, _) in &class.methods {
+            for (mn, _, _, _) in &class.methods {
                 out.insert(mn.clone(), (cname.clone(), tv_param(tv)));
             }
         }
@@ -1188,7 +1188,7 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
 /// by-value `Self` parameter (whose Sized requirement is deferred to `impl`).
 fn emit_class_trait(out: &mut String, class: &Class) {
     out.push_str(&format!("\npub trait {}: Sized {{\n", class.name));
-    for (mn, mparams, mret) in &class.methods {
+    for (mn, mparams, mret, _meffs) in &class.methods {
         let ps: Vec<String> = mparams
             .iter()
             .enumerate()
@@ -1230,10 +1230,10 @@ fn emit_instance_impl(
     let empty_rows: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let empty_gm: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
     for (mn, body) in &inst.defs {
-        let (_, _, mret) = class
+        let (_, _, mret, _) = class
             .methods
             .iter()
-            .find(|(cmn, _, _)| cmn == mn)
+            .find(|(cmn, _, _, _)| cmn == mn)
             .ok_or_else(|| format!("codegen: `{mn}` is not a method of class `{}`", class.name))?;
         let ret_ty = subst_tyvar(mret, &class.tyvar, &inst.ty);
         let (params, lambda_body) = match body {
@@ -1530,6 +1530,28 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
             let fs: Vec<String> = fields.iter().map(rs_ty).collect();
             out.push_str(&format!("    {cn}({}),\n", fs.join(", ")));
         }
+    }
+    // PHANTOM type params (REQ-LLL-095): a param used in NO constructor field — e.g. `h` in
+    // `type Handle[h] = Handle(Int)`, a backend-TAGGED handle carrying the resource identity
+    // at the type level only — is `E0392: type parameter never used`. Bind every such param in
+    // a dead, never-constructed `PhantomData` variant so the tag is a zero-cost type witness;
+    // the real variants and every construction/match site stay untouched (no existing ADT has
+    // a phantom param, so this is inert for them). PhantomData impls all the derived traits
+    // unconditionally, so the enum's `#[derive]` still holds.
+    let mut used_tvars: Vec<String> = Vec::new();
+    for (_, fields) in &td.ctors {
+        for f in fields {
+            collect_tvars(f, &mut used_tvars);
+        }
+    }
+    let phantoms: Vec<&String> =
+        td.type_params.iter().filter(|p| !used_tvars.contains(p)).collect();
+    if !phantoms.is_empty() {
+        let markers: Vec<String> = phantoms
+            .iter()
+            .map(|p| format!("std::marker::PhantomData<{}>", tv_param(p)))
+            .collect();
+        out.push_str(&format!("    #[allow(dead_code)] __Phantom({}),\n", markers.join(", ")));
     }
     out.push_str("}\n");
     // record accessors (REQ-LLL-070): each named field gets a typed getter — an

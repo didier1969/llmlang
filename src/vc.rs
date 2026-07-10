@@ -341,7 +341,15 @@ fn setup_part_emit<'a>(
             .iter()
             .find(|c| &c.name == cname)
             .ok_or_else(|| format!("vcgen: `given {cname}[{tv}]` names an unknown class"))?;
-        for (mn, mparams, mret) in &class.methods {
+        for (mn, mparams, mret, meffs) in &class.methods {
+            // An EFFECTFUL class method (REQ-LLL-095, typeclass-over-effect) is NOT a
+            // functional UF: its result crosses the DEC-LLL-017 havoc boundary, so two
+            // calls with equal args may differ — assuming `m(x) == m(x)` would be unsound.
+            // It is havoc'd as a FRESH const PER CALL in `tr` instead; declare nothing here.
+            // PURE methods keep the UF-firewall (DEC-LLL-029), exactly as REQ-LLL-048.
+            if !meffs.is_empty() {
+                continue;
+            }
             let gparams: Vec<Ty> = mparams
                 .iter()
                 .map(|t| subst_tyvar(t, &class.tyvar, &Ty::Var(tv.clone())))
@@ -519,7 +527,7 @@ fn inline_domain(domain: &ForallDomain, class: &Class, inst: &Instance) -> Resul
 /// another method flattens fully.
 fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, String> {
     Ok(match e {
-        Expr::Call(name, args) if class.methods.iter().any(|(m, _, _)| m == name) => {
+        Expr::Call(name, args) if class.methods.iter().any(|(m, _, _, _)| m == name) => {
             let inl_args: Vec<Expr> = args
                 .iter()
                 .map(|a| inline_methods(a, class, inst))
@@ -1959,6 +1967,28 @@ impl<'a> Emit<'a> {
                         ts.push(self.tr(a, env, None)?);
                     }
                     return Ok(format!("({fsym} {})", ts.join(" ")));
+                }
+                // an EFFECTFUL class-method call (REQ-LLL-095): its result crosses the
+                // DEC-LLL-017 havoc boundary → a FRESH unconstrained const per call, NEVER
+                // a functional UF (relying on `m(x) == m(x)` would be unsound for a real
+                // effect). Pure class methods are the UFs matched by `env.get` just above.
+                // The return sort substitutes the class tyvar with the part's own `given`
+                // variable, matching the preamble's UF declaration for pure methods.
+                let eff_retsort = self.part.given.iter().find_map(|(cname, tv)| {
+                    let class = self.cm.module.classes.iter().find(|c| &c.name == cname)?;
+                    let (_, _, mret, _) = class
+                        .methods
+                        .iter()
+                        .find(|(m, _, _, meffs)| m == name && !meffs.is_empty())?;
+                    Some(smt_ty(&subst_tyvar(mret, &class.tyvar, &Ty::Var(tv.clone()))))
+                });
+                if let Some(retsort) = eff_retsort {
+                    // translate the arguments for their own obligations (e.g. a division in
+                    // an argument), then discard — the havoc'd result depends on none of them.
+                    for a in args {
+                        let _ = self.tr(a, env, None)?;
+                    }
+                    return Ok(self.fresh(&retsort));
                 }
                 // ADT constructor application `(Ctor arg …)` (REQ-LLL-011) — thread
                 // each field type so an empty `array()` in a typed field fixes its

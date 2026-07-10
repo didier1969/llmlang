@@ -195,9 +195,12 @@ pub struct TypeDecl {
 pub struct Class {
     pub name: String,
     pub tyvar: String,
-    /// each required method: name + positional param types + return type,
-    /// written over the class type variable `tyvar`.
-    pub methods: Vec<(String, Vec<Ty>, Ty)>,
+    /// each required method: name + positional param types + return type +
+    /// declared effects (`via IO` — empty = PURE), written over the class type
+    /// variable `tyvar`. A method with a non-empty effect list is EFFECTFUL
+    /// (typeclass-over-effect, REQ-LLL-095): its result is havoc across the
+    /// DEC-LLL-017 boundary, so a class `law` may reference PURE methods ONLY.
+    pub methods: Vec<(String, Vec<Ty>, Ty, Vec<String>)>,
     #[serde(default)]
     pub laws: Vec<Law>,
     /// 1-based source line of the `class` keyword (diagnostics only).

@@ -718,8 +718,27 @@ impl Parser {
                 self.eat(Tok::RParen)?;
                 self.eat(Tok::Arrow)?;
                 let ret = self.ty()?;
+                // optional `via <Effect>, …` — an EFFECTFUL class method (REQ-LLL-095,
+                // typeclass-over-effect). Empty = pure (the REQ-LLL-048 default).
+                let mut meffects = Vec::new();
+                if self.peek() == &Tok::Via {
+                    self.pos += 1;
+                    loop {
+                        match self.bump() {
+                            Tok::Ident(e) | Tok::Dotted(e) => meffects.push(e),
+                            other => {
+                                return Err(self.err(&format!("expected effect name, found {other:?}")))
+                            }
+                        }
+                        if self.peek() == &Tok::Comma {
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
                 self.eat(Tok::Newline)?;
-                methods.push((mname, params, ret));
+                methods.push((mname, params, ret, meffects));
             }
         }
         if methods.is_empty() {

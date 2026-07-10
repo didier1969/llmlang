@@ -905,9 +905,20 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             ));
         }
         let mut mnames: HashSet<&str> = HashSet::new();
-        for (mn, mparams, mret) in &c.methods {
+        for (mn, mparams, mret, meffs) in &c.methods {
             if !mnames.insert(mn.as_str()) {
                 return Err(format!("class `{}`: duplicate method `{mn}`", c.name));
+            }
+            // an EFFECTFUL class method (REQ-LLL-095) declares `via <Effect>` — each named
+            // effect must be a real declared/builtin effect, exactly like a part's `via`.
+            for e in meffs {
+                if !effect_names.contains(e) {
+                    return Err(format!(
+                        "class `{}`: method `{mn}` declares `via {e}`, which is not a declared \
+                         effect",
+                        c.name
+                    ));
+                }
             }
             for t in mparams.iter().chain(std::iter::once(mret)) {
                 check_user_ty_declared(t, &typarams)?;
@@ -927,6 +938,17 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 }
             }
         }
+        // SOUNDNESS FENCE (REQ-LLL-095, invariant PORTEUR — miroir du « never assert forall »
+        // de REQ-LLL-048) : le résultat d'une méthode EFFECTFUL est havoc à la frontière
+        // DEC-LLL-017 ; une `law` qui le référence prétendrait PROUVER une propriété sur une
+        // valeur étrangère (`m(x) == m(x)` est faux pour un effet non-déterministe). Une loi ne
+        // peut donc citer QUE des méthodes PURES — rejeté ici, au law-check, avant le vc.
+        let effectful: HashSet<&str> = c
+            .methods
+            .iter()
+            .filter(|(_, _, _, me)| !me.is_empty())
+            .map(|(n, _, _, _)| n.as_str())
+            .collect();
         // a law binder's type annotation is validated the same way (REQ-LLL-075): a
         // bad-arity binder like `law foo(b: Box[Int, Bool])` otherwise reaches the vc's
         // ground law-instantiation and leaks a raw Z3 "invalid number of parameters to
@@ -934,6 +956,22 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         for law in &c.laws {
             for (_, t) in &law.binders {
                 check_user_ty_declared(t, &typarams)?;
+            }
+            let mut offending: Option<String> = None;
+            law.body.walk(&mut |e| {
+                if let Expr::Call(name, _) | Expr::EffCall(name, _) = e {
+                    if effectful.contains(name.as_str()) {
+                        offending = Some(name.clone());
+                    }
+                }
+            });
+            if let Some(m) = offending {
+                return Err(format!(
+                    "class `{}`: law `{}` references the EFFECTFUL method `{m}` — a law may \
+                     reference PURE methods only (an effectful result is havoc across the \
+                     DEC-LLL-017 boundary and can never be proven; REQ-LLL-095)",
+                    c.name, law.name
+                ));
             }
         }
         if class_map.insert(c.name.clone(), c).is_some() {
@@ -987,7 +1025,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     part.name
                 ));
             }
-            for (mn, mparams, mret) in &class.methods {
+            for (mn, mparams, mret, _meffs) in &class.methods {
                 let gparams: Vec<Ty> = mparams
                     .iter()
                     .map(|t| subst_tyvar(t, &class.tyvar, &Ty::Var(tv.clone())))
@@ -1131,7 +1169,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 inst.class, inst.ty
             ));
         }
-        for (mn, _, _) in &class.methods {
+        for (mn, _, _, _) in &class.methods {
             if !provided.contains(mn.as_str()) {
                 return Err(format!(
                     "instance `{}[{}]`: missing method `{mn}` required by class `{}`",
@@ -1140,7 +1178,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             }
         }
         for (mn, body) in &inst.defs {
-            let method = class.methods.iter().find(|(cmn, _, _)| cmn == mn).ok_or_else(|| {
+            let method = class.methods.iter().find(|(cmn, _, _, _)| cmn == mn).ok_or_else(|| {
                 format!(
                     "instance `{}[{}]`: `{mn}` is not a method of class `{}`",
                     inst.class, inst.ty, inst.class
@@ -1169,7 +1207,11 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 name: format!("<instance {}[{}].{mn}>", inst.class, inst.ty),
                 params: Vec::new(),
                 ret: Ty::Unit,
-                effects: Vec::new(),
+                // REQ-LLL-095: an EFFECTFUL class method (`via IO`) lets its instance bodies
+                // perform exactly those effects — the synth part carries the method's declared
+                // effects so `IO.print(x)` in the body is checked as effectful, not rejected as
+                // impure. A PURE method (empty effects) keeps the REQ-LLL-048 purity check.
+                effects: method.3.clone(),
                 given: Vec::new(),
                 requires: Vec::new(),
                 ensures: Vec::new(),
@@ -1202,7 +1244,16 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 path_facts: Vec::new(),
             };
             let got = check_expr(&mut ctx, body, None)?;
-            if got != want {
+            // A PHANTOM-parameterised return (REQ-LLL-095) synthesises with the ADT's own
+            // parameter name free — `Handle(c)` for `type Handle[h] = Handle(Int)` types as
+            // `Handle[h]` — because no field pins the tag. Reconcile it with the class's
+            // ground requirement by unifying `got`'s FREE type vars against `want` (a
+            // one-directional match: only `got`-side vars may bind, `want` is concrete). A
+            // genuine mismatch — a non-phantom slot, or a var forced to two different types —
+            // still fails, so a wrong instance body is rejected exactly as before.
+            let mut subst: HashMap<String, Ty> = HashMap::new();
+            let reconciled = unify_left_vars(&got, &want, &mut subst) && subst_all(&got, &subst) == want;
+            if !reconciled {
                 return Err(format!(
                     "instance `{}[{}]`: method `{mn}` has type `{got}` but the class requires `{want}`",
                     inst.class, inst.ty
@@ -1367,6 +1418,59 @@ pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
             Box::new(subst_tyvar(r, var, with)),
         ),
         Ty::Tuple(cs) => Ty::Tuple(cs.iter().map(|c| subst_tyvar(c, var, with)).collect()),
+    }
+}
+
+/// Apply a whole substitution map to a type (REQ-LLL-095). The map binds vars to CONCRETE
+/// types (no chaining), so folding `subst_tyvar` over the entries is complete.
+fn subst_all(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
+    let mut out = t.clone();
+    for (v, w) in subst {
+        out = subst_tyvar(&out, v, w);
+    }
+    out
+}
+
+/// One-directional structural match (REQ-LLL-095, phantom reconciliation): bind the FREE
+/// type vars of `got` so that `got` unifies with the GROUND `want`. `want` is treated as
+/// concrete — its shape must match `got`'s exactly; only `got`-side `Var`s may bind, and a
+/// var bound to two different types fails. Used to accept a phantom-parameterised instance
+/// return (`Handle[h]` for `type Handle[h] = Handle(Int)`) against its concrete tag
+/// (`Handle[Console]`) without loosening the instance type-check for any real mismatch.
+fn unify_left_vars(got: &Ty, want: &Ty, subst: &mut HashMap<String, Ty>) -> bool {
+    match (got, want) {
+        (Ty::Var(v), _) => match subst.get(v) {
+            Some(bound) => bound == want,
+            None => {
+                subst.insert(v.clone(), want.clone());
+                true
+            }
+        },
+        (Ty::Int, Ty::Int)
+        | (Ty::Bool, Ty::Bool)
+        | (Ty::Rational, Ty::Rational)
+        | (Ty::Unit, Ty::Unit)
+        | (Ty::Never, Ty::Never) => true,
+        (Ty::List(a), Ty::List(b))
+        | (Ty::Array(a), Ty::Array(b))
+        | (Ty::Set(a), Ty::Set(b)) => unify_left_vars(a, b, subst),
+        (Ty::Map(ka, va), Ty::Map(kb, vb)) => {
+            unify_left_vars(ka, kb, subst) && unify_left_vars(va, vb, subst)
+        }
+        (Ty::User(n1, a1), Ty::User(n2, a2)) => {
+            n1 == n2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(x, y)| unify_left_vars(x, y, subst))
+        }
+        (Ty::Fun(p1, r1), Ty::Fun(p2, r2)) => {
+            p1.len() == p2.len()
+                && p1.iter().zip(p2).all(|(x, y)| unify_left_vars(x, y, subst))
+                && unify_left_vars(r1, r2, subst)
+        }
+        (Ty::Tuple(c1), Ty::Tuple(c2)) => {
+            c1.len() == c2.len() && c1.iter().zip(c2).all(|(x, y)| unify_left_vars(x, y, subst))
+        }
+        _ => false,
     }
 }
 
@@ -4396,6 +4500,11 @@ fn check_expr(
             for (p, _) in params {
                 shadow_path_facts(&mut ctx.path_facts, p);
             }
+            // Lambda bodies SYNTHESISE with no expected type (REQ-LLL-059): a `?` in a lambda
+            // body must be rejected as "no fixed type", never recorded — so codomain is NOT
+            // propagated here. A phantom-parameterised instance-method return (`Handle[h]`) is
+            // reconciled with its concrete tag at the instance check by `unify_left_vars`
+            // instead (REQ-LLL-095), keeping this path untouched.
             let bt = check_expr(ctx, body, None)?;
             ctx.smaller.pop();
             ctx.vars.pop();

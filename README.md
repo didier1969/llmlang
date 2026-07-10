@@ -125,6 +125,36 @@ DEC-LLL-017 havoc boundary; Z3 never reasons about the foreign handle). The cost
 selection is that both backend crates are always linked (both `depends` required). Run the
 live two-backends proof with `devenv up`, then `LLL_PG_URL=1 cargo test`.
 
+## Interchangeable resources — typeclass over effect (REQ-LLL-095)
+
+Typeclasses (`class`/`instance`/`given`, verified laws) extend to **effectful** methods, so a
+resource with several interchangeable implementations is one abstraction. A class method may
+declare `via <Effect>`; its instance bodies then perform that effect, while a **pure** method
+keeps its verified law. One generic part is verified **once, abstractly** — an effectful
+method's result is havoc across the FFI boundary (DEC-LLL-017), so it is a fresh unknown per
+call, never a functional value Z3 may reason about — and rustc **monomorphizes** it over every
+instance (the `given`→trait path). The **soundness fence**: a `law` may reference PURE methods
+only; a law over an effectful method is a compile error (you can never *prove* a property of a
+foreign value — the mirror of "never `assert forall`").
+
+```
+class Sink[h]:
+  open(h, Int) -> Handle[h] via IO       # `h` witness resolves the backend; Handle[h] is phantom-tagged
+  write(Handle[h], Int) -> Int via IO
+
+instance Sink[Console]:  open = \(w, c) -> Handle(c)   write = \(hnd, x) -> IO.print(x)
+instance Sink[Silent]:   open = \(w, c) -> Handle(c)   write = \(hnd, x) -> x
+
+part run(w: h, x: Int) -> Int via IO given Sink[h]:    # ONE generic part …
+  let hnd = open(w, 0)
+  yield write(hnd, x)                                  # … monomorphized over both sinks
+```
+
+The backend type is resolved **statically** by a witness argument (`w: h`) and threaded through a
+**phantom-parameterised handle** (`type Handle[h] = Handle(Int)`, the tag carried at the type level
+only). This is a general language feature — the same machinery serves any interchangeable resource,
+distinct from the Db-specific runtime dispatch above (which selects a backend at *runtime*).
+
 ## Imports & mutual recursion (wave 3)
 
 `import "relative/path.lll"` merges the imported file's parts into one flat
