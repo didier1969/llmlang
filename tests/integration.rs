@@ -3389,6 +3389,28 @@ fn self_host_let_env_binds_variables_and_scopes() {
 }
 
 #[test]
+fn self_host_let_text_lexes_identifiers_and_resolves_names_end_to_end() {
+    // REQ-LLL-111 / DEC-LLL-024 Étape 2 (capstone): the FULL `source text → tokens → AST →
+    // result` pipeline for a mini-language WITH VARIABLES, written in llmlang and Z3-verified.
+    // Unlike prior slices (digits+operators only, or hand-built ASTs), this LEXES an identifier
+    // and the keywords `let`/`in` from raw text (String = List[Int] codepoints, DEC-LLL-030),
+    // then RESOLVES names via a symbol table (`eqStr` on List[Int]). Everything structural
+    // (string tail / env tail) → termination proven without `measure`. Runtime:
+    // `let x = 10 in x + x + 5` = 25 (x lexed → TId → Var → looked up = 10), `let y = 7 in y + 3`
+    // = 10. This slice surfaced a real expressiveness gap (REQ-LLL-110: a cons-pattern head
+    // cannot be a constructor pattern — it binds/shadows — forcing head-match helpers), which is
+    // the genuine dogfooding deliverable. Guards examples/self_host_let_text.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_let_text.lll"),
+    )
+    .expect("read self_host_let_text.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting text pipeline must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("25\n10"), "expected 25 then 10 (lex id + name resolution), got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
