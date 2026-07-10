@@ -3349,6 +3349,26 @@ fn self_host_eval_div_is_meta_circularly_div_safe() {
 }
 
 #[test]
+fn self_host_optimizer_shrinks_generated_bytecode() {
+    // REQ-LLL-107 / DEC-LLL-024 Étape 2: demonstrates an optimizer's VALUE — the self-hosted
+    // constant folder (`fold`) composed with the stack-machine codegen (`compile`) MEASURABLY
+    // shrinks the emitted bytecode: a fully-constant subtree folds to one `Lit`, so its codegen
+    // drops from N instructions to 1. Both passes are verified llmlang, structural. A distinct
+    // point from constfold (semantic preservation): here we measure REDUCTION. Runtime:
+    // delta 0 (semantics kept), ilen(compile(e)) = 5, ilen(compile(fold(e))) = 1. Guards
+    // examples/self_host_optimize_shrinks_bytecode.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/self_host_optimize_shrinks_bytecode.lll"),
+    )
+    .expect("read self_host_optimize_shrinks_bytecode.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting optimizer must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("0\n5\n1"), "expected delta 0, then 5 → 1 instructions, got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only

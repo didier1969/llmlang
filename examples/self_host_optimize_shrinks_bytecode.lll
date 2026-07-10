@@ -1,0 +1,90 @@
+module SelfHost.Optimize:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : démontre la VALEUR d'un
+  # optimiseur — le constant folding RÉDUIT le bytecode émis — en composant l'optimiseur
+  # (fold, cf. self_host_constfold.lll) et le back-end (compile, cf. self_host_codegen.lll),
+  # tous deux en llmlang vérifié. Un sous-arbre entièrement constant se replie en un seul
+  # `Lit`, donc son codegen passe de N instructions à UNE. Structural → terminaison prouvée.
+  # Point DISTINCT de constfold (préservation sémantique) : ici on mesure la RÉDUCTION.
+
+  type Expr  = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
+  type Instr = Push(Int) | INeg | IAdd | ISub | IMul
+
+  part eval(e: Expr) -> Int:
+    match e:
+      Lit(n)    -> yield n
+      Neg(a)    -> yield 0 - eval(a)
+      Add(a, b) -> yield eval(a) + eval(b)
+      Sub(a, b) -> yield eval(a) - eval(b)
+      Mul(a, b) -> yield eval(a) * eval(b)
+
+  # ---- optimiseur : constant folding bottom-up (helpers par cas, v1 single-scrutinee) ----
+  part foldNeg(a: Expr) -> Expr:
+    match a:
+      Lit(x) -> yield Lit(0 - x)
+      _      -> yield Neg(a)
+
+  part foldAddL(x: Int, b: Expr) -> Expr:
+    match b:
+      Lit(y) -> yield Lit(x + y)
+      _      -> yield Add(Lit(x), b)
+
+  part foldAdd(a: Expr, b: Expr) -> Expr:
+    match a:
+      Lit(x) -> yield foldAddL(x, b)
+      _      -> yield Add(a, b)
+
+  part foldSubL(x: Int, b: Expr) -> Expr:
+    match b:
+      Lit(y) -> yield Lit(x - y)
+      _      -> yield Sub(Lit(x), b)
+
+  part foldSub(a: Expr, b: Expr) -> Expr:
+    match a:
+      Lit(x) -> yield foldSubL(x, b)
+      _      -> yield Sub(a, b)
+
+  part foldMulL(x: Int, b: Expr) -> Expr:
+    match b:
+      Lit(y) -> yield Lit(x * y)
+      _      -> yield Mul(Lit(x), b)
+
+  part foldMul(a: Expr, b: Expr) -> Expr:
+    match a:
+      Lit(x) -> yield foldMulL(x, b)
+      _      -> yield Mul(a, b)
+
+  part fold(e: Expr) -> Expr:
+    match e:
+      Lit(n)    -> yield Lit(n)
+      Neg(a)    -> yield foldNeg(fold(a))
+      Add(a, b) -> yield foldAdd(fold(a), fold(b))
+      Sub(a, b) -> yield foldSub(fold(a), fold(b))
+      Mul(a, b) -> yield foldMul(fold(a), fold(b))
+
+  # ---- back-end : codegen post-ordre + compteur d'instructions ----
+  part iappend(xs: List[Instr], ys: List[Instr]) -> List[Instr]:
+    match xs:
+      []     -> yield ys
+      h :: t -> yield h :: iappend(t, ys)
+
+  part compile(e: Expr) -> List[Instr]:
+    match e:
+      Lit(n)    -> yield Push(n) :: []
+      Neg(a)    -> yield iappend(compile(a), INeg :: [])
+      Add(a, b) -> yield iappend(compile(a), iappend(compile(b), IAdd :: []))
+      Sub(a, b) -> yield iappend(compile(a), iappend(compile(b), ISub :: []))
+      Mul(a, b) -> yield iappend(compile(a), iappend(compile(b), IMul :: []))
+
+  part ilen(p: List[Instr]) -> Int:
+    match p:
+      []     -> yield 0
+      h :: t -> yield 1 + ilen(t)
+
+  # ---- différentiel : sémantique préservée ET bytecode réduit ----
+  part main() -> Int via IO:
+    let e = Add(Mul(Lit(3), Lit(4)), Lit(5))       # (3*4)+5 = 17, entièrement constant
+    let delta = eval(fold(e)) - eval(e)            # 0 : fold préserve la sémantique
+    let d = IO.print(delta)                         # 0
+    let raw = IO.print(ilen(compile(e)))            # 5 : push3,push4,IMul,push5,IAdd
+    yield IO.print(ilen(compile(fold(e))))          # 1 : fold(e)=Lit(17) → push17 seul
