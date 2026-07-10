@@ -3,29 +3,44 @@ module SelfHost.Lexer:
   # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : le LEXER du mini-langage
   # `Expr` (apparié à self_host_constfold.lll), écrit EN llmlang et vérifié par le
   # vrai pipeline Z3. Une string = List[Int] de codepoints Unicode (DEC-LLL-030) —
-  # un littéral "3*4" désucre en cette liste. Récursion STRUCTURALE sur la queue
-  # (`h :: t` → lex(t)) → terminaison PROUVÉE gratis ; le match est prouvé exhaustif.
+  # un littéral "12*34" désucre en cette liste.
   #
-  # Slice-1 = chiffres SIMPLES (0..9). Un nombre multi-chiffres exigerait de
-  # consommer plusieurs codepoints d'un coup puis de récurser sur un reste plus
-  # court — une terminaison par LONGUEUR-DE-LISTE que v1 n'exprime pas (`measure`
-  # est Int-only, la récursion structurale est tail-only). C'est le PREMIER gap
-  # d'expressivité self-hosting (loggé en SOLL), pas un échec de cette tranche.
+  # Nombres MULTI-chiffres via un ACCUMULATEUR : le chiffre en cours est porté dans
+  # un paramètre `Pend`, émis (`flush`) au prochain non-chiffre. Chaque cas recurse
+  # sur la queue DIRECTE `t` (comme rev_acc) → récursion STRUCTURALE → terminaison
+  # PROUVÉE gratis, SANS `measure` sur liste (le gap REQ-LLL-101 ne bloque donc PAS
+  # le lexer ; il reste ouvert pour un scan non-restructurable, p.ex. le parseur).
+  # Matches prouvés exhaustifs.
 
-  type Tok = TNum(Int) | TPlus | TMinus | TStar
+  type Tok  = TNum(Int) | TPlus | TMinus | TStar
+  type Pend = NoPend | Pend(Int)
 
-  # un codepoint → un token (ou skip). Récursion structurale sur `t`.
-  # 43='+', 45='-', 42='*', 32=' ', 48..57='0'..'9'.
-  part lex(s: List[Int]) -> List[Tok]:
+  # accumule un chiffre dans le nombre en cours.
+  part push_digit(p: Pend, d: Int) -> Pend:
+    match p:
+      NoPend  -> yield Pend(d)
+      Pend(v) -> yield Pend(v * 10 + d)
+
+  # émet le nombre en cours (s'il y en a un) DEVANT le reste des tokens.
+  part flush(p: Pend, rest: List[Tok]) -> List[Tok]:
+    match p:
+      NoPend  -> yield rest
+      Pend(v) -> yield TNum(v) :: rest
+
+  # 43='+', 45='-', 42='*', 32=' ', 48..57='0'..'9'. Récursion structurale sur `t`.
+  part lexA(s: List[Int], p: Pend) -> List[Tok]:
     match s:
-      []     -> yield []
+      []     -> yield flush(p, [])
       h :: t ->
         match h:
-          43 -> yield TPlus :: lex(t)
-          45 -> yield TMinus :: lex(t)
-          42 -> yield TStar :: lex(t)
-          d when d >= 48 and d <= 57 -> yield TNum(d - 48) :: lex(t)
-          _  -> yield lex(t)                       # espace / inconnu : skip
+          43 -> yield flush(p, TPlus :: lexA(t, NoPend))
+          45 -> yield flush(p, TMinus :: lexA(t, NoPend))
+          42 -> yield flush(p, TStar :: lexA(t, NoPend))
+          d when d >= 48 and d <= 57 -> yield lexA(t, push_digit(p, d - 48))
+          _  -> yield flush(p, lexA(t, NoPend))    # espace / inconnu : flush + skip
+
+  part lex(s: List[Int]) -> List[Tok]:
+    yield lexA(s, NoPend)
 
   # ---- différentiel runtime (la préservation n'est pas exprimable en contrat,
   # DEC-LLL-017) : on lexe une chaîne connue et on PROUVE le résultat à l'exécution.
@@ -49,6 +64,6 @@ module SelfHost.Lexer:
       h :: t -> yield tok_val(h) + tok_sig(t)
 
   part main() -> Int via IO:
-    let toks = lex("3*4+-5")             # [TNum(3), TStar, TNum(4), TPlus, TMinus, TNum(5)]
-    let c = IO.print(tok_count(toks))    # 6 tokens
-    yield IO.print(tok_sig(toks))        # 3 + 300 + 4 + 100 + 200 + 5 = 612
+    let toks = lex("12*34+5")            # [TNum(12), TStar, TNum(34), TPlus, TNum(5)]
+    let c = IO.print(tok_count(toks))    # 5 tokens (multi-chiffres regroupés)
+    yield IO.print(tok_sig(toks))        # 12 + 300 + 34 + 100 + 5 = 451
