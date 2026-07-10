@@ -990,6 +990,11 @@ fn print_report(report: &vc::VerifyReport) {
                             println!("      {line}");
                         }
                     }
+                    // REQ-LLL-098 : hint de réparation par KIND d'obligation (même source
+                    // que le canal JSON `fix`, diag::obligation_fix) — boucle mesure→produit.
+                    if let Some(hint) = diag::obligation_fix(&f.descr) {
+                        println!("      → {hint}");
+                    }
                 }
             }
             vc::PartVerdict::Incomplete { holes } => {

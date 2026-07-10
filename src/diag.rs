@@ -196,6 +196,13 @@ impl Diagnostic {
                     .join(" or ")
             ));
         }
+        // REQ-LLL-098 (boucle mesure→produit, friction bench t16) : hint de réparation
+        // indexé par KIND d'obligation — surgit UNIQUEMENT ici, à l'échec. Additif au
+        // contre-modèle, jamais un substitut.
+        if let Some(hint) = obligation_fix(&f.descr) {
+            fix.push_str(" · ");
+            fix.push_str(hint);
+        }
         Diagnostic {
             code: "LLL-E5001".to_string(),
             severity: "error".to_string(),
@@ -211,6 +218,24 @@ impl Diagnostic {
             hypotheses: Vec::new(),
             sufficient_hypotheses: sufficient,
         }
+    }
+}
+
+/// Repair hints keyed by obligation KIND (REQ-LLL-098) — the did-you-mean analogue of
+/// `unknown_var_msg` (types.rs) but for a FAILED proof obligation, learned from the
+/// generation bench (CPT-LLL-011). One arm per obligation `descr` whose failure has a
+/// common, mechanical cause an LLM (or human) can act on. Extensible without new plumbing.
+pub fn obligation_fix(descr: &str) -> Option<&'static str> {
+    match descr {
+        // bench t16 (REQ-LLL-097): a quantified `ensures forall …` over an Array is true
+        // vacuously for an empty array, so it does NOT bound the length — indexing the
+        // result (`get`/`set`) then fails index-in-bounds with an empty-array counter-model.
+        "array index in bounds" => Some(
+            "the array's length is not bounded here — add an `ensures length(result) >= <n>` \
+             on its producer (or a `requires`/guard); a quantified `ensures forall …` alone \
+             does NOT bound the length",
+        ),
+        _ => None,
     }
 }
 

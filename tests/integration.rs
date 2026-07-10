@@ -5794,6 +5794,40 @@ fn forall_ensures_consumed_by_caller_derives_indexed_fact_req087_t1() {
 }
 
 #[test]
+fn unbounded_array_index_failure_carries_length_repair_hint_req098() {
+    // REQ-LLL-098 (boucle mesure→produit, friction bench t16 / REQ-LLL-097) : indexer un Array
+    // résultat d'un `ensures forall …` SANS `ensures length` échoue « array index in bounds »
+    // (contre-modèle array vide — le forall est vrai vacuously) ; le diagnostic doit porter un
+    // hint did-you-mean sur la borne de longueur, dans le canal HUMAIN et le canal JSON `fix`.
+    // Le hint ne surgit QU'À l'échec (une obligation déchargée n'est jamais affichée).
+    let src = "module M:\n\n  part all_pos() -> Array[Int]:\n    ensures forall i in 0 .. length(result): get(result, i) > 0\n    yield array(1, 2, 3)\n\n  part main() -> Int via IO:\n    let xs = all_pos()\n    yield IO.print(get(xs, 0))\n";
+    // canal humain (`lll check`)
+    let (code, out, _) = check_lll_src("098-hint", src);
+    assert_eq!(code, Some(1), "the unbounded index must FAIL: {out}");
+    assert!(
+        out.contains("does NOT bound the length") && out.contains("ensures length(result)"),
+        "the human diagnostic must carry the length repair hint:\n{out}"
+    );
+    // canal JSON (`--format=json`) : le hint est lifté dans `fix`
+    let dir = tempdir().join("098-hint-json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("m.lll");
+    std::fs::write(&f, src).unwrap();
+    let json = String::from_utf8_lossy(
+        &std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        json.contains("\"fix\"") && json.contains("does NOT bound the length"),
+        "the JSON `fix` must carry the length repair hint: {json}"
+    );
+}
+
+#[test]
 fn forall_false_for_some_index_is_rejected_req087_t1() {
     // REQ-LLL-087 T1 soundness — the fresh index is UNconstrained (never over-constrained to
     // a single witness): a `forall i in 0..len: get>0` true for SOME indices only
