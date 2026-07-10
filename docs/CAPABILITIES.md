@@ -10,7 +10,7 @@ Re-run everything:
 
 ```
 export LLL_Z3="$(pwd)/vendor/z3/bin/z3"     # absolute path (subprocess tests need it)
-cargo test                                   # 22 lib + 416 integration + 3 property
+cargo test                                   # 22 lib + 421 integration + 3 property
 cargo test --test integration <test_name>    # one row below, in isolation
 ./target/debug/lll check examples/<file>.lll # any example
 bash bench/llm_gen/run.sh bench/llm_gen/solutions/reference-20260710
@@ -64,6 +64,7 @@ Test names are `tests/integration.rs` functions unless prefixed `lib:`
 | Verified replay (deterministic effect traces) | `pure_program_trace_replay_round_trips`, `ffi_scalar_effect_is_recorded_and_replayed` | — |
 | Structured LLM diagnostics (`check --format=json`, exit-code mirror) | `check_format_json_exit_code_mirrors_verdict_req084`, `lib:diag::tests::z3_model_decodes_to_named_counterexample` | — |
 | LLM generation bench (v1 kernel t1–t15 + post-07-02 surface t16–t22) | `bash bench/llm_gen/run.sh bench/llm_gen/solutions/reference-20260710` (7/7) | `bench/llm_gen/` |
+| **Self-hosting** (DEC-LLL-024 Étape 2): a verified mini-compiler written *in llmlang* — lexer, precedence parser, stack-VM codegen, full source→execution pipeline, meta-circular div-safe evaluator, constant-folding optimizer | `self_host_lexer_verifies_and_runs`, `self_host_parser_chain_verifies_and_respects_precedence`, `self_host_codegen_stack_vm_preserves_semantics`, `self_host_pipeline_source_to_execution_verifies`, `self_host_eval_div_is_meta_circularly_div_safe`, `self_hosting_constant_folder_verifies_and_preserves_semantics` | `self_host_lexer.lll`, `self_host_parser.lll`, `self_host_codegen.lll`, `self_host_pipeline.lll`, `self_host_eval_div.lll`, `self_host_constfold.lll` |
 
 ## Scorecard (point-in-time — sourced, not current-by-assertion)
 
