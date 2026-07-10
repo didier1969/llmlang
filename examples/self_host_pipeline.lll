@@ -1,0 +1,163 @@
+module SelfHost.Pipeline:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : la pipeline COMPLÈTE
+  # source → tokens → AST → bytecode → exécution du mini-langage `Expr`, écrite EN
+  # llmlang et vérifiée par le vrai pipeline Z3. Compose le front-end (lexer +
+  # parseur à précédence, self_host_lexer/parser.lll) et le back-end (codegen machine
+  # à pile + VM, self_host_codegen.lll) en UN module (les modules llmlang partagent
+  # un espace de noms plat, DEC-LLL-019 ⇒ un seul `main`). Tout STRUCTURAL →
+  # terminaison prouvée gratis. La correction end-to-end (une string compilée puis
+  # exécutée = sa valeur, précédence comprise) est DÉMONTRÉE à l'exécution.
+
+  type Tok   = TNum(Int) | TPlus | TMinus | TStar
+  type Pend  = NoPend | Pend(Int)
+  type Expr  = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
+  type OO    = OO(List[Expr], List[Int])
+  type Instr = Push(Int) | INeg | IAdd | ISub | IMul
+
+  # ---- front-end : lexer (accumulateur, structural) ----
+  part push_digit(p: Pend, d: Int) -> Pend:
+    match p:
+      NoPend  -> yield Pend(d)
+      Pend(v) -> yield Pend(v * 10 + d)
+
+  part flush(p: Pend, rest: List[Tok]) -> List[Tok]:
+    match p:
+      NoPend  -> yield rest
+      Pend(v) -> yield TNum(v) :: rest
+
+  part lexA(s: List[Int], p: Pend) -> List[Tok]:
+    match s:
+      []     -> yield flush(p, [])
+      h :: t ->
+        match h:
+          43 -> yield flush(p, TPlus :: lexA(t, NoPend))
+          45 -> yield flush(p, TMinus :: lexA(t, NoPend))
+          42 -> yield flush(p, TStar :: lexA(t, NoPend))
+          d when d >= 48 and d <= 57 -> yield lexA(t, push_digit(p, d - 48))
+          _  -> yield flush(p, lexA(t, NoPend))
+
+  part lex(s: List[Int]) -> List[Tok]:
+    yield lexA(s, NoPend)
+
+  # ---- front-end : parseur à précédence (structural, 2 passes) ----
+  part collect(toks: List[Tok]) -> OO:
+    match toks:
+      []     -> yield OO([], [])
+      h :: t ->
+        match h:
+          TNum(n) ->
+            match collect(t):
+              OO(es, os) -> yield OO(Lit(n) :: es, os)
+          TPlus ->
+            match collect(t):
+              OO(es, os) -> yield OO(es, 1 :: os)
+          TMinus ->
+            match collect(t):
+              OO(es, os) -> yield OO(es, 2 :: os)
+          TStar ->
+            match collect(t):
+              OO(es, os) -> yield OO(es, 3 :: os)
+
+  part reduceMul(es: List[Expr], os: List[Int]) -> OO:
+    match os:
+      []       -> yield OO(es, [])
+      o :: ots ->
+        match es:
+          []      -> yield OO(es, os)
+          a :: e1 ->
+            match e1:
+              []      -> yield OO(es, os)
+              b :: e2 ->
+                match o == 3:
+                  true  -> yield reduceMul(Mul(a, b) :: e2, ots)
+                  false ->
+                    match reduceMul(b :: e2, ots):
+                      OO(res, ros) -> yield OO(a :: res, o :: ros)
+
+  part foldAdd(es: List[Expr], os: List[Int]) -> Expr:
+    match os:
+      []       ->
+        match es:
+          []        -> yield Lit(0)
+          a :: rest -> yield a
+      o :: ots ->
+        match es:
+          []      -> yield Lit(0)
+          a :: e1 ->
+            match e1:
+              []      -> yield a
+              b :: e2 ->
+                match o == 1:
+                  true  -> yield foldAdd(Add(a, b) :: e2, ots)
+                  false -> yield foldAdd(Sub(a, b) :: e2, ots)
+
+  part parse(toks: List[Tok]) -> Expr:
+    match collect(toks):
+      OO(es, os) ->
+        match reduceMul(es, os):
+          OO(es2, os2) -> yield foldAdd(es2, os2)
+
+  # ---- back-end : codegen machine à pile + VM (structural) ----
+  part iappend(xs: List[Instr], ys: List[Instr]) -> List[Instr]:
+    match xs:
+      []     -> yield ys
+      h :: t -> yield h :: iappend(t, ys)
+
+  part compile(e: Expr) -> List[Instr]:
+    match e:
+      Lit(n)    -> yield Push(n) :: []
+      Neg(a)    -> yield iappend(compile(a), INeg :: [])
+      Add(a, b) -> yield iappend(compile(a), iappend(compile(b), IAdd :: []))
+      Sub(a, b) -> yield iappend(compile(a), iappend(compile(b), ISub :: []))
+      Mul(a, b) -> yield iappend(compile(a), iappend(compile(b), IMul :: []))
+
+  part run(prog: List[Instr], st: List[Int]) -> Int:
+    match prog:
+      []         ->
+        match st:
+          []         -> yield 0
+          v :: srest -> yield v
+      i :: rest ->
+        match i:
+          Push(n) -> yield run(rest, n :: st)
+          INeg    ->
+            match st:
+              a :: s2 -> yield run(rest, (0 - a) :: s2)
+              _       -> yield 0
+          IAdd    ->
+            match st:
+              b :: s1 ->
+                match s1:
+                  a :: s2 -> yield run(rest, (a + b) :: s2)
+                  _       -> yield 0
+              _ -> yield 0
+          ISub    ->
+            match st:
+              b :: s1 ->
+                match s1:
+                  a :: s2 -> yield run(rest, (a - b) :: s2)
+                  _       -> yield 0
+              _ -> yield 0
+          IMul    ->
+            match st:
+              b :: s1 ->
+                match s1:
+                  a :: s2 -> yield run(rest, (a * b) :: s2)
+                  _       -> yield 0
+              _ -> yield 0
+
+  # ---- référence + différentiel end-to-end ----
+  part eval(e: Expr) -> Int:
+    match e:
+      Lit(n)    -> yield n
+      Neg(a)    -> yield 0 - eval(a)
+      Add(a, b) -> yield eval(a) + eval(b)
+      Sub(a, b) -> yield eval(a) - eval(b)
+      Mul(a, b) -> yield eval(a) * eval(b)
+
+  part main() -> Int via IO:
+    let ast = parse(lex("2+3*4"))              # front-end : source → AST (précédence)
+    let result = run(compile(ast), [])         # back-end : AST → bytecode → exécution
+    let chk = IO.print(result - eval(ast))     # 0 : la pipeline préserve la sémantique
+    yield IO.print(result)                     # 14 : "2+3*4" compilé+exécuté (pas 20)

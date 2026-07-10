@@ -3304,6 +3304,25 @@ fn self_host_codegen_stack_vm_preserves_semantics() {
 }
 
 #[test]
+fn self_host_pipeline_source_to_execution_verifies() {
+    // REQ-LLL-104 / DEC-LLL-024 Étape 2: the FULL pipeline source → tokens → AST → bytecode →
+    // execution of the mini-`Expr` language, composing the front-end (lexer + precedence parser)
+    // and back-end (stack-machine codegen + VM) into one verified llmlang module. Every phase is
+    // structural (termination proved for free). End-to-end correctness is DEMONSTRATED at runtime
+    // (DEC-LLL-017): run(compile(parse(lex("2+3*4")))) == eval(...) == 14 (precedence preserved
+    // source-to-execution, not 20). Guards examples/self_host_pipeline.lll — a verified compiler
+    // + VM for the mini-language, written in the language itself.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_pipeline.lll"),
+    )
+    .expect("read self_host_pipeline.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting pipeline must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("0\n14"), "expected delta 0 then result 14 (precedence), got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
