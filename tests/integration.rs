@@ -3267,6 +3267,25 @@ fn self_host_lexer_verifies_and_runs() {
 }
 
 #[test]
+fn self_host_parser_chain_verifies_and_respects_precedence() {
+    // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
+    // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser
+    // honours PRECEDENCE (`*` over `+`/`-`, left-assoc) while staying STRUCTURAL (no list
+    // `measure`, so REQ-LLL-101 is not needed): two passes over parallel operand/operator lists
+    // (`collect` → `reduceMul` → `foldAdd`), each recursing on a direct tail. Correctness is
+    // DEMONSTRATED at runtime (DEC-LLL-017): eval(parse(lex("2+3*4"))) = 14 (not 20),
+    // eval(parse(lex("2*3+4"))) = 10. Guards examples/self_host_parser.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_parser.lll"),
+    )
+    .expect("read self_host_parser.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting parser chain must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("14\n10"), "expected 14 (precedence) then 10, got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only

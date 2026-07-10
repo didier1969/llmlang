@@ -1,0 +1,119 @@
+module SelfHost.Parser:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : la chaîne front-end
+  # COMPLÈTE lex → parse → eval du mini-langage `Expr`, écrite EN llmlang et vérifiée
+  # par le vrai pipeline Z3. Auto-contenue (les modules llmlang partagent un espace
+  # de noms plat, DEC-LLL-019 ; un fichier ⇒ un seul `main`). Le parseur respecte la
+  # PRÉCÉDENCE (`*` plus fort que `+`/`-`, associativité gauche) tout en restant
+  # STRUCTURAL (aucun `measure` sur liste — cf. REQ-LLL-101) : deux passes sur des
+  # listes parallèles opérandes/opérateurs, chacune récursive sur la queue directe.
+
+  type Tok  = TNum(Int) | TPlus | TMinus | TStar
+  type Pend = NoPend | Pend(Int)
+  type Expr = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
+  # opérandes (Expr) + opérateurs (codes 1='+', 2='-', 3='*') appariés.
+  type OO   = OO(List[Expr], List[Int])
+
+  # ---- lexer (accumulateur, multi-chiffres, structural) ----
+
+  part push_digit(p: Pend, d: Int) -> Pend:
+    match p:
+      NoPend  -> yield Pend(d)
+      Pend(v) -> yield Pend(v * 10 + d)
+
+  part flush(p: Pend, rest: List[Tok]) -> List[Tok]:
+    match p:
+      NoPend  -> yield rest
+      Pend(v) -> yield TNum(v) :: rest
+
+  part lexA(s: List[Int], p: Pend) -> List[Tok]:
+    match s:
+      []     -> yield flush(p, [])
+      h :: t ->
+        match h:
+          43 -> yield flush(p, TPlus :: lexA(t, NoPend))
+          45 -> yield flush(p, TMinus :: lexA(t, NoPend))
+          42 -> yield flush(p, TStar :: lexA(t, NoPend))
+          d when d >= 48 and d <= 57 -> yield lexA(t, push_digit(p, d - 48))
+          _  -> yield flush(p, lexA(t, NoPend))
+
+  part lex(s: List[Int]) -> List[Tok]:
+    yield lexA(s, NoPend)
+
+  # ---- parseur (précédence, structural) ----
+
+  # tokens → (opérandes, opérateurs). Structural sur les tokens.
+  part collect(toks: List[Tok]) -> OO:
+    match toks:
+      []     -> yield OO([], [])
+      h :: t ->
+        match h:
+          TNum(n) ->
+            match collect(t):
+              OO(es, os) -> yield OO(Lit(n) :: es, os)
+          TPlus ->
+            match collect(t):
+              OO(es, os) -> yield OO(es, 1 :: os)
+          TMinus ->
+            match collect(t):
+              OO(es, os) -> yield OO(es, 2 :: os)
+          TStar ->
+            match collect(t):
+              OO(es, os) -> yield OO(es, 3 :: os)
+
+  # replie tous les `*` (opérande gauche · opérande droite). Structural sur `os`.
+  part reduceMul(es: List[Expr], os: List[Int]) -> OO:
+    match os:
+      []       -> yield OO(es, [])
+      o :: ots ->
+        match es:
+          []      -> yield OO(es, os)
+          a :: e1 ->
+            match e1:
+              []      -> yield OO(es, os)
+              b :: e2 ->
+                match o == 3:
+                  true  -> yield reduceMul(Mul(a, b) :: e2, ots)
+                  false ->
+                    match reduceMul(b :: e2, ots):
+                      OO(res, ros) -> yield OO(a :: res, o :: ros)
+
+  # replie `+`/`-` à gauche sur des opérandes déjà démultipliées. Structural sur `os`.
+  part foldAdd(es: List[Expr], os: List[Int]) -> Expr:
+    match os:
+      []       ->
+        match es:
+          []        -> yield Lit(0)
+          a :: rest -> yield a
+      o :: ots ->
+        match es:
+          []      -> yield Lit(0)
+          a :: e1 ->
+            match e1:
+              []      -> yield a
+              b :: e2 ->
+                match o == 1:
+                  true  -> yield foldAdd(Add(a, b) :: e2, ots)
+                  false -> yield foldAdd(Sub(a, b) :: e2, ots)
+
+  part parse(toks: List[Tok]) -> Expr:
+    match collect(toks):
+      OO(es, os) ->
+        match reduceMul(es, os):
+          OO(es2, os2) -> yield foldAdd(es2, os2)
+
+  # ---- évaluateur de référence (structural sur l'AST) ----
+
+  part eval(e: Expr) -> Int:
+    match e:
+      Lit(n)    -> yield n
+      Neg(a)    -> yield 0 - eval(a)
+      Add(a, b) -> yield eval(a) + eval(b)
+      Sub(a, b) -> yield eval(a) - eval(b)
+      Mul(a, b) -> yield eval(a) * eval(b)
+
+  # ---- différentiel runtime : la chaîne lex→parse→eval, précédence PROUVÉE à l'exécution.
+
+  part main() -> Int via IO:
+    let a = IO.print(eval(parse(lex("2+3*4"))))   # 2 + (3*4) = 14 (et pas 20)
+    yield IO.print(eval(parse(lex("2*3+4"))))     # (2*3) + 4 = 10
