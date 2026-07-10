@@ -3369,6 +3369,26 @@ fn self_host_optimizer_shrinks_generated_bytecode() {
 }
 
 #[test]
+fn self_host_let_env_binds_variables_and_scopes() {
+    // REQ-LLL-109 / DEC-LLL-024 Étape 2: a self-hosted interpreter with VARIABLE BINDING —
+    // real interpreter machinery (environment, binding, indexed lookup) beyond arithmetic.
+    // Written in llmlang, Z3-verified. Variables are De-Bruijn-indexed Ints; the environment
+    // is a List[Int] (rank 0 = most recent binding). `eval` threads the env; `Let(b, body)`
+    // evaluates `b`, pushes it, evaluates `body` in the extended env; `Var(i)` looks up rank i.
+    // Everything structural (subtrees / env tail) → termination proven for free. Runtime:
+    // `let x=10 in x+x` = 20, then `let x=6 in (let y=7 in x*y)` = 42 (nested scope, De-Bruijn
+    // rank correctly resolves the outer x under the inner y). Guards examples/self_host_let_env.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_let_env.lll"),
+    )
+    .expect("read self_host_let_env.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting let/env interpreter must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("20\n42"), "expected 20 then 42 (binding + nested scope), got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only
