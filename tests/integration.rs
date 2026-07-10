@@ -3286,6 +3286,24 @@ fn self_host_parser_chain_verifies_and_respects_precedence() {
 }
 
 #[test]
+fn self_host_codegen_stack_vm_preserves_semantics() {
+    // REQ-LLL-103 / DEC-LLL-024 Étape 2: the BACK-END of the mini-`Expr` language — a codegen to
+    // stack-machine bytecode (`compile`, post-order) plus the VM (`run`) — written in llmlang and
+    // verified by the real Z3 pipeline. Structural recursion (over subtrees / the program tail)
+    // proves termination for free. Semantic preservation isn't a contract (DEC-LLL-017), so it's
+    // DEMONSTRATED at runtime: run(compile(e)) == eval(e) → delta 0, result 7. Guards
+    // examples/self_host_codegen.lll (the back-end counterpart to the lexer/parser front-end).
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_codegen.lll"),
+    )
+    .expect("read self_host_codegen.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting codegen must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("0\n7"), "expected delta 0 then result 7, got: {out}");
+}
+
+#[test]
 fn borrow_model_traverses_shared_list_and_adt_read_only() {
     // REQ-LLL-017 / DEC-LLL-031 voie B: List/ADT parameters are passed by reference
     // (`&Rc<…>`) — always sound because llmlang is purely functional. A read-only

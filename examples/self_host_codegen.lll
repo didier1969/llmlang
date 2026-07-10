@@ -1,0 +1,81 @@
+module SelfHost.Codegen:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : le BACK-END du mini-langage
+  # `Expr` — un codegen vers le bytecode d'une machine à PILE, plus la VM qui l'exécute,
+  # écrits EN llmlang et vérifiés par le vrai pipeline Z3. Contrepartie back-end du
+  # front-end lexer/parseur (self_host_lexer/parser.lll). Tout est STRUCTURAL
+  # (récursion sur les sous-arbres / la queue du programme) → terminaison prouvée gratis.
+  # La préservation sémantique (run(compile(e)) == eval(e)) n'est pas exprimable en
+  # contrat (DEC-LLL-017) → DÉMONTRÉE à l'exécution.
+
+  type Expr  = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
+  type Instr = Push(Int) | INeg | IAdd | ISub | IMul
+
+  # ---- évaluateur de référence (structural sur l'AST) ----
+  part eval(e: Expr) -> Int:
+    match e:
+      Lit(n)    -> yield n
+      Neg(a)    -> yield 0 - eval(a)
+      Add(a, b) -> yield eval(a) + eval(b)
+      Sub(a, b) -> yield eval(a) - eval(b)
+      Mul(a, b) -> yield eval(a) * eval(b)
+
+  # ---- codegen : Expr → programme bytecode (post-ordre) ----
+  part iappend(xs: List[Instr], ys: List[Instr]) -> List[Instr]:
+    match xs:
+      []     -> yield ys
+      h :: t -> yield h :: iappend(t, ys)
+
+  # post-ordre : compiler les sous-arbres, puis l'opération. Structural sur `e`.
+  part compile(e: Expr) -> List[Instr]:
+    match e:
+      Lit(n)    -> yield Push(n) :: []
+      Neg(a)    -> yield iappend(compile(a), INeg :: [])
+      Add(a, b) -> yield iappend(compile(a), iappend(compile(b), IAdd :: []))
+      Sub(a, b) -> yield iappend(compile(a), iappend(compile(b), ISub :: []))
+      Mul(a, b) -> yield iappend(compile(a), iappend(compile(b), IMul :: []))
+
+  # ---- VM à pile : exécute le bytecode. Structural sur le programme `prog`.
+  # La pile est une List[Int] (sommet = tête). Pour un binaire, `b` (poussé en
+  # dernier, opérande droite) est au sommet, `a` (opérande gauche) juste en dessous.
+  part run(prog: List[Instr], st: List[Int]) -> Int:
+    match prog:
+      []        ->
+        match st:
+          []        -> yield 0
+          v :: srest -> yield v                 # sommet de pile = résultat
+      i :: rest ->
+        match i:
+          Push(n) -> yield run(rest, n :: st)
+          INeg    ->
+            match st:
+              a :: s2 -> yield run(rest, (0 - a) :: s2)
+              _       -> yield 0
+          IAdd    ->
+            match st:
+              b :: s1 ->
+                match s1:
+                  a :: s2 -> yield run(rest, (a + b) :: s2)
+                  _       -> yield 0
+              _ -> yield 0
+          ISub    ->
+            match st:
+              b :: s1 ->
+                match s1:
+                  a :: s2 -> yield run(rest, (a - b) :: s2)
+                  _       -> yield 0
+              _ -> yield 0
+          IMul    ->
+            match st:
+              b :: s1 ->
+                match s1:
+                  a :: s2 -> yield run(rest, (a * b) :: s2)
+                  _       -> yield 0
+              _ -> yield 0
+
+  # ---- différentiel runtime : le back-end préserve la sémantique de `eval`.
+  part main() -> Int via IO:
+    let e = Add(Mul(Lit(3), Lit(4)), Neg(Lit(5)))   # (3*4) + (-5) = 7
+    let delta = run(compile(e), []) - eval(e)       # 0 = codegen correct
+    let d = IO.print(delta)                          # 0
+    yield IO.print(run(compile(e), []))              # 7
