@@ -6742,8 +6742,11 @@ fn aps3d_rules_multi_two_live_backends_gated() {
     // ouvre un handle SQLite (`sqlite::memory:`) ET un handle Postgres (db `aps3d_rules_multi`),
     // écrit une règle DISTINCTE dans chacun (seuil 90 vs 75), relit de chacun, et prouve
     // l'isolation. All-ones (4) = SQLite vivant + Postgres vivant EN MÊME TEMPS + chacun rend SES
-    // propres données. Skippé par défaut (pas de PG en CI) ; pour l'exécuter : `devenv up` (crée
-    // aussi la base `aps3d_rules_multi`) puis `LLL_PG_URL=1 cargo test`.
+    // propres données. Skippé par défaut (pas de PG en CI) ; pour l'exécuter : `devenv up` puis
+    // `LLL_PG_URL=1 cargo test`. La base `aps3d_rules_multi` est créée par `initialDatabases`
+    // (devenv.nix) au PREMIER initdb SEULEMENT — sur un `.devenv/state/postgres` déjà existant,
+    // la créer à la main : `psql -h 127.0.0.1 -p 5442 -U aps3d -d postgres -c 'CREATE DATABASE
+    // aps3d_rules_multi OWNER aps3d;'`.
     //
     // GAP CI CONNU (identique au roundtrip PG) : le Rust émis par `emit_db_multi_runtime` n'est
     // compilé QUE par ce test gaté (`lll check` ne fait pas de codegen). Exécuter ce test lors
