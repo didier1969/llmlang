@@ -3378,6 +3378,21 @@ fn self_host_rdparser_parses_precedence_and_parens_req118() {
 }
 
 #[test]
+fn string_literal_may_contain_hash_req117() {
+    // REQ-LLL-117: comment-stripping is now string-aware — a `#` inside a `"…"` literal is data,
+    // not a comment start. Before the fix, `"a#b"` truncated at `#` to `"a` → "unterminated string";
+    // now it lexes fully. `"a#b"` = 3 codepoints, `"#fff"` = 4, so length-sum is 7. The trailing
+    // real comment must still be stripped. This is a pure completeness fix: it only turns former
+    // errors into valid programs (no previously-valid program contained `#` in a string), so nothing
+    // that used to verify changes meaning.
+    let src = "module StrHash:\n  # a normal comment is still stripped\n  part llen(xs: List[Int]) -> Int:\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + llen(t)\n  part sig() -> Int:\n    yield llen(\"a#b\") + llen(\"#fff\")   # 3 + 4 = 7\n  part main() -> Int:\n    yield sig()\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "a program with `#` inside string literals must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("7"), "expected count-sum 7 (strings keep their `#`), got: {out}");
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser

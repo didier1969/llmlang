@@ -94,16 +94,34 @@ pub struct Sp {
     pub line: usize,
 }
 
+/// Byte index at which a line comment starts, i.e. the first `#` that is NOT
+/// inside a double-quoted string literal; `raw.len()` if there is none (REQ-LLL-117).
+/// Strings have no escapes (§lex_line), so a lone `"` toggles string state. A `#`
+/// inside a string (`"a#b"`, `"#fff"`) is data, not a comment; a `#` after a
+/// string, or with no string on the line, starts the comment as before.
+fn comment_start(raw: &str) -> usize {
+    let b = raw.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => in_string = !in_string,
+            b'#' if !in_string => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    raw.len()
+}
+
 pub fn lex(src: &str) -> Result<Vec<Sp>, String> {
     let mut out: Vec<Sp> = Vec::new();
     let mut indents: Vec<usize> = vec![0];
     for (lineno0, raw) in src.lines().enumerate() {
         let line = lineno0 + 1;
-        // strip comments
-        let code = match raw.find('#') {
-            Some(i) => &raw[..i],
-            None => raw,
-        };
+        // strip comments — string-aware: a `#` inside a `"…"` literal is data, not a
+        // comment start (REQ-LLL-117), so `"a#b"` / `  "#x"` lex as strings, not errors.
+        let code = &raw[..comment_start(raw)];
         if code.trim().is_empty() {
             continue; // blank lines are layout-neutral
         }
