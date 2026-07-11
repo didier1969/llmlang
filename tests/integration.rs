@@ -3726,7 +3726,7 @@ fn cons_ctor_sugar_out_of_rule_keeps_actionable_diagnostic_req110() {
     let guarded = "module M:\n\n  type Tok = TNum(Int) | TPlus\n\n  part g(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield 0\n      TNum(n) :: t when n > 0 -> yield n\n      hd :: t -> yield 0\n";
     let e = parser::parse_module(guarded).unwrap_err();
     assert!(
-        e.contains("constructor-headed cons arm") && e.contains("match h: TNum"),
+        e.contains("refutable-head cons arm") && e.contains("match h: TNum"),
         "a guarded constructor head should get the head-bind guidance, got: {e}"
     );
     let divergent = "module M:\n\n  type Tok = TNum(Int) | TPlus\n\n  part d(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield 0\n      TNum(n) :: t1 -> yield n\n      TPlus :: t2 -> yield 0\n";
@@ -3828,6 +3828,34 @@ fn if_expression_example_verifies_and_runs_req124() {
     .expect("read if_expression.lll");
     assert!(verify_src(&src).ok(), "the if-expression example must verify: {:?}", failures(&verify_src(&src)));
     assert!(build_run(&src).contains("0\n5\n-1\n1"), "expected 0,5,-1,1, got: {}", build_run(&src));
+}
+
+// ─── REQ-LLL-126: a LITERAL head in a cons arm (`0 :: t`, `True :: t`) — the same measured
+// friction as REQ-110's constructor heads, one class up. Generalises `coalesce_cons_heads`:
+// the refutable head is an int/bool literal, desugared to `h :: t -> match h: 0 -> …`.
+
+#[test]
+fn cons_literal_head_hash_equals_manual_form_req126() {
+    // Keystone (as for REQ-110): the literal-head sugar desugars to the SAME AST as the manual
+    // `h :: t -> match h: 0 -> …; _ -> …` — hash-equality ⟹ AST identity ⟹ VC/codegen identical.
+    let sugar = "module M:\n\n  part rd(xs: List[Int], acc: Int) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield acc\n      0 :: t -> yield rd(t, acc)\n      h :: t -> yield rd(t, acc div h)\n";
+    let manual = "module M:\n\n  part rd(xs: List[Int], acc: Int) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield acc\n      h :: t ->\n        match h:\n          0 -> rd(t, acc)\n          _ -> rd(t, acc div h)\n";
+    let (_, hs) = full(sugar);
+    let (_, hm) = full(manual);
+    assert_eq!(hs.def_hash["rd"], hm.def_hash["rd"], "a literal cons head must desugar to the manual match AST");
+}
+
+#[test]
+fn cons_literal_head_runtime_and_nonexhaustive_req126() {
+    // Runtime: the `0 :: t` arm skips a zero divisor, so rd([2,0,3], 30) = 30/2 → skip → 15/3 = 5.
+    // The div in the binder-default arm is safe: first-match gives h != 0 after the `0` arm.
+    let src = "module M:\n\n  part rd(xs: List[Int], acc: Int) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield acc\n      0 :: t -> yield rd(t, acc)\n      h :: t -> yield rd(t, acc div h)\n\n  part main() -> Int via IO:\n    yield IO.print(rd(2 :: 0 :: 3 :: [], 30))\n";
+    assert!(verify_src(src).ok(), "literal cons head must verify: {:?}", failures(&verify_src(src)));
+    assert!(build_run(src).contains("5"), "expected 5, got: {}", build_run(src));
+    // ADVERSE: a literal head covering only `0` with no binder default leaves the inner match
+    // non-exhaustive over Int → rejected (the sugar invents no coverage).
+    let adverse = "module M:\n\n  part rd(xs: List[Int]) -> Int:\n    match xs:\n      [] -> yield 0\n      0 :: t -> yield 1\n";
+    assert!(!verify_src(adverse).ok(), "a literal cons head without a default must be rejected as non-exhaustive");
 }
 
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the

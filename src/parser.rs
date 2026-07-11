@@ -44,30 +44,40 @@ pub struct Parser {
     fresh: usize,
 }
 
-/// A parser-local arm that CAN carry a cons-pattern head whose head element is a
-/// constructor (`Ctor :: t` / `Ctor(x…) :: t`) — a shape the AST `Pattern`
-/// deliberately cannot hold (REQ-LLL-110). Keeping `Pattern` unchanged is what
-/// preserves the content-hash of every existing cons pattern (DEC-LLL-020): the
-/// sugar lives ENTIRELY in the parser. `coalesce_cons_ctor` folds a run of these
-/// into the ordinary `h :: t -> match h: …` AST; every other arm is already an `Arm`.
+/// A parser-local arm that CAN carry a cons-pattern head whose head element is a REFUTABLE
+/// scalar pattern — a constructor (`Ctor :: t` / `Ctor(x…) :: t`, REQ-LLL-110) or a literal
+/// (`0 :: t`, `True :: t`, REQ-LLL-126) — a shape the AST `Pattern` deliberately cannot hold.
+/// Keeping `Pattern` unchanged is what preserves the content-hash of every existing cons
+/// pattern (DEC-LLL-020): the sugar lives ENTIRELY in the parser. `coalesce_cons_heads` folds
+/// a run of these into the ordinary `h :: t -> match h: …` AST; every other arm is an `Arm`.
 enum RawArm {
     Plain(Arm),
-    ConsCtor {
-        ctor: String,
-        binders: Vec<String>,
+    ConsPat {
+        head: Pattern,
         tail: String,
         guard: Option<Expr>,
         body: Vec<Stmt>,
     },
 }
 
-/// Unwrap an arm known to sit OUTSIDE a coalesced constructor run — such arms are
-/// always ordinary (a `ConsCtor` there is impossible, as the run spans exactly the
-/// constructor-headed arms).
+/// Unwrap an arm known to sit OUTSIDE a coalesced cons-head run — such arms are always
+/// ordinary (a `ConsPat` there is impossible, as the run spans exactly the refutable-head
+/// cons arms).
 fn plain_arm(r: RawArm) -> Arm {
     match r {
         RawArm::Plain(a) => a,
-        RawArm::ConsCtor { .. } => unreachable!("an arm outside the constructor run is always Plain"),
+        RawArm::ConsPat { .. } => unreachable!("an arm outside the cons-head run is always Plain"),
+    }
+}
+
+/// Render a refutable head pattern for a diagnostic message (`0`, `True`, `Ctor`, `Ctor(…)`).
+fn render_head_pat(p: &Pattern) -> String {
+    match p {
+        Pattern::IntLit(n) => n.to_string(),
+        Pattern::BoolLit(b) => b.to_string(),
+        Pattern::Ctor(name, binders) if binders.is_empty() => name.clone(),
+        Pattern::Ctor(name, _) => format!("{name}(…)"),
+        _ => "…".to_string(),
     }
 }
 
@@ -975,9 +985,9 @@ impl Parser {
                     if raw.is_empty() {
                         return Err(self.err("match with no arms"));
                     }
-                    // REQ-LLL-110: fold any constructor-headed cons run into the
+                    // REQ-LLL-110 / REQ-LLL-126: fold any refutable-head cons run into the
                     // ordinary `h :: t -> match h: …` AST before the arms leave the parser.
-                    let arms = self.coalesce_cons_ctor(raw)?;
+                    let arms = self.coalesce_cons_heads(raw)?;
                     out.push(Stmt::Match(scrut, arms));
                 }
                 Tok::Handle => {
@@ -1125,39 +1135,70 @@ impl Parser {
         Ok(HandleClause { op, params, body })
     }
 
-    /// Parse one match arm. A constructor-headed cons (`Ctor :: t` / `Ctor(x…) :: t`)
-    /// is ALWAYS accepted here into a `RawArm::ConsCtor` — `pattern()` sees one motif
-    /// in isolation and cannot decide accept-vs-diagnose (that needs the whole arm
-    /// list), so the single decision point is `coalesce_cons_ctor` (REQ-LLL-110).
+    /// Parse one match arm. A cons whose HEAD is a refutable scalar pattern — a constructor
+    /// (`Ctor :: t`, REQ-LLL-110) or a literal (`0 :: t`, `True :: t`, REQ-LLL-126) — is
+    /// ALWAYS accepted here into a `RawArm::ConsPat`; `pattern()` sees one motif in isolation
+    /// and cannot decide accept-vs-diagnose (that needs the whole arm list), so the single
+    /// decision point is `coalesce_cons_heads`.
     fn raw_arm(&mut self) -> Result<RawArm, String> {
-        if let Tok::Ident(h) = self.peek().clone() {
-            if h.chars().next().is_some_and(|c| c.is_uppercase()) {
+        if let Some(head) = self.refutable_head()? {
+            if self.peek() == &Tok::ColonColon {
+                // a refutable-head cons — the REQ-LLL-110 / REQ-LLL-126 shape
                 self.pos += 1;
-                let binders = self.ctor_binders()?;
-                if self.peek() == &Tok::ColonColon {
-                    // constructor-headed cons — the REQ-LLL-110 shape
-                    self.pos += 1;
-                    let tail = self.ident()?;
-                    let guard = self.opt_guard()?;
-                    self.eat(Tok::Arrow)?;
-                    let body = self.arrow_body()?;
-                    return Ok(RawArm::ConsCtor { ctor: h, binders, tail, guard, body });
-                }
-                // an ordinary constructor pattern (nullary or payload), no cons head
-                let pattern = Pattern::Ctor(h, binders);
+                let tail = self.ident()?;
                 let guard = self.opt_guard()?;
                 self.eat(Tok::Arrow)?;
                 let body = self.arrow_body()?;
-                return Ok(RawArm::Plain(Arm { pattern, guard, body }));
+                return Ok(RawArm::ConsPat { head, tail, guard, body });
             }
+            // not a cons head → the head pattern IS the whole arm pattern
+            let guard = self.opt_guard()?;
+            self.eat(Tok::Arrow)?;
+            let body = self.arrow_body()?;
+            return Ok(RawArm::Plain(Arm { pattern: head, guard, body }));
         }
-        // everything else — incl. the binder-head default `b :: t` (lowercase) — is an
-        // ordinary pattern the AST can represent directly.
+        // everything else — the binder-head default `b :: t` (lowercase), `[]`, `_`, a
+        // tuple — is an ordinary pattern the AST can represent directly.
         let pattern = self.pattern()?;
         let guard = self.opt_guard()?;
         self.eat(Tok::Arrow)?;
         let body = self.arrow_body()?;
         Ok(RawArm::Plain(Arm { pattern, guard, body }))
+    }
+
+    /// A REFUTABLE scalar head pattern that can head a cons sugar AND stand as an inner-`match`
+    /// arm pattern: an integer/bool literal or a constructor (nullary/payload). Returns `None`
+    /// (consuming nothing) for a binder / `[]` / `_` / tuple — the ordinary-pattern cases left
+    /// to `pattern()`. Shares `ctor_binders` with `pattern`.
+    fn refutable_head(&mut self) -> Result<Option<Pattern>, String> {
+        Ok(match self.peek().clone() {
+            Tok::Int(n) => {
+                self.pos += 1;
+                Some(Pattern::IntLit(n))
+            }
+            Tok::Minus => {
+                self.pos += 1;
+                match self.bump() {
+                    Tok::Int(n) => Some(Pattern::IntLit(-n)),
+                    other => {
+                        return Err(self.err(&format!("expected integer after '-', found {other:?}")))
+                    }
+                }
+            }
+            Tok::True => {
+                self.pos += 1;
+                Some(Pattern::BoolLit(true))
+            }
+            Tok::False => {
+                self.pos += 1;
+                Some(Pattern::BoolLit(false))
+            }
+            Tok::Ident(h) if h.chars().next().is_some_and(|c| c.is_uppercase()) => {
+                self.pos += 1;
+                Some(Pattern::Ctor(h, self.ctor_binders()?))
+            }
+            _ => None,
+        })
     }
 
     /// The optional `when <guard>` suffix shared by every arm shape.
@@ -1196,45 +1237,49 @@ impl Parser {
         format!("_conshd_{n}")
     }
 
-    /// REQ-LLL-110 cons-constructor sugar. Collapse a contiguous run of
-    /// constructor-headed cons arms (`Ctor :: t`, all sharing one tail binder `t`, no
-    /// `when` guard), optionally closed by a single binder-head default `b :: t`, into
-    /// the ordinary `h :: t -> match h: … ` AST — the SAME nodes the hand-written form
-    /// parses, so content-hash, VC (incl. the exhaustivity obligation) and codegen are
-    /// re-derived downstream and IDENTICAL to the manual form (DEC-LLL-020/058). ZERO
-    /// body substitution: each `Ctor` arm body binds its own fields, every body shares
-    /// the one outer tail `t`, and the default body binds `b` = the reused head name.
-    /// Anything outside this shape (guarded, non-contiguous, or mixed tails) keeps an
-    /// actionable diagnostic guiding the author to the explicit head-bind idiom.
-    fn coalesce_cons_ctor(&mut self, raw: Vec<RawArm>) -> Result<Vec<Arm>, String> {
-        // No constructor-headed cons arm ⇒ ordinary arm list, nothing to desugar.
-        if !raw.iter().any(|r| matches!(r, RawArm::ConsCtor { .. })) {
+    /// REQ-LLL-110 / REQ-LLL-126 cons-head sugar. Collapse a contiguous run of cons arms
+    /// whose head is a refutable scalar pattern (`Ctor :: t` or a literal `0 :: t`, all
+    /// sharing one tail binder `t`, no `when` guard), optionally closed by a single
+    /// binder-head default `b :: t`, into the ordinary `h :: t -> match h: … ` AST — the SAME
+    /// nodes the hand-written form parses, so content-hash, VC (incl. the exhaustivity
+    /// obligation) and codegen are re-derived downstream and IDENTICAL to the manual form
+    /// (DEC-LLL-020/058). ZERO body substitution: each head arm body binds its own fields,
+    /// every body shares the one outer tail `t`, and the default body binds `b` = the reused
+    /// head name. Anything outside this shape (guarded, non-contiguous, or mixed tails) keeps
+    /// an actionable diagnostic guiding the author to the explicit head-bind idiom.
+    fn coalesce_cons_heads(&mut self, raw: Vec<RawArm>) -> Result<Vec<Arm>, String> {
+        // No refutable-head cons arm ⇒ ordinary arm list, nothing to desugar.
+        if !raw.iter().any(|r| matches!(r, RawArm::ConsPat { .. })) {
             return Ok(raw.into_iter().map(plain_arm).collect());
         }
-        let first = raw.iter().position(|r| matches!(r, RawArm::ConsCtor { .. })).unwrap();
-        let last = raw.iter().rposition(|r| matches!(r, RawArm::ConsCtor { .. })).unwrap();
+        let first = raw.iter().position(|r| matches!(r, RawArm::ConsPat { .. })).unwrap();
+        let last = raw.iter().rposition(|r| matches!(r, RawArm::ConsPat { .. })).unwrap();
 
-        // The constructor-headed arms must be contiguous, share one tail, be unguarded.
+        // The refutable-head arms must be contiguous, share one tail, be unguarded.
         let mut tail: Option<String> = None;
         for r in &raw[first..=last] {
             match r {
-                RawArm::ConsCtor { ctor, tail: t, guard, .. } => {
+                RawArm::ConsPat { head, tail: t, guard, .. } => {
                     if guard.is_some() {
-                        return Err(self.cons_ctor_bail(ctor, t));
+                        return Err(self.cons_head_bail(&render_head_pat(head), t));
                     }
                     match &tail {
                         None => tail = Some(t.clone()),
-                        Some(t0) if t0 != t => return Err(self.cons_ctor_bail(ctor, t)),
+                        Some(t0) if t0 != t => {
+                            return Err(self.cons_head_bail(&render_head_pat(head), t))
+                        }
                         _ => {}
                     }
                 }
-                // a non-constructor arm wedged inside the run ⇒ not desugarable
+                // a non-refutable-head arm wedged inside the run ⇒ not desugarable
                 RawArm::Plain(_) => {
-                    let (ctor, t) = match &raw[first] {
-                        RawArm::ConsCtor { ctor, tail, .. } => (ctor.clone(), tail.clone()),
+                    let (head, t) = match &raw[first] {
+                        RawArm::ConsPat { head, tail, .. } => {
+                            (render_head_pat(head), tail.clone())
+                        }
                         _ => unreachable!(),
                     };
-                    return Err(self.cons_ctor_bail(&ctor, &t));
+                    return Err(self.cons_head_bail(&head, &t));
                 }
             }
         }
@@ -1256,12 +1301,13 @@ impl Parser {
             }
         }
 
-        // Inner arms: one per constructor arm, plus the default as a wildcard.
+        // Inner arms: one per refutable-head arm (the head IS the inner pattern), plus the
+        // default as a wildcard.
         let mut inner = Vec::new();
         for r in &raw[first..=last] {
-            if let RawArm::ConsCtor { ctor, binders, body, .. } = r {
+            if let RawArm::ConsPat { head, body, .. } = r {
                 inner.push(Arm {
-                    pattern: Pattern::Ctor(ctor.clone(), binders.clone()),
+                    pattern: head.clone(),
                     guard: None,
                     body: body.clone(),
                 });
@@ -1296,14 +1342,14 @@ impl Parser {
         Ok(out)
     }
 
-    /// The actionable diagnostic for a constructor-headed cons arm that falls outside
-    /// the v1 coalescence rule (REQ-LLL-110 graceful degradation).
-    fn cons_ctor_bail(&self, ctor: &str, tail: &str) -> String {
+    /// The actionable diagnostic for a refutable-head cons arm that falls outside the v1
+    /// coalescence rule (REQ-LLL-110 / REQ-LLL-126 graceful degradation).
+    fn cons_head_bail(&self, head: &str, tail: &str) -> String {
         self.err(&format!(
-            "a constructor-headed cons arm (`{ctor} :: {tail}`) is desugared only inside a \
-             contiguous group of constructor heads that share one tail binder and carry no \
+            "a refutable-head cons arm (`{head} :: {tail}`) is desugared only inside a \
+             contiguous group of such heads that share one tail binder and carry no \
              `when` guard; write the explicit head-bind form instead: \
-             `h :: {tail} -> match h: {ctor} … -> …`"
+             `h :: {tail} -> match h: {head} … -> …`"
         ))
     }
 
