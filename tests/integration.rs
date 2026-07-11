@@ -3750,6 +3750,27 @@ fn cons_ctor_sugar_example_verifies_and_runs_req110() {
     assert!(out.contains("1\n3\n0"), "expected 1,3,0 (lead precedence by head token), got: {out}");
 }
 
+#[test]
+fn ampamp_and_pipepipe_alias_and_or_req125() {
+    // REQ-LLL-125 (bench-measured surface friction, reduce_div pilot): `&&`/`||` lex to the
+    // SAME tokens as `and`/`or`, so the C-style form has the IDENTICAL AST and content-hash
+    // as the keyword form — one canonical AST, zero new semantics. A lone `&` still errors,
+    // now pointing at `and` instead of the opaque "unexpected character".
+    let sym = "module M:\n\n  part p(a: Bool, b: Bool) -> Bool:\n    yield (a && b) || (not b)\n";
+    let kw = "module M:\n\n  part p(a: Bool, b: Bool) -> Bool:\n    yield (a and b) or (not b)\n";
+    let (_, hs) = full(sym);
+    let (_, hk) = full(kw);
+    assert_eq!(
+        hs.def_hash["p"], hk.def_hash["p"],
+        "`&&`/`||` must lex to the same tokens as `and`/`or` — identical AST and hash"
+    );
+    let bad = "module M:\n\n  part p(a: Bool) -> Bool:\n    yield a & a\n";
+    assert!(
+        parser::parse_module(bad).unwrap_err().contains("`and`"),
+        "a lone `&` should guide the author to `and`"
+    );
+}
+
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the
 // `measure`/`ensures` fragment. Positives prove the feature works; the three negative
 // controls (per the pre-landing soundness review) are the real load-bearing checks —

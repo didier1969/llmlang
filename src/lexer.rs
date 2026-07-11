@@ -204,8 +204,30 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                 i += 1;
             }
             '|' => {
-                push(out, Tok::Pipe);
-                i += 1;
+                // `||` is the boolean OR (REQ-LLL-125): it lexes to the SAME token as the
+                // `or` keyword, so `a || b` and `a or b` share one AST and one content-hash
+                // (measured friction — LLMs reach for `||`). A lone `|` stays the
+                // ADT-declaration separator (`type T = A | B`).
+                if i + 1 < b.len() && b[i + 1] == b'|' {
+                    push(out, Tok::KwOr);
+                    i += 2;
+                } else {
+                    push(out, Tok::Pipe);
+                    i += 1;
+                }
+            }
+            '&' => {
+                // `&&` is the boolean AND (REQ-LLL-125): same token as the `and` keyword →
+                // one AST, one content-hash. A lone `&` is not an operator in llmlang; guide
+                // the author to `and` rather than the opaque "unexpected character".
+                if i + 1 < b.len() && b[i + 1] == b'&' {
+                    push(out, Tok::KwAnd);
+                    i += 2;
+                } else {
+                    return Err(format!(
+                        "line {line}: unexpected '&' — llmlang's boolean AND is `and` (or `&&`)"
+                    ));
+                }
             }
             '?' => {
                 // typed hole `?` (CPT-LLL-002, DEC-LLL-052) — a first-class term
