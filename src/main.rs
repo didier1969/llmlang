@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -935,6 +935,42 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                  call sites resolve by name (DEC-LLL-019). ~0 output tokens.",
                 origin,
                 &old_hash[..16]
+            );
+            Ok(())
+        }
+        ["extract", file, part, let_name, new_name] => {
+            // REQ-LLL-143 / DEC-LLL-002: pull the RHS of `let <let_name>` in `<part>` into a new part
+            // `<new_name>`, its free locals lifted to typed parameters (types recovered from the
+            // checker). Source-faithful (verbatim RHS, DEC-LLL-020). Fail-safe: the rewrite is applied,
+            // re-checked, and rolled back on any failure. The def-hash of `<part>` legitimately CHANGES
+            // (it now calls `<new_name>`); `extract` then `inline` round-trips back (identity oracle).
+            let (orig, cm, _) = load(file)?;
+            let new_src = refactor::extract_let(&orig, &cm, part, let_name, new_name)?;
+            std::fs::write(*file, &new_src).map_err(|e| e.to_string())?;
+            if let Err(e) = load(file) {
+                std::fs::write(*file, &orig).map_err(|e| e.to_string())?;
+                return Err(format!("extract validation failed: {e}; file restored"));
+            }
+            println!(
+                "✔ extracted the RHS of `let {let_name}` from `{part}` into `part {new_name}`; \
+                 workspace re-checks. Structural edit — ~constant output tokens (DEC-LLL-002)."
+            );
+            Ok(())
+        }
+        ["inline", file, target] => {
+            // REQ-LLL-143 / DEC-LLL-002: the inverse of `extract` — replace every call to a single-
+            // `yield` PURE part `<target>` with its body (arguments substituted for parameters), then
+            // remove the part. Fail-safe rewrite (applied, re-checked, rolled back on failure).
+            let (orig, cm, _) = load(file)?;
+            let new_src = refactor::inline_part(&orig, &cm, target)?;
+            std::fs::write(*file, &new_src).map_err(|e| e.to_string())?;
+            if let Err(e) = load(file) {
+                std::fs::write(*file, &orig).map_err(|e| e.to_string())?;
+                return Err(format!("inline validation failed: {e}; file restored"));
+            }
+            println!(
+                "✔ inlined `{target}` at its call sites and removed it; workspace re-checks. \
+                 Structural edit — ~constant output tokens (DEC-LLL-002)."
             );
             Ok(())
         }
