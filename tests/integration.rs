@@ -3478,6 +3478,26 @@ fn pattern_binder_homonym_from_distinct_scrutinees_not_merged_req106() {
 }
 
 #[test]
+fn guard_does_not_leak_across_sibling_branches_req106() {
+    // REQ-LLL-106 ADVERSARIAL (must-not-merge, negative control on the BRANCH-SCOPING of guard
+    // hypotheses — the property the ensures-reassumption fix established, distinct from the
+    // memo-KEY controls above). Here the three `f(k)` calls share the SAME argument term `k`, so
+    // the CSE CORRECTLY shares one havoc'd result term `r` (functional determinism). The inner
+    // guard `f(k) == 0` establishes `r != 0` ONLY in its own `false` sub-arm; the OUTER `false`
+    // arm's `500 div f(k)` has NO such hypothesis. A sound VC keeps guard facts branch-scoped, so
+    // the outer divisor stays unconstrained → the div-by-zero obligation is undischarged → the
+    // module stays REJECTED. If merging ever leaked `r != 0` across the sibling branch (as the
+    // first buggy CSE impl did before ensures were re-assumed per occurrence), this would FALSELY
+    // verify. Confirmed rejected for the right reason: `divisor is non-zero in div [sat]`.
+    let src = "module GuardLeak:\n  part f(n: Int) -> Int:\n    yield n\n  part g(k: Int) -> Int:\n    match k > 100:\n      true ->\n        match f(k) == 0:\n          true  -> yield 0\n          false -> yield 500 div f(k)\n      false -> yield 500 div f(k)\n";
+    let report = verify_src(src);
+    assert!(
+        !report.ok(),
+        "a branch-scoped guard `f(k) != 0` must NOT leak onto the sibling arm's shared `f(k)` (else div-by-zero falsely discharges)"
+    );
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser

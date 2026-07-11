@@ -11,11 +11,15 @@ module SelfHost.RdParser:
   # `PR{ast, rem}`. Trois techniques, chacune vérifiée par Z3 sur ce fichier :
   #
   #   (1) RÉCURSION MUTUELLE sous mesure : expr→term→factor→(parenthèse)→expr forme un cycle.
-  #   (2) MESURE LEXICOGRAPHIQUE encodée arithmétiquement `measure length(toks) * 5 + rang`
-  #       (rang expr=4 > term=3 > exprRest=2 > termRest=1 > factor=0). La délégation expr→term
-  #       sur les MÊMES tokens ne décroît PAS en longueur — c'est le RANG qui décroît ; une arête
-  #       consommante (parenthèse/opérateur pelé) fait chuter length*5 de ≥5, dominant tout gain de
-  #       rang ≤4. C'est un usage RÉEL de REQ-LLL-101 (length en mesure) dans sa forme la plus dure.
+  #   (2) MESURE LEXICOGRAPHIQUE NATIVE `measure length(toks), rang` (REQ-LLL-012 / DEC-LLL-016 —
+  #       tuple comparé lexicographiquement, exactement comme Ackermann `measure m, n`). Rang
+  #       expr=4 > term=3 > exprRest=2 > termRest=1 > factor=0. La délégation expr→term sur les
+  #       MÊMES tokens ne décroît PAS en longueur — length est ÉGALE, c'est le RANG (2ᵉ composante)
+  #       qui décroît ; une arête consommante (parenthèse/opérateur pelé) fait décroître length
+  #       (1ʳᵉ composante), et l'ordre lexicographique ignore alors le rang (le cas dur
+  #       parseFactor→parseExpr, rang 0→4, tient PARCE QUE `(` est consommé). Aucun encodage
+  #       arithmétique à la main : l'auteur écrit le tuple évident, la VC fait la comparaison
+  #       bien-fondée. Usage RÉEL de REQ-LLL-101 (length en mesure) dans sa forme la plus dure.
   #   (3) CONTRAT SUR LE RESTE : `ensures length(result.rem) <= length(toks)` — `result.rem` est un
   #       SÉLECTEUR de record natif (REQ-LLL-070), donc ADMIS dans le fragment de contrat v1 (un
   #       appel de PART y serait interdit, DEC-LLL-017). C'est ce contrat, importé par la VC de
@@ -57,11 +61,11 @@ module SelfHost.RdParser:
   part lex(s: List[Int]) -> List[Tok]:
     yield lexA(s, NoPend)
 
-  # ---- parseur recursive-descent (SCC mutuel, mesure lexicographique length*5 + rang) ----
+  # ---- parseur recursive-descent (SCC mutuel, mesure lexicographique native `length(toks), rang`) ----
 
   # factor := NUMBER | '(' expr ')'          rang 0
   part parseFactor(toks: List[Tok]) -> PR:
-    measure length(toks) * 5 + 0
+    measure length(toks), 0
     ensures length(result.rem) <= length(toks)
     match toks:
       []     -> yield PR(Lit(0), [])
@@ -81,7 +85,7 @@ module SelfHost.RdParser:
 
   # boucle ('*' factor)*                     rang 1
   part parseTermRest(left: Expr, toks: List[Tok]) -> PR:
-    measure length(toks) * 5 + 1
+    measure length(toks), 1
     ensures length(result.rem) <= length(toks)
     match toks:
       []      -> yield PR(left, [])
@@ -94,7 +98,7 @@ module SelfHost.RdParser:
 
   # exprRest : boucle (('+'|'-') term)*      rang 2
   part parseExprRest(left: Expr, toks: List[Tok]) -> PR:
-    measure length(toks) * 5 + 2
+    measure length(toks), 2
     ensures length(result.rem) <= length(toks)
     match toks:
       []      -> yield PR(left, [])
@@ -110,14 +114,14 @@ module SelfHost.RdParser:
 
   # term := factor ('*' factor)*             rang 3
   part parseTerm(toks: List[Tok]) -> PR:
-    measure length(toks) * 5 + 3
+    measure length(toks), 3
     ensures length(result.rem) <= length(toks)
     match parseFactor(toks):
       PR(a, r) -> yield parseTermRest(a, r)
 
   # expr := term (('+'|'-') term)*           rang 4
   part parseExpr(toks: List[Tok]) -> PR:
-    measure length(toks) * 5 + 4
+    measure length(toks), 4
     ensures length(result.rem) <= length(toks)
     match parseTerm(toks):
       PR(a, r) -> yield parseExprRest(a, r)
