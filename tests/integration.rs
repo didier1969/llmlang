@@ -3914,6 +3914,54 @@ fn cache_key_folds_type_environment_req128() {
     );
 }
 
+#[test]
+fn recursion_through_a_function_valued_position_is_rejected_req127() {
+    // REQ-LLL-127 (audit Fable-5, PROVEN): a part that recurses only by passing ITSELF by value
+    // to an HOF that calls it (or via a self-call inside a lambda) escaped the call-graph
+    // recursion detection — it "verified" with 0 obligations and no measure while looping
+    // forever. Both forms must now be rejected loudly (DEC-LLL-016).
+    let byname = "module M:\n\n  part app(f: (Int) -> Int, n: Int) -> Int:\n    yield f(n)\n\n  part bad(n: Int) -> Int:\n    yield app(bad, n)\n";
+    let e = types::check_module(parser::parse_module(byname).expect("parse")).unwrap_err();
+    assert!(
+        e.contains("function-valued position") && e.contains("bad"),
+        "by-value self-recursion must be rejected, got: {e}"
+    );
+    let lambda = "module M:\n\n  part app(g: (Int) -> Int, n: Int) -> Int:\n    yield g(n)\n\n  part f(n: Int) -> Int:\n    measure n\n    yield app((\\(m: Int) -> f(m)), n)\n";
+    assert!(
+        types::check_module(parser::parse_module(lambda).expect("parse"))
+            .unwrap_err()
+            .contains("function-valued position"),
+        "a self-call inside a lambda must be rejected"
+    );
+}
+
+#[test]
+fn legit_hof_passing_a_non_recursive_part_by_value_still_verifies_req127() {
+    // Non-regression wall: passing a NON-recursive part by value to an HOF (the legitimate
+    // first-class-function case) is NOT rejected — only a cycle that exists ONLY through the
+    // weak (by-value / in-lambda) edge is. app(inc, 41) = 42.
+    let src = "module M:\n\n  part inc(n: Int) -> Int:\n    yield n + 1\n\n  part app(f: (Int) -> Int, n: Int) -> Int:\n    yield f(n)\n\n  part main() -> Int via IO:\n    yield IO.print(app(inc, 41))\n";
+    assert!(verify_src(src).ok(), "a non-recursive part passed by value must still verify: {:?}", failures(&verify_src(src)));
+    assert!(build_run(src).contains("42"), "expected 42, got: {}", build_run(src));
+}
+
+#[test]
+#[ignore = "KNOWN GAP (REQ-LLL-127 / DEC-LLL-029): a part cyclic in the STRONG graph AND \
+            separately looping via a weak self-edge is not caught by the v1 guardrail \
+            (cyclic_full minus cyclic_strong excludes it). It needs a per-call-site decrease \
+            obligation. Today it UNSOUNDLY verifies; this test asserts the future correct \
+            rejection — un-ignore it when DEC-029 lands."]
+fn recursion_mixed_strong_and_weak_self_edge_known_gap_req127() {
+    // `p` decreases on the direct branch (`p(n-1)`) but the `0` branch loops via a by-value
+    // self-call (`app(p, n)`, no decrease). `p` is cyclic in the strong graph, so the v1 rule
+    // excludes it from `unsound_rec` — the residual hole the advisor and REQ-127 both note.
+    let src = "module M:\n\n  part app(f: (Int) -> Int, n: Int) -> Int:\n    yield f(n)\n\n  part p(n: Int) -> Int:\n    measure n\n    match n:\n      0 -> yield app(p, n)\n      _ -> yield p(n - 1)\n";
+    assert!(
+        types::check_module(parser::parse_module(src).expect("parse")).is_err(),
+        "mixed strong+weak self-recursion should be rejected (needs DEC-LLL-029)"
+    );
+}
+
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the
 // `measure`/`ensures` fragment. Positives prove the feature works; the three negative
 // controls (per the pre-landing soundness review) are the real load-bearing checks —

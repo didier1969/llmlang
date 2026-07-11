@@ -906,7 +906,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     }
 
     // call-graph SCCs (wave 3): mutual recursion is allowed, measured
-    let (scc_id, scc_multi) = compute_sccs(&module, &index);
+    let (scc_id, scc_multi, unsound_rec) = compute_sccs(&module, &index);
 
     // typeclasses (REQ-LLL-048, DEC-LLL-047): register classes BEFORE the per-part
     // loop below, so a part's `given Class[a]` clause can resolve the class's
@@ -1113,6 +1113,18 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         // drain the holes found in this part BODY into the module-level record — the
         // SINGLE source the vc fork reads to mark parts Incomplete.
         all_holes.extend(std::mem::take(&mut ctx.holes));
+        // REQ-LLL-127 (audit Fable-5, soundness): a part that only becomes recursive once the
+        // by-value / in-lambda edges are counted recurses through a position the VC never emits
+        // a decrease obligation for — it would otherwise "verify" while looping forever. Reject
+        // it loudly; termination is never assumed (DEC-LLL-016).
+        if unsound_rec.contains(&part.name) {
+            return Err(format!(
+                "part `{}`: recursion runs through a function-valued position — a part passed by \
+                 value, or a self-call inside a lambda — whose decrease the verifier cannot prove; \
+                 termination is never assumed (DEC-LLL-016). Express the recursion as a direct call.",
+                part.name
+            ));
+        }
         let in_multi = scc_multi.contains(&part.name);
         let rec = if in_multi {
             // mutual recursion: every SCC member must carry a measure
@@ -2123,32 +2135,21 @@ fn collect_instantiations(
     seen.into_iter().collect()
 }
 
-fn compute_sccs(
-    module: &Module,
-    index: &HashMap<String, usize>,
-) -> (HashMap<String, usize>, std::collections::HashSet<String>) {
-    // Kosaraju: forward post-order, then reverse-graph DFS in reverse post-order
-    let names: Vec<String> = module.parts.iter().map(|p| p.name.clone()).collect();
-    let mut fwd: HashMap<String, Vec<String>> = HashMap::new();
+/// Kosaraju SCC on a part-call adjacency → (scc_id per node, size per scc_id). Forward
+/// post-order, then reverse-graph DFS in reverse post-order.
+fn kosaraju(
+    names: &[String],
+    fwd: &HashMap<String, Vec<String>>,
+) -> (HashMap<String, usize>, HashMap<usize, usize>) {
     let mut rev: HashMap<String, Vec<String>> = HashMap::new();
-    for p in &module.parts {
-        let mut callees = Vec::new();
-        collect_calls(&p.body, &mut |name| {
-            if index.contains_key(name) {
-                callees.push(name.to_string());
-            }
-        });
-        callees.sort();
-        callees.dedup();
-        for c in &callees {
-            rev.entry(c.clone()).or_default().push(p.name.clone());
+    for (n, callees) in fwd {
+        for c in callees {
+            rev.entry(c.clone()).or_default().push(n.clone());
         }
-        fwd.insert(p.name.clone(), callees);
     }
-    // iterative post-order on fwd
     let mut visited: std::collections::HashSet<String> = Default::default();
     let mut post: Vec<String> = Vec::new();
-    for start in &names {
+    for start in names {
         if visited.contains(start) {
             continue;
         }
@@ -2173,7 +2174,6 @@ fn compute_sccs(
             }
         }
     }
-    // reverse-graph DFS in reverse post-order
     let mut scc_id: HashMap<String, usize> = HashMap::new();
     let mut sizes: HashMap<usize, usize> = HashMap::new();
     let mut next_id = 0usize;
@@ -2195,12 +2195,74 @@ fn compute_sccs(
             }
         }
     }
+    (scc_id, sizes)
+}
+
+/// The parts that lie on a CYCLE of `fwd`: a member of a multi-node SCC, OR a node with a
+/// direct self-edge (a single-node SCC the size test alone would miss).
+fn cyclic_set(
+    names: &[String],
+    fwd: &HashMap<String, Vec<String>>,
+) -> std::collections::HashSet<String> {
+    let (scc_id, sizes) = kosaraju(names, fwd);
+    names
+        .iter()
+        .filter(|n| {
+            sizes.get(&scc_id[n.as_str()]).copied().unwrap_or(1) > 1
+                || fwd.get(n.as_str()).is_some_and(|cs| cs.iter().any(|c| c == *n))
+        })
+        .cloned()
+        .collect()
+}
+
+fn compute_sccs(
+    module: &Module,
+    index: &HashMap<String, usize>,
+) -> (
+    HashMap<String, usize>,
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let names: Vec<String> = module.parts.iter().map(|p| p.name.clone()).collect();
+    let is_part = |n: &str| index.contains_key(n);
+    // STRONG = direct `Call` edges in a VC-translated position (a decrease obligation is
+    // generated, so a strong cycle is soundly handled). FULL = strong PLUS the WEAK edges the
+    // VC never translates as a decreasing call site (a part passed by value, or a call inside
+    // a lambda body — REQ-LLL-127).
+    let mut strong_adj: HashMap<String, Vec<String>> = HashMap::new();
+    let mut full_adj: HashMap<String, Vec<String>> = HashMap::new();
+    for p in &module.parts {
+        let mut s = Vec::new();
+        let mut w = Vec::new();
+        collect_part_refs(&p.body, &is_part, &mut s, &mut w);
+        s.sort();
+        s.dedup();
+        let mut f = s.clone();
+        f.extend(w);
+        f.sort();
+        f.dedup();
+        strong_adj.insert(p.name.clone(), s);
+        full_adj.insert(p.name.clone(), f);
+    }
+    // scc_id / scc_multi drive the existing mutual-recursion measure logic (DEC-LLL-016) and
+    // MUST be computed on the STRONG graph: every strong cycle gets a cross-decrease obligation.
+    let (scc_id, sizes) = kosaraju(&names, &strong_adj);
     let scc_multi: std::collections::HashSet<String> = names
         .iter()
         .filter(|n| sizes.get(&scc_id[n.as_str()]).copied().unwrap_or(1) > 1)
         .cloned()
         .collect();
-    (scc_id, scc_multi)
+    // A part on a cycle that appears ONLY once the weak edges are added recurses through a
+    // position the VC never obliges → it must be REJECTED (REQ-LLL-127, audit Fable-5). A part
+    // already cyclic in the strong graph is soundly handled (its measure is proved) and is
+    // excluded — so a legitimate direct/mutual recursion that ALSO passes a sibling by value to
+    // a bounded consumer is NOT rejected. (Known v1 gap: a part cyclic in strong AND separately
+    // looping via a weak self-edge is not caught here; that needs DEC-LLL-029.)
+    let cyclic_strong = cyclic_set(&names, &strong_adj);
+    let cyclic_full = cyclic_set(&names, &full_adj);
+    let unsound_rec: std::collections::HashSet<String> =
+        cyclic_full.difference(&cyclic_strong).cloned().collect();
+    (scc_id, scc_multi, unsound_rec)
 }
 
 /// LLM-repair hints for unknown-variable errors (wave-3 bench lessons):
@@ -2317,37 +2379,107 @@ fn collect_binders(body: &[Stmt]) -> std::collections::HashSet<String> {
     out
 }
 
-fn collect_calls(body: &[Stmt], f: &mut dyn FnMut(&str)) {
+/// Collect references from a part body to OTHER parts (filtered by `is_part`), split by
+/// whether the VC emits a termination obligation at that position (REQ-LLL-127). STRONG = a
+/// direct `Call` in a VC-translated position → a decreasing-measure obligation is generated.
+/// WEAK = a reference the VC does NOT translate as a decreasing call site: a part passed BY
+/// VALUE (`Expr::Var` naming a part) or ANY call made INSIDE a lambda body (the lambda
+/// application is uninterpreted in the VC). A cycle that exists only through weak edges has no
+/// decrease obligation and must be rejected — see `compute_sccs`.
+fn collect_part_refs(
+    body: &[Stmt],
+    is_part: &dyn Fn(&str) -> bool,
+    strong: &mut Vec<String>,
+    weak: &mut Vec<String>,
+) {
+    fn ex(
+        e: &Expr,
+        in_lambda: bool,
+        is_part: &dyn Fn(&str) -> bool,
+        strong: &mut Vec<String>,
+        weak: &mut Vec<String>,
+    ) {
+        match e {
+            Expr::Call(n, args) => {
+                if is_part(n) {
+                    if in_lambda {
+                        weak.push(n.clone());
+                    } else {
+                        strong.push(n.clone());
+                    }
+                }
+                for a in args {
+                    ex(a, in_lambda, is_part, strong, weak);
+                }
+            }
+            // a part named as a VALUE is passed by value — a weak (VC-untranslated) reference.
+            Expr::Var(n) => {
+                if is_part(n) {
+                    weak.push(n.clone());
+                }
+            }
+            Expr::Lambda(_, b) => ex(b, true, is_part, strong, weak),
+            Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
+                ex(a, in_lambda, is_part, strong, weak);
+                ex(b, in_lambda, is_part, strong, weak);
+            }
+            Expr::If(c, a, b) => {
+                ex(c, in_lambda, is_part, strong, weak);
+                ex(a, in_lambda, is_part, strong, weak);
+                ex(b, in_lambda, is_part, strong, weak);
+            }
+            Expr::Not(a) | Expr::Neg(a) | Expr::Proj(a, _) | Expr::Field(a, _) => {
+                ex(a, in_lambda, is_part, strong, weak)
+            }
+            Expr::EffCall(_, args) | Expr::ListLit(args) | Expr::Tuple(args) => {
+                for a in args {
+                    ex(a, in_lambda, is_part, strong, weak);
+                }
+            }
+            Expr::RecordLit(_, fields) => {
+                for (_, v) in fields {
+                    ex(v, in_lambda, is_part, strong, weak);
+                }
+            }
+            Expr::Forall { domain, body, .. } | Expr::Exists { domain, body, .. } => {
+                match domain {
+                    ForallDomain::Range(lo, hi) => {
+                        ex(lo, in_lambda, is_part, strong, weak);
+                        ex(hi, in_lambda, is_part, strong, weak);
+                    }
+                    ForallDomain::In(c) => ex(c, in_lambda, is_part, strong, weak),
+                }
+                ex(body, in_lambda, is_part, strong, weak);
+                if let Expr::Exists { witness: Some(w), .. } = e {
+                    ex(w, in_lambda, is_part, strong, weak);
+                }
+            }
+            Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => {}
+        }
+    }
     for s in body {
         match s {
-            Stmt::Let(_, e) | Stmt::Yield(e) => collect_calls_expr(e, f),
+            Stmt::Let(_, e) | Stmt::Yield(e) => ex(e, false, is_part, strong, weak),
             Stmt::Match(e, arms) => {
-                collect_calls_expr(e, f);
+                ex(e, false, is_part, strong, weak);
                 for a in arms {
                     if let Some(g) = &a.guard {
-                        collect_calls_expr(g, f);
+                        ex(g, false, is_part, strong, weak);
                     }
-                    collect_calls(&a.body, f);
+                    collect_part_refs(&a.body, is_part, strong, weak);
                 }
             }
             Stmt::Handle(h) => {
-                collect_calls_expr(&h.call, f);
+                ex(&h.call, false, is_part, strong, weak);
                 if let Some(fr) = &h.from {
-                    collect_calls_expr(fr, f);
+                    ex(fr, false, is_part, strong, weak);
                 }
                 for c in &h.clauses {
-                    collect_calls(&c.body, f);
+                    collect_part_refs(&c.body, is_part, strong, weak);
                 }
             }
         }
     }
-}
-fn collect_calls_expr(e: &Expr, f: &mut dyn FnMut(&str)) {
-    e.walk(&mut |x| {
-        if let Expr::Call(n, _) = x {
-            f(n);
-        }
-    });
 }
 
 fn check_signature(part: &Part) -> Result<(), String> {
