@@ -85,7 +85,8 @@ pub fn render_contract_clause(e: &Expr) -> String {
     // wrap a child in parens when it is itself compound, so precedence is explicit
     fn atom(e: &Expr) -> String {
         match e {
-            Expr::Bin(..) | Expr::Cons(..) | Expr::Neg(_) | Expr::Not(_) | Expr::Lambda(..) => {
+            Expr::Bin(..) | Expr::Cons(..) | Expr::Neg(_) | Expr::Not(_) | Expr::Lambda(..)
+            | Expr::If(..) => {
                 format!("({})", render_contract_clause(e))
             }
             _ => render_contract_clause(e),
@@ -93,6 +94,15 @@ pub fn render_contract_clause(e: &Expr) -> String {
     }
     match e {
         Expr::Hole => "?".to_string(),
+        // a conditional in a rendered path fact (REQ-LLL-124): its branch condition may be
+        // an `if`. `if` is rejected in contract clauses (type_of_pure), so this only renders
+        // body-derived facts, never a contract clause.
+        Expr::If(c, a, b) => format!(
+            "if {} then {} else {}",
+            render_contract_clause(c),
+            render_contract_clause(a),
+            render_contract_clause(b)
+        ),
         Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             let kw = if matches!(e, Expr::Exists { .. }) { "exists" } else { "forall" };
             let dom = match domain {
@@ -196,6 +206,11 @@ fn collect_free_vars(e: &Expr, acc: &mut HashSet<String>) {
             }
         }
         Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
+            collect_free_vars(a, acc);
+            collect_free_vars(b, acc);
+        }
+        Expr::If(c, a, b) => {
+            collect_free_vars(c, acc);
             collect_free_vars(a, acc);
             collect_free_vars(b, acc);
         }
@@ -2655,6 +2670,17 @@ fn type_of_pure(
                     .into(),
             )
         }
+        // REQ-LLL-124 v1: an if-EXPRESSION is code-position only. A conditional inside a
+        // contract is rejected here — the same term-only stance as `Hole` above — so
+        // `contract_hash` never contains an `if` and the trusted contract surface is
+        // unchanged (advisor scope call; contract-if is a separate, unmapped need).
+        Expr::If(..) => {
+            return Err(
+                "if-expressions are not allowed in a contract (requires/ensures/measure) — \
+                 REQ-LLL-124 v1 is code-position only"
+                    .into(),
+            )
+        }
         // A BOUNDED universal quantifier (REQ-LLL-087 T1 ensures; A1 requires; A2 Map/Set).
         // A `measure` must be `Int`, and a `forall` is `Bool`, so the measure loop's Int
         // check rejects a quantified measure — no bespoke guard needed here. In a `requires`
@@ -3692,6 +3718,43 @@ fn check_expr(
                     ))
                 }
             }
+        }
+        // Conditional EXPRESSION `if c then a else b` (REQ-LLL-124). The condition is Bool;
+        // both branches are typed against `expected` and must agree — that common type is
+        // the `if`'s type. D2 (REQ-LLL-059): a hole in `then` sees `c` among its hypotheses,
+        // a hole in `else` sees `not c` — DISPLAY-ONLY path facts, pushed and popped exactly
+        // as `let` and match arms push theirs (no obligation, no Z3).
+        Expr::If(c, a, b) => {
+            let tc = check_expr(ctx, c, Some(&Ty::Bool))?;
+            if tc != Ty::Bool {
+                return Err(format!(
+                    "part `{}`: an `if` condition must be Bool, found {tc}",
+                    ctx.part.name
+                ));
+            }
+            let mut cvars = HashSet::new();
+            collect_free_vars(c, &mut cvars);
+            let saved = ctx.path_facts.clone();
+            ctx.path_facts.push(PathFact {
+                text: render_contract_clause(c),
+                vars: cvars.clone(),
+            });
+            let ta = check_expr(ctx, a, expected)?;
+            ctx.path_facts = saved;
+            let saved = ctx.path_facts.clone();
+            ctx.path_facts.push(PathFact {
+                text: format!("not ({})", render_contract_clause(c)),
+                vars: cvars,
+            });
+            let tb = check_expr(ctx, b, expected)?;
+            ctx.path_facts = saved;
+            if ta != tb {
+                return Err(format!(
+                    "part `{}`: `if` branches disagree on type — then is {ta}, else is {tb}",
+                    ctx.part.name
+                ));
+            }
+            ta
         }
         Expr::RecordLit(..) => {
             unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)")

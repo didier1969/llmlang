@@ -637,6 +637,11 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         Expr::Field(a, name) => {
             Expr::Field(Box::new(inline_methods(a, class, inst)?), name.clone())
         }
+        Expr::If(c, a, b) => Expr::If(
+            Box::new(inline_methods(c, class, inst)?),
+            Box::new(inline_methods(a, class, inst)?),
+            Box::new(inline_methods(b, class, inst)?),
+        ),
         Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit
         | Expr::Hole => e.clone(),
         Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
@@ -669,6 +674,11 @@ fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
         Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| subst_vars(x, map)).collect()),
         Expr::Proj(a, i) => Expr::Proj(Box::new(subst_vars(a, map)), *i),
         Expr::Field(a, name) => Expr::Field(Box::new(subst_vars(a, map)), name.clone()),
+        Expr::If(c, a, b) => Expr::If(
+            Box::new(subst_vars(c, map)),
+            Box::new(subst_vars(a, map)),
+            Box::new(subst_vars(b, map)),
+        ),
         Expr::Call(n, args) => {
             Expr::Call(n.clone(), args.iter().map(|a| subst_vars(a, map)).collect())
         }
@@ -1512,6 +1522,24 @@ impl<'a> Emit<'a> {
                         .into(),
                 )
             }
+            // Conditional expression (REQ-LLL-124): value = (ite c a b). PATH-SENSITIVE
+            // obligations — `a`'s assume `c`, `b`'s assume `¬c` — via the SAME `self.hyps`
+            // stack discipline `walk_body` uses for match arms (save/push/tr/truncate, one
+            // branch at a time). `c` runs with the ambient hyps (it is always evaluated).
+            // `expected` flows into BOTH branches: an if in result/tail position puts both
+            // branches in that position. Soundness gate = the div-in-then / div-in-else pair.
+            Expr::If(c, a, b) => {
+                let cc = self.tr(c, env, Some(&Ty::Bool))?;
+                let saved = self.hyps.len();
+                self.hyps.push(cc.clone());
+                let ta = self.tr(a, env, expected)?;
+                self.hyps.truncate(saved);
+                let saved = self.hyps.len();
+                self.hyps.push(format!("(not {cc})"));
+                let tb = self.tr(b, env, expected)?;
+                self.hyps.truncate(saved);
+                format!("(ite {cc} {ta} {tb})")
+            }
             Expr::RecordLit(..) => {
                 unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)")
             }
@@ -2309,6 +2337,21 @@ impl<'a> Emit<'a> {
 
     /// Contracts contain no calls/effects (enforced by the checker) — pure translation.
     fn tr_contract(&mut self, e: &Expr, env: &HashMap<String, String>) -> Result<String, String> {
+        // REQ-LLL-124 v1: if-expressions are CODE-position only. A conditional anywhere
+        // inside a contract clause is rejected here — its obligation interaction with the
+        // trusted contract surface is a separate, unmapped need (scope call). Term-only
+        // rejection, like `Hole` in `tr`.
+        let mut has_if = false;
+        e.walk(&mut |x| {
+            if matches!(x, Expr::If(..)) {
+                has_if = true;
+            }
+        });
+        if has_if {
+            return Err("if-expressions are not yet supported inside contracts \
+                        (requires/ensures/measure) — REQ-LLL-124 v1 is code-position only"
+                .into());
+        }
         self.tr(e, env, None)
     }
 }

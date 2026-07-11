@@ -529,6 +529,14 @@ pub enum Expr {
     Neg(Box<Expr>),
     /// List construction `h :: t` (mirror of the Cons pattern, DEC-LLL-027).
     Cons(Box<Expr>, Box<Expr>),
+    /// Conditional EXPRESSION `if c then a else b` (REQ-LLL-124). First-class: it may
+    /// nest anywhere a value is expected (`f(if c then a else b)`, `yield if …`), and it
+    /// chains (`else if …` gives `elif` for free). The VC lowers it to `(ite ⟦c⟧ ⟦a⟧ ⟦b⟧)`
+    /// with PATH-SENSITIVE obligations — `a`'s obligations assume `c`, `b`'s assume `¬c`
+    /// (vc.rs). This variant is the EXPRESSION position (`f(if …)`, `yield if …`); a
+    /// whole-body `if` STATEMENT keeps its `Stmt::Match` desugar (DEC-LLL-058), so identity
+    /// is position-dependent in v1 (a documented follow-up). `then`/`else` are single exprs.
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
     /// Call to another part in the module, OR application of a function-valued
     /// variable `f(args)` — the checker disambiguates (REQ-LLL-009).
     Call(String, Vec<Expr>),
@@ -649,6 +657,11 @@ impl Expr {
                 b.walk(f);
             }
             Expr::Not(a) | Expr::Neg(a) => a.walk(f),
+            Expr::If(c, a, b) => {
+                c.walk(f);
+                a.walk(f);
+                b.walk(f);
+            }
             Expr::Call(_, args) | Expr::EffCall(_, args) | Expr::ListLit(args) | Expr::Tuple(args) => {
                 for a in args {
                     a.walk(f);

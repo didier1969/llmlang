@@ -3771,6 +3771,65 @@ fn ampamp_and_pipepipe_alias_and_or_req125() {
     );
 }
 
+// ─── REQ-LLL-124: `if…then…else` as a first-class EXPRESSION. The dominant surface friction
+// the repair-loop pilot (REQ-119) measured: 5/10 models reached for `if` in expression position
+// and hit "expected expression, found If". The VC lowers it to `(ite c a b)` with PATH-SENSITIVE
+// obligations — `a` assumes `c`, `b` assumes `¬c` — via the same `self.hyps` stack `match` arms
+// use. Whole-body `if` keeps its `Stmt::Match` desugar (DEC-LLL-058); this is expression position.
+
+#[test]
+fn if_expression_path_sensitive_obligations_req124() {
+    // SOUNDNESS GATE. The div-by-zero guard inside a branch must inherit that branch's
+    // condition. SAFE: div in the `else`, where `h != 0` holds → verifies.
+    let safe = "module M:\n\n  part rd(xs: List[Int], acc: Int) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield acc\n      h :: t -> yield rd(t, if h == 0 then acc else acc div h)\n";
+    assert!(verify_src(safe).ok(), "div in the else-branch (h != 0) must verify: {:?}", failures(&verify_src(safe)));
+    // UNSAFE: div in the `then`, where `h == 0` → division by zero possible → REJECTED.
+    let unsafe_div = "module M:\n\n  part rd(xs: List[Int], acc: Int) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield acc\n      h :: t -> yield rd(t, if h == 0 then acc div h else acc)\n";
+    assert!(!verify_src(unsafe_div).ok(), "div in the then-branch (h == 0) MUST be rejected — path-sensitivity");
+}
+
+#[test]
+fn if_expression_elif_chain_accumulates_negations_req124() {
+    // `else if` nests for free; the else-hypothesis stack accumulates ¬c across the chain, so
+    // the deepest `900 div h` sits under ¬(h==0) ∧ ¬(h==5) — h != 0 is known → verifies + runs.
+    let src = "module M:\n\n  part classify(h: Int) -> Int:\n    yield if h == 0 then 100 else if h == 5 then 500 else 900 div h\n\n  part main() -> Int via IO:\n    let a = IO.print(classify(0))\n    let b = IO.print(classify(5))\n    yield IO.print(classify(3))\n";
+    assert!(verify_src(src).ok(), "elif chain with a div guarded in the tail else must verify: {:?}", failures(&verify_src(src)));
+    assert!(build_run(src).contains("100\n500\n300"), "expected 100,500,300 (classify 0/5/3), got: {}", build_run(src));
+}
+
+#[test]
+fn if_expression_hole_reports_branch_condition_req124() {
+    // REQ-LLL-059 preserved for the if-EXPRESSION: a hole in the else-branch reports the
+    // NEGATED condition as a display-only hypothesis (correct polarity).
+    let src = "module M:\n\n  part f(h: Int) -> Int:\n    ensures result >= 0\n    yield if h == 0 then 1 else ?\n";
+    let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("checks");
+    assert_eq!(
+        cm.holes[0].hypotheses, vec!["not (h == 0)".to_string()],
+        "a hole in the if-expression else-branch sees ¬condition"
+    );
+}
+
+#[test]
+fn if_expression_rejected_in_contracts_req124() {
+    // Scope (advisor): `if` is CODE-position only in v1. A conditional inside a contract clause
+    // is rejected at type-check, so `contract_hash` never contains one (trusted surface unchanged).
+    let src = "module M:\n\n  part f(a: Int) -> Int:\n    ensures result == (if a == 0 then 0 else a)\n    yield a\n";
+    let e = types::check_module(parser::parse_module(src).expect("parse")).unwrap_err();
+    assert!(e.contains("not allowed in a contract"), "if in a contract must be rejected, got: {e}");
+}
+
+#[test]
+fn if_expression_example_verifies_and_runs_req124() {
+    // The discoverable canonical example: an if-expression as a call argument (path-sensitive
+    // safe div) and an `else if` chain (`sign`), both verifying, running 0/5/-1/1.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/if_expression.lll"),
+    )
+    .expect("read if_expression.lll");
+    assert!(verify_src(&src).ok(), "the if-expression example must verify: {:?}", failures(&verify_src(&src)));
+    assert!(build_run(&src).contains("0\n5\n-1\n1"), "expected 0,5,-1,1, got: {}", build_run(&src));
+}
+
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the
 // `measure`/`ensures` fragment. Positives prove the feature works; the three negative
 // controls (per the pre-landing soundness review) are the real load-bearing checks —

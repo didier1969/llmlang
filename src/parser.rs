@@ -242,6 +242,11 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
         Expr::Lambda(ps, body) => Expr::Lambda(ps, Box::new(desugar_expr(*body, recs)?)),
         Expr::Proj(a, i) => Expr::Proj(Box::new(desugar_expr(*a, recs)?), i),
         Expr::Field(a, n) => Expr::Field(Box::new(desugar_expr(*a, recs)?), n),
+        Expr::If(c, a, b) => Expr::If(
+            Box::new(desugar_expr(*c, recs)?),
+            Box::new(desugar_expr(*a, recs)?),
+            Box::new(desugar_expr(*b, recs)?),
+        ),
         Expr::Forall { var, domain, body } => Expr::Forall {
             var,
             domain: desugar_domain(domain, recs)?,
@@ -1481,7 +1486,25 @@ impl Parser {
         if self.peek() == &Tok::Exists {
             return self.exists_expr();
         }
+        if self.peek() == &Tok::If {
+            return self.if_expr();
+        }
         self.or_expr()
+    }
+    /// A conditional EXPRESSION `if c then a else b` (REQ-LLL-124). Parsed at the top of
+    /// `expr()`, so it may appear wherever a value is expected — a call argument, a
+    /// `yield`, a `::`/tuple/list element — and it NESTS in the `else` for `elif`-style
+    /// chains (`if a then x else if b then y else z`) at zero grammar cost. A whole-body
+    /// `if` STATEMENT is caught earlier (block_stmts → `Stmt::Match`, DEC-LLL-058), so this
+    /// only fires in genuine expression position.
+    fn if_expr(&mut self) -> Result<Expr, String> {
+        self.eat(Tok::If)?;
+        let c = self.expr()?;
+        self.eat(Tok::Then)?;
+        let a = self.expr()?;
+        self.eat(Tok::Else)?;
+        let b = self.expr()?;
+        Ok(Expr::If(Box::new(c), Box::new(a), Box::new(b)))
     }
     /// A bounded universal quantifier (REQ-LLL-087). Two surface forms, disambiguated by the
     /// `..` after the domain expression:

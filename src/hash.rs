@@ -528,6 +528,13 @@ impl<'a> Norm<'a> {
             Expr::Neg(a) => format!("(neg {})", self.expr(a)),
             Expr::Not(a) => format!("(not {})", self.expr(a)),
             Expr::Bin(op, a, b) => format!("({op:?} {} {})", self.expr(a), self.expr(b)),
+            // conditional EXPRESSION `if c then a else b` (REQ-LLL-124: `f(if …)`, `yield
+            // if …`). A whole-body `if` STATEMENT keeps its `Stmt::Match` desugar
+            // (DEC-LLL-058), so identity is position-dependent in v1 — harmless (a
+            // mismatched hash only forgoes a dedup/cache hit), a documented follow-up.
+            Expr::If(c, a, b) => {
+                format!("(if {} {} {})", self.expr(c), self.expr(a), self.expr(b))
+            }
             Expr::EffCall(n, args) => {
                 let xs: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
                 // fold the op's identity token when it is a user-declared op

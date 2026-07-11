@@ -2402,6 +2402,15 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         // form is byte-identical to the Z3 `Real` value (model≡binary, DEC-LLL-020).
         Expr::RatLit(n, d) => format!("Rat::new({n}i64, {d}i64)"),
         Expr::BoolLit(v) => format!("{v}"),
+        // conditional expression → native Rust `if` (itself an expression). `res` flows
+        // into BOTH branches (they share the `if`'s position); the condition is a plain
+        // bool, never the result (REQ-LLL-124).
+        Expr::If(c, a, b) => format!(
+            "if {} {{ {} }} else {{ {} }}",
+            expr(c, cx, false)?,
+            expr(a, cx, res)?,
+            expr(b, cx, res)?
+        ),
         Expr::Var(n) => {
             if cx.ctors.contains(n) {
                 // nullary ADT constructor value → Rc-wrapped, fully-qualified (REQ-LLL-011)
