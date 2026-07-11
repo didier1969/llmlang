@@ -3350,11 +3350,12 @@ fn self_host_rdparser_parses_precedence_and_parens_req118() {
     // parser (self_host_parser.lll) could not do (parens build a tree, not two parallel lists). The
     // five parse functions are MUTUALLY RECURSIVE (expr→term→factor→'('expr')'→expr) and thread the
     // remaining tokens through a record `PR{ast, rem}`. Termination rests on three techniques all
-    // proved by Z3 here: (1) mutual recursion under a measure; (2) a LEXICOGRAPHIC measure encoded
-    // arithmetically as `length(toks)*5 + rank` (rank expr=4>term=3>exprRest=2>termRest=1>factor=0),
-    // so the non-consuming grammar delegation expr→term (same tokens) decreases by RANK while a
-    // consuming edge drops length*5 by ≥5, dominating any rank gain ≤4 — a real REQ-LLL-101 use in
-    // its hardest form; (3) `ensures length(result.rem) <= length(toks)` where `result.rem` is a
+    // proved by Z3 here: (1) mutual recursion under a measure; (2) a NATIVE LEXICOGRAPHIC measure
+    // `measure length(toks), rank` (REQ-LLL-012/DEC-LLL-016; rank expr=4>term=3>exprRest=2>termRest=1
+    // >factor=0), so the non-consuming grammar delegation expr→term (same tokens, length EQUAL)
+    // decreases by the RANK second component while a consuming edge decreases length (first
+    // component) so the lex order ignores rank — a real REQ-LLL-101 use combined with the native
+    // lexicographic tuple; (3) `ensures length(result.rem) <= length(toks)` where `result.rem` is a
     // native record SELECTOR (REQ-LLL-070), admitted in the v1 contract fragment (a user-part call
     // would be forbidden, DEC-LLL-017) — that callee contract, imported by the caller's measure VC,
     // is what proves the threaded remainder shrinks so the `(op factor)*` loops terminate. Precedence
@@ -3374,6 +3375,32 @@ fn self_host_rdparser_parses_precedence_and_parens_req118() {
     assert!(
         out.contains("14\n20\n13"),
         "expected eval results 14 (precedence), 20 (paren override) then 13 (nesting), got: {out}"
+    );
+}
+
+#[test]
+fn ackermann_example_verifies_by_native_lexicographic_measure() {
+    // REQ-LLL-012 / DEC-LLL-016: the DISCOVERABLE canonical example of the native lexicographic
+    // measure `measure m, n`. Ackermann decreases on NO single argument (`ack(m-1, ack(m,n-1))`
+    // keeps `m` equal in the inner call) — the well-founded quantity is the TUPLE `(m, n)` compared
+    // lexicographically, which `measure m, n` expresses with no hand-rolled `m*K + n` arithmetic.
+    // Guards examples/ackermann.lll (companion to the inline
+    // `ackermann_terminates_by_lexicographic_measure`, which the surface example was missing).
+    // Runtime differential (DEC-LLL-017): ack(2,2)=7, ack(3,3)=61.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/ackermann.lll"),
+    )
+    .expect("read ackermann.lll");
+    let report = verify_src(&src);
+    assert!(
+        report.ok(),
+        "Ackermann must verify by the native lexicographic measure `measure m, n`: {:?}",
+        failures(&report)
+    );
+    let out = build_run(&src);
+    assert!(
+        out.contains("7\n61"),
+        "expected ack(2,2)=7 then ack(3,3)=61, got: {out}"
     );
 }
 

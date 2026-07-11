@@ -311,12 +311,11 @@ pub fn decode_model(model: &str) -> Vec<Assignment> {
         // after the name: " () <sort> <value>"
         let after = inside[name_end..].trim_start();
         let after = after.strip_prefix("()").unwrap_or(after).trim_start();
-        // drop the sort token, keep the value
-        let value_raw = after
-            .split_once(char::is_whitespace)
-            .map(|x| x.1)
-            .unwrap_or("")
-            .trim();
+        // drop the sort, keep the value. The sort is either an atom (`Int`) or a
+        // parenthesised group (`(List Int)`, `(Array Int Int)`); skip the WHOLE group,
+        // not just the first whitespace-delimited token — otherwise `(List Int)` leaks
+        // `Int)` into the value (REQ-LLL-121).
+        let value_raw = skip_sort(after).trim();
         let value = prettify_value(value_raw);
         if !name.is_empty() && !value.is_empty() {
             out.push(Assignment { var: name, value });
@@ -326,12 +325,122 @@ pub fn decode_model(model: &str) -> Vec<Assignment> {
     out
 }
 
-fn prettify_value(v: &str) -> String {
-    if let Some(inner) = v.strip_prefix("(- ").and_then(|s| s.strip_suffix(')')) {
-        format!("-{}", inner.trim())
+/// Skip the sort annotation in a `define-fun` body, returning the value text.
+/// The sort is either an atom (`Int`) or a balanced parenthesised group
+/// (`(List Int)`) — the latter must be skipped whole, else `Int)` leaks into the
+/// value. REQ-LLL-121.
+fn skip_sort(after: &str) -> &str {
+    let after = after.trim_start();
+    if after.starts_with('(') {
+        let mut depth = 0i32;
+        for (k, ch) in after.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[k + 1..];
+                    }
+                }
+                _ => {}
+            }
+        }
+        "" // unbalanced sort — no value
     } else {
-        v.to_string()
+        after
+            .split_once(char::is_whitespace)
+            .map(|x| x.1)
+            .unwrap_or("")
     }
+}
+
+/// Render a Z3 model value as an llmlang surface value: `(- N)` → `-N`, `nil` →
+/// `[]`, `(cons H T)` → `[H, …]`. Embedded newlines from Z3's pretty-printer are
+/// collapsed; unknown constructors fall back to their normalised S-expression
+/// (never the raw sort-leaked text). REQ-LLL-121.
+fn prettify_value(v: &str) -> String {
+    render_sexpr(&v.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn render_sexpr(v: &str) -> String {
+    let v = v.trim();
+    if v == "nil" {
+        return "[]".to_string();
+    }
+    if let Some(inner) = strip_call(v, "-") {
+        return format!("-{}", render_sexpr(inner));
+    }
+    if let Some(inner) = strip_call(v, "cons") {
+        let parts = split_top_level(inner);
+        if parts.len() == 2 {
+            let head = render_sexpr(parts[0]);
+            let tail = render_sexpr(parts[1]);
+            if let Some(items) = tail.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                return if items.is_empty() {
+                    format!("[{head}]")
+                } else {
+                    format!("[{head}, {items}]")
+                };
+            }
+            return format!("cons({head}, {tail})");
+        }
+    }
+    v.to_string()
+}
+
+/// If `v` is exactly a balanced `(<head> <rest>)` with `head` a whole token,
+/// return `<rest>` trimmed. REQ-LLL-121.
+fn strip_call<'a>(v: &'a str, head: &str) -> Option<&'a str> {
+    let inner = v.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let rest = inner.strip_prefix(head)?;
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
+/// Split an S-expression body into its top-level arguments (respecting nested
+/// parens). REQ-LLL-121.
+fn split_top_level(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut in_tok = false;
+    for (k, ch) in s.char_indices() {
+        match ch {
+            '(' => {
+                if !in_tok {
+                    start = k;
+                    in_tok = true;
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 && in_tok {
+                    out.push(&s[start..=k]);
+                    in_tok = false;
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_tok && depth == 0 {
+                    out.push(&s[start..k]);
+                    in_tok = false;
+                }
+            }
+            _ => {
+                if !in_tok {
+                    start = k;
+                    in_tok = true;
+                }
+            }
+        }
+    }
+    if in_tok {
+        out.push(&s[start..]);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -361,6 +470,20 @@ mod tests {
         assert_eq!(ce, vec![
             Assignment { var: "a".into(), value: "0".into() },
             Assignment { var: "b".into(), value: "-1".into() },
+        ]);
+    }
+
+    #[test]
+    fn z3_model_decodes_list_counterexample_req121() {
+        // REQ-LLL-121: a `List[Int]` counterexample must render as a clean surface
+        // literal, NOT leak the parametrised sort (`Int)`) or Z3's newlines/`cons`.
+        // The sort `(List Int)` is a parenthesised group and the value spans lines.
+        let model = "(\n  (define-fun p_xs () (List Int)\n    (cons 0 nil))\n  (define-fun p_ys () (List Int) (cons (- 1) (cons 2 nil)))\n  (define-fun p_acc () Int 0)\n)";
+        let ce = decode_model(model);
+        assert_eq!(ce, vec![
+            Assignment { var: "xs".into(), value: "[0]".into() },
+            Assignment { var: "ys".into(), value: "[-1, 2]".into() },
+            Assignment { var: "acc".into(), value: "0".into() },
         ]);
     }
 }

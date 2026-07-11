@@ -1,0 +1,34 @@
+module Ackermann:
+
+  # Le cas CANONIQUE de la terminaison par MESURE LEXICOGRAPHIQUE NATIVE (REQ-LLL-012 / DEC-LLL-016).
+  # La fonction d'Ackermann ne décroît sur AUCUN argument seul : `ack(m-1, ack(m, n-1))` garde `m`
+  # égal dans l'appel interne. Ce qui décroît est le TUPLE `(m, n)` comparé lexicographiquement —
+  # exactement ce que `measure m, n` exprime : l'auteur écrit le tuple évident, la VC prouve l'ordre
+  # bien-fondé sur ℕ² (chaque composant ≥ 0 + décroissance lexicographique stricte). AUCUN encodage
+  # arithmétique à la main (pas de `measure m*K + n`) — c'est la forme first-class du langage.
+  #
+  #   • appel externe `ack(m - 1, …)`     : m DÉCROÎT (1ʳᵉ composante) → l'ordre ignore n
+  #   • appel interne `ack(m, n - 1)`      : m ÉGAL, n DÉCROÎT (2ᵉ composante)
+  #   • appel `ack(m - 1, 1)`              : m DÉCROÎT (1ʳᵉ composante)
+  #
+  # `ensures result >= 0` est REQUIS et suffisant : l'argument interne `ack(m, n - 1)` est havocé au
+  # site de l'appel externe (DEC-LLL-017) ; sans son ensures, ni le `requires n >= 0` ni la borne
+  # `>= 0` du tuple de l'appelant ne tiendraient. La vérification modulaire (DEC-LLL-021) importe
+  # ce contrat du callee pour décharger l'obligation — c'est vrai (ack renvoie toujours ≥ 1).
+
+  part ack(m: Int, n: Int) -> Int:
+    requires m >= 0 and n >= 0
+    ensures result >= 0
+    measure m, n
+    match m:
+      0 -> yield n + 1
+      _ ->
+        match n:
+          0 -> yield ack(m - 1, 1)
+          _ -> yield ack(m - 1, ack(m, n - 1))
+
+  # Différentiel runtime (DEC-LLL-017) : ack(2, n) = 2n + 3 → ack(2, 2) = 7 ;
+  # ack(3, n) = 2^(n+3) - 3 → ack(3, 3) = 61.
+  part main() -> Int via IO:
+    let a = IO.print(ack(2, 2))
+    yield IO.print(ack(3, 3))
