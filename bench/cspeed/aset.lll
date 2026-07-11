@@ -1,0 +1,34 @@
+module Bench.ASet:
+
+  # Build the array [n, n-1, …, 1] of length n via `push` from an empty literal.
+  # `push` on a uniquely-owned array is `Rc::make_mut(&mut a).push(v)` — amortized O(1).
+  part build(a: Array[Int], n: Int) -> Array[Int]:
+    requires n >= 0
+    measure n
+    yield if n == 0 then a else build(push(a, n), n - 1)
+
+  # One left-to-right pass: increment every element via `set`. `set(a, i, v)` lowers to
+  # `Rc::make_mut(&mut a)[i] = v` — in place (O(1)) when the array is uniquely owned, a
+  # copy-on-write O(n) clone when shared. Whether THIS site stays unique through the
+  # recursive fold is exactly what the N-vs-2N scaling check decides (not asserted here).
+  part pass(a: Array[Int], i: Int) -> Array[Int]:
+    requires 0 <= i, i <= length(a)
+    measure length(a) - i
+    yield if i == length(a) then a else pass(set(a, i, get(a, i) + 1), i + 1)
+
+  # k passes, threaded linearly — each pass's result replaces the previous binding.
+  part passes(a: Array[Int], k: Int) -> Array[Int]:
+    requires k >= 0
+    measure k
+    yield if k == 0 then a else passes(pass(a, 0), k - 1)
+
+  # Checksum so the passes are not dead-code-eliminated by rustc/LLVM.
+  part asum(a: Array[Int], i: Int, acc: Int) -> Int:
+    requires 0 <= i, i <= length(a)
+    measure length(a) - i
+    yield if i == length(a) then acc else asum(a, i + 1, acc + get(a, i))
+
+  part main() -> Int via IO:
+    let a = build(array(), 2000)
+    let done = passes(a, 4000)
+    yield IO.print(asum(done, 0, 0))

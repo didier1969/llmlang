@@ -1,0 +1,26 @@
+module Bench.MapBench:
+
+  # Build a map {1:2, 2:4, …, n:2n} via `insert` from the empty map. `insert(m, k, v)`
+  # lowers to `Rc::make_mut(&mut m).insert(k, v)` on an `Rc<BTreeMap>` — O(log n) when the
+  # map is uniquely owned (linear threading here), a COW O(n) clone when shared.
+  part build(m: Map[Int, Int], n: Int) -> Map[Int, Int]:
+    requires n >= 0
+    measure n
+    yield if n == 0 then m else build(insert(m, n, n + n), n - 1)
+
+  # Count how many of the keys [1..k] are present. `haskey` borrows the map (no clone) and
+  # lowers to `BTreeMap::contains_key` — the associative read is O(log n) tree descent.
+  part probe(m: Map[Int, Int], k: Int, acc: Int) -> Int:
+    requires k >= 0
+    measure k
+    yield if k == 0 then acc else probe(m, k - 1, acc + (if haskey(m, k) then 1 else 0))
+
+  # r rounds of the k-key probe (amplify total work; the map is READ-shared across rounds).
+  part rounds(m: Map[Int, Int], r: Int, k: Int, acc: Int) -> Int:
+    requires r >= 0, k >= 0
+    measure r
+    yield if r == 0 then acc else rounds(m, r - 1, k, acc + probe(m, k, 0))
+
+  part main() -> Int via IO:
+    let m = build(map(), 4000)
+    yield IO.print(rounds(m, 2000, 4000, 0))

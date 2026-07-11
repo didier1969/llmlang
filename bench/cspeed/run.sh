@@ -30,3 +30,19 @@ $LLL build --no-opt bench/cspeed/cse.lll >/dev/null 2>&1; cp build/Bench_Cse bui
 $LLL build          bench/cspeed/cse.lll >/dev/null 2>&1; cp build/Bench_Cse build/cspeed/cse_opt
 printf "cse      opt=%ss  no-opt=%ss  (equality-saturation, REQ-LLL-058)\n" \
   "$(best build/cspeed/cse_opt)" "$(best build/cspeed/cse_noopt)"
+
+# REQ-LLL-140 — WRITE / ASSOCIATIVE regime (the audit's unsubstantiated "as fast as C").
+# aset: functional array update in a linear fold. llmlang `set` currently clones the whole
+# Vec per call (borrow model → refcount>1 → make_mut copies) → O(N)/op, vs C's in-place O(1).
+# The N-vs-2N scaling (see RESULTS.md) is the proof of the O(N) regime, not the single number.
+build_lll bench/cspeed/aset.lll aset_lll
+gcc -O2 bench/cspeed/aset.c -o build/cspeed/aset_c
+printf "aset     llmlang=%ss  C=%ss  (functional array UPDATE — O(N)/op gap, REQ-LLL-140)\n" \
+  "$(best build/cspeed/aset_lll)" "$(best build/cspeed/aset_c 2000 4000)"
+
+# map: associative read, verified Rc<BTreeMap> vs a FAIR C ordered baseline (sorted-array
+# bsearch, same O(log n) + ordering) — not an O(1) hashmap. Result: C-competitive.
+build_lll bench/cspeed/mapbench.lll map_lll
+gcc -O2 bench/cspeed/mapbench.c -o build/cspeed/map_c
+printf "map      llmlang=%ss  C(bsearch)=%ss  (associative read — C-competitive, REQ-LLL-140)\n" \
+  "$(best build/cspeed/map_lll)" "$(best build/cspeed/map_c 4000 2000)"
