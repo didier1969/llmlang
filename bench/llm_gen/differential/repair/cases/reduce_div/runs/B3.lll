@@ -1,0 +1,9 @@
+module M:
+  part reduceDiv(xs: List[Int], acc: Int) -> Int:
+    measure length(xs)
+    match xs:
+      [] -> yield acc
+      h :: t ->
+        match h:
+          0 -> yield reduceDiv(t, acc)
+          _ -> yield reduceDiv(t, acc div h)

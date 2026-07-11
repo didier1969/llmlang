@@ -1,0 +1,54 @@
+# Task
+Écris un module llmlang complet nommé `M` avec une part :
+
+    reduceDiv(xs: List[Int], acc: Int) -> Int
+
+Elle replie la liste `xs` de gauche à droite en divisant l'accumulateur par
+chaque élément (division entière euclidienne, l'opérateur `div`). Sur la liste
+vide, elle renvoie l'accumulateur `acc`.
+
+Le module doit passer `lll check` : toutes les obligations de vérification
+déchargées.
+
+# Your previous attempt (failed verification)
+```
+module M:
+
+  part reduceDiv(xs: List[Int], acc: Int) -> Int:
+    measure length(xs)
+    match xs:
+      [] -> yield acc
+      h :: t -> yield reduceDiv(t, acc div h)
+```
+
+# Compiler diagnostic (llmlang, structured)
+```json
+{
+  "ok": false,
+  "status": "failed",
+  "module": "M",
+  "diagnostics": [
+    {
+      "code": "LLL-E5001",
+      "severity": "error",
+      "category": "contract",
+      "message": "undischarged obligation: divisor is non-zero in `div` [sat]",
+      "part": "reduceDiv",
+      "fix": "fails on xs=[0], acc=0 — handle this case or strengthen `requires`",
+      "counterexample": [
+        {
+          "var": "xs",
+          "value": "[0]"
+        },
+        {
+          "var": "acc",
+          "value": "0"
+        }
+      ]
+    }
+  ]
+}
+```
+
+# Instruction
+Repair the attempt so it passes `lll check`. Return only the corrected module.

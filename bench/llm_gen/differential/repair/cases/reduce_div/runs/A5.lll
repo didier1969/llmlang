@@ -1,0 +1,13 @@
+module M:
+  part allNonZero(xs: List[Int]) -> Bool:
+    measure length(xs)
+    match xs:
+      [] -> yield true
+      h :: t -> yield (h != 0) && allNonZero(t)
+
+  part reduceDiv(xs: List[Int], acc: Int) -> Int:
+    requires allNonZero(xs)
+    measure length(xs)
+    match xs:
+      [] -> yield acc
+      h :: t -> yield reduceDiv(t, acc div h)

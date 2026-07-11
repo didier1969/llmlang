@@ -1,0 +1,10 @@
+Écris un module llmlang complet nommé `M` avec une part :
+
+    reduceDiv(xs: List[Int], acc: Int) -> Int
+
+Elle replie la liste `xs` de gauche à droite en divisant l'accumulateur par
+chaque élément (division entière euclidienne, l'opérateur `div`). Sur la liste
+vide, elle renvoie l'accumulateur `acc`.
+
+Le module doit passer `lll check` : toutes les obligations de vérification
+déchargées.
