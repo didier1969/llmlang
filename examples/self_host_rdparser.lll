@@ -76,11 +76,9 @@ module SelfHost.RdParser:
             match parseExpr(t):
               PR(e, r2) ->
                 match r2:
-                  []      -> yield PR(e, [])           # ')' manquant → récupération
-                  c :: r3 ->
-                    match c:
-                      TRParen -> yield PR(e, r3)
-                      _       -> yield PR(e, r2)       # ')' manquant → récupération
+                  []            -> yield PR(e, [])     # ')' manquant → récupération
+                  TRParen :: r3 -> yield PR(e, r3)     # sucre REQ-LLL-110 : tête-constructeur cons
+                  hd :: r3      -> yield PR(e, r2)     # défaut (autre tête) → récupération
           _       -> yield PR(Lit(0), toks)           # token inattendu → récupération
 
   # boucle ('*' factor)*                     rang 1

@@ -37,11 +37,43 @@ fn starts_expr(t: &Tok) -> bool {
 pub struct Parser {
     toks: Vec<Sp>,
     pos: usize,
+    /// Monotonic counter for parser-synthesised binders. Used by the REQ-LLL-110
+    /// cons-constructor sugar to mint a fresh head binder (`_conshd_N`, a reserved
+    /// prefix no source identifier collides with) for a coalesced `match` that
+    /// carries no explicit default arm.
+    fresh: usize,
+}
+
+/// A parser-local arm that CAN carry a cons-pattern head whose head element is a
+/// constructor (`Ctor :: t` / `Ctor(x…) :: t`) — a shape the AST `Pattern`
+/// deliberately cannot hold (REQ-LLL-110). Keeping `Pattern` unchanged is what
+/// preserves the content-hash of every existing cons pattern (DEC-LLL-020): the
+/// sugar lives ENTIRELY in the parser. `coalesce_cons_ctor` folds a run of these
+/// into the ordinary `h :: t -> match h: …` AST; every other arm is already an `Arm`.
+enum RawArm {
+    Plain(Arm),
+    ConsCtor {
+        ctor: String,
+        binders: Vec<String>,
+        tail: String,
+        guard: Option<Expr>,
+        body: Vec<Stmt>,
+    },
+}
+
+/// Unwrap an arm known to sit OUTSIDE a coalesced constructor run — such arms are
+/// always ordinary (a `ConsCtor` there is impossible, as the run spans exactly the
+/// constructor-headed arms).
+fn plain_arm(r: RawArm) -> Arm {
+    match r {
+        RawArm::Plain(a) => a,
+        RawArm::ConsCtor { .. } => unreachable!("an arm outside the constructor run is always Plain"),
+    }
 }
 
 pub fn parse_module(src: &str) -> Result<Module, String> {
     let toks = lex(src)?;
-    let mut p = Parser { toks, pos: 0 };
+    let mut p = Parser { toks, pos: 0, fresh: 0 };
     let mut m = p.module()?;
     p.skip_newlines();
     if !p.at_end() {
@@ -926,18 +958,21 @@ impl Parser {
                     self.eat(Tok::Colon)?;
                     self.eat(Tok::Newline)?;
                     self.eat(Tok::Indent)?;
-                    let mut arms = Vec::new();
+                    let mut raw = Vec::new();
                     loop {
                         self.skip_newlines();
                         if self.peek() == &Tok::Dedent {
                             self.pos += 1;
                             break;
                         }
-                        arms.push(self.arm()?);
+                        raw.push(self.raw_arm()?);
                     }
-                    if arms.is_empty() {
+                    if raw.is_empty() {
                         return Err(self.err("match with no arms"));
                     }
+                    // REQ-LLL-110: fold any constructor-headed cons run into the
+                    // ordinary `h :: t -> match h: …` AST before the arms leave the parser.
+                    let arms = self.coalesce_cons_ctor(raw)?;
                     out.push(Stmt::Match(scrut, arms));
                 }
                 Tok::Handle => {
@@ -1085,21 +1120,186 @@ impl Parser {
         Ok(HandleClause { op, params, body })
     }
 
-    fn arm(&mut self) -> Result<Arm, String> {
+    /// Parse one match arm. A constructor-headed cons (`Ctor :: t` / `Ctor(x…) :: t`)
+    /// is ALWAYS accepted here into a `RawArm::ConsCtor` — `pattern()` sees one motif
+    /// in isolation and cannot decide accept-vs-diagnose (that needs the whole arm
+    /// list), so the single decision point is `coalesce_cons_ctor` (REQ-LLL-110).
+    fn raw_arm(&mut self) -> Result<RawArm, String> {
+        if let Tok::Ident(h) = self.peek().clone() {
+            if h.chars().next().is_some_and(|c| c.is_uppercase()) {
+                self.pos += 1;
+                let binders = self.ctor_binders()?;
+                if self.peek() == &Tok::ColonColon {
+                    // constructor-headed cons — the REQ-LLL-110 shape
+                    self.pos += 1;
+                    let tail = self.ident()?;
+                    let guard = self.opt_guard()?;
+                    self.eat(Tok::Arrow)?;
+                    let body = self.arrow_body()?;
+                    return Ok(RawArm::ConsCtor { ctor: h, binders, tail, guard, body });
+                }
+                // an ordinary constructor pattern (nullary or payload), no cons head
+                let pattern = Pattern::Ctor(h, binders);
+                let guard = self.opt_guard()?;
+                self.eat(Tok::Arrow)?;
+                let body = self.arrow_body()?;
+                return Ok(RawArm::Plain(Arm { pattern, guard, body }));
+            }
+        }
+        // everything else — incl. the binder-head default `b :: t` (lowercase) — is an
+        // ordinary pattern the AST can represent directly.
         let pattern = self.pattern()?;
-        let guard = if self.peek() == &Tok::When {
-            self.pos += 1;
-            Some(self.expr()?)
-        } else {
-            None
-        };
+        let guard = self.opt_guard()?;
         self.eat(Tok::Arrow)?;
         let body = self.arrow_body()?;
-        Ok(Arm {
-            pattern,
-            guard,
-            body,
-        })
+        Ok(RawArm::Plain(Arm { pattern, guard, body }))
+    }
+
+    /// The optional `when <guard>` suffix shared by every arm shape.
+    fn opt_guard(&mut self) -> Result<Option<Expr>, String> {
+        if self.peek() == &Tok::When {
+            self.pos += 1;
+            Ok(Some(self.expr()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Parse the optional `(x, y, …)` binder list of a constructor pattern. No parens
+    /// ⇒ a nullary constructor (empty list). Shared by `raw_arm` and `pattern`.
+    fn ctor_binders(&mut self) -> Result<Vec<String>, String> {
+        if self.peek() != &Tok::LParen {
+            return Ok(vec![]);
+        }
+        self.pos += 1;
+        let mut binders = Vec::new();
+        if self.peek() != &Tok::RParen {
+            binders.push(self.ident()?);
+            while self.peek() == &Tok::Comma {
+                self.pos += 1;
+                binders.push(self.ident()?);
+            }
+        }
+        self.eat(Tok::RParen)?;
+        Ok(binders)
+    }
+
+    /// Mint a fresh, collision-proof head binder for a coalesced match with no default.
+    fn fresh_head_binder(&mut self) -> String {
+        let n = self.fresh;
+        self.fresh += 1;
+        format!("_conshd_{n}")
+    }
+
+    /// REQ-LLL-110 cons-constructor sugar. Collapse a contiguous run of
+    /// constructor-headed cons arms (`Ctor :: t`, all sharing one tail binder `t`, no
+    /// `when` guard), optionally closed by a single binder-head default `b :: t`, into
+    /// the ordinary `h :: t -> match h: … ` AST — the SAME nodes the hand-written form
+    /// parses, so content-hash, VC (incl. the exhaustivity obligation) and codegen are
+    /// re-derived downstream and IDENTICAL to the manual form (DEC-LLL-020/058). ZERO
+    /// body substitution: each `Ctor` arm body binds its own fields, every body shares
+    /// the one outer tail `t`, and the default body binds `b` = the reused head name.
+    /// Anything outside this shape (guarded, non-contiguous, or mixed tails) keeps an
+    /// actionable diagnostic guiding the author to the explicit head-bind idiom.
+    fn coalesce_cons_ctor(&mut self, raw: Vec<RawArm>) -> Result<Vec<Arm>, String> {
+        // No constructor-headed cons arm ⇒ ordinary arm list, nothing to desugar.
+        if !raw.iter().any(|r| matches!(r, RawArm::ConsCtor { .. })) {
+            return Ok(raw.into_iter().map(plain_arm).collect());
+        }
+        let first = raw.iter().position(|r| matches!(r, RawArm::ConsCtor { .. })).unwrap();
+        let last = raw.iter().rposition(|r| matches!(r, RawArm::ConsCtor { .. })).unwrap();
+
+        // The constructor-headed arms must be contiguous, share one tail, be unguarded.
+        let mut tail: Option<String> = None;
+        for r in &raw[first..=last] {
+            match r {
+                RawArm::ConsCtor { ctor, tail: t, guard, .. } => {
+                    if guard.is_some() {
+                        return Err(self.cons_ctor_bail(ctor, t));
+                    }
+                    match &tail {
+                        None => tail = Some(t.clone()),
+                        Some(t0) if t0 != t => return Err(self.cons_ctor_bail(ctor, t)),
+                        _ => {}
+                    }
+                }
+                // a non-constructor arm wedged inside the run ⇒ not desugarable
+                RawArm::Plain(_) => {
+                    let (ctor, t) = match &raw[first] {
+                        RawArm::ConsCtor { ctor, tail, .. } => (ctor.clone(), tail.clone()),
+                        _ => unreachable!(),
+                    };
+                    return Err(self.cons_ctor_bail(&ctor, &t));
+                }
+            }
+        }
+        let tail = tail.unwrap();
+
+        // Optional trailing default: `b :: tail -> …` immediately after the run.
+        let mut hbind: Option<String> = None;
+        let mut default_body: Option<Vec<Stmt>> = None;
+        let mut resume = last + 1;
+        if let Some(RawArm::Plain(a)) = raw.get(last + 1) {
+            if a.guard.is_none() {
+                if let Pattern::Cons(b, t) = &a.pattern {
+                    if t == &tail {
+                        hbind = Some(b.clone());
+                        default_body = Some(a.body.clone());
+                        resume = last + 2;
+                    }
+                }
+            }
+        }
+
+        // Inner arms: one per constructor arm, plus the default as a wildcard.
+        let mut inner = Vec::new();
+        for r in &raw[first..=last] {
+            if let RawArm::ConsCtor { ctor, binders, body, .. } = r {
+                inner.push(Arm {
+                    pattern: Pattern::Ctor(ctor.clone(), binders.clone()),
+                    guard: None,
+                    body: body.clone(),
+                });
+            }
+        }
+        if let Some(body) = default_body {
+            inner.push(Arm { pattern: Pattern::Wildcard, guard: None, body });
+        }
+        let hbind = hbind.unwrap_or_else(|| self.fresh_head_binder());
+
+        let coalesced = Arm {
+            pattern: Pattern::Cons(hbind.clone(), tail),
+            guard: None,
+            body: vec![Stmt::Match(Expr::Var(hbind), inner)],
+        };
+
+        // Reassemble: untouched arms before the run, the ONE coalesced arm at `first`,
+        // untouched arms after the run (its default, if any, was consumed).
+        let mut coalesced = Some(coalesced);
+        let mut out = Vec::new();
+        for (i, r) in raw.into_iter().enumerate() {
+            if i < first {
+                out.push(plain_arm(r));
+            } else if i == first {
+                out.push(coalesced.take().unwrap());
+            } else if i <= last || i + 1 == resume {
+                // folded into the coalesced arm (a run body, or the consumed default)
+            } else {
+                out.push(plain_arm(r));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The actionable diagnostic for a constructor-headed cons arm that falls outside
+    /// the v1 coalescence rule (REQ-LLL-110 graceful degradation).
+    fn cons_ctor_bail(&self, ctor: &str, tail: &str) -> String {
+        self.err(&format!(
+            "a constructor-headed cons arm (`{ctor} :: {tail}`) is desugared only inside a \
+             contiguous group of constructor heads that share one tail binder and carry no \
+             `when` guard; write the explicit head-bind form instead: \
+             `h :: {tail} -> match h: {ctor} … -> …`"
+        ))
     }
 
     fn pattern(&mut self) -> Result<Pattern, String> {
@@ -1149,42 +1349,16 @@ impl Parser {
             Tok::Ident(h) => {
                 self.pos += 1;
                 if self.peek() == &Tok::ColonColon {
-                    // A cons-pattern head is always a binder or `[]`; a constructor there
-                    // (capitalized bareword) cannot match the head element — the parser would
-                    // otherwise take `TLet` as a fresh binder that shadows the constructor,
-                    // producing a baffling "shadows … — rename it" downstream. Guide the author
-                    // to the head-bind + match idiom instead (REQ-LLL-110).
-                    if h.chars().next().is_some_and(|c| c.is_uppercase()) {
-                        return Err(self.err(&format!(
-                            "a cons-pattern head must be a binder or `[]`, not the constructor \
-                             `{h}`; bind the head and match it: `h :: rest` then `match h: {h} -> …`"
-                        )));
-                    }
+                    // `h :: t` — a binder-headed cons. A CONSTRUCTOR-headed cons
+                    // (`Ctor :: t`) never reaches here: `raw_arm` intercepts an uppercase
+                    // head into a `RawArm::ConsCtor` and lets `coalesce_cons_ctor` desugar
+                    // or diagnose it — the single decision point (REQ-LLL-110).
                     self.pos += 1;
                     let t = self.ident()?;
                     Ok(Pattern::Cons(h, t))
                 } else if self.peek() == &Tok::LParen {
                     // constructor pattern `Ctor(x, y, …)` (REQ-LLL-011)
-                    self.pos += 1;
-                    let mut binders = Vec::new();
-                    if self.peek() != &Tok::RParen {
-                        binders.push(self.ident()?);
-                        while self.peek() == &Tok::Comma {
-                            self.pos += 1;
-                            binders.push(self.ident()?);
-                        }
-                    }
-                    self.eat(Tok::RParen)?;
-                    // Same gap the other way: `Ctor(x) :: t` in head position. Without this the
-                    // caller reports the opaque "expected Arrow, found ColonColon" (REQ-LLL-110).
-                    if self.peek() == &Tok::ColonColon {
-                        return Err(self.err(&format!(
-                            "a cons-pattern head must be a binder or `[]`, not the constructor \
-                             `{h}(…)`; bind the head and match it: `h :: rest` then \
-                             `match h: {h}(…) -> …`"
-                        )));
-                    }
-                    Ok(Pattern::Ctor(h, binders))
+                    Ok(Pattern::Ctor(h, self.ctor_binders()?))
                 } else if h.chars().next().is_some_and(|c| c.is_uppercase()) {
                     // a capitalized bareword is a nullary constructor
                     Ok(Pattern::Ctor(h, vec![]))

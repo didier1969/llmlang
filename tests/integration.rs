@@ -3668,25 +3668,86 @@ fn self_host_let_text_lexes_identifiers_and_resolves_names_end_to_end() {
     assert!(out.contains("25\n10"), "expected 25 then 10 (lex id + name resolution), got: {out}");
 }
 
+// ─── REQ-LLL-110: constructor-headed cons sugar (`Ctor :: t ->`). REQ-110 first shipped the
+// diagnostic-only form (option B); this is the real sugar (option A). A contiguous run of
+// constructor heads sharing one tail binder — optionally closed by a `b :: t` default —
+// desugars AT THE PARSER to the hand-written `h :: t -> match h: …` AST (`coalesce_cons_ctor`,
+// the SINGLE decision point). The desugar is pre-VC, so Z3 re-checks exhaustivity and every
+// obligation on the result, and the content-hash converges with the manual form
+// (DEC-LLL-020/058). The tests lead with the two load-bearing guarantees — hash-fidelity and
+// adverse non-exhaustiveness — then cover the runtime differential and graceful degradation.
+
 #[test]
-fn cons_pattern_head_that_is_a_constructor_gets_an_actionable_diagnostic_req110() {
-    // REQ-LLL-110 (dogfooding follow-through of REQ-LLL-111): a cons-pattern head must be a
-    // binder or `[]` — a constructor there cannot match the head element. Before the fix,
-    // `A(v) :: rest` gave the opaque "expected Arrow, found ColonColon" and `A :: rest` silently
-    // bound `A` then tripped a downstream "shadows … — rename it". Both now yield a targeted
-    // parse error pointing at the head-bind + `match h` idiom. Guards src/parser.rs::pattern.
-    let nullary = "module M:\n\n  type T = A | B\n\n  part f(xs: List[T]) -> Int:\n    match xs:\n      [] -> yield 0\n      A :: rest -> yield 1\n";
-    let payload = "module M:\n\n  type T = A(Int) | B\n\n  part f(xs: List[T]) -> Int:\n    match xs:\n      [] -> yield 0\n      A(v) :: rest -> yield v\n";
-    let e1 = parser::parse_module(nullary).unwrap_err();
-    assert!(
-        e1.contains("cons-pattern head must be a binder") && e1.contains("match h: A ->"),
-        "nullary ctor cons-head should get the actionable message, got: {e1}"
+fn cons_ctor_sugar_hash_equals_manual_form_req110() {
+    // KEYSTONE. `def_hash` is a function of the DESUGARED AST, so hash-equality ⟹ AST identity
+    // ⟹ VC and codegen are trivially identical to the hand-written form — a stronger fidelity
+    // proof than the runtime differential. The sugar's fresh/reused head binder differs by name
+    // from the manual `h`, but de Bruijn canonicalisation erases binder names, so hashes match.
+    let sugar = "module M:\n\n  type Tok = TNum(Int) | TPlus | TStar\n\n  part firstTag(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield -1\n      TNum(n) :: t -> yield 1\n      TPlus :: t -> yield 2\n      TStar :: t -> yield 3\n";
+    let manual = "module M:\n\n  type Tok = TNum(Int) | TPlus | TStar\n\n  part firstTag(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield -1\n      h :: t ->\n        match h:\n          TNum(n) -> yield 1\n          TPlus -> yield 2\n          TStar -> yield 3\n";
+    let (_, hs) = full(sugar);
+    let (_, hm) = full(manual);
+    assert_eq!(
+        hs.def_hash["firstTag"], hm.def_hash["firstTag"],
+        "the sugared cons-ctor form must desugar to the SAME AST as the manual head-bind form"
     );
-    let e2 = parser::parse_module(payload).unwrap_err();
+}
+
+#[test]
+fn cons_ctor_sugar_nonexhaustive_still_rejected_req110() {
+    // ADVERSE — the one thing hash-equality cannot cover: the sugar must NOT invent coverage.
+    // A run covering a strict subset of the head ADT with NO default leaves the inner match
+    // non-exhaustive → Z3 rejects (loud). Under option B this was a parse-time diagnostic; under
+    // option A it PARSES and fails at verification — the honest place for a coverage gap.
+    let src = "module M:\n\n  type Tok = TNum(Int) | TPlus | TStar\n\n  part bad(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield 0\n      TNum(n) :: t -> yield n\n";
+    assert!(parser::parse_module(src).is_ok(), "the sugar must ACCEPT `Ctor :: t` at the parser");
+    let report = verify_src(src);
+    assert!(!report.ok(), "a non-exhaustive constructor run without a default must be rejected");
     assert!(
-        e2.contains("cons-pattern head must be a binder") && e2.contains("A(…)"),
-        "payload ctor cons-head should get the actionable message, got: {e2}"
+        failures(&report).iter().any(|f| f.descr.contains("exhaustive")),
+        "the rejection must be the exhaustivity obligation, got: {:?}", failures(&report)
     );
+}
+
+#[test]
+fn cons_ctor_sugar_runtime_matches_manual_form_req110() {
+    // Differential (DEC-LLL-017) — the axis orthogonal to hash-equality and the adverse: the
+    // sugared program produces the same runtime output the manual form would.
+    let sugar = "module M:\n\n  type Tok = TNum(Int) | TPlus\n\n  part tag(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield 0\n      TNum(n) :: t -> yield n\n      TPlus :: t -> yield 99\n      hd :: t -> yield -1\n\n  part main() -> Int via IO:\n    let a = IO.print(tag(TNum(7) :: []))\n    yield IO.print(tag(TPlus :: []))\n";
+    let out = build_run(sugar);
+    assert!(out.contains("7\n99"), "expected 7 then 99, got: {out}");
+}
+
+#[test]
+fn cons_ctor_sugar_out_of_rule_keeps_actionable_diagnostic_req110() {
+    // GRACEFUL DEGRADATION. A `when` guard, divergent tail binders, or non-contiguous heads
+    // fall outside v1 coalescence → `coalesce_cons_ctor` keeps a message pointing at the
+    // explicit head-bind idiom, so an author never hits a silent miscompile.
+    let guarded = "module M:\n\n  type Tok = TNum(Int) | TPlus\n\n  part g(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield 0\n      TNum(n) :: t when n > 0 -> yield n\n      hd :: t -> yield 0\n";
+    let e = parser::parse_module(guarded).unwrap_err();
+    assert!(
+        e.contains("constructor-headed cons arm") && e.contains("match h: TNum"),
+        "a guarded constructor head should get the head-bind guidance, got: {e}"
+    );
+    let divergent = "module M:\n\n  type Tok = TNum(Int) | TPlus\n\n  part d(xs: List[Tok]) -> Int:\n    match xs:\n      [] -> yield 0\n      TNum(n) :: t1 -> yield n\n      TPlus :: t2 -> yield 0\n";
+    assert!(
+        parser::parse_module(divergent).unwrap_err().contains("share one tail binder"),
+        "divergent tail binders should be diagnosed, not silently split"
+    );
+}
+
+#[test]
+fn cons_ctor_sugar_example_verifies_and_runs_req110() {
+    // The discoverable canonical example (examples/cons_ctor_sugar.lll): a contiguous run +
+    // default AND a default-less exhaustive run, both verifying, running 1/3/0.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/cons_ctor_sugar.lll"),
+    )
+    .expect("read cons_ctor_sugar.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the cons-ctor sugar example must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("1\n3\n0"), "expected 1,3,0 (lead precedence by head token), got: {out}");
 }
 
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the

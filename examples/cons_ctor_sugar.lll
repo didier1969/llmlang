@@ -1,0 +1,46 @@
+module ConsCtorSugar:
+
+  # Le cas CANONIQUE du SUCRE TÊTE-CONSTRUCTEUR EN POSITION CONS (REQ-LLL-110).
+  # L'idiome LLM le plus fréquent est un parseur/lexer qui filtre sur la TÊTE d'une liste
+  # de tokens taggés. Sans sucre, chaque étape impose un `match` imbriqué + un niveau
+  # d'indentation :
+  #     h :: rest -> match h: TPlus -> … ; TMinus -> … ; _ -> …
+  # Avec le sucre, l'auteur (ou le LLM) écrit la forme PLATE multi-bras ci-dessous ; le
+  # compilateur la DÉSUCRE au parse vers EXACTEMENT cette forme manuelle — même AST, donc
+  # même content-hash (DEC-LLL-020/058) : le sucre est invisible à l'identité. Z3
+  # revérifie l'exhaustivité INDÉPENDAMMENT sur l'AST désucré (l'obligation d'exhaustivité
+  # est le filet : le sucre n'invente aucune couverture). Gain : moins de tokens + un
+  # niveau d'imbrication en moins par étape de parseur — l'axe token-first de VIS-LLL-001.
+
+  type Tok = TNum(Int) | TPlus | TMinus | TLParen | TRParen
+
+  # Groupe CONTIGU de têtes-constructeur partageant la queue `rest`, clos par un bras
+  # défaut `other :: rest` (tête quelconque). Désucre en
+  #   h :: rest -> match h: TNum(n) -> … ; TPlus -> … ; TMinus -> … ; _ -> …
+  # `other` est le binder réutilisé comme scrutinee interne — ZÉRO substitution de corps :
+  # `n` est lié par `TNum(n)`, `rest` par le cons, le défaut ne touche pas la tête.
+  part leadPrec(toks: List[Tok]) -> Int:
+    ensures result >= 0
+    match toks:
+      []              -> yield 0
+      TNum(n) :: rest -> yield 3
+      TPlus :: rest   -> yield 1
+      TMinus :: rest  -> yield 1
+      other :: rest   -> yield 0     # '(' ou ')' : pas un opérateur binaire
+
+  # SANS bras défaut : la couverture doit être EXHAUSTIVE sur l'ADT de tête, sinon Z3
+  # rejette (obligation d'exhaustivité). Ici les 5 constructeurs sont listés → prouvé.
+  # Le binder de tête est alors frais et anonyme (aucun corps ne le référence).
+  part isCloser(toks: List[Tok]) -> Bool:
+    match toks:
+      []           -> yield false
+      TNum(n) :: r -> yield false
+      TPlus :: r   -> yield false
+      TMinus :: r  -> yield false
+      TLParen :: r -> yield false
+      TRParen :: r -> yield true
+
+  part main() -> Int via IO:
+    let a = IO.print(leadPrec(TPlus :: TNum(2) :: []))   # 1 : tête TPlus
+    let b = IO.print(leadPrec(TNum(7) :: []))            # 3 : tête TNum
+    yield IO.print(leadPrec(TRParen :: []))              # 0 : tête « autre »
