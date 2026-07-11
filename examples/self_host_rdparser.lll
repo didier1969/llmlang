@@ -114,19 +114,19 @@ module SelfHost.RdParser:
   part parseTerm(toks: List[Tok]) -> PR:
     measure length(toks), 3
     ensures length(result.rem) <= length(toks)
-    match parseFactor(toks):
-      PR(a, r) -> yield parseTermRest(a, r)
+    let PR(a, r) = parseFactor(toks)   # sucre REQ-LLL-123 : let-destructuration
+    yield parseTermRest(a, r)
 
   # expr := term (('+'|'-') term)*           rang 4
   part parseExpr(toks: List[Tok]) -> PR:
     measure length(toks), 4
     ensures length(result.rem) <= length(toks)
-    match parseTerm(toks):
-      PR(a, r) -> yield parseExprRest(a, r)
+    let PR(a, r) = parseTerm(toks)     # sucre REQ-LLL-123
+    yield parseExprRest(a, r)
 
   part parse(toks: List[Tok]) -> Expr:
-    match parseExpr(toks):
-      PR(e, r) -> yield e
+    let PR(e, r) = parseExpr(toks)     # sucre REQ-LLL-123
+    yield e
 
   # ---- évaluateur de référence (structural sur l'AST) ----
   part eval(e: Expr) -> Int:

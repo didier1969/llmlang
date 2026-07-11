@@ -3858,6 +3858,38 @@ fn cons_literal_head_runtime_and_nonexhaustive_req126() {
     assert!(!verify_src(adverse).ok(), "a literal cons head without a default must be rejected as non-exhaustive");
 }
 
+// ─── REQ-LLL-123: let-destructuring (`let (a,b) = e`, `let PR(a,r) = e`). Desugars the binding
+// to a one-arm match wrapping the rest of the block — pure parser sugar (AST = the manual
+// `match`, hash converges). The last measured dogfood friction (rdparser threads `PR{ast,rem}`
+// via a one-arm match at each combinator).
+
+#[test]
+fn let_destructure_tuple_hash_equals_manual_match_req123() {
+    let sugar = "module M:\n\n  part swap(p: (Int, Int)) -> (Int, Int):\n    let (a, b) = p\n    yield (b, a)\n";
+    let manual = "module M:\n\n  part swap(p: (Int, Int)) -> (Int, Int):\n    match p:\n      (a, b) -> yield (b, a)\n";
+    let (_, hs) = full(sugar);
+    let (_, hm) = full(manual);
+    assert_eq!(hs.def_hash["swap"], hm.def_hash["swap"], "let-destructure must desugar to the manual match AST");
+}
+
+#[test]
+fn let_destructure_runtime_and_record_req123() {
+    // A record (mono-ctor) destructure `let PR(a,r) = …` — the rdparser idiom — threaded to a
+    // result. Verifies (irrefutable) and runs: 10 + 20 = 30.
+    let src = "module M:\n\n  type PR = { ast: Int, rem: Int }\n\n  part mk() -> PR:\n    yield PR(10, 20)\n\n  part use() -> Int:\n    let PR(a, r) = mk()\n    yield a + r\n\n  part main() -> Int via IO:\n    yield IO.print(use())\n";
+    assert!(verify_src(src).ok(), "record let-destructure must verify: {:?}", failures(&verify_src(src)));
+    assert!(build_run(src).contains("30"), "expected 30, got: {}", build_run(src));
+}
+
+#[test]
+fn let_destructure_refutable_rejected_req123() {
+    // A refutable ctor pattern (multi-variant ADT) leaves the match non-exhaustive → rejected
+    // (the sugar invents no coverage; the `B` case is uncovered).
+    let src = "module M:\n\n  type T = A(Int) | B\n\n  part f(t: T) -> Int:\n    let A(n) = t\n    yield n\n";
+    assert!(parser::parse_module(src).is_ok(), "the destructure must parse");
+    assert!(!verify_src(src).ok(), "a refutable multi-variant destructure must be rejected as non-exhaustive");
+}
+
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the
 // `measure`/`ensures` fragment. Positives prove the feature works; the three negative
 // controls (per the pre-landing soundness review) are the real load-bearing checks —

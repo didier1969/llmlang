@@ -946,9 +946,38 @@ impl Parser {
             match self.peek() {
                 Tok::Let => {
                     self.pos += 1;
-                    // `let _ = e` — discard binding: evaluate (effects included),
-                    // bind nothing (wave-3 lesson from the model bench, REQ-LLL-005)
-                    let n = if self.peek() == &Tok::Underscore {
+                    let is_underscore = self.peek() == &Tok::Underscore;
+                    // REQ-LLL-126… REQ-LLL-123: let-destructuring. A PRODUCT-pattern target —
+                    // `(a, b)` (tuple) or `Ctor(a, …)` (single-ctor record / ADT) — desugars
+                    // the binding to a one-arm match wrapping the REST of the block:
+                    //     let <pat> = e ; <rest>   →   match e: <pat> -> <rest>
+                    // Pure parser sugar (the AST is the manual `match`, hash converges,
+                    // DEC-LLL-020). A REFUTABLE pattern (a multi-variant ADT ctor) leaves the
+                    // match non-exhaustive → Z3 rejects loudly; an irrefutable one (tuple,
+                    // mono-ctor record) is exhaustive and verifies.
+                    let is_destructure = !is_underscore
+                        && match self.peek() {
+                            Tok::LParen => true,
+                            Tok::Ident(h) if h.chars().next().is_some_and(|c| c.is_uppercase()) => {
+                                self.toks.get(self.pos + 1).map(|s| &s.tok) == Some(&Tok::LParen)
+                            }
+                            _ => false,
+                        };
+                    if is_destructure {
+                        let pat = self.pattern()?;
+                        self.eat(Tok::Assign)?;
+                        let e = self.expr()?;
+                        self.eat(Tok::Newline)?;
+                        let rest = self.block_stmts()?;
+                        out.push(Stmt::Match(
+                            e,
+                            vec![Arm { pattern: pat, guard: None, body: rest }],
+                        ));
+                        break;
+                    }
+                    // `let _ = e` — discard binding: evaluate (effects included), bind nothing
+                    // (wave-3 lesson from the model bench, REQ-LLL-005). Otherwise a plain name.
+                    let n = if is_underscore {
                         self.pos += 1;
                         "_".to_string()
                     } else {
