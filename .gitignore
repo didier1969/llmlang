@@ -1,7 +1,7 @@
 /target
 /vendor/z3
 *.zip
-/.lll-cache
+.lll-cache/
 /build
 
 # Agent worktrees / local tooling state

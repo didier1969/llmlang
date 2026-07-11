@@ -9,7 +9,8 @@ module Name:
   part name(arg: Type, ...) -> Type [via IO]:
     requires <Bool expr>[, <Bool expr>...]     # optional
     ensures  <Bool expr over params + result>  # optional
-    measure  <Int expr over Int params>        # required for non-structural recursion
+    measure  <Int expr> [, <Int expr>...]      # non-structural recursion; a comma-list is
+                                               # a LEXICOGRAPHIC tuple (e.g. `measure m, n`)
     let x = <expr>                             # zero or more
     yield <expr>                               # OR a match, as the LAST statement
     match <expr>:
@@ -26,11 +27,27 @@ Rules:
 - Pure parts cannot call `IO.*` nor `via IO` parts. Effects: `IO.print(Int) -> Int`
   (returns its argument), `IO.read() -> Int`.
 - Recursion on a list tail (`h :: t` then recurse on `t`) is accepted as-is;
-  any other recursion needs `measure <Int expr>` that is provably `>= 0` and
-  strictly decreasing at each recursive call. Mutual recursion is not supported.
+  any other recursion needs a `measure` that is provably `>= 0` and strictly
+  decreasing at each recursive call. The measure may be a LEXICOGRAPHIC tuple
+  `measure e1, e2` compared left-to-right (e.g. Ackermann: `measure m, n`).
+  MUTUAL recursion IS supported: every part in the call cycle carries a `measure`
+  that decreases across each cross-call. (A part that recurses only by passing
+  ITSELF by value to a higher-order part, or via a self-call inside a lambda, is
+  rejected — express recursion as a direct call.)
 - Every `match` must be provably exhaustive (add `_ ->` when in doubt).
 - Contracts (`requires`/`ensures`/`measure`) may not contain calls.
 - Every `ensures` must be provable by an SMT solver from the requires + body.
+
+Surface conveniences (all desugar to the kernel above — identical content-hash):
+- **`if c then a else b` is an EXPRESSION** — usable wherever a value is expected
+  (`yield f(if c then a else b)`); it nests for `elif`:
+  `if a then x else if b then y else z`. (Not allowed inside contracts.)
+- **`&&` / `||`** are accepted as `and` / `or`.
+- **A cons-pattern head may be a CONSTRUCTOR or a literal**: a contiguous group of
+  `match` arms `TNum(n) :: t -> …`, `TPlus :: t -> …`, `0 :: t -> …` (same tail
+  binder, no guard) is sugar for `h :: t -> match h: TNum(n) -> …; TPlus -> …; 0 -> …`.
+- **`let` destructuring**: `let (a, b) = e` or `let Ctor(a, b) = e` binds a product's
+  fields (sugar for a one-arm `match`).
 
 Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
 algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):
