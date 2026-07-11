@@ -1,0 +1,194 @@
+module SelfHost.Layout:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) — la VRAIE frontière de la phase
+  # « grammaire llmlang RÉELLE » : la couche d'INDENTATION (Indent/Dedent/Newline), écrite EN
+  # llmlang et vérifiée par Z3, reproduisant FIDÈLEMENT l'algorithme de `src/lexer.rs::lex` — la
+  # seule chose qui sépare l'auto-hébergement d'un langage-jouet de celui de llmlang pour de vrai
+  # (aucun slice précédent ne la touchait). Sémantique lllc reproduite au caractère près :
+  #   pile d'indentations `indents = [0]` ; pour chaque ligne NON-VIDE (vides = espaces seuls OU
+  #   commentaire `#…`, neutres — lllc strippe `#` AVANT le test de vacuité) :
+  #     ind > sommet  → push(ind), émettre UN Indent
+  #     ind < sommet  → pop TANT QUE sommet > ind (UN Dedent par pop), puis cohérence (== ind)
+  #     ind == sommet → rien
+  #   Newline après CHAQUE ligne ; à EOF, un Dedent par niveau au-dessus de la base 0.
+  #   Le CONTENU de ligne (tokens) est abstrait — déjà prouvé au slice lexer (REQ-LLL-115) ; seule
+  #   compte ici l'émission de layout, dont le strip `#` et le saut des blanches font partie car ils
+  #   changent QUELLES lignes sont blanches.
+  #
+  # Deux récursions distinctes, deux mesures (aucune récursion mutuelle — le piège évité au slice
+  # lexer) :
+  #   - `indentsOf` (char → niveaux d'indentation par ligne) : récursion NON structurale — elle
+  #     saute une ligne entière via l'appel OPAQUE `afterNL`, donc `measure length(cs)` est un usage
+  #     RÉEL de REQ-LLL-101 ; la décroissance stricte vient du pelage du 1er char (`c :: t` → `t`
+  #     sous-terme, +1) combiné au contrat `ensures length(result) <= length(cs)` d'`afterNL`.
+  #   - la pile de layout (`dropTo`/`dedentsFor`/`closeAll`/`layout`) : `measure length(...)` sur la
+  #     pile / la liste de lignes, la boucle de pop des dedents décroissant sur la pile.
+  #
+  # String = List[Int] de codepoints (DEC-LLL-030) ; les littéraux chaîne étant mono-ligne et sans
+  # échappement (`src.lines()` a déjà découpé), le flux multi-ligne est assemblé explicitement avec
+  # `10 ::` pour les sauts de ligne, les littéraux portant les espaces d'indentation.
+
+  type Lay = LIndent | LDedent | LNewline
+
+  # ---- découpage char → niveaux d'indentation (la passe measure-length, usage RÉEL REQ-101) ----
+  # nombre d'espaces (32) en tête de ligne
+  part leadSp(cs: List[Int]) -> Int:
+    match cs:
+      []     -> yield 0
+      c :: t ->
+        match c == 32:
+          true  -> yield 1 + leadSp(t)
+          false -> yield 0
+
+  # ligne blanche ? (que des espaces jusqu'au newline/fin/commentaire) — lllc les saute
+  # (layout-neutres). Fidèle à lllc qui strippe `#…` AVANT le test de vacuité : une ligne
+  # « espaces puis `#commentaire` » est BLANCHE → pas d'Indent parasite.
+  part blankLine(cs: List[Int]) -> Bool:
+    match cs:
+      []     -> yield true
+      c :: t ->
+        match c == 10:
+          true  -> yield true
+          false ->
+            match c == 35:                 # '#' atteint sur des espaces → commentaire → blanche
+              true  -> yield true
+              false ->
+                match c == 32:
+                  true  -> yield blankLine(t)
+                  false -> yield false
+
+  # reste APRÈS le prochain newline (10), inclus ; [] s'il n'y en a pas. Contrat non-strict
+  # (`<=`, sans trou sur le cas vide) : la stricte décroissance d'`indentsOf` vient du pelage.
+  part afterNL(cs: List[Int]) -> List[Int]:
+    ensures length(result) <= length(cs)
+    match cs:
+      []     -> yield []
+      c :: t ->
+        match c == 10:
+          true  -> yield t
+          false -> yield afterNL(t)
+
+  # niveaux d'indentation ligne par ligne (lignes blanches sautées). Pèle le 1er char → `t` est un
+  # sous-terme (length(cs) = 1 + length(t)) ; avec `length(afterNL(t)) <= length(t)` la mesure
+  # `length(cs)` décroît STRICTEMENT sur l'appel opaque. C'est le déblocage REQ-LLL-101.
+  part indentsOf(cs: List[Int]) -> List[Int]:
+    measure length(cs)
+    match cs:
+      []     -> yield []
+      c :: t ->
+        match c == 10:                       # ligne vide nue → saute juste le newline
+          true  -> yield indentsOf(t)
+          false ->
+            match blankLine(cs):             # espaces puis newline → blanche, saute la ligne
+              true  -> yield indentsOf(afterNL(t))
+              false -> yield leadSp(cs) :: indentsOf(afterNL(t))
+
+  # ---- pile de layout : fidèle à src/lexer.rs::lex, aucune récursion mutuelle ----
+  # pop la pile tant que sommet > indent, renvoie la pile résultante (la base 0 n'est jamais popée
+  # car indent >= 0)
+  part dropTo(stack: List[Int], indent: Int) -> List[Int]:
+    measure length(stack)
+    match stack:
+      []        -> yield []
+      x :: rest ->
+        match x > indent:
+          true  -> yield dropTo(rest, indent)
+          false -> yield x :: rest
+
+  # un LDedent par niveau popé (la boucle de pop des dedents, measure length(stack))
+  part dedentsFor(stack: List[Int], indent: Int) -> List[Lay]:
+    measure length(stack)
+    match stack:
+      []        -> yield []
+      x :: rest ->
+        match x > indent:
+          true  -> yield LDedent :: dedentsFor(rest, indent)
+          false -> yield []
+
+  # EOF : un LDedent pour chaque niveau au-dessus de la base
+  part closeAll(stack: List[Int]) -> List[Lay]:
+    measure length(stack)
+    match stack:
+      []        -> yield []
+      x :: rest ->
+        match rest:
+          []     -> yield []
+          h :: r -> yield LDedent :: closeAll(rest)
+
+  part app(a: List[Lay], b: List[Lay]) -> List[Lay]:
+    match a:
+      []     -> yield b
+      h :: t -> yield h :: app(t, b)
+
+  part appI(a: List[Int], b: List[Int]) -> List[Int]:
+    match a:
+      []     -> yield b
+      h :: t -> yield h :: appI(t, b)
+
+  # enfile la pile d'indentation le long des niveaux ligne par ligne (transitions AVANT le Newline
+  # de fin de ligne, comme lllc ; le contenu de ligne est abstrait — déjà prouvé au slice lexer).
+  part layout(lines: List[Int], stack: List[Int]) -> List[Lay]:
+    measure length(lines)
+    match lines:
+      []          -> yield closeAll(stack)
+      ind :: rest ->
+        match stack:
+          []           -> yield []
+          cur :: srest ->
+            match ind > cur:
+              true  -> yield LIndent :: (LNewline :: layout(rest, ind :: stack))
+              false ->
+                match ind < cur:
+                  true  -> yield app(dedentsFor(stack, ind), LNewline :: layout(rest, dropTo(stack, ind)))
+                  false -> yield LNewline :: layout(rest, stack)
+
+  part lay(src: List[Int]) -> List[Lay]:
+    yield layout(indentsOf(src), 0 :: [])
+
+  # ---- différentiel : signature = SOMME pondérée par KIND (Indent=100, Dedent=10, Newline=1) →
+  # elle épingle le COMPTE de chaque kind (l'ordre, lui, est correct par construction : chaque ligne
+  # émet `dedents ++ Newline`). Une pile mal gérée (Indent manqué, pop en trop/en moins, EOF non
+  # fermé, ligne blanche/commentaire comptée à tort) change les comptes donc la signature — DEC-LLL-017.
+  part wl(t: Lay) -> Int:
+    match t:
+      LIndent  -> yield 100
+      LDedent  -> yield 10
+      LNewline -> yield 1
+
+  part sigL(ts: List[Lay]) -> Int:
+    match ts:
+      []     -> yield 0
+      h :: t -> yield wl(h) + sigL(t)
+
+  # trois sources multi-ligne construites explicitement (10 = newline).
+  # "a:\n  b:\n    c\n  d\ne"  → N I N I N D N D N (indent puis dedent partiel puis dedent) → 225
+  part src1() -> List[Int]:
+    yield appI("a:", 10 :: appI("  b:", 10 :: appI("    c", 10 :: appI("  d", 10 :: "e"))))
+
+  # "a:\n  b:\n    c\nd"  → N I N I N D D N (dedent de DEUX niveaux en une transition) → 224
+  part src2() -> List[Int]:
+    yield appI("a:", 10 :: appI("  b:", 10 :: appI("    c", 10 :: "d")))
+
+  # "a:\n  b:\n    c"  → N I N I N D D (deux Dedent de fermeture à EOF) → 223
+  part src3() -> List[Int]:
+    yield appI("a:", 10 :: appI("  b:", 10 :: "    c"))
+
+  # lignes BLANCHES + COMMENTAIRE indenté, layout-neutres (sautées) : la ligne « espaces seuls »
+  # ET la ligne « espaces puis `#…` » ne doivent produire NI Indent NI Newline — la signature doit
+  # être IDENTIQUE à la version sans blanches (`srcPlain`). Sans le strip `#`, `   # c` compterait
+  # comme un Indent parasite → signature différente. C'est le garde-fou de la fidélité lllc.
+  # "a:\n   \n   # note\n  b"  → N I N D → 112 (identique à "a:\n  b"). Le `#` (35) est construit par
+  # codepoint : un littéral chaîne ne peut PAS contenir `#`, lllc stripe `#…` avant de lexer la chaîne.
+  part srcBlank() -> List[Int]:
+    yield appI("a:", 10 :: appI("   ", 10 :: appI("   ", 35 :: appI(" note", 10 :: appI("  b", [])))))
+
+  # "a:\n  b"  → N I N D → 112
+  part srcPlain() -> List[Int]:
+    yield appI("a:", 10 :: appI("  b", []))
+
+  part main() -> Int via IO:
+    let x = IO.print(sigL(lay(src1())))       # 225
+    let y = IO.print(sigL(lay(src2())))       # 224
+    let z = IO.print(sigL(lay(src3())))       # 223
+    let u = IO.print(sigL(lay(srcBlank())))   # 112  (blanches + commentaire sautés)
+    yield IO.print(sigL(lay(srcPlain())))     # 112  (identique → prouve la neutralité)

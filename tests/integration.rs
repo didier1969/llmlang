@@ -3297,7 +3297,10 @@ fn self_host_lex_real_tokenizes_llmlang_syntax_req115() {
     // (DEC-LLL-017), so it's DEMONSTRATED at runtime via a kind-weighted signature: lexing the real
     // `part` signature `part gcd(a: Int, b: Int) -> Int` gives sig 98 (with `part`=keyword and `->`
     // a SINGLE `TArrow`, not `part`=id or `-`,`>` split), and `requires a >= 0` gives sig 29 (`>=` a
-    // single `TGe`). Guards examples/self_host_lex_real.lll.
+    // single `TGe`). The middle fragment `x :: y == z != w <= v + a * b / c < d > e` gives sig 226 and
+    // exercises EVERY remaining operator: the multi-char `::` `==` `!=` `<=` (each a single token, not
+    // split) plus every single-char op `+ * / < >` — so a wrong two-char coalescing or a bad 1-char
+    // mapping breaks it too. Guards examples/self_host_lex_real.lll.
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_lex_real.lll"),
     )
@@ -3305,7 +3308,39 @@ fn self_host_lex_real_tokenizes_llmlang_syntax_req115() {
     let report = verify_src(&src);
     assert!(report.ok(), "the real-llmlang lexer must verify: {:?}", failures(&report));
     let out = build_run(&src);
-    assert!(out.contains("98\n29"), "expected token signatures 98 then 29, got: {out}");
+    assert!(out.contains("98\n226\n29"), "expected token signatures 98, 226 then 29, got: {out}");
+}
+
+#[test]
+fn self_host_layout_reproduces_indent_dedent_newline_req116() {
+    // REQ-LLL-116 / DEC-LLL-024 Étape 2: the REAL frontier of the "real llmlang grammar" phase — the
+    // INDENTATION layer (Indent/Dedent/Newline), written in llmlang and Z3-verified, reproducing
+    // src/lexer.rs::lex's own layout algorithm at the character level (indent stack seeded with [0];
+    // ind>top→push+Indent; ind<top→pop-while-top>ind emitting one Dedent per pop; ind==top→nothing;
+    // Newline per line; EOF→Dedent down to the base). This is where `measure length` genuinely bites:
+    // `indentsOf` splits the char stream line-by-line via the OPAQUE call `afterNL` (not a structural
+    // subterm), so termination needs REQ-LLL-101's abstract length — the strict decrease is proved by
+    // peeling the first char (`c :: t`, +1) plus afterNL's `ensures length(result) <= length(cs)`.
+    // The two recursions (line-splitter and layout stack) carry SEPARATE measures with NO mutual
+    // recursion (the trap avoided at the lexer slice). Correctness is DEMONSTRATED at runtime
+    // (DEC-LLL-017) via a kind-weighted signature (Indent=100, Dedent=10, Newline=1): a mismanaged
+    // stack (missed Indent, wrong pop count, unclosed EOF) shifts the signature. The snippets cover a
+    // partial dedent (225), a two-level dedent in one transition (224), two closing dedents at EOF
+    // (223), and — faithful to lllc stripping `#…` BEFORE the blank check — a spaces-only line AND an
+    // indented comment-only line that are layout-neutral: `srcBlank` and `srcPlain` both give 112, so
+    // the two 112s prove the blank/comment lines emit neither Indent nor Newline (without the `#`
+    // strip, the comment line would add a spurious Indent). Guards examples/self_host_layout.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_layout.lll"),
+    )
+    .expect("read self_host_layout.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosted layout pass must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(
+        out.contains("225\n224\n223\n112\n112"),
+        "expected layout signatures 225, 224, 223, 112 then 112, got: {out}"
+    );
 }
 
 #[test]

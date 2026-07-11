@@ -203,5 +203,7 @@ module SelfHost.LexReal:
     # une signature `part` réelle : `part gcd(a: Int, b: Int) -> Int` → sig 98
     # (13 tokens ; `->` = UN TArrow(12), `part` = KPart(1) et non TId)
     let a = IO.print(sig(lex("part gcd(a: Int, b: Int) -> Int")))   # 98
+    # couvre TOUS les op multi-car (`::` `==` `!=` `<=`) + 1-car (`+ * / < >`) → sig 226
+    let b = IO.print(sig(lex("x :: y == z != w <= v + a * b / c < d > e")))  # 226
     # une clause de contrat réelle : `requires a >= 0` → sig 29 (`>=` = UN TGe(14))
     yield IO.print(sig(lex("requires a >= 0")))                     # 29
