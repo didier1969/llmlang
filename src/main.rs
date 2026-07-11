@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
         .to_string()
 }
 
@@ -950,6 +950,26 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         ["rationale", "show", file, part] => {
             let (_, _cm, hm) = load(file)?;
             print!("{}", explain::rationale_show(Path::new("."), &hm, part)?);
+            Ok(())
+        }
+        ["context", file, part] | ["context", file, part, "--format=json"] => {
+            // REQ-LLL-142 — the minimal EDIT CONTEXT of a part: its own source + the CONTRACTS
+            // (never the bodies) of its direct deps + the types it references, plus the byte
+            // reduction vs the whole file (the INPUT half of the token economy, VIS-LLL-001 #1).
+            // Read-only; reads the file VERBATIM (mono-file proto, DEC-LLL-020).
+            let raw = std::fs::read_to_string(*file).map_err(|e| format!("{file}: {e}"))?;
+            let (_, cm, _) = load(file)?;
+            let mut ctx = context::edit_context(&raw, &cm, part)?;
+            ctx.file = (*file).to_string();
+            if matches!(a.as_slice(), [.., "--format=json"]) {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&context::render_json(&ctx))
+                        .map_err(|e| e.to_string())?
+                );
+            } else {
+                print!("{}", context::render_text(&ctx));
+            }
             Ok(())
         }
         ["mcp", file] => mcp::serve(file),

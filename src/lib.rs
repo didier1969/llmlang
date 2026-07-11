@@ -8,6 +8,7 @@
 
 pub mod ast;
 pub mod codegen;
+pub mod context;
 pub mod diag;
 pub mod explain;
 pub mod hash;

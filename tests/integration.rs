@@ -9399,3 +9399,76 @@ fn char_literal_hash_and_quote_are_data_not_comment_or_string_req137() {
     let plain = "module M:\n\n  part f() -> Int:\n    yield 43\n";
     assert_eq!(full(with_comment).1.def_hash["f"], full(plain).1.def_hash["f"]);
 }
+
+// ─── REQ-LLL-142: `lll context <part>` — the minimal EDIT CONTEXT (INPUT half of the token
+// economy). The contract is the firewall (DEC-LLL-021): to edit a part you need its own source +
+// the CONTRACTS (never the bodies) of its DIRECT deps + the types it uses.
+
+#[test]
+fn edit_context_is_part_plus_dep_contracts_not_bodies_req142() {
+    let src = "module M:\n\n  type Color = Red | Green | Blue\n\n  part hue(c: Color) -> Int:\n    ensures result >= 0\n    match c:\n      Red -> yield 0\n      Green -> yield 1\n      Blue -> yield 2\n\n  part helper(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= n\n    yield n + 100\n\n  part target(c: Color, n: Int) -> Int:\n    requires n >= 0\n    yield helper(n) + hue(c)\n";
+    let (cm, _) = full(src);
+    let ctx = context::edit_context(src, &cm, "target").expect("edit context");
+    let out = context::render_text(&ctx);
+
+    // (1) the edited part's OWN body is present.
+    assert!(out.contains("helper(n) + hue(c)"), "must include the edited part's body:\n{out}");
+    // (2) each direct dep's CONTRACT is present.
+    assert!(out.contains("ensures result >= n"), "helper's contract must be shown:\n{out}");
+    assert!(out.contains("ensures result >= 0"), "hue's contract must be shown:\n{out}");
+    // (3) the FIREWALL — dep BODIES are withheld. This is the assertion a "prints something" check
+    // misses; a trim regression that leaked a body would fail HERE.
+    assert!(!out.contains("n + 100"), "helper's body must be withheld (firewall):\n{out}");
+    assert!(!out.contains("Green -> yield 1"), "hue's body must be withheld (firewall):\n{out}");
+    // (4) the referenced ADT is in scope (you can't edit a `match c` without it).
+    assert!(out.contains("type Color = Red | Green | Blue"), "referenced ADT must be in scope:\n{out}");
+    // (5) direct deps only, self excluded, sorted — no transitive explosion.
+    let names: Vec<&str> = ctx.deps.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, vec!["helper", "hue"], "direct deps only, self excluded, sorted");
+    // (6) a real, positive byte reduction (the CAP number) — not a specific percentage.
+    assert!(ctx.context_bytes < ctx.file_bytes, "context must be smaller than the whole file");
+    assert!(ctx.reduction_pct() > 0.0, "reduction must be positive: {}", ctx.reduction_pct());
+
+    // the JSON surface (LLM-consumption path) mirrors it and also withholds bodies.
+    let j = context::render_json(&ctx);
+    assert_eq!(j["deps"][0]["name"], "helper");
+    let c0 = j["deps"][0]["contract"].as_str().unwrap();
+    assert!(c0.contains("ensures result >= n"), "json dep contract: {c0}");
+    assert!(!c0.contains("n + 100"), "json must also withhold bodies: {c0}");
+    assert!(j["bytes"]["reduction_pct"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn cli_context_prints_firewall_and_metric_req142() {
+    let dir = tempdir();
+    let f = dir.join("ctx.lll");
+    std::fs::write(
+        &f,
+        "module M:\n\n  part helper(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= n\n    yield n + 100\n\n  part target(n: Int) -> Int:\n    requires n >= 0\n    yield helper(n)\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("context")
+        .arg(&f)
+        .arg("target")
+        .output()
+        .expect("run lll context");
+    assert!(out.status.success(), "context must exit 0: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("ensures result >= n"), "dep contract shown:\n{s}");
+    assert!(!s.contains("n + 100"), "dep body withheld:\n{s}");
+    assert!(s.contains("smaller"), "byte metric shown:\n{s}");
+    // JSON variant — assert on the raw text (integration tests can't depend on serde_json).
+    let outj = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("context")
+        .arg(&f)
+        .arg("target")
+        .arg("--format=json")
+        .output()
+        .expect("run lll context --format=json");
+    assert!(outj.status.success());
+    let sj = String::from_utf8_lossy(&outj.stdout);
+    assert!(sj.contains("\"part\": \"target\""), "json part field:\n{sj}");
+    assert!(sj.contains("\"reduction_pct\""), "json metric:\n{sj}");
+    assert!(!sj.contains("n + 100"), "json withholds dep body:\n{sj}");
+}

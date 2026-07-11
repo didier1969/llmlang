@@ -107,6 +107,11 @@ fn tools_list() -> Value {
             "name": "lll_check",
             "description": "Run full verification (Z3, with incremental proof cache) and return the per-part report.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "lll_context",
+            "description": "Minimal EDIT CONTEXT for one part (REQ-LLL-142): the part's own source + the CONTRACTS (never the bodies) of its direct dependencies + the types it references, plus the byte reduction vs the whole file. The contract is the firewall (DEC-LLL-021) — this is everything, and only what, is needed to edit the part safely.",
+            "inputSchema": { "type": "object", "properties": { "part": { "type": "string", "description": "part name" } }, "required": ["part"], "additionalProperties": false }
         }
     ]})
 }
@@ -237,6 +242,17 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
             });
             Ok(s)
         }
+        "lll_context" => {
+            let part = args
+                .get("part")
+                .and_then(|p| p.as_str())
+                .ok_or("missing required argument `part`")?;
+            let (_, cm, _) = load(file)?;
+            let raw = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+            let mut ctx = crate::context::edit_context(&raw, &cm, part)?;
+            ctx.file = file.to_string();
+            Ok(crate::context::render_text(&ctx))
+        }
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -315,6 +331,21 @@ mod tests {
         assert!(out.contains("module M"), "got: {out}");
         assert!(out.contains("part(s)"), "got: {out}");
         assert!(out.contains("main"), "got: {out}");
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn call_tool_lll_context_shows_dep_contract_not_body() {
+        // REQ-LLL-142 over MCP: the edit-context tool returns the dep's CONTRACT and withholds its
+        // body (the firewall) — type-check only, no Z3.
+        let f = tmp(
+            "ctx",
+            "module M:\n\n  part helper(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= n\n    yield n + 100\n\n  part target(n: Int) -> Int:\n    requires n >= 0\n    yield helper(n)\n",
+        );
+        let out = call_tool(f.to_str().unwrap(), "lll_context", &json!({ "part": "target" })).unwrap();
+        assert!(out.contains("ensures result >= n"), "dep contract: {out}");
+        assert!(!out.contains("n + 100"), "dep body withheld (firewall): {out}");
+        assert!(out.contains("smaller"), "byte metric: {out}");
         let _ = std::fs::remove_file(&f);
     }
 
