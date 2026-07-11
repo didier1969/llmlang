@@ -1,0 +1,66 @@
+# Task
+Écris un module llmlang complet nommé `M` avec une part :
+
+    clamp(x: Int, lo: Int, hi: Int) -> Int
+
+Elle borne `x` dans l'intervalle [lo, hi] : renvoie lo si x est en dessous, hi si x
+est au-dessus, x sinon. Contrats :
+
+    requires lo <= hi
+    ensures result >= lo and result <= hi
+
+Le module doit passer `lll check` : toutes les obligations déchargées.
+
+# Your previous attempt (failed verification)
+```
+module M:
+
+  part clamp(x: Int, lo: Int, hi: Int) -> Int:
+    requires lo <= hi
+    ensures result >= lo and result <= hi
+    yield if x < lo then lo else x
+```
+
+# Compiler diagnostic (llmlang, structured)
+```json
+{
+  "ok": false,
+  "status": "failed",
+  "module": "M",
+  "diagnostics": [
+    {
+      "code": "LLL-E5001",
+      "severity": "error",
+      "category": "contract",
+      "message": "undischarged obligation: ensures #1 holds at yield [sat]",
+      "part": "clamp",
+      "fix": "fails on hi=0, x=1, lo=0 — handle this case or strengthen `requires` · a Z3-verified SUFFICIENT strengthening (not necessarily necessary): `requires x < lo` or `requires x <= lo` or `requires x == lo` or `requires x < hi` or `requires x <= hi` or `requires x == hi`",
+      "counterexample": [
+        {
+          "var": "hi",
+          "value": "0"
+        },
+        {
+          "var": "x",
+          "value": "1"
+        },
+        {
+          "var": "lo",
+          "value": "0"
+        }
+      ],
+      "sufficient_hypotheses": [
+        "x < lo",
+        "x <= lo",
+        "x == lo",
+        "x < hi",
+        "x <= hi",
+        "x == hi"
+      ]
+    }
+  ]
+}
+```
+
+# Instruction
+Repair the attempt so it passes `lll check`. Return only the corrected module.
