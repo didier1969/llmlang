@@ -1543,3 +1543,48 @@ fn overflow_traps_instead_of_silently_breaking_contracts() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("overflow"), "expected overflow panic, got: {err}");
 }
+
+
+#[test]
+fn functional_update_moves_owned_param_not_clone_req146() {
+    // REQ-LLL-146 / DEC-LLL-071 Option A: a List/Array/Map param that is FUNCTIONALLY
+    // UPDATED (`set`/`push`/`insert`/`add`) and threaded LINEARLY must be passed OWNED
+    // and MOVED into `Rc::make_mut` at its LAST use — so make_mut sees a unique `Rc` and
+    // mutates in place (O(1)), instead of cloning the whole collection (refcount>1 →
+    // copy-on-write O(N)) every call. The borrow model (DEC-LLL-031) borrowed EVERY heap
+    // param, forcing the clone; owning the updated one and moving it closes the gap.
+    let src = "module T:\n\n  part pass(a: Array[Int], i: Int) -> Array[Int]:\n    requires 0 <= i, i <= length(a)\n    measure length(a) - i\n    yield if i == length(a) then a else pass(set(a, i, get(a, i) + 1), i + 1)\n\n  part main() -> Int via IO:\n    let a = pass(array(10, 20, 30), 0)\n    yield IO.print(get(a, 0))\n";
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    // the hot-path `set` site MOVES the array (no `.clone()`): make_mut hits its O(1)
+    // in-place path. The base case `then a` still clones once (return-position, O(N) once)
+    // — the assertion targets the SET site specifically, which is the N-times hot path.
+    assert!(
+        rust.contains("let mut __aset = u_a; Rc::make_mut"),
+        "REQ-146: the linearly-updated array param must be MOVED into make_mut at the set site:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__aset = u_a.clone()"),
+        "REQ-146: the set site must not clone the owned array param:\n{rust}"
+    );
+    // and it still compiles + runs correctly: pass increments each of [10,20,30] → [11,21,31],
+    // so get(a,0) = 11 — the move must not change observable pure semantics (make_mut COWs if shared).
+    let dir = tempdir();
+    let rs = dir.join("aset146.rs");
+    let bin = dir.join("aset146_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "REQ-146 move-on-update codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("11"), "pass([10,20,30]) then get(_,0) must print 11, got: {stdout}");
+}

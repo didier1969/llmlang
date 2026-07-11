@@ -983,6 +983,22 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             part.params.iter().map(|(_, t)| b && is_heap(t)).collect(),
         );
     }
+    // REQ-LLL-146 (DEC-LLL-071 Option A): a heap param that is FUNCTIONALLY UPDATED
+    // (arg 0 of set/push/insert/add) must be OWNED, not borrowed — only an owned `Rc`
+    // can be MOVED into `Rc::make_mut` to reach its refcount==1 in-place fast path.
+    // Clearing its borrow bit here keeps signature and call sites in lock-step (both
+    // read `borrow_mask`). Narrow by design: only genuinely-updated params are owned,
+    // so read-only traversals keep their DEC-LLL-031 borrow (no read regression).
+    for part in &cm.module.parts {
+        let updated = updated_params(&part.body);
+        if let Some(mask) = borrow_mask.get_mut(&part.name) {
+            for (i, (n, _)) in part.params.iter().enumerate() {
+                if updated.contains(n) {
+                    mask[i] = false;
+                }
+            }
+        }
+    }
     let g = Globals {
         ctors: &ctors,
         ctor_ei: &ctor_ei,
@@ -1224,6 +1240,7 @@ fn emit_instance_impl(
     let empty_names: Names = std::collections::HashSet::new();
     let empty_smap: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let empty_bmask: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+    let empty_ptrset: PtrSet = std::collections::HashSet::new();
     let empty_ops: std::collections::HashMap<String, Vec<OpSig>> = std::collections::HashMap::new();
     let empty_caps: PartCaps = std::collections::HashMap::new();
     let empty_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -1257,6 +1274,7 @@ fn emit_instance_impl(
             borrows: &empty_names,
             borrow_mask: &empty_bmask,
             refs: std::collections::HashSet::new(),
+            movable: &empty_ptrset,
             abort: &empty_names,
             extern_ops: &empty_smap,
             abort_ops: &empty_names,
@@ -1408,6 +1426,255 @@ fn collect_value_names(body: &[Stmt], parts: &Names, out: &mut Names) {
             }
         }
     }
+}
+
+/// The array/map/set builtins that FUNCTIONALLY UPDATE their collection argument
+/// (arg 0) in place via `Rc::make_mut` (REQ-LLL-146). A MOVE of a uniquely-owned
+/// collection into `make_mut` hits its O(1) in-place path; a `.clone()` forces the
+/// O(N) copy-on-write. These four are exactly the code ops that consume + rebuild.
+fn is_update_builtin(name: &str) -> bool {
+    matches!(name, "set" | "push" | "insert" | "add")
+}
+
+/// The variables a `match` pattern binds (in scope for the arm's guard + body).
+fn pattern_binds(p: &Pattern) -> Vec<String> {
+    match p {
+        Pattern::Var(n) => vec![n.clone()],
+        Pattern::Cons(h, t) => vec![h.clone(), t.clone()],
+        Pattern::Ctor(_, fs) | Pattern::Tuple(fs) => fs.clone(),
+        Pattern::IntLit(_) | Pattern::BoolLit(_) | Pattern::Wildcard | Pattern::Nil => Vec::new(),
+    }
+}
+
+/// Apply `f` to every sub-expression appearing anywhere in a statement body
+/// (mirrors [`collect_value_names`]'s traversal; `Expr::walk` recurses within each).
+fn walk_body_exprs(body: &[Stmt], f: &mut dyn FnMut(&Expr)) {
+    for s in body {
+        match s {
+            Stmt::Let(_, e) | Stmt::Yield(e) => e.walk(f),
+            Stmt::Match(scr, arms) => {
+                scr.walk(f);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        g.walk(f);
+                    }
+                    walk_body_exprs(&a.body, f);
+                }
+            }
+            Stmt::Handle(h) => {
+                h.call.walk(f);
+                if let Some(x) = &h.from {
+                    x.walk(f);
+                }
+                for c in &h.clauses {
+                    walk_body_exprs(&c.body, f);
+                }
+            }
+        }
+    }
+}
+
+/// Parameter names that appear as the COLLECTION argument (arg 0) of an in-place
+/// update builtin anywhere in the body (REQ-LLL-146). Such a parameter must be
+/// passed OWNED (not borrowed): only an owned `Rc` can be MOVED into `Rc::make_mut`
+/// to reach its refcount==1 fast path — a borrowed `&Rc` can only be cloned. Owning
+/// never regresses reads (a read still borrows `&u_x` with no refcount bump); it
+/// only shifts a clone to the caller boundary, where linear threading avoids it.
+fn updated_params(body: &[Stmt]) -> Names {
+    let mut out = Names::new();
+    walk_body_exprs(body, &mut |e| {
+        if let Expr::Call(name, args) = e {
+            if is_update_builtin(name) {
+                if let Some(Expr::Var(n)) = args.first() {
+                    out.insert(n.clone());
+                }
+            }
+        }
+    });
+    out
+}
+
+/// The set of in-place-update Call NODES (by address) whose collection variable is
+/// at its LAST USE — safe to MOVE into `Rc::make_mut` for the O(1) path (REQ-LLL-146).
+/// Backward liveness over the body: an update `set(x, …)` / `push(x, …)` /
+/// `insert(x, …)` / `add(x, …)` is movable iff `x` is not live AFTER the update
+/// expression. Its own arg reads of `x` (e.g. `set(a, i, get(a, i))`) do NOT block the
+/// move — the emit site hoists them into `let`s evaluated BEFORE the move. CONSERVATIVE
+/// by construction: unhandled control (effect handlers, lambdas) keeps variables live,
+/// so the site falls back to a clone — always sound, since a wrongly-emitted move is a
+/// `rustc` use-after-move error (build-time, loud), never a wrong result. `Expr` is a
+/// `Box`-tree (no `Rc<Expr>` sharing), so a node address uniquely identifies its occurrence.
+fn movable_updates(body: &[Stmt], updated: &Names) -> std::collections::HashSet<*const Expr> {
+    let mut movable = std::collections::HashSet::new();
+    live_stmts(body, &Names::new(), updated, &mut movable);
+    movable
+}
+
+type PtrSet = std::collections::HashSet<*const Expr>;
+
+/// Live-in of a statement sequence given `live_out` (variables used after it), recording
+/// movable update nodes along the way. Statements run in order, so we fold in REVERSE.
+fn live_stmts(stmts: &[Stmt], live_out: &Names, updated: &Names, movable: &mut PtrSet) -> Names {
+    let mut acc = live_out.clone();
+    for s in stmts.iter().rev() {
+        acc = match s {
+            Stmt::Yield(e) => live_expr(e, &acc, updated, movable),
+            Stmt::Let(name, e) => {
+                // `name` is defined here → dead before this point; the rhs is evaluated
+                // under the continuation's liveness minus `name`.
+                let mut after = acc.clone();
+                after.remove(name);
+                live_expr(e, &after, updated, movable)
+            }
+            Stmt::Match(scrut, arms) => {
+                // arms are alternative paths (union their live-ins); each arm's pattern
+                // binders are local to the arm, so they never propagate to the scrutinee.
+                let mut branch = Names::new();
+                for a in arms {
+                    let mut al = live_stmts(&a.body, &acc, updated, movable);
+                    if let Some(g) = &a.guard {
+                        al = live_expr(g, &al, updated, movable);
+                    }
+                    for b in pattern_binds(&a.pattern) {
+                        al.remove(&b);
+                    }
+                    branch.extend(al);
+                }
+                live_expr(scrut, &branch, updated, movable)
+            }
+            Stmt::Handle(h) => {
+                // effect handlers reorder control (tail resumptions); stay conservative —
+                // treat every variable mentioned as live and record no moves inside.
+                let mut s = acc.clone();
+                h.call.walk(&mut |x| {
+                    if let Expr::Var(n) = x {
+                        s.insert(n.clone());
+                    }
+                });
+                if let Some(f) = &h.from {
+                    f.walk(&mut |x| {
+                        if let Expr::Var(n) = x {
+                            s.insert(n.clone());
+                        }
+                    });
+                }
+                for c in &h.clauses {
+                    walk_body_exprs(&c.body, &mut |x| {
+                        if let Expr::Var(n) = x {
+                            s.insert(n.clone());
+                        }
+                    });
+                }
+                s
+            }
+        };
+    }
+    acc
+}
+
+/// Live-in of an expression given `live_out`, recording movable update nodes.
+fn live_expr(e: &Expr, live_out: &Names, updated: &Names, movable: &mut PtrSet) -> Names {
+    match e {
+        Expr::Var(n) => {
+            let mut s = live_out.clone();
+            s.insert(n.clone());
+            s
+        }
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => {
+            live_out.clone()
+        }
+        Expr::Not(a) | Expr::Neg(a) | Expr::Proj(a, _) | Expr::Field(a, _) => {
+            live_expr(a, live_out, updated, movable)
+        }
+        Expr::Bin(_, l, r) => {
+            let lr = live_expr(r, live_out, updated, movable);
+            live_expr(l, &lr, updated, movable)
+        }
+        Expr::Cons(h, t) => {
+            let lt = live_expr(t, live_out, updated, movable);
+            live_expr(h, &lt, updated, movable)
+        }
+        Expr::If(c, a, b) => {
+            let la = live_expr(a, live_out, updated, movable);
+            let lb = live_expr(b, live_out, updated, movable);
+            let mut branch = la;
+            branch.extend(lb);
+            live_expr(c, &branch, updated, movable)
+        }
+        Expr::Tuple(xs) | Expr::ListLit(xs) => seq_live(xs, live_out, updated, movable),
+        Expr::Call(name, args) | Expr::EffCall(name, args) => {
+            // record THIS node's movability from `live_out` (what is live AFTER the whole
+            // update); the update's own arg reads of the variable are hoisted before the
+            // move, so they must not count against it here.
+            if is_update_builtin(name) {
+                if let Some(Expr::Var(n)) = args.first() {
+                    if updated.contains(n) && !live_out.contains(n) {
+                        movable.insert(e as *const Expr);
+                    }
+                }
+            }
+            seq_live(args, live_out, updated, movable)
+        }
+        Expr::Lambda(params, body) => {
+            // a lambda defers evaluation and may run after this point → treat its free
+            // variables (minus its own params) as live. v1 forbids captures of enclosing
+            // locals, so this is usually a no-op; over-approximating only suppresses moves.
+            let mut b = live_expr(body, &Names::new(), updated, movable);
+            for (p, _) in params {
+                b.remove(p);
+            }
+            let mut s = live_out.clone();
+            s.extend(b);
+            s
+        }
+        Expr::Forall { .. } | Expr::Exists { .. } => {
+            // contract-only (erased at codegen) — unreachable in a term body, but stay safe:
+            // union every variable used, record no moves.
+            let mut s = live_out.clone();
+            e.walk(&mut |x| {
+                if let Expr::Var(n) = x {
+                    s.insert(n.clone());
+                }
+            });
+            s
+        }
+        Expr::RecordLit(_, fields) => {
+            // desugared away before codegen (unreachable); be safe if ever reached.
+            let mut acc = live_out.clone();
+            for (_, x) in fields.iter().rev() {
+                acc = live_expr(x, &acc, updated, movable);
+            }
+            acc
+        }
+    }
+}
+
+/// Live-in of a left-to-right argument sequence (fold in reverse over `live_out`).
+fn seq_live(xs: &[Expr], live_out: &Names, updated: &Names, movable: &mut PtrSet) -> Names {
+    let mut acc = live_out.clone();
+    for x in xs.iter().rev() {
+        acc = live_expr(x, &acc, updated, movable);
+    }
+    acc
+}
+
+/// Lower the COLLECTION argument (arg 0) of an in-place update builtin. When the whole
+/// update `node` is a proven last-use of an OWNED variable (it is in `cx.movable`, is not
+/// a `&Rc` borrow, and is a value — not a ctor/part name), emit a MOVE (the bare local) so
+/// `Rc::make_mut` sees a unique `Rc` and mutates in place (REQ-LLL-146). Otherwise fall back
+/// to the normal owned lowering (`expr` → a `.clone()`), which is always sound: a wrong move
+/// would be a `rustc` use-after-move error at build time, never a wrong result.
+fn update_arg0(node: &Expr, arg0: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
+    if let Expr::Var(n) = arg0 {
+        if cx.movable.contains(&(node as *const Expr))
+            && !cx.refs.contains(n)
+            && !cx.ctors.contains(n)
+            && !cx.parts.contains(n)
+        {
+            return Ok(local(n));
+        }
+    }
+    expr(arg0, cx, res)
 }
 
 /// The in-scope Rust variable name for a user tail-resumptive capability, keyed
@@ -1609,16 +1876,19 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     collect_key_tvars(&part.ret, &mut key_tvars);
     let generics = generics_clause(&tvars, &key_tvars, &part.given);
     let given_methods = given_methods_map(&part.given, g.classes);
-    // borrow model (DEC-LLL-031): if this part is not used as a first-class value,
-    // its List/ADT parameters are taken by reference (`&Rc<…>`) — a read-only
-    // traversal then costs no per-node refcount. Those names are the seed `refs`.
-    let this_borrows = g.borrows.contains(&part.name);
+    // borrow model (DEC-LLL-031 + REQ-LLL-146): a heap param is taken by reference
+    // (`&Rc<…>`) iff its `borrow_mask` bit is set — the SINGLE source of truth shared
+    // with the call sites (`part_call_args`). The mask already excludes functionally
+    // updated params (they are owned so the update site can move them). Borrowed names
+    // seed `refs`.
+    let mask = g.borrow_mask.get(&part.name);
     let mut refs: Names = std::collections::HashSet::new();
     let mut params: Vec<String> = part
         .params
         .iter()
-        .map(|(n, t)| {
-            if this_borrows && is_heap(t) {
+        .enumerate()
+        .map(|(i, (n, t))| {
+            if mask.and_then(|m| m.get(i)).copied().unwrap_or(false) {
                 refs.insert(n.clone());
                 format!("{}: &{}", local(n), rs_ty(t))
             } else {
@@ -1626,6 +1896,8 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
             }
         })
         .collect();
+    // REQ-LLL-146: update nodes whose collection variable is at its last use → movable.
+    let movable = movable_updates(&part.body, &updated_params(&part.body));
     // a part whose row carries an abort effect returns `Result<Ret, i64>` — the
     // abort payload is the raised Int; a raise compiles to an early `Err`, and
     // callers propagate with `?` or discharge the effect with a `handle` match.
@@ -1685,6 +1957,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         borrows: g.borrows,
         borrow_mask: g.borrow_mask,
         refs,
+        movable: &movable,
         abort: g.abort,
         extern_ops: g.extern_ops,
         abort_ops: g.abort_ops,
@@ -1767,10 +2040,10 @@ fn emit_specialized_part(
     // borrow model (DEC-LLL-031): an effect-generic part is never used as a value,
     // so it borrows its List/ADT non-function parameters (`&Rc<…>`) like a plain
     // part; the row-carrying function parameter is unaffected (it is a fn pointer).
-    let this_borrows = g.borrows.contains(&part.name);
+    let mask = g.borrow_mask.get(&part.name);
     let mut refs: Names = std::collections::HashSet::new();
     let mut params: Vec<String> = Vec::new();
-    for (n, t) in &part.params {
+    for (i, (n, t)) in part.params.iter().enumerate() {
         match t {
             Ty::Fun(argtys, ret0) if *n == fn_param_name => {
                 // the row-carrying function parameter: append the row's evidence
@@ -1784,13 +2057,15 @@ fn emit_specialized_part(
                 };
                 params.push(format!("{}: fn({}) -> {}", local(n), ats.join(", "), r));
             }
-            _ if this_borrows && is_heap(t) => {
+            _ if mask.and_then(|m| m.get(i)).copied().unwrap_or(false) => {
                 refs.insert(n.clone());
                 params.push(format!("{}: &{}", local(n), rs_ty(t)));
             }
             _ => params.push(format!("{}: {}", local(n), rs_ty(t))),
         }
     }
+    // REQ-LLL-146: update nodes whose collection variable is at its last use → movable.
+    let movable = movable_updates(&part.body, &updated_params(&part.body));
     // the part's own evidence params for the row (forwarded to f / nested generics)
     let mut row_ev: Vec<String> = Vec::new();
     if is_state {
@@ -1835,6 +2110,7 @@ fn emit_specialized_part(
         borrows: g.borrows,
         borrow_mask: g.borrow_mask,
         refs,
+        movable: &movable,
         abort: g.abort,
         extern_ops: g.extern_ops,
         abort_ops: g.abort_ops,
@@ -1928,6 +2204,10 @@ struct Cx<'a> {
     /// list/ADT pattern binders) — a borrow-mode use emits the name bare, an owned
     /// use `.clone()`s it (deref-clone → owned `Rc`). DEC-LLL-031 voie B.
     refs: Names,
+    /// in-place-update Call nodes (by address) whose collection variable is at its
+    /// LAST use → MOVE it into `Rc::make_mut` for the O(1) path (REQ-LLL-146). Empty
+    /// for emitters that never lower a part body with linear updates.
+    movable: &'a PtrSet,
     abort: &'a Names,
     /// dotted op name → bound Rust function path (FFI, REQ-LLL-022)
     extern_ops: &'a std::collections::HashMap<String, String>,
@@ -2055,6 +2335,7 @@ fn emit_body(
                     borrows: cx.borrows,
                     borrow_mask: cx.borrow_mask,
                     refs: cx.refs.clone(),
+                    movable: cx.movable,
                     abort: cx.abort,
                     extern_ops: cx.extern_ops,
                     abort_ops: cx.abort_ops,
@@ -2132,6 +2413,7 @@ fn emit_body(
                         borrows: cx.borrows,
                         borrow_mask: cx.borrow_mask,
                         refs: Names::new(),
+                        movable: cx.movable,
                         abort: cx.abort,
                         extern_ops: cx.extern_ops,
                         abort_ops: cx.abort_ops,
@@ -2165,6 +2447,7 @@ fn emit_body(
                     borrows: cx.borrows,
                     borrow_mask: cx.borrow_mask,
                     refs: cx.refs.clone(),
+                    movable: cx.movable,
                     abort: cx.abort,
                     extern_ops: cx.extern_ops,
                     abort_ops: cx.abort_ops,
@@ -2529,20 +2812,23 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     format!("(**{a})[({i}) as usize].clone()")
                 }
                 "set" => {
-                    // functional update: `Rc::make_mut` mutates in place when the
-                    // array is uniquely owned, else copies-on-write — sound under
-                    // pure semantics (the caller's array is never observed changed).
-                    let a = expr(&args[0], cx, res)?;
+                    // functional update (REQ-LLL-146): MOVE the array in when it is uniquely
+                    // owned at its last use (`Rc::make_mut` mutates in place, O(1)), else clone
+                    // (copy-on-write, O(n)). Sound under pure semantics either way — the caller's
+                    // array is never observed changed. Index/value are bound FIRST so their reads
+                    // of the array complete BEFORE the move (else: rustc use-after-move).
+                    let a = update_arg0(e, &args[0], cx, res)?;
                     let i = expr(&args[1], cx, res)?;
                     let v = expr(&args[2], cx, res)?;
                     format!(
-                        "{{ let mut __aset = {a}; Rc::make_mut(&mut __aset)[({i}) as usize] = {v}; __aset }}"
+                        "{{ let __i = ({i}) as usize; let __v = {v}; let mut __aset = {a}; Rc::make_mut(&mut __aset)[__i] = __v; __aset }}"
                     )
                 }
                 "push" => {
-                    let a = expr(&args[0], cx, res)?;
+                    // REQ-LLL-146: move when uniquely owned at last use; value bound first.
+                    let a = update_arg0(e, &args[0], cx, res)?;
                     let v = expr(&args[1], cx, res)?;
-                    format!("{{ let mut __apush = {a}; Rc::make_mut(&mut __apush).push({v}); __apush }}")
+                    format!("{{ let __v = {v}; let mut __apush = {a}; Rc::make_mut(&mut __apush).push(__v); __apush }}")
                 }
                 "contains" => {
                     let a = borrowed(&args[0], cx, res)?;
@@ -2565,11 +2851,12 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             match name.as_str() {
                 "map" => "Rc::new(BTreeMap::new())".to_string(),
                 "insert" => {
-                    let m = expr(&args[0], cx, res)?;
+                    // REQ-LLL-146: move when uniquely owned at last use; key/value bound first.
+                    let m = update_arg0(e, &args[0], cx, res)?;
                     let k = expr(&args[1], cx, res)?;
                     let v = expr(&args[2], cx, res)?;
                     format!(
-                        "{{ let mut __mins = {m}; Rc::make_mut(&mut __mins).insert({k}, {v}); __mins }}"
+                        "{{ let __k = {k}; let __v = {v}; let mut __mins = {m}; Rc::make_mut(&mut __mins).insert(__k, __v); __mins }}"
                     )
                 }
                 "lookup" => {
@@ -2596,10 +2883,11 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             match name.as_str() {
                 "emptyset" => "Rc::new(BTreeMap::new())".to_string(),
                 "add" => {
-                    let s = expr(&args[0], cx, res)?;
+                    // REQ-LLL-146: move when uniquely owned at last use; element bound first.
+                    let s = update_arg0(e, &args[0], cx, res)?;
                     let x = expr(&args[1], cx, res)?;
                     format!(
-                        "{{ let mut __sadd = {s}; Rc::make_mut(&mut __sadd).insert({x}, ()); __sadd }}"
+                        "{{ let __x = {x}; let mut __sadd = {s}; Rc::make_mut(&mut __sadd).insert(__x, ()); __sadd }}"
                     )
                 }
                 "member" => {

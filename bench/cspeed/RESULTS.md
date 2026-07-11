@@ -57,40 +57,57 @@ pass — the proof fork consumes the ORIGINAL core, so soundness is untouched
 (DEC-LLL-008/017). This is the falsifiable DoD of REQ-LLL-058 tranche-1: a case
 where the optimized binary BEATS the un-optimized one, measured — not "the pass runs".
 
-## aset — functional array UPDATE in a linear fold (`bench/cspeed/aset.lll`, REQ-LLL-140)
+## aset — functional array UPDATE in a linear fold (`bench/cspeed/aset.lll`, REQ-LLL-140/146)
 `k` left-to-right passes over an `Array[Int]` of length `N`, each pass `set`-ing every
-element in place (`set` ⇒ `Rc::make_mut(&mut a)[i] = v`). C baseline: the same passes as
-an in-place `a[i] += 1` loop (O(1) per element).
-| binary            | N=1000, K=4000 | N=2000, K=4000 | scaling (N→2N) |
-|-------------------|----------------|----------------|----------------|
-| llmlang → Rust    | 3.38s          | 19.06s         | **×5.6** ⇒ **O(N) per `set`** |
-| C (gcc -O2)       | ~0.001s        | ~0.002s        | ×2 ⇒ O(1) per element |
+element (`set` ⇒ `Rc::make_mut(&mut a)[i] = v`). C baseline: the same passes as an in-place
+`a[i] += 1` loop (O(1) per element).
+| binary                  | N=1000, K=4000 | N=2000, K=4000 | scaling (N→2N) |
+|-------------------------|----------------|----------------|----------------|
+| llmlang **before REQ-146** | 3.38s       | 19.06s         | **×5.6** ⇒ ≥O(N) per `set` |
+| llmlang **after REQ-146**  | 0.06s       | 0.12s          | **×2.0** ⇒ **O(1) per `set`** |
+| C (gcc -O2)                | ~0.001s     | ~0.002s        | ×2 ⇒ O(1) per element |
 
-(C at these sizes is below the 0.01s timer floor; the ~0.002s is calibrated from an
-8×10⁹-op run = 2.30s, ÷1000.) Gap at N=2000: **≈ 10⁴×**.
+(C at these sizes is below the 0.01s timer floor; the ~0.002s is calibrated from a
+1000×-ops run = 2.22s, ÷1000.)
 
-**Finding — the one real "not as fast as C".** The N-vs-2N **scaling check is the proof,
-not the single number**: a linear-use fold *should* keep the array refcount-1 so
-`Rc::make_mut` mutates in place (O(1)); if it did, doubling N would double the time (×2).
-It **×5.6**es → each `set` is **super-linear (≥O(N))** — it clones the whole Vec every call
-(×5.6 sits above the ×4 a pure O(N) predicts: allocation/free churn per clone on top of the
-copy). The conclusion is noise-immune at 10⁴×. The generated Rust shows exactly why:
+**Finding — the O(N)/`set` gap is CLOSED (REQ-LLL-146, DEC-LLL-071 Option A).** The N-vs-2N
+**scaling check is the proof, not the single number**: a linear-use fold *should* keep the
+array refcount-1 so `Rc::make_mut` mutates in place (O(1)) — doubling N then doubles the time
+(×2). BEFORE, it **×5.6**ed → each `set` was **super-linear (≥O(N))**, cloning the whole Vec
+every call. AFTER REQ-146 it is **×2.0** → each `set` is **O(1)**, a **159× wall-clock speedup**
+at N=2000 (19.06s → 0.12s). The borrow model (DEC-031 voie B) borrowed **every** heap param, so
+the updated one was `.clone()`d before `make_mut` (refcount 2 → copy). REQ-146 OWNS a param that
+is functionally updated and MOVES it into `make_mut` at its last use (refcount 1 → in place):
 ```rust
-lll_pass(&({ let mut __aset = u_a.clone(); Rc::make_mut(&mut __aset)[i] = …; __aset }), i+1)
-//        ^ borrowed param (DEC-031 voie B) ^ .clone() ⇒ refcount 2 ⇒ make_mut COPIES O(N)
+pub fn lll_pass(u_a: Arr<i64>, u_i: i64) -> Arr<i64> {           // OWNED param, not &Arr
+  … let mut __aset = u_a; Rc::make_mut(&mut __aset)[__i] = __v; __aset …   // MOVE, no clone
+}
 ```
-The borrow model (DEC-LLL-031 voie B) that made READS C-competitive borrows **every**
-List/ADT/Array param — including one that is then functionally UPDATED and linearly
-threaded. `set`/`push`/`insert` need an *owned* `Rc`, so the borrowed param is `.clone()`d
-(refcount → 2) and `make_mut`'s in-place fast path is **never reached**. (Only `set` was
-timed; `push` and `insert` lower through the identical `let x = clone(); make_mut(&mut x)…`
-pattern — codegen.rs:2545/2572 — so the O(N) is by the same mechanism, not separately
-benchmarked.) This is a codegen
-limitation, **not** a fundamental cost of purity: passing such a param *owned* (moved on
-last use) would give `make_mut` a unique `Rc` → O(1). It is also **not** the reuse-Perceus
-écarté by DEC-031 — that analysis covered the SHARED-READ case and manual-C refcount reuse;
-this is the LINEAR-WRITE case that DEC-031 itself flagged reuse *would* help, and the fix is
-native (`Rc::make_mut` already rewards a unique `Rc`; we simply fail to hand it one).
+Sound by two independent nets: `make_mut` copies-on-write if the `Rc` is ever shared (runtime),
+and a non-last-use move is a `rustc` use-after-move error (compile time) — **never** a wrong
+result. Same observable output (10001000) and identical Z3 verdicts (codegen is downstream of
+check/VC/hash, DEC-LLL-020). `push`/`insert`/`add` lower through the same move, so all four
+in-place ops are O(1) when linearly threaded. This is the LINEAR-WRITE case DEC-031 flagged reuse
+*would* help — distinct from the SHARED-READ reuse-Perceus écarté there.
+
+**Residual — a constant-factor boundary clone (follow-up REQ-LLL-148).** llmlang is now **~54× C**
+(0.12s vs ~0.0022s), down from ~10⁴×: the **asymptotic regime is fixed** (O(N²)/pass → O(N)/pass),
+but a per-round O(N) clone remains at the `passes → pass` boundary. `passes` READS its array param
+(borrowed, DEC-031) yet hands it to `pass`, which now OWNS it — so the borrowed `&Rc` is `.clone()`d
+once per round to supply an owned `Rc`:
+```rust
+lll_passes(&(lll_pass(u_a.clone(), 0i64)), k-1)   // ^ borrowed→owned handoff clones O(N)/round
+```
+Closing it needs a SECOND lever — **linear ownership inference**: own a param that is passed, at its
+last use, to an *owning* callee, and move it there. That is a call-graph fixpoint (own-set propagates
+transitively), distinct from the *local* update-site move REQ-146 delivers, and worth its own design
++ non-regression gate (over-owning could shift clones to other call boundaries). Tracked as
+**REQ-LLL-148**. It removes the O(N)/round *clone* (the per-round term) — but the residual constant
+vs C is **unmeasured and not assumed to be ~1×**: `pass` recurses per element, so ~8M function calls +
+`make_mut` refcount checks + bounds checks remain against C's tight 8M-write loop, structural
+persistent-`Rc` costs that reads (fib/listsum) never pay. Whether the WRITE regime can reach genuine
+C-parity *at all* without dropping persistent-`Rc` is the DEC-LLL-071 **Option B** question — an
+operator decision, not foreclosed here.
 
 ## map — associative read: verified `Rc<BTreeMap>` vs C sorted-array bsearch (`mapbench.lll`)
 Build a map of `n` entries, then `r` rounds each counting `haskey` over keys `1..n`
@@ -115,18 +132,23 @@ the array O(N) per snapshot (`memcpy`). So that shape is O(N) in BOTH languages 
 a gap; it is the intrinsic cost of persistence, paid equally. The gap above is specifically
 the EPHEMERAL/linear case, where C is O(1) and llmlang is needlessly O(N).
 
-## Verdict (VIS-LLL-001 "as fast as C", now MEASURED per regime — REQ-LLL-140)
+## Verdict (VIS-LLL-001 "as fast as C", now MEASURED per regime — REQ-LLL-140/146)
 | regime | kernel | llmlang vs C | status |
 |--------|--------|--------------|--------|
 | Int / compute      | fib     | 0.96× Rust, 1.5× C (rustc↔gcc) | **C-competitive** |
 | read traversal     | listsum | 0.9× C (post REQ-017 borrow)   | **C-competitive** |
 | associative read   | map     | ~1.1× C ordered bsearch        | **C-competitive** |
 | optimizer          | cse     | 1.97× its own `--no-opt`       | LLVM-invisible win |
-| **functional UPDATE** | **aset** | **≈10⁴× C (≥O(N)/op)**      | **❌ GAP — codegen** |
+| **functional UPDATE** | **aset** | **~54× C (O(1)/op, ×2) — was 10⁴×** | **⚠ REQ-146 fixed the asymptote; VIS-001 write-parity still OPEN (REQ-147 targets the constant)** |
 
 - **Reads are as fast as C across the board** (compute, list traversal, associative).
-- **The single violation is functional UPDATE-in-a-loop**: currently O(N) per `set`/`push`/
-  `insert` because the borrow model clones the param before `Rc::make_mut`. It is closeable
-  by an ownership/move-on-last-use refinement in codegen (own the param at linear update
-  sites → `make_mut` sees a unique `Rc` → O(1)), which extends DEC-031 voie B's type-env and
-  is distinct from the reuse-Perceus écarté there. See the DECISION in the SOLL (REQ-LLL-140).
+- **Functional UPDATE-in-a-loop**: REQ-LLL-146 (DEC-LLL-071 A) closed the per-`set`/`push`/
+  `insert`/`add` **asymptotic** gap — ≥O(N)/op → **O(1)/op** by owning the updated param and
+  MOVING it into `Rc::make_mut` at its last use (159× at N=2000, ×2 scaling, listsum reads
+  un-regressed). A residual **constant-factor** boundary clone remains (borrowed→owned handoff,
+  O(N)/round). **VIS-LLL-001's "as fast as C" is NOT yet met on writes (~54× C)** — the asymptote
+  is fixed, the constant open. **REQ-LLL-148** (linear ownership inference, call-graph fixpoint)
+  removes the O(N)/round *clone*, but the residual constant vs C is **unmeasured**: persistent-`Rc`
+  carries a per-write refcount/bounds cost reads never pay, so genuine ~1× C on writes may require
+  dropping persistent-`Rc` — the DEC-LLL-071 **Option B** question, an operator call. Both levers are
+  distinct from the SHARED-READ reuse-Perceus écarté by DEC-031.
