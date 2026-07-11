@@ -3344,6 +3344,40 @@ fn self_host_layout_reproduces_indent_dedent_newline_req116() {
 }
 
 #[test]
+fn self_host_rdparser_parses_precedence_and_parens_req118() {
+    // REQ-LLL-118 / DEC-LLL-024 Étape 2: a REAL recursive-descent parser written in llmlang and
+    // Z3-verified — precedence AND parentheses (arbitrary nesting), which the earlier structural toy
+    // parser (self_host_parser.lll) could not do (parens build a tree, not two parallel lists). The
+    // five parse functions are MUTUALLY RECURSIVE (expr→term→factor→'('expr')'→expr) and thread the
+    // remaining tokens through a record `PR{ast, rem}`. Termination rests on three techniques all
+    // proved by Z3 here: (1) mutual recursion under a measure; (2) a LEXICOGRAPHIC measure encoded
+    // arithmetically as `length(toks)*5 + rank` (rank expr=4>term=3>exprRest=2>termRest=1>factor=0),
+    // so the non-consuming grammar delegation expr→term (same tokens) decreases by RANK while a
+    // consuming edge drops length*5 by ≥5, dominating any rank gain ≤4 — a real REQ-LLL-101 use in
+    // its hardest form; (3) `ensures length(result.rem) <= length(toks)` where `result.rem` is a
+    // native record SELECTOR (REQ-LLL-070), admitted in the v1 contract fragment (a user-part call
+    // would be forbidden, DEC-LLL-017) — that callee contract, imported by the caller's measure VC,
+    // is what proves the threaded remainder shrinks so the `(op factor)*` loops terminate. Precedence
+    // and paren-override are DEMONSTRATED at runtime (DEC-LLL-017): 2+3*4=14 (not 20), (2+3)*4=20,
+    // 2*(3+4)-1=13. Guards examples/self_host_rdparser.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_rdparser.lll"),
+    )
+    .expect("read self_host_rdparser.lll");
+    let report = verify_src(&src);
+    assert!(
+        report.ok(),
+        "the recursive-descent parser must verify (mutual recursion + lexicographic measure): {:?}",
+        failures(&report)
+    );
+    let out = build_run(&src);
+    assert!(
+        out.contains("14\n20\n13"),
+        "expected eval results 14 (precedence), 20 (paren override) then 13 (nesting), got: {out}"
+    );
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser
