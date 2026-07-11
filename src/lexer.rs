@@ -107,6 +107,22 @@ fn comment_start(raw: &str) -> usize {
         match b[i] {
             b'"' => in_string = !in_string,
             b'#' if !in_string => return i,
+            // A char literal `'c'` (REQ-LLL-137) — skip its body so a `#`/`"` inside it (`'#'`,
+            // `'"'`, `'\''`) is DATA, not a comment start or a string toggle. Body is `\X` (an
+            // escape; the escaped byte is ASCII) or one UTF-8 scalar, then the closing `'`. A
+            // malformed literal just runs to end here and errors in `lex_line`.
+            b'\'' if !in_string => {
+                let mut j = i + 1;
+                if j < b.len() && b[j] == b'\\' {
+                    j += 2;
+                } else {
+                    j += 1;
+                    while j < b.len() && (b[j] & 0xC0) == 0x80 {
+                        j += 1;
+                    }
+                }
+                i = j; // the closing `'`; the trailing `i += 1` steps past it
+            }
             _ => {}
         }
         i += 1;
@@ -299,6 +315,55 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
                     push(out, Tok::Gt);
                     i += 1;
                 }
+            }
+            '\'' => {
+                // Char literal `'c'` (REQ-LLL-137): a single Unicode scalar, lexed to the SAME
+                // `Int` the codepoint takes in a string literal (DEC-LLL-030). Pure lexer sugar —
+                // `'A'` IS `65`, identical token ⟹ identical AST and content-hash (the REQ-125/126
+                // family), and it works in PATTERN position for free. Standard escapes fold to
+                // their scalars. Kills the `match c == 43` codepoint stairs of a hand-written lexer.
+                let rest = &s[i + 1..];
+                let mut it = rest.chars();
+                let first = it.next().ok_or_else(|| {
+                    format!("line {line}: unterminated char literal — expected a character then `'`")
+                })?;
+                let (scalar, body_bytes) = if first == '\\' {
+                    let esc = it.next().ok_or_else(|| {
+                        format!("line {line}: unterminated escape in char literal")
+                    })?;
+                    let v: u32 = match esc {
+                        'n' => 10,
+                        't' => 9,
+                        'r' => 13,
+                        '0' => 0,
+                        '\\' => 92,
+                        '\'' => 39,
+                        '"' => 34,
+                        other => {
+                            return Err(format!(
+                                "line {line}: unknown escape `\\{other}` in char literal \
+                                 (supported: \\n \\t \\r \\0 \\\\ \\' \\\")"
+                            ))
+                        }
+                    };
+                    (v, 1 + esc.len_utf8())
+                } else if first == '\'' {
+                    return Err(format!(
+                        "line {line}: empty char literal `''` — a char literal is exactly one \
+                         character (e.g. `'+'`, `'\\n'`)"
+                    ));
+                } else {
+                    (first as u32, first.len_utf8())
+                };
+                let close = i + 1 + body_bytes;
+                if close >= b.len() || b[close] != b'\'' {
+                    return Err(format!(
+                        "line {line}: char literal must be a single character closed by `'` \
+                         (e.g. `'+'`, `'\\n'`)"
+                    ));
+                }
+                push(out, Tok::Int(scalar as i64));
+                i = close + 1;
             }
             '"' => {
                 let start = i + 1;

@@ -9324,3 +9324,78 @@ fn gate_enforcement_artifacts_replay_the_oracle_req130() {
         }
     }
 }
+
+// ─── REQ-LLL-137: char literal `'c'` — PURE lexer sugar for the Unicode-scalar Int ───────────────
+// Text is `List[Int]` of codepoints (DEC-LLL-030) with NO char literal, forcing `match c == 43`
+// codepoint stairs (self_host_lex_real.lll:73-122, the phare LLM load). `'c'` lexes to the SAME
+// `Tok::Int(scalar)` as the integer — identical token ⟹ identical AST and content-hash (the
+// REQ-125/126 family), and it works in PATTERN position for free (a pattern reads `Tok::Int`).
+
+#[test]
+fn char_literal_is_the_codepoint_int_req137() {
+    // KEYSTONE: char literals in match-arm patterns hash identically to their codepoint ints.
+    let sugar = "module M:\n\n  part kind(c: Int) -> Int:\n    match c:\n      '+' -> yield 1\n      '-' -> yield 2\n      _ -> yield 0\n";
+    let manual = "module M:\n\n  part kind(c: Int) -> Int:\n    match c:\n      43 -> yield 1\n      45 -> yield 2\n      _ -> yield 0\n";
+    let (_, hs) = full(sugar);
+    let (_, hm) = full(manual);
+    assert_eq!(
+        hs.def_hash["kind"], hm.def_hash["kind"],
+        "char literals must hash identically to their codepoint ints"
+    );
+}
+
+#[test]
+fn char_literal_runs_and_works_in_expression_position_req137() {
+    // Runtime differential + expression position: `'+'` == 43, `'x'` == 120.
+    let src = "module M:\n\n  part is_plus(c: Int) -> Int:\n    yield if c == '+' then 1 else 0\n\n  part main() -> Int via IO:\n    let a = IO.print(is_plus('+'))\n    yield IO.print(is_plus('x'))\n";
+    assert!(verify_src(src).ok(), "char literal in expr must verify: {:?}", failures(&verify_src(src)));
+    assert!(build_run(src).contains("1\n0"), "expected 1 then 0, got: {}", build_run(src));
+}
+
+#[test]
+fn char_literal_escapes_and_unicode_match_string_codepoints_req137() {
+    // Escapes resolve to the standard scalars; a non-ASCII char literal is the SAME Unicode scalar
+    // the string literal encodes (DEC-LLL-030) — `'\n'` is 10.
+    let nl = "module M:\n\n  part probe() -> Int:\n    ensures result == 10\n    yield '\\n'\n";
+    assert!(verify_src(nl).ok(), "'\\n' must be 10: {:?}", failures(&verify_src(nl)));
+    // `'\t'` + `'\\'` + `'\''` == 9 + 92 + 39
+    let esc = "module M:\n\n  part f() -> Int:\n    yield '\\t' + '\\\\' + '\\''\n";
+    let ints = "module M:\n\n  part f() -> Int:\n    yield 9 + 92 + 39\n";
+    assert_eq!(full(esc).1.def_hash["f"], full(ints).1.def_hash["f"], "escapes must fold to their scalars");
+    // Unicode scalar consistency: `'é'` (U+00E9 = 233).
+    let uni = "module M:\n\n  part g() -> Int:\n    ensures result == 233\n    yield 'é'\n";
+    assert!(verify_src(uni).ok(), "'é' must be its Unicode scalar 233: {:?}", failures(&verify_src(uni)));
+}
+
+#[test]
+fn char_literal_malformed_is_rejected_with_guidance_req137() {
+    // ADVERSE: an empty or multi-character char literal is a loud, actionable error — never a
+    // silent mislex.
+    for bad in [
+        "module M:\n\n  part f() -> Int:\n    yield ''\n",
+        "module M:\n\n  part f() -> Int:\n    yield 'ab'\n",
+        "module M:\n\n  part f() -> Int:\n    yield 'a\n",
+    ] {
+        let e = parser::parse_module(bad).unwrap_err();
+        assert!(e.contains("char literal"), "a malformed char literal must be diagnosed, got: {e}");
+    }
+    // an unknown escape is diagnosed, not silently swallowed.
+    let e = parser::parse_module("module M:\n\n  part f() -> Int:\n    yield '\\q'\n").unwrap_err();
+    assert!(e.contains("escape"), "an unknown escape must be diagnosed, got: {e}");
+}
+
+#[test]
+fn char_literal_hash_and_quote_are_data_not_comment_or_string_req137() {
+    // The line pre-scanner (`comment_start`, REQ-LLL-117) must treat `#` (35) and `"` (34) INSIDE a
+    // char literal as data — not a comment start nor a string toggle.
+    let src = "module M:\n\n  part f() -> Int:\n    yield '#' + '\"'\n";
+    let ints = "module M:\n\n  part f() -> Int:\n    yield 35 + 34\n";
+    assert_eq!(
+        full(src).1.def_hash["f"], full(ints).1.def_hash["f"],
+        "'#' and '\"' must lex as codepoints, not a comment/string"
+    );
+    // a genuine trailing comment AFTER a char literal is still stripped.
+    let with_comment = "module M:\n\n  part f() -> Int:\n    yield '+' # a plus sign\n";
+    let plain = "module M:\n\n  part f() -> Int:\n    yield 43\n";
+    assert_eq!(full(with_comment).1.def_hash["f"], full(plain).1.def_hash["f"]);
+}

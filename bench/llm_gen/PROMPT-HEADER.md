@@ -48,6 +48,10 @@ Surface conveniences (all desugar to the kernel above — identical content-hash
   binder, no guard) is sugar for `h :: t -> match h: TNum(n) -> …; TPlus -> …; 0 -> …`.
 - **`let` destructuring**: `let (a, b) = e` or `let Ctor(a, b) = e` binds a product's
   fields (sugar for a one-arm `match`).
+- **Char literal `'c'`** is the Unicode-scalar `Int` (`'A'` is `65`, `'+'` is `43`;
+  escapes `\n \t \r \0 \\ \' \"`). Works in BOTH expression and pattern position —
+  write `match c: '+' -> …` instead of `match c: 43 -> …`. Text is `List[Int]`, so a
+  string literal is a list of these codepoints.
 
 Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
 algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):
