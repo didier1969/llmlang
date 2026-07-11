@@ -9284,3 +9284,43 @@ fn desugar_bool_alias_hash_identity_property_req133() {
     }
     assert_eq!(n, N, "the bool-alias corpus degenerated");
 }
+
+#[test]
+fn gate_enforcement_artifacts_replay_the_oracle_req130() {
+    // REQ-LLL-130 — the machine gate (local pre-push hook + GitHub CI) must stay in sync with the
+    // GUI-LLL-003 correctness oracle. This guards against the enforcement artifacts silently
+    // rotting — e.g. someone dropping `-D warnings`, so clippy stops REJECTING warnings and the
+    // zero-warning invariant becomes virtue-dependent again (the exact gap the Fable-5 audit, M2,
+    // found). Meta but load-bearing: enforcement is only as good as its fidelity to the oracle.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let gate = std::fs::read_to_string(root.join("scripts/gate.sh")).expect("scripts/gate.sh exists");
+    assert!(gate.contains("cargo build"), "gate must build");
+    assert!(gate.contains("cargo test"), "gate must run the test suite");
+    assert!(
+        gate.contains("cargo clippy --all-targets -- -D warnings"),
+        "gate must enforce zero warnings as a HARD failure (-D warnings), not a soft clippy pass"
+    );
+
+    let hook =
+        std::fs::read_to_string(root.join(".githooks/pre-push")).expect(".githooks/pre-push exists");
+    assert!(hook.contains("scripts/gate.sh"), "the pre-push hook must invoke the single-source gate");
+
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml exists");
+    assert!(ci.contains("./scripts/gate.sh"), "CI must run the same single-source gate");
+    assert!(
+        ci.contains("z3-4.16.0"),
+        "CI must pin the SAME z3 the project vendors (DEC-LLL-026 model≡binary), no version drift"
+    );
+
+    // On unix the hook and gate must be executable, else the hook silently never fires.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for rel in ["scripts/gate.sh", ".githooks/pre-push"] {
+            let mode = std::fs::metadata(root.join(rel)).unwrap().permissions().mode();
+            assert!(mode & 0o111 != 0, "{rel} must be executable (mode {mode:o})");
+        }
+    }
+}

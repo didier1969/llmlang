@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# REQ-LLL-130 — machine enforcement of the GUI-LLL-003 gate before every push.
+#
+# Install once (version-controlled hook, so it survives clone):
+#   git config core.hooksPath .githooks
+#
+# On any red (build / test / clippy warning) the push is rejected. Same gate the
+# GitHub CI runs, so local and remote agree by construction.
+set -euo pipefail
+exec "$(git rev-parse --show-toplevel)/scripts/gate.sh"

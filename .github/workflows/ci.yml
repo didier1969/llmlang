@@ -1,0 +1,30 @@
+name: gate
+
+# REQ-LLL-130 — machine enforcement of the GUI-LLL-003 correctness oracle, run on
+# every push and pull request. Independent of any local setup or agent choice: this
+# is the enforcement the audit (Fable-5 M2) found missing.
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust clippy component
+        run: rustup component add clippy
+
+      # The vendored z3 is gitignored, so CI fetches the SAME pinned release the
+      # project vendors (z3-4.16.0, glibc-2.39). Identical binary ⇒ no SMT/binary
+      # drift (DEC-LLL-026: the model and the compiled binary must agree).
+      - name: Install pinned Z3 4.16.0 (identical to the vendored oracle binary)
+        run: |
+          curl -sL https://github.com/Z3Prover/z3/releases/download/z3-4.16.0/z3-4.16.0-x64-glibc-2.39.zip -o /tmp/z3.zip
+          python3 -m zipfile -e /tmp/z3.zip vendor/
+          mv vendor/z3-*/ vendor/z3
+          vendor/z3/bin/z3 --version
+
+      - name: Gate (build + test + clippy -D warnings)
+        run: ./scripts/gate.sh
