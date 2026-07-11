@@ -262,6 +262,12 @@ pub struct Part {
     #[serde(default)]
     pub examples: Vec<Expr>,
     pub body: Vec<Stmt>,
+    /// REQ-LLL-138: a `spec` predicate rather than a runtime `part` — pure, non-recursive,
+    /// `-> Bool`, body a single `yield <expr>`. Admitted in `requires`/`ensures`, where it is
+    /// inlined (AST substitution) before check/hash/vc; the spec part is then erased. The
+    /// trusted contract fragment never sees a spec call. Default `false` = ordinary part.
+    #[serde(default)]
+    pub is_spec: bool,
     /// 1-based source line of the `part` keyword (diagnostics only, erased from hash).
     pub line: usize,
     /// file this part was imported from (None = main file). Diagnostics only,

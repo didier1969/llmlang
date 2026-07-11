@@ -19,6 +19,7 @@ pub mod opsem;
 pub mod optimize;
 pub mod parser;
 pub mod refactor;
+pub mod spec_expand;
 pub mod synth;
 pub mod types;
 pub mod vc;

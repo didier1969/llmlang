@@ -417,6 +417,7 @@ impl Parser {
                 Tok::Class => classes.push(self.class_decl()?),
                 Tok::Instance => instances.push(self.instance_decl()?),
                 Tok::Part => parts.push(self.part()?),
+                Tok::Spec => parts.push(self.spec()?),
                 Tok::Dedent => {
                     self.pos += 1;
                     break;
@@ -424,7 +425,7 @@ impl Parser {
                 _ if self.at_end() => break,
                 other => {
                     return Err(self.err(&format!(
-                        "expected `type`, `effect`, `class`, `instance` or `part`, found {other:?}"
+                        "expected `type`, `effect`, `class`, `instance`, `part` or `spec`, found {other:?}"
                     )))
                 }
             }
@@ -933,6 +934,56 @@ impl Parser {
             measure,
             examples,
             body,
+            is_spec: false,
+            line,
+            origin: None,
+        })
+    }
+
+    /// `spec <name>(<params>) -> Bool:` newline indent `yield <expr>` dedent (REQ-LLL-138).
+    /// A pure, non-recursive predicate — parsed as a `Part` with `is_spec = true`, no effects,
+    /// no `given`, an empty contract, and a body (single `yield <expr>` enforced in `check_module`,
+    /// where purity / acyclicity / `Bool` are also checked). Inlined into contracts before the
+    /// trusted fragment (check/hash/vc) runs, then erased.
+    fn spec(&mut self) -> Result<Part, String> {
+        let line = self.line();
+        self.eat(Tok::Spec)?;
+        let name = self.ident()?;
+        self.eat(Tok::LParen)?;
+        let mut params = Vec::new();
+        if self.peek() != &Tok::RParen {
+            loop {
+                let pn = self.ident()?;
+                self.eat(Tok::Colon)?;
+                let ty = self.ty()?;
+                params.push((pn, ty));
+                if self.peek() == &Tok::Comma {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.eat(Tok::RParen)?;
+        self.eat(Tok::Arrow)?;
+        let ret = self.ty()?;
+        self.eat(Tok::Colon)?;
+        self.eat(Tok::Newline)?;
+        self.eat(Tok::Indent)?;
+        let body = self.block_stmts()?;
+        self.eat(Tok::Dedent)?;
+        Ok(Part {
+            name,
+            params,
+            ret,
+            effects: Vec::new(),
+            given: Vec::new(),
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            measure: Vec::new(),
+            examples: Vec::new(),
+            body,
+            is_spec: true,
             line,
             origin: None,
         })

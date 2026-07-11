@@ -413,6 +413,10 @@ impl Ctx<'_> {
 }
 
 pub fn check_module(module: Module) -> Result<CheckedModule, String> {
+    // REQ-LLL-138: inline `spec` predicate calls in contracts and erase the spec parts BEFORE any
+    // trusted stage runs. Everything below (index, check_contracts, hash, vc, codegen) then sees a
+    // spec-free module whose contracts are exactly the hand-inlined form (sugar-hash-identity).
+    let module = crate::spec_expand::expand_spec_predicates(module)?;
     let mut index = HashMap::new();
     for (i, p) in module.parts.iter().enumerate() {
         if index.insert(p.name.clone(), i).is_some() {
@@ -1245,6 +1249,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 measure: Vec::new(),
                 examples: Vec::new(),
                 body: Vec::new(),
+                is_spec: false,
                 line: inst.line,
                 origin: None,
             };

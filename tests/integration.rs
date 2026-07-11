@@ -25,3 +25,5 @@ mod adts;
 mod fuzz;
 #[path = "integration/refactor.rs"]
 mod refactor;
+#[path = "integration/spec_predicates.rs"]
+mod spec_predicates;

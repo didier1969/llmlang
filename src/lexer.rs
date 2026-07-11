@@ -26,6 +26,10 @@ pub enum Tok {
     Instance,
     Law,
     Part,
+    /// `spec` — a named, pure, non-recursive Bool predicate callable in contracts
+    /// (`requires sorted(xs)`), inlined by AST substitution before check/hash/vc
+    /// (REQ-LLL-138). Never a runtime function; erased after expansion.
+    Spec,
     Requires,
     Ensures,
     Measure,
@@ -466,6 +470,7 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
         "instance" => Tok::Instance,
         "law" => Tok::Law,
         "part" => Tok::Part,
+        "spec" => Tok::Spec,
         "requires" => Tok::Requires,
         "ensures" => Tok::Ensures,
         "measure" => Tok::Measure,

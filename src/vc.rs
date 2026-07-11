@@ -484,6 +484,7 @@ fn gen_instance_law_obligations(
         measure: Vec::new(),
         examples: Vec::new(),
         body: Vec::new(),
+        is_spec: false,
         line: inst.line,
         origin: None,
     };
@@ -668,7 +669,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
 /// `inline_methods`). A name absent from `map` is left as-is; a `Lambda` that
 /// re-binds one of `map`'s names shadows it for its own body (standard capture-
 /// avoidance — this codebase's lambdas are the only binder form substituted here).
-fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
+pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
     match e {
         Expr::Var(n) => map.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
         Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => e.clone(),
