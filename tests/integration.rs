@@ -8936,3 +8936,351 @@ fn unknown_verb_also_prints_usage_to_stderr_and_exits_nonzero() {
         "expected `error: usage:` prefix on stderr, got:\n{stderr}"
     );
 }
+
+// ─── REQ-LLL-133: property-test of the hash-identity DESUGARINGS ──────────────────────────────
+// The keystone tests (…_hash_equals_manual_form_*) prove hash(surface)==hash(manual) for ONE
+// example per sugar — an EXISTENTIAL guarantee. A desugaring bug on a form that is INSIDE the rule
+// but absent from the keystones would produce a different well-formed AST that Z3 would verify
+// against itself: a SILENT betrayal of the surface intent (audit Fable-5, M5). These tests close
+// that gap UNIVERSALLY — a deterministic seeded corpus (xorshift, reproducible; no proptest dep,
+// shrinking is unnecessary when the failing seed is printed) of in-rule forms per family, each
+// rendered TWICE by two INDEPENDENT string emitters (the flat SURFACE form and the explicit KERNEL
+// form a human would hand-write), asserting `def_hash` equal. `def_hash` is the project's canonical
+// identity, a function of the DESUGARED AST (DEC-LLL-020), so equality ⟹ identical VC + codegen +
+// runtime — a stronger fidelity proof than a runtime differential. `if…then…else` (REQ-LLL-124) is
+// an AST EXTENSION, not a hash-identity sugar, and is deliberately EXCLUDED (a different risk class,
+// defended by its own adverse pair). Because de Bruijn canonicalisation erases binder names, the
+// manual emitter uses a FIXED head binder `h` and never reproduces the desugarer's `hbind` choice —
+// keeping the two emitters genuinely independent rather than both encoding the transform.
+
+struct XorShift(u64);
+impl XorShift {
+    fn new(seed: u64) -> Self {
+        XorShift(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+    }
+    fn bits(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    /// A uniform-ish index in `0..n` (n > 0).
+    fn below(&mut self, n: usize) -> usize {
+        (self.bits() % n as u64) as usize
+    }
+    /// An integer in `lo..=hi`.
+    fn int(&mut self, lo: i64, hi: i64) -> i64 {
+        lo + (self.bits() % ((hi - lo + 1) as u64)) as i64
+    }
+    fn flip(&mut self) -> bool {
+        self.bits() & 1 == 1
+    }
+}
+
+/// Parse → check → hash, surfacing any stage error WITH the offending source so a generator bug is
+/// a clear red (not a cryptic `.expect` panic) and a genuine desugaring divergence is a hash
+/// mismatch. Returns the part `f`'s content-hash.
+fn dsp_hash(src: &str) -> Result<String, String> {
+    let m = parser::parse_module(src).map_err(|e| format!("parse: {e}"))?;
+    let cm = types::check_module(m).map_err(|e| format!("check: {e}"))?;
+    let hm = hash::hash_module(&cm).map_err(|e| format!("hash: {e}"))?;
+    hm.def_hash
+        .get("f")
+        .cloned()
+        .ok_or_else(|| "no def_hash for part `f`".to_string())
+}
+
+/// Assert both renderings hash-equal, printing seed + both sources on failure; also machine-checks
+/// NON-TAUTOLOGY (the emitters genuinely diverge at the string level — the sugar is really present).
+fn dsp_assert_equal(seed: u64, family: &str, surface: &str, manual: &str) {
+    assert_ne!(
+        surface, manual,
+        "[{family} seed={seed}] surface and manual renderings are identical — the case exercises \
+         no sugar (tautological); generator bug"
+    );
+    let hs = dsp_hash(surface).unwrap_or_else(|e| {
+        panic!("[{family} seed={seed}] surface did not compile: {e}\n--- surface ---\n{surface}")
+    });
+    let hm = dsp_hash(manual).unwrap_or_else(|e| {
+        panic!("[{family} seed={seed}] manual did not compile: {e}\n--- manual ---\n{manual}")
+    });
+    assert_eq!(
+        hs, hm,
+        "[{family} seed={seed}] the surface sugar desugared to a DIFFERENT AST than the manual \
+         kernel form — a real desugaring bug (M5), NOT a case to exclude.\n\
+         --- surface ---\n{surface}\n--- manual ---\n{manual}"
+    );
+}
+
+struct ConsShape {
+    literal: bool,
+    has_default: bool,
+    nil_before: bool,
+}
+
+/// Render a cons-head case two ways. SURFACE: flat refutable-head cons arms (`C1(n) :: t -> …`,
+/// `7 :: t -> …`), optional trailing default (`hd :: t -> …`). MANUAL: the ONE coalesced cons arm
+/// with a nested `match h: …` a human would hand-write. The `[]` arm sits BEFORE the run (hits the
+/// `i < first` reassembly branch in `coalesce_cons_heads`) or AFTER it (hits the trailing `else`
+/// branch — the ordering the keystones never reach).
+fn dsp_render_cons(
+    elem: &str,
+    type_decl: Option<&str>,
+    heads: &[(String, String)],
+    default_body: Option<&str>,
+    nil_before: bool,
+    nil_body: &str,
+) -> (String, String) {
+    let typ = match type_decl {
+        Some(d) => format!("  type {d}\n\n"),
+        None => String::new(),
+    };
+    let header =
+        format!("module M:\n\n{typ}  part f(xs: List[{elem}]) -> Int:\n    match xs:\n");
+    let nil_arm = format!("      [] -> {nil_body}\n");
+
+    let mut surf_run = String::new();
+    for (pat, body) in heads {
+        surf_run.push_str(&format!("      {pat} :: t -> {body}\n"));
+    }
+    if let Some(db) = default_body {
+        surf_run.push_str(&format!("      hd :: t -> {db}\n"));
+    }
+
+    let mut man_run = String::from("      h :: t ->\n        match h:\n");
+    for (pat, body) in heads {
+        man_run.push_str(&format!("          {pat} -> {body}\n"));
+    }
+    if let Some(db) = default_body {
+        man_run.push_str(&format!("          _ -> {db}\n"));
+    }
+
+    if nil_before {
+        (format!("{header}{nil_arm}{surf_run}"), format!("{header}{nil_arm}{man_run}"))
+    } else {
+        (format!("{header}{surf_run}{nil_arm}"), format!("{header}{man_run}{nil_arm}"))
+    }
+}
+
+/// One cons-head case (REQ-LLL-110 constructor heads / REQ-LLL-126 literal heads).
+fn dsp_cons_case(rng: &mut XorShift) -> (String, String, ConsShape) {
+    let nil_before = rng.flip();
+    let nil_body = format!("yield {}", rng.int(-9, -1));
+    let mut body_val = rng.int(0, 40);
+    let literal = rng.flip();
+
+    if literal {
+        // List[Int] literal heads — a match on an Int head is never exhaustive on a finite set, so
+        // a default is MANDATORY. Distinct literals, distinct bodies.
+        let m = 1 + rng.below(3);
+        let mut lits: Vec<i64> = Vec::new();
+        let mut heads: Vec<(String, String)> = Vec::new();
+        let mut v = rng.int(0, 20);
+        for _ in 0..m {
+            while lits.contains(&v) {
+                v = (v + 1 + rng.int(0, 3)) % 50;
+            }
+            lits.push(v);
+            body_val += 7 + rng.int(1, 5);
+            heads.push((format!("{v}"), format!("yield {body_val}")));
+            v = (v + 3 + rng.int(0, 4)) % 50;
+        }
+        let default_body = format!("yield {}", body_val + 100);
+        let (s, m) =
+            dsp_render_cons("Int", None, &heads, Some(&default_body), nil_before, &nil_body);
+        return (s, m, ConsShape { literal: true, has_default: true, nil_before });
+    }
+
+    // ADT constructor heads: mix nullary and unary constructors.
+    let k = 2 + rng.below(3); // 2..=4
+    let mut unary = Vec::new();
+    let mut decls: Vec<String> = Vec::new();
+    for i in 0..k {
+        let is_unary = rng.flip();
+        unary.push(is_unary);
+        decls.push(if is_unary { format!("C{i}(Int)") } else { format!("C{i}") });
+    }
+    let has_default = rng.flip();
+    // FULL coverage when there is no default (the inner match must be exhaustive on its own); else a
+    // PROPER, non-empty subset so the default stays reachable. Fisher–Yates shuffles arm ORDER —
+    // both emitters use the SAME order.
+    let mut idx: Vec<usize> = (0..k).collect();
+    for i in (1..idx.len()).rev() {
+        let j = rng.below(i + 1);
+        idx.swap(i, j);
+    }
+    let covered: Vec<usize> = if has_default {
+        let take = 1 + rng.below(k - 1); // 1..=k-1
+        idx.into_iter().take(take).collect()
+    } else {
+        idx
+    };
+    let mut heads: Vec<(String, String)> = Vec::new();
+    for &i in &covered {
+        body_val += 7 + rng.int(1, 5);
+        heads.push(if unary[i] {
+            (format!("C{i}(n)"), format!("yield n + {body_val}"))
+        } else {
+            (format!("C{i}"), format!("yield {body_val}"))
+        });
+    }
+    let type_decl = format!("Tok = {}", decls.join(" | "));
+    let default_body = format!("yield {}", body_val + 100);
+    let db = if has_default { Some(default_body.as_str()) } else { None };
+    let (s, m) = dsp_render_cons("Tok", Some(&type_decl), &heads, db, nil_before, &nil_body);
+    (s, m, ConsShape { literal: false, has_default, nil_before })
+}
+
+#[test]
+fn desugar_cons_head_hash_identity_property_req133() {
+    // The MEAT: `coalesce_cons_heads` is the only nontrivial desugaring, so the corpus is weighted
+    // here. Also verifies the corpus actually EXERCISED each structural axis (non-vacuity — a
+    // generator regression that stopped producing, e.g., the trailing-`[]` shape must not pass
+    // green vacuously).
+    const N: usize = 140;
+    let mut rng = XorShift::new(0xC0FF_EE13);
+    let (mut lit, mut deflt, mut nilb) = (0usize, 0usize, 0usize);
+    for _ in 0..N {
+        let seed = rng.0;
+        let (surface, manual, shape) = dsp_cons_case(&mut rng);
+        dsp_assert_equal(seed, "cons-head/110-126", &surface, &manual);
+        lit += shape.literal as usize;
+        deflt += shape.has_default as usize;
+        nilb += shape.nil_before as usize;
+    }
+    // Every structural axis appeared in BOTH states (both flat-arm reassembly branches, literal and
+    // constructor domains, default-present and full-coverage). Thresholds are far below the ~50%
+    // expectation so the guard flags a degenerate generator, not statistical noise.
+    assert!((20..=N - 20).contains(&lit), "literal/ctor domain not both exercised: {lit}/{N}");
+    assert!((20..=N - 20).contains(&deflt), "default-present/full-coverage not both exercised: {deflt}/{N}");
+    assert!((20..=N - 20).contains(&nilb), "`[]`-before/`[]`-after (reassembly else branch) not both exercised: {nilb}/{N}");
+}
+
+// let-destructuring (REQ-LLL-123): `let <pat> = e ; <rest>` → `match e: <pat> -> <rest>`.
+
+fn dsp_letdestr_case(rng: &mut XorShift) -> (String, String) {
+    let n = 2 + rng.below(2); // 2..=3 fields
+    let ctor = rng.flip();
+    let binders: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
+    let xs: Vec<String> = (0..n).map(|i| format!("x{i}")).collect();
+    let params = xs.iter().map(|x| format!("{x}: Int")).collect::<Vec<_>>().join(", ");
+    // A distinct linear combination over the bound fields, so a mis-bind changes the hash.
+    let lincomb = binders
+        .iter()
+        .enumerate()
+        .map(|(i, b)| if i == 0 { b.clone() } else { format!("{b} * {}", i + 1) })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    // Sometimes a preceding plain `let` to exercise a multi-statement `<rest>`.
+    let extra = rng.flip();
+    let (pat, value) = if ctor {
+        let arity_tys = vec!["Int"; n].join(", ");
+        let fields = binders.join(", ");
+        let args = xs.join(", ");
+        (
+            format!("P{n}({fields})"),
+            (format!("P{n}({args})"), Some(format!("type P{n} = P{n}({arity_tys})"))),
+        )
+    } else {
+        (format!("({})", binders.join(", ")), (format!("({})", xs.join(", ")), None))
+    };
+    let (val_expr, type_decl) = value;
+    let typ = match &type_decl {
+        Some(d) => format!("  {d}\n\n"),
+        None => String::new(),
+    };
+    let header = format!("module M:\n\n{typ}  part f({params}) -> Int:\n");
+    let (rest_surface, rest_manual) = if extra {
+        (
+            format!("    let z = {} + 1\n    yield z + {lincomb}\n", binders[0]),
+            format!("        let z = {} + 1\n        yield z + {lincomb}\n", binders[0]),
+        )
+    } else {
+        (format!("    yield {lincomb}\n"), format!("        yield {lincomb}\n"))
+    };
+    let surface = format!("{header}    let {pat} = {val_expr}\n{rest_surface}");
+    let manual = format!("{header}    match {val_expr}:\n      {pat} ->\n{rest_manual}");
+    (surface, manual)
+}
+
+#[test]
+fn desugar_let_destructure_hash_identity_property_req133() {
+    const N: usize = 48;
+    let mut rng = XorShift::new(0xDE57_2233);
+    let mut n = 0usize;
+    for _ in 0..N {
+        let seed = rng.0;
+        let (surface, manual) = dsp_letdestr_case(&mut rng);
+        dsp_assert_equal(seed, "let-destructure/123", &surface, &manual);
+        n += 1;
+    }
+    assert_eq!(n, N, "the let-destructure corpus degenerated");
+}
+
+// `&&`/`||` (REQ-LLL-125): a LEXER alias — `&&`/`||` lex to the SAME tokens as `and`/`or`. The
+// property is near-tautological (it can only catch a lexer regression), included cheaply.
+
+enum DspBool {
+    Var(u8),
+    Not(Box<DspBool>),
+    And(Box<DspBool>, Box<DspBool>),
+    Or(Box<DspBool>, Box<DspBool>),
+}
+
+fn dsp_gen_bool(rng: &mut XorShift, depth: u32) -> DspBool {
+    if depth == 0 || rng.below(3) == 0 {
+        return DspBool::Var(rng.below(3) as u8);
+    }
+    match rng.below(3) {
+        0 => DspBool::Not(Box::new(dsp_gen_bool(rng, depth - 1))),
+        1 => DspBool::And(Box::new(dsp_gen_bool(rng, depth - 1)), Box::new(dsp_gen_bool(rng, depth - 1))),
+        _ => DspBool::Or(Box::new(dsp_gen_bool(rng, depth - 1)), Box::new(dsp_gen_bool(rng, depth - 1))),
+    }
+}
+
+/// Fully parenthesised so precedence is irrelevant; `sym` picks `&&`/`||` vs `and`/`or`.
+fn dsp_render_bool(b: &DspBool, sym: bool) -> String {
+    match b {
+        DspBool::Var(i) => ((b'a' + i) as char).to_string(),
+        DspBool::Not(x) => format!("(not {})", dsp_render_bool(x, sym)),
+        DspBool::And(l, r) => format!(
+            "({} {} {})",
+            dsp_render_bool(l, sym),
+            if sym { "&&" } else { "and" },
+            dsp_render_bool(r, sym)
+        ),
+        DspBool::Or(l, r) => format!(
+            "({} {} {})",
+            dsp_render_bool(l, sym),
+            if sym { "||" } else { "or" },
+            dsp_render_bool(r, sym)
+        ),
+    }
+}
+
+#[test]
+fn desugar_bool_alias_hash_identity_property_req133() {
+    const N: usize = 30;
+    let mut rng = XorShift::new(0xB007_2233);
+    let mut n = 0usize;
+    for _ in 0..N {
+        let seed = rng.0;
+        // Force the root to be `&&`/`||` so every case actually contains an aliased operator
+        // (guarantees non-tautology: surface != manual).
+        let l = dsp_gen_bool(&mut rng, 2);
+        let r = dsp_gen_bool(&mut rng, 2);
+        let tree = if rng.flip() {
+            DspBool::Or(Box::new(l), Box::new(r))
+        } else {
+            DspBool::And(Box::new(l), Box::new(r))
+        };
+        let head = "module M:\n\n  part f(a: Bool, b: Bool, c: Bool) -> Bool:\n    yield ";
+        let surface = format!("{head}{}\n", dsp_render_bool(&tree, true));
+        let manual = format!("{head}{}\n", dsp_render_bool(&tree, false));
+        dsp_assert_equal(seed, "bool-alias/125", &surface, &manual);
+        n += 1;
+    }
+    assert_eq!(n, N, "the bool-alias corpus degenerated");
+}
