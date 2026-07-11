@@ -9575,3 +9575,183 @@ fn oracle_never_panics_on_adversarial_input_req132() {
     }
     assert_eq!(n, 4200, "the fuzz corpus degenerated");
 }
+
+// ─── REQ-LLL-139: nested literal/bool sub-patterns in Ctor-args and tuple-elements ────────────────
+// A literal in a constructor-argument or tuple-element position (`P(0, y)`, `(true, x)`) DESUGARS at
+// PARSE TIME to a fresh binder plus a `when`-guard equality (`P(g, y) when g == 0`). The Pattern enum
+// stays FLAT and unchanged, so checker/VC/codegen/hash are re-derived downstream IDENTICAL to the
+// hand-written guarded form — hash-identity, the REQ-110/126/133 discipline. Guards give NATIVE
+// fall-through, so the old matrix "merge trap" (`P(0,_) -> A; _ -> B`) DISSOLVES with no bespoke
+// overlap analysis. Everything outside this shape — a nested CONSTRUCTOR/tuple sub-pattern, or a
+// literal in an IRREFUTABLE `let` destructuring — stays a LOUD error, never a silent mis-bind
+// (DEC-LLL-015). Design divergence from the SOLL's "matrix-compilation to nested matches": guards are
+// strictly safer (proven machinery, native fall-through) and — verified below — as strong within
+// scope (complementary Bool guards prove jointly exhaustive).
+
+#[test]
+fn nested_literal_ctor_arg_desugars_to_guard_hash_identity_req139() {
+    // KEYSTONE: `P(0, y)` hashes identically to the hand-written `P(g, y) when g == 0`. Match binders
+    // are α-normalized in def_hash (verified: `x` and `zzz` collide), so the fresh name is irrelevant.
+    let sugar = "module M:\n\n  type PB = P(Int, Int)\n\n  part f(p: PB) -> Int:\n    match p:\n      P(0, y) -> yield y\n      _ -> yield 9\n";
+    let manual = "module M:\n\n  type PB = P(Int, Int)\n\n  part f(p: PB) -> Int:\n    match p:\n      P(g, y) when g == 0 -> yield y\n      _ -> yield 9\n";
+    assert_ne!(sugar, manual, "keystone must exercise the sugar (non-tautology)");
+    let (_, hs) = full(sugar);
+    let (_, hm) = full(manual);
+    assert_eq!(
+        hs.def_hash["f"], hm.def_hash["f"],
+        "a literal ctor-arg sub-pattern must desugar to the hand-written `when`-guard form"
+    );
+}
+
+#[test]
+fn nested_literal_tuple_elem_desugars_to_guard_hash_identity_req139() {
+    // KEYSTONE (tuple element): `(0, y)` ≡ `(g, y) when g == 0`.
+    let sugar = "module M:\n\n  part f(p: (Int, Int)) -> Int:\n    match p:\n      (0, y) -> yield y\n      _ -> yield 9\n";
+    let manual = "module M:\n\n  part f(p: (Int, Int)) -> Int:\n    match p:\n      (g, y) when g == 0 -> yield y\n      _ -> yield 9\n";
+    assert_ne!(sugar, manual, "keystone must exercise the sugar (non-tautology)");
+    let (_, hs) = full(sugar);
+    let (_, hm) = full(manual);
+    assert_eq!(
+        hs.def_hash["f"], hm.def_hash["f"],
+        "a literal tuple-element sub-pattern must desugar to the hand-written `when`-guard form"
+    );
+}
+
+#[test]
+fn nested_literal_merge_trap_dissolves_and_runs_req139() {
+    // The classic matrix "merge trap": a specific-then-general pair `P(0, y)` then `P(x, y)`. Guards
+    // make the fall-through NATIVE — this PROVES exhaustive AND runs with the right value, where a
+    // naive per-arm nested-match desugar would silently drop the general arm (the soundness hazard).
+    let src = "module M:\n\n  type PB = P(Int, Int)\n\n  part classify(p: PB) -> Int:\n    match p:\n      P(0, y) -> yield 100\n      P(x, y) -> yield x\n\n  part main() -> Int via IO:\n    let a = IO.print(classify(P(0, 9)))\n    yield IO.print(classify(P(7, 9)))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "the merge-trap pair must verify (exhaustive): {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(
+        out.contains("100\n7"),
+        "classify(P(0,_))=100 (specific), classify(P(7,_))=7 (general fall-through); got: {out}"
+    );
+}
+
+#[test]
+fn nested_literal_bool_complementary_arms_prove_exhaustive_req139() {
+    // Complementary Bool sub-patterns with NO trailing wildcard prove JOINTLY exhaustive — the
+    // desugared `when g == true` / `when g == false` guards feed the exhaustiveness VC, so the
+    // guard desugar is as strong as a nested match within scope (not merely safe).
+    let src = "module M:\n\n  type PB = P(Bool, Int)\n\n  part f(p: PB) -> Int:\n    match p:\n      P(true, y) -> yield 1\n      P(false, y) -> yield 2\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "complementary Bool sub-patterns must prove exhaustive: {:?}", failures(&report));
+}
+
+#[test]
+fn nested_literal_alone_is_non_exhaustive_and_rejected_req139() {
+    // ADVERSE: a lone `P(0, y)` (an Int literal, no fall-through) desugars to a guarded arm that is
+    // NON-exhaustive → Z3 rejects it loudly (DEC-LLL-015). Over-rejection is the SAFE direction: the
+    // naive desugar can only ever be loud, never a silent miscompile.
+    let src = "module M:\n\n  type PB = P(Int, Int)\n\n  part f(p: PB) -> Int:\n    match p:\n      P(0, y) -> yield y\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "a lone literal sub-pattern arm must fail the exhaustiveness obligation");
+}
+
+#[test]
+fn nested_literal_in_let_destructure_is_rejected_loudly_req139() {
+    // ADVERSE: a `let` destructuring is IRREFUTABLE — there is no alternative arm to fall through to,
+    // so a literal sub-pattern there must be REJECTED, never silently dropped (the shared-state
+    // hazard). The guard fragments are threaded by RETURN VALUE, so this irrefutable context sees a
+    // non-empty guard list and errors.
+    let src = "module M:\n\n  type PB = P(Int, Int)\n\n  part f(p: PB) -> Int:\n    let P(0, y) = p\n    yield y\n";
+    let err = parser::parse_module(src).expect_err("a literal in a `let` destructuring must be rejected");
+    assert!(
+        err.contains("let") || err.contains("irrefutable") || err.contains("literal"),
+        "the diagnostic must name the irrefutable-let problem; got: {err}"
+    );
+}
+
+/// One REQ-139 nested-literal case rendered two ways over a fixed `(Int, Bool)` two-field shape.
+/// SURFACE inlines a literal in a sub-position (`P(0, y)`, `(true, y)`, …); MANUAL replaces each
+/// literal position with a fresh binder plus a `when g == lit` fragment (positions conjoined
+/// left-to-right, `&&`). At least one position is forced to a literal (non-vacuity: surface ≠ manual).
+/// Both close with a `_ -> yield 0` so an Int/Bool literal position stays exhaustive.
+fn dsp_nested_case(rng: &mut XorShift, tuple: bool) -> (String, String) {
+    let mut surf = [String::new(), String::new()];
+    let mut man = [String::new(), String::new()];
+    let mut frags: Vec<String> = Vec::new();
+    let mut lits = 0;
+    for i in 0..2 {
+        if rng.flip() {
+            lits += 1;
+            let g = format!("g{i}");
+            let lit = if i == 0 {
+                format!("{}", rng.below(5))
+            } else {
+                format!("{}", rng.flip())
+            };
+            surf[i] = lit.clone();
+            man[i] = g.clone();
+            frags.push(format!("{g} == {lit}"));
+        } else {
+            let b = format!("y{i}");
+            surf[i] = b.clone();
+            man[i] = b;
+        }
+    }
+    if lits == 0 {
+        // force non-vacuity: position 0 becomes the literal `0`
+        surf[0] = "0".to_string();
+        man[0] = "g0".to_string();
+        frags.insert(0, "g0 == 0".to_string());
+    }
+    let (decl, ty, head, tail) = if tuple {
+        (String::new(), "(Int, Bool)".to_string(), "(".to_string(), ")".to_string())
+    } else {
+        (
+            "  type PB = P(Int, Bool)\n\n".to_string(),
+            "PB".to_string(),
+            "P(".to_string(),
+            ")".to_string(),
+        )
+    };
+    let when = if frags.is_empty() {
+        String::new()
+    } else {
+        format!(" when {}", frags.join(" && "))
+    };
+    let pre = format!("module M:\n\n{decl}  part f(p: {ty}) -> Int:\n    match p:\n      ");
+    let surface = format!(
+        "{pre}{head}{}, {}{tail} -> yield 1\n      _ -> yield 0\n",
+        surf[0], surf[1]
+    );
+    let manual = format!(
+        "{pre}{head}{}, {}{tail}{when} -> yield 1\n      _ -> yield 0\n",
+        man[0], man[1]
+    );
+    (surface, manual)
+}
+
+#[test]
+fn desugar_nested_literal_hash_identity_property_req139() {
+    // Property (M5 discipline, extends REQ-133 to nested patterns): for a generated corpus of Ctor
+    // and tuple patterns carrying literal sub-positions, the surface sugar hashes IDENTICALLY to the
+    // hand-written `when`-guard kernel — OR both fail identically; NEVER a silent divergence. The
+    // corpus includes the merge-trap shape (a literal position beside a binder) and multi-literal
+    // conjunctions (association of `&&` must match), the exact cases a naive desugar breaks.
+    const N: usize = 120;
+    let mut rng = XorShift::new(0x139D_E5A6);
+    let mut n = 0usize;
+    let mut tuples = 0usize;
+    for _ in 0..N {
+        let seed = rng.0;
+        let tuple = rng.flip();
+        if tuple {
+            tuples += 1;
+        }
+        let (surface, manual) = dsp_nested_case(&mut rng, tuple);
+        dsp_assert_equal(seed, "nested-literal/139", &surface, &manual);
+        n += 1;
+    }
+    assert_eq!(n, N, "the nested-literal corpus degenerated");
+    // non-vacuity of the FAMILY split: both ctor and tuple shapes are actually exercised.
+    assert!(
+        (20..=N - 20).contains(&tuples),
+        "family split degenerate: {tuples}/{N} tuple cases (want a real mix of ctor and tuple)"
+    );
+}

@@ -964,7 +964,18 @@ impl Parser {
                             _ => false,
                         };
                     if is_destructure {
-                        let pat = self.pattern()?;
+                        let (pat, sub_guards) = self.pattern()?;
+                        if !sub_guards.is_empty() {
+                            // A `let` destructuring is IRREFUTABLE — there is no alternative arm to
+                            // fall through to — so a literal sub-pattern (REQ-LLL-139) has no meaning
+                            // here and must NOT be silently dropped (the shared-state hazard). Because
+                            // the fragments flow by return value, this context sees them and rejects.
+                            return Err(self.err(
+                                "a literal sub-pattern is not allowed in a `let` destructuring \
+                                 (it is irrefutable — there is no alternative arm to fall through \
+                                 to); bind the field and compare it, or `match` on the value instead",
+                            ));
+                        }
                         self.eat(Tok::Assign)?;
                         let e = self.expr()?;
                         self.eat(Tok::Newline)?;
@@ -1170,26 +1181,26 @@ impl Parser {
     /// and cannot decide accept-vs-diagnose (that needs the whole arm list), so the single
     /// decision point is `coalesce_cons_heads`.
     fn raw_arm(&mut self) -> Result<RawArm, String> {
-        if let Some(head) = self.refutable_head()? {
+        if let Some((head, sub_guards)) = self.refutable_head()? {
             if self.peek() == &Tok::ColonColon {
                 // a refutable-head cons — the REQ-LLL-110 / REQ-LLL-126 shape
                 self.pos += 1;
                 let tail = self.ident()?;
-                let guard = self.opt_guard()?;
+                let guard = self.finish_guard(sub_guards)?;
                 self.eat(Tok::Arrow)?;
                 let body = self.arrow_body()?;
                 return Ok(RawArm::ConsPat { head, tail, guard, body });
             }
             // not a cons head → the head pattern IS the whole arm pattern
-            let guard = self.opt_guard()?;
+            let guard = self.finish_guard(sub_guards)?;
             self.eat(Tok::Arrow)?;
             let body = self.arrow_body()?;
             return Ok(RawArm::Plain(Arm { pattern: head, guard, body }));
         }
         // everything else — the binder-head default `b :: t` (lowercase), `[]`, `_`, a
         // tuple — is an ordinary pattern the AST can represent directly.
-        let pattern = self.pattern()?;
-        let guard = self.opt_guard()?;
+        let (pattern, sub_guards) = self.pattern()?;
+        let guard = self.finish_guard(sub_guards)?;
         self.eat(Tok::Arrow)?;
         let body = self.arrow_body()?;
         Ok(RawArm::Plain(Arm { pattern, guard, body }))
@@ -1199,16 +1210,16 @@ impl Parser {
     /// arm pattern: an integer/bool literal or a constructor (nullary/payload). Returns `None`
     /// (consuming nothing) for a binder / `[]` / `_` / tuple — the ordinary-pattern cases left
     /// to `pattern()`. Shares `ctor_binders` with `pattern`.
-    fn refutable_head(&mut self) -> Result<Option<Pattern>, String> {
+    fn refutable_head(&mut self) -> Result<Option<(Pattern, Vec<Expr>)>, String> {
         Ok(match self.peek().clone() {
             Tok::Int(n) => {
                 self.pos += 1;
-                Some(Pattern::IntLit(n))
+                Some((Pattern::IntLit(n), vec![]))
             }
             Tok::Minus => {
                 self.pos += 1;
                 match self.bump() {
-                    Tok::Int(n) => Some(Pattern::IntLit(-n)),
+                    Tok::Int(n) => Some((Pattern::IntLit(-n), vec![])),
                     other => {
                         return Err(self.err(&format!("expected integer after '-', found {other:?}")))
                     }
@@ -1216,15 +1227,16 @@ impl Parser {
             }
             Tok::True => {
                 self.pos += 1;
-                Some(Pattern::BoolLit(true))
+                Some((Pattern::BoolLit(true), vec![]))
             }
             Tok::False => {
                 self.pos += 1;
-                Some(Pattern::BoolLit(false))
+                Some((Pattern::BoolLit(false), vec![]))
             }
             Tok::Ident(h) if h.chars().next().is_some_and(|c| c.is_uppercase()) => {
                 self.pos += 1;
-                Some(Pattern::Ctor(h, self.ctor_binders()?))
+                let (binders, guards) = self.ctor_binders()?;
+                Some((Pattern::Ctor(h, binders), guards))
             }
             _ => None,
         })
@@ -1242,21 +1254,27 @@ impl Parser {
 
     /// Parse the optional `(x, y, …)` binder list of a constructor pattern. No parens
     /// ⇒ a nullary constructor (empty list). Shared by `raw_arm` and `pattern`.
-    fn ctor_binders(&mut self) -> Result<Vec<String>, String> {
+    /// Parse the parenthesized argument binders of a constructor pattern `Ctor(a, b, …)`. Each
+    /// position is an ordinary binder OR a scalar literal that desugars to a fresh binder plus a
+    /// `when`-guard fragment (REQ-LLL-139). The fragments are RETURNED (never buffered on `self`) so
+    /// every caller must decide what to do with them: a match arm conjoins them into its guard
+    /// (`finish_guard`), an irrefutable `let` destructuring rejects a non-empty list loudly.
+    fn ctor_binders(&mut self) -> Result<(Vec<String>, Vec<Expr>), String> {
         if self.peek() != &Tok::LParen {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
         self.pos += 1;
         let mut binders = Vec::new();
+        let mut guards = Vec::new();
         if self.peek() != &Tok::RParen {
-            binders.push(self.ident()?);
+            self.sub_binder(&mut binders, &mut guards)?;
             while self.peek() == &Tok::Comma {
                 self.pos += 1;
-                binders.push(self.ident()?);
+                self.sub_binder(&mut binders, &mut guards)?;
             }
         }
         self.eat(Tok::RParen)?;
-        Ok(binders)
+        Ok((binders, guards))
     }
 
     /// Mint a fresh, collision-proof head binder for a coalesced match with no default.
@@ -1264,6 +1282,69 @@ impl Parser {
         let n = self.fresh;
         self.fresh += 1;
         format!("_conshd_{n}")
+    }
+
+    fn fresh_subpat_binder(&mut self) -> String {
+        let n = self.fresh;
+        self.fresh += 1;
+        format!("_subpat_{n}")
+    }
+
+    /// One sub-pattern POSITION inside a constructor/tuple pattern (REQ-LLL-139). A scalar literal
+    /// (`0`, `-3`, `true`, `false`) is lowered to a FRESH binder plus an equality guard fragment
+    /// `binder == literal` (pushed to `guards`); anything else is an ordinary binder (pushed to
+    /// `binders`). Deeper nesting is out of v1 scope and stays LOUD, never a silent mis-bind: a
+    /// constructor-with-args sub-pattern (`Som(x)`) trips `ctor_binders`' `eat(RParen)` on the inner
+    /// `(`, and a nullary-ctor name (`Non`) binds a variable that the checker's shadow check rejects.
+    fn sub_binder(&mut self, binders: &mut Vec<String>, guards: &mut Vec<Expr>) -> Result<(), String> {
+        let lit = match self.peek().clone() {
+            Tok::Int(n) => {
+                self.pos += 1;
+                Some(Expr::IntLit(n))
+            }
+            Tok::Minus => {
+                self.pos += 1;
+                match self.bump() {
+                    Tok::Int(n) => Some(Expr::IntLit(-n)),
+                    other => {
+                        return Err(self.err(&format!("expected integer after '-', found {other:?}")))
+                    }
+                }
+            }
+            Tok::True => {
+                self.pos += 1;
+                Some(Expr::BoolLit(true))
+            }
+            Tok::False => {
+                self.pos += 1;
+                Some(Expr::BoolLit(false))
+            }
+            _ => None,
+        };
+        match lit {
+            Some(v) => {
+                let b = self.fresh_subpat_binder();
+                guards.push(Expr::Bin(BinOp::Eq, Box::new(Expr::Var(b.clone())), Box::new(v)));
+                binders.push(b);
+            }
+            None => binders.push(self.ident()?),
+        }
+        Ok(())
+    }
+
+    /// Conjoin the REQ-LLL-139 sub-pattern guard fragments (source order) with the arm's optional
+    /// user `when` guard: `sub0 && sub1 && … && user`. Left-associative — matches how the parser
+    /// reads the equivalent hand-written `when a && b && …`, so the desugar is hash-identical to it.
+    fn finish_guard(&mut self, sub_guards: Vec<Expr>) -> Result<Option<Expr>, String> {
+        let user = self.opt_guard()?;
+        let mut acc: Option<Expr> = None;
+        for g in sub_guards.into_iter().chain(user) {
+            acc = Some(match acc {
+                None => g,
+                Some(a) => Expr::Bin(BinOp::And, Box::new(a), Box::new(g)),
+            });
+        }
+        Ok(acc)
     }
 
     /// REQ-LLL-110 / REQ-LLL-126 cons-head sugar. Collapse a contiguous run of cons arms
@@ -1382,49 +1463,55 @@ impl Parser {
         ))
     }
 
-    fn pattern(&mut self) -> Result<Pattern, String> {
+    /// Parse one pattern, returning it plus any REQ-LLL-139 sub-pattern guard fragments produced by
+    /// literal sub-positions inside a `Ctor(…)`/tuple. In a REFUTABLE context (match arm) the caller
+    /// conjoins them into the arm guard; in an IRREFUTABLE one (`let` destructuring) a non-empty list
+    /// is rejected. The fragments flow by RETURN VALUE so no caller can silently drop them.
+    fn pattern(&mut self) -> Result<(Pattern, Vec<Expr>), String> {
         match self.peek().clone() {
             Tok::Int(n) => {
                 self.pos += 1;
-                Ok(Pattern::IntLit(n))
+                Ok((Pattern::IntLit(n), vec![]))
             }
             Tok::Minus => {
                 self.pos += 1;
                 match self.bump() {
-                    Tok::Int(n) => Ok(Pattern::IntLit(-n)),
+                    Tok::Int(n) => Ok((Pattern::IntLit(-n), vec![])),
                     other => Err(self.err(&format!("expected integer after '-', found {other:?}"))),
                 }
             }
             Tok::True => {
                 self.pos += 1;
-                Ok(Pattern::BoolLit(true))
+                Ok((Pattern::BoolLit(true), vec![]))
             }
             Tok::False => {
                 self.pos += 1;
-                Ok(Pattern::BoolLit(false))
+                Ok((Pattern::BoolLit(false), vec![]))
             }
             Tok::Underscore => {
                 self.pos += 1;
-                Ok(Pattern::Wildcard)
+                Ok((Pattern::Wildcard, vec![]))
             }
             Tok::LBracket => {
                 self.pos += 1;
                 self.eat(Tok::RBracket)?;
-                Ok(Pattern::Nil)
+                Ok((Pattern::Nil, vec![]))
             }
-            // tuple destructuring pattern `(x, y, …)` (REQ-LLL-026, DEC-LLL-036)
+            // tuple destructuring pattern `(x, y, …)` (REQ-LLL-026, DEC-LLL-036); a literal element
+            // desugars to a fresh binder + guard fragment exactly like a constructor argument.
             Tok::LParen => {
                 self.pos += 1;
                 let mut binders = Vec::new();
+                let mut guards = Vec::new();
                 if self.peek() != &Tok::RParen {
-                    binders.push(self.ident()?);
+                    self.sub_binder(&mut binders, &mut guards)?;
                     while self.peek() == &Tok::Comma {
                         self.pos += 1;
-                        binders.push(self.ident()?);
+                        self.sub_binder(&mut binders, &mut guards)?;
                     }
                 }
                 self.eat(Tok::RParen)?;
-                Ok(Pattern::Tuple(binders))
+                Ok((Pattern::Tuple(binders), guards))
             }
             Tok::Ident(h) => {
                 self.pos += 1;
@@ -1435,15 +1522,16 @@ impl Parser {
                     // or diagnose it — the single decision point (REQ-LLL-110).
                     self.pos += 1;
                     let t = self.ident()?;
-                    Ok(Pattern::Cons(h, t))
+                    Ok((Pattern::Cons(h, t), vec![]))
                 } else if self.peek() == &Tok::LParen {
                     // constructor pattern `Ctor(x, y, …)` (REQ-LLL-011)
-                    Ok(Pattern::Ctor(h, self.ctor_binders()?))
+                    let (binders, guards) = self.ctor_binders()?;
+                    Ok((Pattern::Ctor(h, binders), guards))
                 } else if h.chars().next().is_some_and(|c| c.is_uppercase()) {
                     // a capitalized bareword is a nullary constructor
-                    Ok(Pattern::Ctor(h, vec![]))
+                    Ok((Pattern::Ctor(h, vec![]), vec![]))
                 } else {
-                    Ok(Pattern::Var(h))
+                    Ok((Pattern::Var(h), vec![]))
                 }
             }
             other => Err(self.err(&format!("expected pattern, found {other:?}"))),

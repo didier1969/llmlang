@@ -46,6 +46,11 @@ Surface conveniences (all desugar to the kernel above — identical content-hash
 - **A cons-pattern head may be a CONSTRUCTOR or a literal**: a contiguous group of
   `match` arms `TNum(n) :: t -> …`, `TPlus :: t -> …`, `0 :: t -> …` (same tail
   binder, no guard) is sugar for `h :: t -> match h: TNum(n) -> …; TPlus -> …; 0 -> …`.
+- **A literal in a constructor-arg or tuple-element position** desugars to a `when`
+  guard: `match p: P(0, y) -> …` is `P(g, y) when g == 0 -> …`, and `(true, y) -> …`
+  is `(g, y) when g == true -> …`. Fall-through is native — `P(0, y) -> a; P(x, y) -> b`
+  works. (Only ONE level deep: a nested constructor `P(Som(x))` still needs an inner
+  `match`; and it is illegal in an irrefutable `let` — there is nothing to fall to.)
 - **`let` destructuring**: `let (a, b) = e` or `let Ctor(a, b) = e` binds a product's
   fields (sugar for a one-arm `match`).
 - **Char literal `'c'`** is the Unicode-scalar `Int` (`'A'` is `65`, `'+'` is `43`;
