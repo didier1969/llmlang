@@ -3287,6 +3287,28 @@ fn self_host_reduce_folds_tokens_by_length_measure_req101_req114() {
 }
 
 #[test]
+fn self_host_lex_real_tokenizes_llmlang_syntax_req115() {
+    // REQ-LLL-115 / DEC-LLL-024 Étape 2: OPENS the "real llmlang grammar" phase — a lexer, written
+    // in llmlang and Z3-verified, that tokenizes llmlang's OWN concrete syntax (real keywords, ADT
+    // identifiers, and the multi-char operators `->` `::` `>=` — the genuine step up from the toy
+    // languages). `lexA` stays self-recursive with 1-char lookahead delegated to non-recursive
+    // helpers, terminating by `measure length(s)` (a real use of REQ-LLL-101: the `t2` tail-of-tail
+    // recursion on a 2-char operator is not purely structural). Correctness isn't a contract
+    // (DEC-LLL-017), so it's DEMONSTRATED at runtime via a kind-weighted signature: lexing the real
+    // `part` signature `part gcd(a: Int, b: Int) -> Int` gives sig 98 (with `part`=keyword and `->`
+    // a SINGLE `TArrow`, not `part`=id or `-`,`>` split), and `requires a >= 0` gives sig 29 (`>=` a
+    // single `TGe`). Guards examples/self_host_lex_real.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_lex_real.lll"),
+    )
+    .expect("read self_host_lex_real.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the real-llmlang lexer must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("98\n29"), "expected token signatures 98 then 29, got: {out}");
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser

@@ -1,0 +1,207 @@
+module SelfHost.LexReal:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) — OUVERTURE de la phase
+  # « grammaire llmlang RÉELLE » : un lexer, écrit EN llmlang et vérifié par Z3, qui
+  # tokenise la SYNTAXE CONCRÈTE DE llmlang LUI-MÊME (pas un langage-jouet). Il gère les
+  # mots-clés réels (`part`/`requires`/…), les identifiants (maj+min+`_`), les entiers, et
+  # surtout les OPÉRATEURS MULTI-CARACTÈRES `->` `::` `>=` `<=` `==` `!=` — le vrai stress
+  # vs les slices précédents. String = List[Int] de codepoints (DEC-LLL-030).
+  #
+  # `lexA` reste AUTO-récursif (lookahead 1-car délégué à des helpers NON-récursifs
+  # `isTwo`/`two`/`delim1cons`, jamais à un pair mutuel qui rouvrirait la mesure). La
+  # terminaison tient par `measure length(s)` : les appels récursifs portent sur `t` (queue)
+  # ou `t2` (queue-de-queue, cas op 2-car) — c'est un usage RÉEL de REQ-LLL-101, la longueur
+  # de liste en mesure débloquant une récursion non purement structurale.
+
+  type LTok = KPart | KRequires | KEnsures | KMeasure | KYield | TId(List[Int]) | TInt(Int) | TLParen | TRParen | TComma | TColon | TArrow | TColonColon | TGe | TLe | TEqEq | TNe | TLt | TGt | TAssign | TPlus | TMinus | TStar | TSlash
+
+  type Pend = NoPend | PNum(Int) | PId(List[Int])
+
+  # ---- classes de caractères ----
+  part isDigit(c: Int) -> Bool:
+    yield c >= 48 and c <= 57
+
+  # identifiant llmlang : lettre (min/maj) ou `_`
+  part isAlpha(c: Int) -> Bool:
+    yield (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+
+  part snoc(xs: List[Int], c: Int) -> List[Int]:
+    match xs:
+      []     -> yield c :: []
+      h :: t -> yield h :: snoc(t, c)
+
+  part eqStr(a: List[Int], b: List[Int]) -> Bool:
+    match a:
+      []       ->
+        match b:
+          [] -> yield true
+          _  -> yield false
+      ha :: ta ->
+        match b:
+          []       -> yield false
+          hb :: tb ->
+            match ha == hb:
+              true  -> yield eqStr(ta, tb)
+              false -> yield false
+
+  # un run d'identifiant → mot-clé réel ou TId (littéraux chaîne = List[Int]).
+  part classify(chars: List[Int]) -> LTok:
+    match eqStr(chars, "part"):
+      true  -> yield KPart
+      false ->
+        match eqStr(chars, "requires"):
+          true  -> yield KRequires
+          false ->
+            match eqStr(chars, "ensures"):
+              true  -> yield KEnsures
+              false ->
+                match eqStr(chars, "measure"):
+                  true  -> yield KMeasure
+                  false ->
+                    match eqStr(chars, "yield"):
+                      true  -> yield KYield
+                      false -> yield TId(chars)
+
+  # ---- délimiteurs : lookahead 1-car, tout NON-récursif ----
+  # op 2-caractères formé par (c, d) ?  `::` `->` `>=` `<=` `==` `!=`
+  # op 2-car (c,d) : `::`(58,58) `->`(45,62) `>=`(62,61) `<=`(60,61) `==`(61,61) `!=`(33,61)
+  part isTwo(c: Int, d: Int) -> Bool:
+    yield (c == 58 and d == 58) or (c == 45 and d == 62) or (c == 62 and d == 61) or (c == 60 and d == 61) or (c == 61 and d == 61) or (c == 33 and d == 61)
+
+  part two(c: Int, d: Int) -> LTok:
+    match c == 58:
+      true  -> yield TColonColon
+      false ->
+        match c == 45:
+          true  -> yield TArrow
+          false ->
+            match c == 62:
+              true  -> yield TGe
+              false ->
+                match c == 60:
+                  true  -> yield TLe
+                  false ->
+                    match c == 61:
+                      true  -> yield TEqEq
+                      false -> yield TNe                 # (33,61) = !=
+
+  # préfixe le token 1-caractère de `c` devant `rest` (espace/inconnu = sauté).
+  part delim1cons(c: Int, rest: List[LTok]) -> List[LTok]:
+    match c == 40:
+      true  -> yield TLParen :: rest
+      false ->
+        match c == 41:
+          true  -> yield TRParen :: rest
+          false ->
+            match c == 44:
+              true  -> yield TComma :: rest
+              false ->
+                match c == 58:
+                  true  -> yield TColon :: rest
+                  false ->
+                    match c == 45:
+                      true  -> yield TMinus :: rest
+                      false ->
+                        match c == 62:
+                          true  -> yield TGt :: rest
+                          false ->
+                            match c == 60:
+                              true  -> yield TLt :: rest
+                              false ->
+                                match c == 61:
+                                  true  -> yield TAssign :: rest
+                                  false ->
+                                    match c == 43:
+                                      true  -> yield TPlus :: rest
+                                      false ->
+                                        match c == 42:
+                                          true  -> yield TStar :: rest
+                                          false ->
+                                            match c == 47:
+                                              true  -> yield TSlash :: rest
+                                              false -> yield rest      # espace (32) / inconnu
+
+  # vide l'accumulateur devant `rest` (pending = 0 ou 1 token).
+  part consPend(p: Pend, rest: List[LTok]) -> List[LTok]:
+    match p:
+      NoPend  -> yield rest
+      PNum(n) -> yield TInt(n) :: rest
+      PId(cs) -> yield classify(cs) :: rest
+
+  part flushEnd(p: Pend) -> List[LTok]:
+    match p:
+      NoPend  -> yield []
+      PNum(n) -> yield TInt(n) :: []
+      PId(cs) -> yield classify(cs) :: []
+
+  # ---- le lexer : accumulateur 3-états, AUTO-récursif, measure length(s). ----
+  part lexA(s: List[Int], p: Pend) -> List[LTok]:
+    measure length(s)
+    match s:
+      []     -> yield flushEnd(p)
+      c :: t ->
+        match isDigit(c):
+          true  ->                          # chiffre : étend/démarre un nombre
+            match p:
+              NoPend  -> yield lexA(t, PNum(c - 48))
+              PNum(n) -> yield lexA(t, PNum(n * 10 + (c - 48)))
+              PId(cs) -> yield classify(cs) :: lexA(t, PNum(c - 48))
+          false ->
+            match isAlpha(c):
+              true  ->                      # lettre/'_' : étend/démarre un identifiant
+                match p:
+                  NoPend  -> yield lexA(t, PId(c :: []))
+                  PId(cs) -> yield lexA(t, PId(snoc(cs, c)))
+                  PNum(n) -> yield TInt(n) :: lexA(t, PId(c :: []))
+              false ->                      # délimiteur : vide le pending puis dispatch
+                match t:
+                  [] -> yield consPend(p, delim1cons(c, []))
+                  d :: t2 ->
+                    match isTwo(c, d):
+                      true  -> yield consPend(p, two(c, d) :: lexA(t2, NoPend))
+                      false -> yield consPend(p, delim1cons(c, lexA(t, NoPend)))
+
+  part lex(s: List[Int]) -> List[LTok]:
+    yield lexA(s, NoPend)
+
+  # ---- différentiel : compte les tokens + signature pondérée par KIND. Une mauvaise
+  # tokenisation (`->` scindé, `part` non reconnu comme mot-clé, `>=` scindé) change la
+  # signature — c'est la démonstration de correction à l'exécution (DEC-LLL-017).
+  part w(t: LTok) -> Int:
+    match t:
+      KPart       -> yield 1
+      KRequires   -> yield 2
+      KEnsures    -> yield 3
+      KMeasure    -> yield 4
+      KYield      -> yield 5
+      TId(cs)     -> yield 6
+      TInt(n)     -> yield 7
+      TLParen     -> yield 8
+      TRParen     -> yield 9
+      TComma      -> yield 10
+      TColon      -> yield 11
+      TArrow      -> yield 12
+      TColonColon -> yield 13
+      TGe         -> yield 14
+      TLe         -> yield 15
+      TEqEq       -> yield 16
+      TNe         -> yield 17
+      TLt         -> yield 18
+      TGt         -> yield 19
+      TAssign     -> yield 20
+      TPlus       -> yield 21
+      TMinus      -> yield 22
+      TStar       -> yield 23
+      TSlash      -> yield 24
+
+  part sig(toks: List[LTok]) -> Int:
+    match toks:
+      []     -> yield 0
+      h :: t -> yield w(h) + sig(t)
+
+  part main() -> Int via IO:
+    # une signature `part` réelle : `part gcd(a: Int, b: Int) -> Int` → sig 98
+    # (13 tokens ; `->` = UN TArrow(12), `part` = KPart(1) et non TId)
+    let a = IO.print(sig(lex("part gcd(a: Int, b: Int) -> Int")))   # 98
+    # une clause de contrat réelle : `requires a >= 0` → sig 29 (`>=` = UN TGe(14))
+    yield IO.print(sig(lex("requires a >= 0")))                     # 29
