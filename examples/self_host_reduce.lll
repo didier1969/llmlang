@@ -1,0 +1,55 @@
+module SelfHost.Reduce:
+
+  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : une passe de compilateur qui a
+  # GENUINEMENT besoin de REQ-LLL-101 (longueur de liste en `measure`). `reduce` replie les
+  # triplets adjacents `TNum a, TPlus, TNum b` en `TNum (a+b)` sur un flux de tokens. Le pli
+  # CONSOMME 3 tokens et en REPRODUIT 1, puis RE-RÉDUIT le reste : la récursion n'est donc
+  # PAS structurale (elle reconstruit la liste), et la terminaison ne tient QUE parce que la
+  # LONGUEUR décroît strictement à chaque appel — `measure length(toks)`. C'était impossible
+  # tant que `length(liste)` n'était pas admis en contrat (DEC-LLL-017, amendé REQ-LLL-101).
+  # `List[Tok]` = liste d'ADT : exerce le chemin `len_<ADT>` (REQ-LLL-114) en conditions
+  # réelles, pas seulement `List[Int]`.
+
+  type Tok = TNum(Int) | TPlus
+
+  # Un motif en tête de cons ne peut pas être un motif constructeur (`TNum(a) :: rest` est
+  # un écart connu, REQ-LLL-110) : on lie la tête à un binder puis on la `match`. D'où la
+  # chaîne de `match` imbriqués ci-dessous.
+  part reduce(toks: List[Tok]) -> List[Tok]:
+    measure length(toks)
+    match toks:
+      [] -> yield []
+      h :: rest1 ->
+        match h:
+          TPlus  -> yield h :: reduce(rest1)          # tête non pliable → structural sur rest1
+          TNum(a) ->
+            match rest1:
+              [] -> yield h :: []
+              h2 :: rest2 ->
+                match h2:
+                  TNum(x) -> yield h :: reduce(rest1)  # deux nombres sans `+` → structural
+                  TPlus ->
+                    match rest2:
+                      [] -> yield h :: h2 :: []
+                      h3 :: rest3 ->
+                        match h3:
+                          TPlus   -> yield h :: reduce(rest1)          # `+ +` → structural
+                          TNum(b) -> yield reduce(TNum(a + b) :: rest3) # PLI : 3 tokens → 1, longueur ↓ 2
+
+  # extrait la valeur du premier `TNum` (structural, terminaison gratis) — sonde du différentiel.
+  part firstNum(toks: List[Tok]) -> Int:
+    match toks:
+      [] -> yield 0
+      h :: t ->
+        match h:
+          TNum(a) -> yield a
+          TPlus   -> yield firstNum(t)
+
+  # ---- différentiel runtime : réduit un flux connu et imprime la valeur repliée.
+  part main() -> Int via IO:
+    # [3, +, 4, +, 5] → pli 3+4=7 → [7, +, 5] → pli 7+5=12 → [12]
+    let toks = TNum(3) :: TPlus :: TNum(4) :: TPlus :: TNum(5) :: []
+    let a = IO.print(firstNum(reduce(toks)))        # 12
+    # [8, +, 9] → [17]
+    let toks2 = TNum(8) :: TPlus :: TNum(9) :: []
+    yield IO.print(firstNum(reduce(toks2)))         # 17

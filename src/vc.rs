@@ -1240,6 +1240,16 @@ impl<'a> Emit<'a> {
                 let srt = self.sort_of(inner, env)?;
                 record_field_sort(&self.cm.module.types, &srt, name)
             }
+            // a cons / non-empty list literal is a `(Lst E)` list, with the element sort `E`
+            // recovered from the head / first element — so `length(h :: t)` or `length([x])`
+            // in a `measure` or contract dispatches to the abstract `len_<E>` rather than
+            // falling back to `seq.len` on a `(Lst …)` term (REQ-LLL-114: the reduce pass's
+            // `measure length(TNum(a+b) :: rest)` is the first `length` over a cons EXPRESSION,
+            // not a list var). An empty literal has no inferable element sort → `None`.
+            Expr::Cons(h, _) => Some(format!("(Lst {})", self.sort_of(h, env)?)),
+            Expr::ListLit(items) => {
+                Some(format!("(Lst {})", self.sort_of(items.first()?, env)?))
+            }
             _ => None,
         }
     }
@@ -2108,6 +2118,16 @@ impl<'a> Emit<'a> {
                             // as a call argument takes its element sort from the
                             // callee signature (REQ-LLL-037).
                             let at = self.tr(a, env, Some(pt))?;
+                            // record the argument term's sort (mirror of the let-local case in
+                            // `walk_body`) so a callee contract/measure that reads the param
+                            // back — e.g. `measure length(toks)` at a recursive call whose
+                            // argument is a cons EXPRESSION — recovers `(Lst E)` and dispatches
+                            // `length` to the abstract `len_<E>` instead of the `seq.len`
+                            // fallback (REQ-LLL-114). Absence just means a later sort lookup
+                            // fails LOUD, never a silent mis-dispatch.
+                            if let Some(s) = self.sort_of(a, env) {
+                                self.sorts.insert(at.clone(), s);
+                            }
                             cenv.insert(pn.clone(), at);
                         }
                     }
@@ -2831,30 +2851,6 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     if uses_list || dt_decls.iter().any(|d| d.contains("(Lst")) {
         s.push_str(LIST_DECL);
         s.push('\n');
-        // REQ-LLL-101 (DEC-LLL-017 amendment): the abstract list-length `len_<E>` per
-        // element sort ACTUALLY used with `length` on a cons-list, with its definitional
-        // axioms. Emitted globally (definitional truths, asserted once) right after the
-        // datatype it depends on. Only sorts whose `len_<E>` is referenced are emitted.
-        let mut elems: std::collections::BTreeSet<String> = Default::default();
-        for o in obls {
-            for text in o.decls.iter().chain(o.hyps.iter()).chain(std::iter::once(&o.goal)) {
-                collect_list_elem_sorts(text, &mut elems);
-            }
-        }
-        for elem in &elems {
-            let fname = list_len_fn(elem);
-            let referenced = obls.iter().any(|o| {
-                o.decls
-                    .iter()
-                    .chain(o.hyps.iter())
-                    .chain(std::iter::once(&o.goal))
-                    .any(|t| t.contains(&format!("({fname} ")))
-            });
-            if referenced {
-                s.push_str(&list_len_decl_and_axioms(elem, &fname));
-                s.push('\n');
-            }
-        }
     }
     // the parametric Maybe wraps a map's values so an absent key is `none` and map
     // equality stays extensional (REQ-LLL-037, DEC-LLL-043). Self-contained.
@@ -2884,6 +2880,38 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     for d in dt_decls {
         s.push_str(d);
         s.push('\n');
+    }
+    // REQ-LLL-101 (DEC-LLL-017 amendment): the abstract list-length `len_<E>` per element
+    // sort ACTUALLY used with `length` on a cons-list, with its definitional axioms. Emitted
+    // globally (definitional truths, asserted once). MUST come LAST in the prelude: a
+    // `len_<E>` — via its `(declare-fun len_<E> ((Lst E)) Int)` and the `(cons h t)` with
+    // `h : E` in its axioms — depends on the element sort `E`, which may be a user ADT, a
+    // tuple, a `Maybe`, or a nested `(Lst …)`. Emitting here, after LIST_DECL + Maybe + tuple
+    // + user datatypes, guarantees every possible `E` is already declared (REQ-LLL-114: a
+    // `List[<ADT>]` length previously emitted `len_Tok` axioms before `Tok`'s datatype, so
+    // the declare-fun failed on the forward sort reference → `unknown constant len_Tok`, a
+    // false rejection of a valid part). Only sorts whose `len_<E>` is referenced are emitted.
+    {
+        let mut elems: std::collections::BTreeSet<String> = Default::default();
+        for o in obls {
+            for text in o.decls.iter().chain(o.hyps.iter()).chain(std::iter::once(&o.goal)) {
+                collect_list_elem_sorts(text, &mut elems);
+            }
+        }
+        for elem in &elems {
+            let fname = list_len_fn(elem);
+            let referenced = obls.iter().any(|o| {
+                o.decls
+                    .iter()
+                    .chain(o.hyps.iter())
+                    .chain(std::iter::once(&o.goal))
+                    .any(|t| t.contains(&format!("({fname} ")))
+            });
+            if referenced {
+                s.push_str(&list_len_decl_and_axioms(elem, &fname));
+                s.push('\n');
+            }
+        }
     }
     for o in obls {
         s.push_str("(push)\n");

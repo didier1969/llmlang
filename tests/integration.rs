@@ -3267,6 +3267,26 @@ fn self_host_lexer_verifies_and_runs() {
 }
 
 #[test]
+fn self_host_reduce_folds_tokens_by_length_measure_req101_req114() {
+    // REQ-LLL-101/114 / DEC-LLL-024 Étape 2: a compiler pass that GENUINELY needs list-length in a
+    // `measure`. `reduce(List[Tok])` folds adjacent `TNum a, TPlus, TNum b → TNum (a+b)`; the fold
+    // CONSUMES 3 tokens and PRODUCES 1, then re-reduces — the recursion is NON-structural (it
+    // rebuilds the list), so termination holds ONLY because `measure length(toks)` strictly
+    // decreases (impossible before REQ-101). It runs on `List[Tok]` (a list of ADTs), so it is the
+    // real-conditions exercise of the `len_<ADT>` path (REQ-114). Correctness isn't a contract
+    // (DEC-LLL-017), so it's DEMONSTRATED at runtime: reduce([3,+,4,+,5]) folds to [12],
+    // reduce([8,+,9]) to [17]. Guards examples/self_host_reduce.lll.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/self_host_reduce.lll"),
+    )
+    .expect("read self_host_reduce.lll");
+    let report = verify_src(&src);
+    assert!(report.ok(), "the self-hosting reduce pass must verify: {:?}", failures(&report));
+    let out = build_run(&src);
+    assert!(out.contains("12\n17"), "expected folded values 12 then 17, got: {out}");
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser
@@ -3623,6 +3643,70 @@ fn cons_with_terminal_nil_literal_under_length_is_well_sorted_req113() {
 "#;
     assert!(verify_src(via_cons).ok(), "`0 :: []` under length must be well-sorted (cons site)");
     assert!(verify_src(via_literal).ok(), "`[1]` under length must be well-sorted (list-literal site)");
+}
+
+// ─── REQ-LLL-114: list length over NON-Int element sorts. REQ-101 shipped tested only on
+// `List[Int]`; the `len_<E>` machinery is generic in the element sort, but three latent
+// false-rejections lurked on the untested paths (all fail-closed, not unsoundness): a `len_<E>`
+// axiom declared before its user-ADT element sort, `sort_of` blind to cons/list-literal
+// EXPRESSIONS, and a call-site argument term whose sort was never recorded. These pin all three.
+
+#[test]
+fn list_length_over_bool_element_verifies_req101() {
+    // `List[Bool]`: `len_Bool` (Bool is a built-in sort, so this passes even pre-REQ-114) — a
+    // non-regression guard that the sort mangling stays generic and `len_Bool != len_Int`.
+    let src = r#"module M:
+
+  part repl(n: Int) -> List[Bool]:
+    requires n >= 0
+    measure n
+    ensures length(result) == n
+    match n:
+      0 -> yield []
+      _ -> yield true :: repl(n - 1)
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list length over Bool elements must verify: {:?}", failures(&report));
+}
+
+#[test]
+fn list_length_over_adt_element_verifies_req101_req114() {
+    // `List[<ADT>]`: THE reproduction of REQ-LLL-114 fix (1). Before it, the `len_Tok` axioms were
+    // emitted before `Tok`'s `declare-datatypes`, so `(declare-fun len_Tok ((Lst Tok)) Int)` hit a
+    // forward reference to sort `Tok` → Z3 `unknown constant len_Tok` → this valid part REJECTED.
+    // Emitting the len axioms LAST in the prelude (after user datatypes) fixes it.
+    let src = r#"module M:
+
+  type Tok = TNum(Int) | TPlus
+
+  part repl(n: Int) -> List[Tok]:
+    requires n >= 0
+    measure n
+    ensures length(result) == n
+    match n:
+      0 -> yield []
+      _ -> yield TPlus :: repl(n - 1)
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list length over ADT elements must verify: {:?}", failures(&report));
+}
+
+#[test]
+fn list_length_over_nested_list_element_verifies_req101() {
+    // `List[List[Int]]`: the element sort is itself a compound `(Lst Int)`, so `len_Lst_Int`'s
+    // axioms reference `(Lst (Lst Int))` — exercises `collect_list_elem_sorts`' balanced-paren
+    // capture and `mangle_sort` on a nested sort. `(Lst Int)` is declared by LIST_DECL, so this
+    // passes independently of fix (1), guarding the nested-element path.
+    let src = r#"module M:
+
+  part countRows(xss: List[List[Int]]) -> Int:
+    measure length(xss)
+    match xss:
+      []        -> yield 0
+      r :: rest -> yield countRows(rest)
+"#;
+    let report = verify_src(src);
+    assert!(report.ok(), "list length over nested-list elements must verify: {:?}", failures(&report));
 }
 
 #[test]
