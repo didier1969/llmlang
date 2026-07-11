@@ -9472,3 +9472,106 @@ fn cli_context_prints_firewall_and_metric_req142() {
     assert!(sj.contains("\"reduction_pct\""), "json metric:\n{sj}");
     assert!(!sj.contains("n + 100"), "json withholds dep body:\n{sj}");
 }
+
+// ─── REQ-LLL-132: fuzz the JUDGE — the compiler is the oracle of every measurement (bench, agent
+// loop), so it must FAIL-STOP with an `Err` on ANY input and NEVER panic (a panic is a robustness
+// hole and a DoS vector for the mcp server). A deterministic corpus (xorshift, reproducible — the
+// failing input is printed) across three adversarial classes, each run through the whole Z3-free
+// front of the judge (parse → check → hash) under `catch_unwind`.
+
+/// Run the Z3-free judge front on `input`; the point is that it must return, never unwind.
+fn fuzz_pipeline(input: &str) {
+    if let Ok(m) = parser::parse_module(input) {
+        if let Ok(cm) = types::check_module(m) {
+            let _ = hash::hash_module(&cm);
+        }
+    }
+}
+
+fn fuzz_one(input: &str) {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let r = catch_unwind(AssertUnwindSafe(|| fuzz_pipeline(input)));
+    assert!(
+        r.is_ok(),
+        "the oracle PANICKED on adversarial input — a robustness bug (it must fail-stop with an \
+         Err, never crash):\n{input:?}"
+    );
+}
+
+fn fuzz_random_bytes(rng: &mut XorShift) -> String {
+    let len = rng.below(80) + 1;
+    let mut s = String::new();
+    for _ in 0..len {
+        let pick = rng.below(100);
+        let c = if pick < 68 {
+            (0x20 + rng.below(0x5f) as u8) as char // printable ASCII
+        } else if pick < 82 {
+            '\n'
+        } else if pick < 90 {
+            ' '
+        } else if pick < 96 {
+            ['\'', '"', '#', ':', '(', '\\'][rng.below(6)] // stress string/char/comment lexing
+        } else {
+            ['é', '→', 'λ', '€'][rng.below(4)] // multibyte — stresses UTF-8 handling
+        };
+        s.push(c);
+    }
+    s
+}
+
+fn fuzz_token_soup(rng: &mut XorShift, vocab: &[&str]) -> String {
+    let n = rng.below(40) + 1;
+    let mut s = String::new();
+    for _ in 0..n {
+        s.push_str(vocab[rng.below(vocab.len())]);
+        if rng.flip() {
+            s.push(' ');
+        }
+    }
+    s
+}
+
+fn fuzz_mutate(rng: &mut XorShift, seed: &str) -> String {
+    let mut bytes: Vec<u8> = seed.bytes().collect();
+    let muts = rng.below(6) + 1;
+    for _ in 0..muts {
+        if bytes.is_empty() {
+            break;
+        }
+        let pos = rng.below(bytes.len());
+        match rng.below(3) {
+            0 => {
+                bytes.remove(pos);
+            }
+            1 => bytes.insert(pos, 0x20 + rng.below(0x5f) as u8),
+            _ => bytes[pos] = 0x20 + rng.below(0x5f) as u8,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[test]
+fn oracle_never_panics_on_adversarial_input_req132() {
+    let seeds = [
+        "module M:\n\n  part f(n: Int) -> Int:\n    requires n >= 0\n    yield n + 1\n",
+        "module M:\n\n  type T = A | B(Int)\n\n  part g(x: T) -> Int:\n    match x:\n      A -> yield 0\n      B(k) -> yield k\n",
+        "module M:\n\n  part h(xs: List[Int]) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      a :: t -> yield a + h(t)\n",
+        "module M:\n\n  part p(c: Int) -> Int:\n    match c:\n      '+' -> yield 1\n      _ -> yield 0\n",
+    ];
+    let vocab = [
+        "module", "part", "type", "match", "yield", "requires", "ensures", "measure", "let", "if",
+        "then", "else", "via", "IO", "Int", "Bool", "List", "->", "::", "(", ")", "[", "]", ":",
+        ",", "+", "-", "*", "div", "mod", "==", "and", "or", "not", "0", "1", "n", "x", "f", "'",
+        "\"", "&&", "||", "=", "\n", "  ", "\n    ", "# c", "é",
+    ];
+    let mut rng = XorShift::new(0xFACE_F0FF);
+    let mut n = 0usize;
+    for _ in 0..1400 {
+        fuzz_one(&fuzz_random_bytes(&mut rng));
+        fuzz_one(&fuzz_token_soup(&mut rng, &vocab));
+        let si = rng.below(seeds.len());
+        fuzz_one(&fuzz_mutate(&mut rng, seeds[si]));
+        n += 3;
+    }
+    assert_eq!(n, 4200, "the fuzz corpus degenerated");
+}
