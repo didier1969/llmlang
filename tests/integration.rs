@@ -3445,6 +3445,39 @@ fn effectful_call_repeated_is_not_merged_req106() {
 }
 
 #[test]
+fn shadow_in_branch_between_guard_and_use_not_merged_req106() {
+    // REQ-LLL-106 ADVERSARIAL (must-not-merge, negative control on the memo × branch-scope
+    // interaction): the guard `f(c) == 0` (with `c == b`) sits on one occurrence; `c` is then
+    // REBOUND to `a` inside the else-branch and `100 div f(c)` divides by `f(a)`. Merging by
+    // variable NAME would leak the guard's `f(b) != 0` onto the unrelated `f(a)` and FALSELY
+    // discharge the div-by-zero (DEC-LLL-026). Because the CSE key is the RESOLVED argument
+    // term, the rebound `c` keys distinctly → NOT merged → `f(a)` stays unconstrained (may be 0)
+    // → the module stays REJECTED. If this ever verifies, the CSE is keying by name and UNSOUND.
+    let src = "module Adv:\n  part f(x: Int) -> Int:\n    ensures result == x\n    yield x\n  part attack(a: Int, b: Int) -> Int:\n    let c = b\n    match f(c) == 0:\n      true -> yield 0\n      false ->\n        let c = a\n        yield 100 div f(c)\n";
+    let report = verify_src(src);
+    assert!(
+        !report.ok(),
+        "a branch-scoped rebind of the argument must NOT merge the two `f(c)` (else div-by-zero leaks)"
+    );
+}
+
+#[test]
+fn pattern_binder_homonym_from_distinct_scrutinees_not_merged_req106() {
+    // REQ-LLL-106 ADVERSARIAL (must-not-merge, negative control on the pattern-binder keying
+    // vector): two `Some(v)` binders named `v` come from DIFFERENT scrutinees (`p` then `q`).
+    // The guard `f(v) == 0` constrains p's `v` (= 7, non-zero); the divisor `f(v)` uses q's `v`
+    // (unconstrained — `q` may be `Some(0)`). Merging by binder NAME would leak the guard and
+    // FALSELY discharge the div-by-zero. The RESOLVED-term key gives the two `v`s distinct SMT
+    // consts (selectors over different scrutinees) → NOT merged → module stays REJECTED.
+    let src = "module AdvPat:\n  type Opt = None | Some(Int)\n  part f(x: Int) -> Int:\n    ensures result == x\n    yield x\n  part attack(p: Opt, q: Opt) -> Int:\n    requires p == Some(7)\n    match p:\n      None -> yield 0\n      Some(v) ->\n        match f(v) == 0:\n          true -> yield 0\n          false ->\n            match q:\n              None -> yield 0\n              Some(v) -> yield 100 div f(v)\n";
+    let report = verify_src(src);
+    assert!(
+        !report.ok(),
+        "pattern binders named `v` from distinct scrutinees must NOT be merged (else div-by-zero leaks)"
+    );
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser
