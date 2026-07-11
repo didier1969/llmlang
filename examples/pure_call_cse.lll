@@ -1,0 +1,20 @@
+module PureCallCse:
+
+  # REQ-LLL-106 : deux appels PURS syntaxiquement identiques (`eval(b)` en garde ET diviseur)
+  # sont reconnus égaux au VC → la garde `eval(b) == 0` propage `eval(b) != 0` au diviseur, et
+  # l'obligation div-par-zéro (DEC-LLL-026) se décharge SANS le workaround `let vb = eval(b)`.
+  # Avant REQ-106, chaque appel était havocé en un const frais distinct → non-propagation → REJET.
+
+  type Expr = Lit(Int) | Dv(Expr, Expr)
+
+  part eval(e: Expr) -> Int:
+    match e:
+      Lit(n)   -> yield n
+      Dv(a, b) ->
+        match eval(b) == 0:
+          true  -> yield 0
+          false -> yield eval(a) div eval(b)     # sûr : `eval(b) != 0` de la garde (même terme)
+
+  part main() -> Int via IO:
+    let x = IO.print(eval(Dv(Lit(12), Lit(4))))   # 3
+    yield IO.print(eval(Dv(Lit(7), Lit(0))))      # 0 (division par zéro gardée)

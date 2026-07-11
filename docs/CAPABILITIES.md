@@ -10,7 +10,7 @@ Re-run everything:
 
 ```
 export LLL_Z3="$(pwd)/vendor/z3/bin/z3"     # absolute path (subprocess tests need it)
-cargo test                                   # 22 lib + 441 integration + 3 property
+cargo test                                   # 22 lib + 444 integration + 3 property
 cargo test --test integration <test_name>    # one row below, in isolation
 ./target/debug/lll check examples/<file>.lll # any example
 bash bench/llm_gen/run.sh bench/llm_gen/solutions/reference-20260710
@@ -103,4 +103,8 @@ axiomatisée (`len(nil)=0`, `len(cons)=1+len(tail)`, `len≥0`) — premiers qua
 du système → fragment **semi-décidable, CONTENU** aux seuls scripts list-length et
 **fail-closed** (un but falsifiable revient `unknown`, donc rejeté sans contre-modèle ;
 les scripts sans liste restent quantifier-free avec contre-modèles). Overflow is
-fail-stop at runtime, not statically excluded. See `README.md` for the full list.
+fail-stop at runtime, not statically excluded. Deux appels PURS syntaxiquement
+identiques dans un corps partagent un seul résultat au VC (REQ-LLL-106, CSE
+appels-purs) — une garde `f(x) == 0` propage donc à un usage `a div f(x)` sans le
+détour `let vb = f(x)` ; sain par déterminisme (effectful/args-fonction exclus,
+argument shadowé clefé distinctement). See `README.md` for the full list.

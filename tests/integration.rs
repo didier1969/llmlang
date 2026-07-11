@@ -3393,6 +3393,58 @@ fn string_literal_may_contain_hash_req117() {
 }
 
 #[test]
+fn pure_call_shared_across_guard_and_use_req106() {
+    // REQ-LLL-106: two syntactically-identical PURE calls (`eval(b)` in the guard `eval(b) == 0`
+    // AND in the divisor `eval(a) div eval(b)`) share ONE havoc'd result (functional determinism),
+    // so the guard's `eval(b) != 0` propagates to the divisor and the div-by-zero obligation
+    // (DEC-LLL-026) discharges WITHOUT the `let vb = eval(b)` workaround. Before the CSE each call
+    // was a distinct fresh const → the fact did not propagate → REJECTED. Guards
+    // examples/pure_call_cse.lll (kept as the minimal reproduction).
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/pure_call_cse.lll"),
+    )
+    .expect("read pure_call_cse.lll");
+    let report = verify_src(&src);
+    assert!(
+        report.ok(),
+        "identical pure calls must share a result so the guard discharges the divisor: {:?}",
+        failures(&report)
+    );
+    let out = build_run(&src);
+    assert!(out.contains("3\n0"), "expected 3 then 0 (guarded div-by-zero), got: {out}");
+}
+
+#[test]
+fn shadowed_arg_call_is_not_merged_req106() {
+    // REQ-LLL-106 ADVERSARIAL (must-not-merge, silent→loud guardrail): two textually-identical
+    // `id(b)` calls with `b` REBOUND (`let b = 5`) between them must NOT be merged — merging would
+    // force `outer == inner` i.e. `3 == 5`, an ex-falso contradiction that would make the FALSE
+    // `ensures result == 100` verify. Because the CSE key is the RESOLVED argument term, the inner
+    // `id(b)` keys on the shadowed value and stays distinct → the module stays REJECTED. If this
+    // ever passes, the CSE is keying syntactically and is UNSOUND.
+    let src = "module AdvShadow:\n  part id(x: Int) -> Int:\n    ensures result == x\n    yield x\n  part exploit(b: Int) -> Int:\n    requires b == 3\n    ensures result == 100\n    let outer = id(b)\n    let b = 5\n    let inner = id(b)\n    yield outer + inner\n";
+    let report = verify_src(src);
+    assert!(
+        !report.ok(),
+        "shadowed-argument pure calls must NOT be merged (else a false ensures verifies via ex-falso)"
+    );
+}
+
+#[test]
+fn effectful_call_repeated_is_not_merged_req106() {
+    // REQ-LLL-106 ADVERSARIAL (must-not-merge): two repeated EFFECTFUL calls (`readIt()` reads the
+    // world) must NOT be merged — merging would force `readIt() - readIt() == 0` and verify the
+    // FALSE `ensures result == 0`. The CSE excludes callees with effects (they cross the DEC-LLL-017
+    // havoc boundary), so each call stays a fresh const → the module stays REJECTED.
+    let src = "module AdvEff:\n  part readIt() -> Int via IO:\n    yield IO.read()\n  part exploit() -> Int via IO:\n    ensures result == 0\n    yield readIt() - readIt()\n";
+    let report = verify_src(src);
+    assert!(
+        !report.ok(),
+        "repeated effectful calls must NOT be merged (else `read() - read() == 0` verifies)"
+    );
+}
+
+#[test]
 fn self_host_parser_chain_verifies_and_respects_precedence() {
     // REQ-LLL-102 / DEC-LLL-024 Étape 2: the FULL front-end chain lex → parse → eval of the
     // mini-`Expr` language, written in llmlang and verified by the real Z3 pipeline. The parser

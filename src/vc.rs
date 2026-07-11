@@ -281,6 +281,14 @@ struct Emit<'a> {
     /// so it emits NO bounds obligation and triggers NO further instantiation (which would
     /// not terminate). Guarantees the ground-instantiation pass is a single finite step.
     instantiating: bool,
+    /// REQ-LLL-106: CSE of PURE user-function calls. Maps `(callee name, arg SMT terms)` to the one
+    /// havoc'd result term shared by every syntactically-identical pure call in this VC, so a guard
+    /// `f(x) == 0` constrains the SAME term used as a divisor `a div f(x)` — sound by functional
+    /// determinism of a pure call. The key is the RESOLVED arg terms, so a shadowed argument
+    /// resolves to a different term and is NOT merged; effectful callees and function-valued
+    /// arguments are never inserted. `requires`/`measure` are still discharged per call site
+    /// (path-sensitive) — the memo only shares the havoc'd result + its assumed `ensures`.
+    call_memo: HashMap<(String, Vec<String>), String>,
 }
 
 /// Shared preamble: declare the part's params (and `given` methods) as fresh
@@ -305,6 +313,7 @@ fn setup_part_emit<'a>(
         sorts: HashMap::new(),
         forall_ens: HashMap::new(),
         instantiating: false,
+        call_memo: HashMap::new(),
     };
     // params
     let mut env: HashMap<String, String> = HashMap::new();
@@ -479,6 +488,7 @@ fn gen_instance_law_obligations(
             sorts: HashMap::new(),
             forall_ens: HashMap::new(),
             instantiating: false,
+            call_memo: HashMap::new(),
         };
         let mut env: HashMap<String, String> = HashMap::new();
         for (bn, bt) in &law.binders {
@@ -2103,6 +2113,11 @@ impl<'a> Emit<'a> {
                 let callee = &self.cm.module.parts[self.cm.index[name]];
                 let callee_params = callee.params.clone();
                 let mut cenv: HashMap<String, String> = HashMap::new();
+                // REQ-LLL-106: collect the RESOLVED argument terms in order for the pure-call CSE
+                // key. A function-valued argument is a fresh UF per call → never a stable key, so
+                // it disqualifies memoization (`memoizable = false`).
+                let mut arg_terms: Vec<String> = Vec::new();
+                let mut memoizable = true;
                 for (a, (pn, pt)) in args.iter().zip(&callee_params) {
                     match pt {
                         // function argument → opaque UF: the callee is proved
@@ -2112,6 +2127,7 @@ impl<'a> Emit<'a> {
                             let sorts: Vec<String> = argtys.iter().map(smt_ty).collect();
                             let f = self.fresh_fun(&sorts, &smt_ty(ret));
                             cenv.insert(pn.clone(), f);
+                            memoizable = false;
                         }
                         _ => {
                             // thread the parameter type so an empty `array()` passed
@@ -2128,6 +2144,7 @@ impl<'a> Emit<'a> {
                             if let Some(s) = self.sort_of(a, env) {
                                 self.sorts.insert(at.clone(), s);
                             }
+                            arg_terms.push(at.clone());
                             cenv.insert(pn.clone(), at);
                         }
                     }
@@ -2224,9 +2241,38 @@ impl<'a> Emit<'a> {
                         lex_less(&next, &cur),
                     );
                 }
-                // havoc result + assume callee ensures
-                let rty = smt_ty(&callee.ret);
-                let r = self.fresh(&rty);
+                // havoc result + assume callee ensures.
+                // REQ-LLL-106: a PURE user call with all-plain arguments SHARES one havoc'd result
+                // across syntactically-identical occurrences (functional determinism of a pure,
+                // deterministic call), so a guard `f(x) == 0` constrains the very term later used as
+                // `a div f(x)`. `requires`/`measure` were already discharged per call site above
+                // (path-sensitive). The key is the RESOLVED argument terms, so a shadowed argument
+                // keys differently and is NOT merged; effectful callees and function-valued
+                // arguments are excluded (they cross the DEC-LLL-017 havoc boundary / are fresh UFs
+                // per call). Only the RESULT TERM is shared — the `ensures` are RE-ASSUMED in the
+                // current context at EVERY occurrence: hypotheses are branch-scoped (truncated on
+                // branch exit), so a second occurrence in a sibling arm (e.g. `parseTerm(t)` under
+                // both `TPlus` and `TMinus`) must re-assert the shared term's facts or its proof
+                // would go incomplete (`unknown`). Re-asserting a pure call's true `ensures` is sound.
+                let memo_key = if callee.effects.is_empty()
+                    && memoizable
+                    && arg_terms.len() == args.len()
+                {
+                    Some((name.clone(), arg_terms))
+                } else {
+                    None
+                };
+                let r = match memo_key.as_ref().and_then(|k| self.call_memo.get(k)).cloned() {
+                    Some(cached) => cached,
+                    None => {
+                        let rty = smt_ty(&callee.ret);
+                        let r = self.fresh(&rty);
+                        if let Some(k) = memo_key {
+                            self.call_memo.insert(k, r.clone());
+                        }
+                        r
+                    }
+                };
                 let mut eenv = cenv.clone();
                 eenv.insert("result".into(), r.clone());
                 for ens in callee.ensures.clone() {
