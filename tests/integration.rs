@@ -3890,6 +3890,30 @@ fn let_destructure_refutable_rejected_req123() {
     assert!(!verify_src(src).ok(), "a refutable multi-variant destructure must be rejected as non-exhaustive");
 }
 
+#[test]
+fn cache_key_folds_type_environment_req128() {
+    // REQ-LLL-128 (audit Fable-5, PROVEN & reproduced): a part's obligations depend on the
+    // module's ADT declarations (exhaustivity coverage), but `proof_hash` doesn't fold them —
+    // so editing a `type` (adding a ctor) left a stale cache HIT on a now-non-exhaustive
+    // match, and `lll check` returned a false "proved (cache hit)". The cache key MUST change
+    // when the type environment changes, even when the part's own text is byte-identical.
+    // Both forms use a wildcard so both type-check; only the ADT differs.
+    let src_a = "module M:\n\n  type Color = Red | Green\n\n  part f(c: Color) -> Int:\n    match c:\n      Red -> yield 1\n      _ -> yield 2\n";
+    let src_b = "module M:\n\n  type Color = Red | Green | Blue\n\n  part f(c: Color) -> Int:\n    match c:\n      Red -> yield 1\n      _ -> yield 2\n";
+    let (cm_a, hm_a) = full(src_a);
+    let (cm_b, hm_b) = full(src_b);
+    let fa = cm_a.module.parts.iter().find(|p| p.name == "f").unwrap();
+    let fb = cm_b.module.parts.iter().find(|p| p.name == "f").unwrap();
+    // the part's OWN proof_hash is unchanged (identical text) — proving the difference comes
+    // from the type environment, not the part itself.
+    assert_eq!(hm_a.proof_hash["f"], hm_b.proof_hash["f"], "identical part text → same proof_hash");
+    assert_ne!(
+        vc::cache_key(fa, &cm_a, &hm_a),
+        vc::cache_key(fb, &cm_b, &hm_b),
+        "editing the ADT must change the cache key of a part that matches on it (REQ-128)"
+    );
+}
+
 // ─── REQ-LLL-101 (DEC-LLL-017 amendment): abstract list-length `len` in the
 // `measure`/`ensures` fragment. Positives prove the feature works; the three negative
 // controls (per the pre-landing soundness review) are the real load-bearing checks —

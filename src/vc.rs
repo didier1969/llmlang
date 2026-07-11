@@ -209,11 +209,22 @@ pub fn discharge_part(
     discharge(z3, &obligations, &dt_decls)
 }
 
-pub fn cache_key(part: &Part, _cm: &CheckedModule, hm: &HashedModule) -> String {
+pub fn cache_key(part: &Part, cm: &CheckedModule, hm: &HashedModule) -> String {
     // proof_hash already folds in the part's own body+contract AND the
     // CONTRACT hashes of every direct dependency (calls are normalized to
     // them) — exactly the modular-proof footprint of DEC-LLL-017.
-    let input = format!("{VCGEN_VERSION}|{}", hm.proof_hash[&part.name]);
+    //
+    // But a part's obligations ALSO depend on the module's TYPE ENVIRONMENT — the ADT
+    // declarations (exhaustivity coverage, ctor selectors, sorts) and the classes — which
+    // `proof_hash` does NOT fold. Without this, editing a `type` (e.g. adding a constructor)
+    // leaves a stale cache HIT on a now-non-exhaustive match, so `lll check` returns a false
+    // "proved (cache hit)" — the oracle lying, against DEC-LLL-015/020 (REQ-LLL-128, audit
+    // Fable-5, reproduced). Fold a hash of that environment into the key. Over-invalidation
+    // (a type edit re-checks the module's parts) is CORRECT and cheap; a source with an
+    // unchanged type environment still hits.
+    let env = format!("{:?}|{:?}", cm.module.types, cm.module.classes);
+    let env_hash = blake3::hash(env.as_bytes()).to_hex().to_string();
+    let input = format!("{VCGEN_VERSION}|{}|{env_hash}", hm.proof_hash[&part.name]);
     blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
