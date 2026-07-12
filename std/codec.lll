@@ -7,5 +7,7 @@ module Std.Codec:
   # crosses the FFI frontier — the codec itself is pure/total.
 
   effect Codec:
-    hex_encode(List[Int]) -> List[Int] = extern "lll_codec_runtime::hex_encode" as (Vec<u8>) -> String
-    hex_decode(List[Int]) -> List[Int] = extern "lll_codec_runtime::hex_decode" as (str) -> Vec<u8>
+    hex_encode(List[Int]) -> List[Int]    = extern "lll_codec_runtime::hex_encode" as (Vec<u8>) -> String
+    hex_decode(List[Int]) -> List[Int]    = extern "lll_codec_runtime::hex_decode" as (str) -> Vec<u8>
+    base64_encode(List[Int]) -> List[Int] = extern "lll_codec_runtime::base64_encode" as (Vec<u8>) -> String
+    base64_decode(List[Int]) -> List[Int] = extern "lll_codec_runtime::base64_decode" as (str) -> Vec<u8>

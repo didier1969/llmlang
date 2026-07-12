@@ -448,6 +448,24 @@ fn verified_codec_hex_roundtrip_req154() {
 }
 
 #[test]
+fn verified_codec_base64_roundtrip_req154() {
+    // REQ-LLL-154 (codec): base64 encode/decode round-trip. "Man" = [77,97,110] encodes to
+    // "TWFu" and decodes back; recover the first byte 77.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/codec.lll\"\n\nmodule B64App:\n\n  part main() -> Int via IO, Codec:\n    let enc = Codec.base64_encode(77 :: 97 :: 110 :: [])\n    let dec = Codec.base64_decode(enc)\n    match dec:\n      x :: t -> yield IO.print(x)\n      []     -> yield IO.print(0 - 1)\n"
+        ),
+    )
+    .unwrap();
+    let out = run_pure_std(&entry, &dir, "b64");
+    assert!(out.contains("77"), "base64 round-trip first byte 77, got: {out}");
+}
+
+#[test]
 fn verified_http_post_body_req151() {
     // REQ-LLL-151 follow-up: `Http.post` sends a body and returns the response body. A
     // loopback server replies "posted"; the program recovers 'p' = 112.

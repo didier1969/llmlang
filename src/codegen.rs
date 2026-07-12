@@ -260,6 +260,48 @@ mod lll_codec_runtime {
                 .unwrap_or_else(|e| panic!("lll_codec_runtime::hex_decode `{}`: {e}", &t[i..i + 2])))
             .collect()
     }
+    // standard base64 (RFC 4648) — for tokens, data URIs, wire formats.
+    pub fn base64_encode(bytes: Vec<u8>) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut s = String::new();
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let n = (b0 << 16) | (b1 << 8) | b2;
+            s.push(T[((n >> 18) & 63) as usize] as char);
+            s.push(T[((n >> 12) & 63) as usize] as char);
+            s.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
+            s.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        }
+        s
+    }
+    // decode with a 6-bit accumulator — no chunk alignment to get wrong; non-alphabet
+    // chars (`=`, whitespace) are skipped.
+    pub fn base64_decode(text: &str) -> Vec<u8> {
+        let val = |c: u8| -> Option<u32> {
+            match c {
+                b'A'..=b'Z' => Some((c - b'A') as u32),
+                b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+                b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        };
+        let (mut acc, mut nbits, mut out) = (0u32, 0u32, Vec::new());
+        for c in text.bytes() {
+            if let Some(v) = val(c) {
+                acc = (acc << 6) | v;
+                nbits += 6;
+                if nbits >= 8 {
+                    nbits -= 8;
+                    out.push((acc >> nbits) as u8);
+                }
+            }
+        }
+        out
+    }
 }
 "#,
     );

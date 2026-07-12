@@ -1982,8 +1982,12 @@ fn validate_extern_path(
         ));
     }
     // REQ-LLL-154 (codec): the emitted `lll_codec_runtime` glue (hex encode/decode).
-    const CODEC_RUNTIME_PATHS: &[&str] =
-        &["lll_codec_runtime::hex_encode", "lll_codec_runtime::hex_decode"];
+    const CODEC_RUNTIME_PATHS: &[&str] = &[
+        "lll_codec_runtime::hex_encode",
+        "lll_codec_runtime::hex_decode",
+        "lll_codec_runtime::base64_encode",
+        "lll_codec_runtime::base64_decode",
+    ];
     if root == "lll_codec_runtime" {
         if CODEC_RUNTIME_PATHS.contains(&p) {
             return Ok(());
