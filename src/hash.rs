@@ -712,7 +712,7 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tyvars(a, acc);
             }
         }
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
+        Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -721,6 +721,7 @@ fn collect_tyvars(t: &Ty, acc: &mut Vec<String>) {
 fn canon_ty(t: &Ty, rename: &HashMap<String, String>) -> String {
     match t {
         Ty::Int => "Int".to_string(),
+        Ty::Big => "Big".to_string(),
         Ty::Bool => "Bool".to_string(),
         Ty::Rational => "Rational".to_string(),
         Ty::Var(a) => rename.get(a).cloned().unwrap_or_else(|| a.clone()),

@@ -1616,6 +1616,7 @@ impl Parser {
     fn ty(&mut self) -> Result<Ty, String> {
         match self.bump() {
             Tok::Ident(s) if s == "Int" => Ok(Ty::Int),
+            Tok::Ident(s) if s == "Big" => Ok(Ty::Big),
             Tok::Ident(s) if s == "Bool" => Ok(Ty::Bool),
             Tok::Ident(s) if s == "Rational" => Ok(Ty::Rational),
             Tok::Ident(s) if s == "Never" => Ok(Ty::Never),

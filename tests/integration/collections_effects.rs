@@ -408,6 +408,36 @@ fn run_pure_std(entry: &std::path::Path, dir: &std::path::Path, stem: &str) -> S
 }
 
 #[test]
+fn verified_bigint_i128_arithmetic_beyond_i64_req157() {
+    // REQ-LLL-157a: `Big` is a 128-bit exact integer — same Z3 `Int` proof sort as `Int`,
+    // i128 runtime. `inc`'s contract (`result > x`) is proven over Z3 Int; `main` doubles
+    // 9e18 to 1.8e19 (which OVERFLOWS i64 and would fail-stop as `Int`) then subtracts back
+    // to 9e18 — impossible without the wider runtime. `to_int` narrows the i64-fitting
+    // result. Explicit `big`/`to_int` bridge Int↔Big (no implicit coercion). `+ - *` only
+    // in this slice (div/mod are a tracked follow-up).
+    let src = "module BigApp:\n\n  part inc(x: Big) -> Big:\n    ensures result > x\n    yield x + big(1)\n\n  part main() -> Int via IO:\n    let a = big(9000000000000000000)\n    let doubled = a + a\n    let back = doubled - a\n    yield IO.print(to_int(back))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "Big contract must verify over Z3 Int: {:?}", failures(&report));
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(&entry, src).unwrap();
+    let out = run_pure_std(&entry, &dir, "bigint");
+    assert!(
+        out.contains("9000000000000000000"),
+        "Big 9e18+9e18-9e18 = 9e18 (1.8e19 beyond-i64 intermediate), got: {out}"
+    );
+}
+
+#[test]
+fn bigint_contract_is_not_vacuous_req157() {
+    // REQ-LLL-157a SOUNDNESS: a FALSE `Big` contract must NOT verify — `result > x` cannot
+    // be proven when the body just returns `x`. A green here would mean Big proofs are vacuous.
+    let src = "module BadBig:\n\n  part bad(x: Big) -> Big:\n    ensures result > x\n    yield x\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "`result > x` with `yield x` must NOT be provable for Big");
+}
+
+#[test]
 fn verified_sys_fs_ops_req152() {
     // REQ-LLL-152 follow-up: filesystem ops — `mkdir`/`path_exists`/`remove`. Make a dir,
     // write a file (exists → 1), remove it (exists → 0): 1*10 + 0 = 10.

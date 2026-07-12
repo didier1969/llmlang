@@ -747,6 +747,9 @@ pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
 fn smt_ty(t: &Ty) -> String {
     match t {
         Ty::Int => "Int".to_string(),
+        // REQ-LLL-157a: `Big` proves over the SAME unbounded Z3 `Int` sort as `Int` — no
+        // new theory. Partial correctness modulo the runtime i128 trap, exactly like `Int`.
+        Ty::Big => "Int".to_string(),
         Ty::Bool => "Bool".to_string(),
         // an exact rational proves over Z3's native `Real` theory (LRA, exact) —
         // NO new SMT theory invented (REQ-LLL-054, DEC-LLL-042/051). `+ - * =` are
@@ -1820,6 +1823,18 @@ impl<'a> Emit<'a> {
                 } else {
                     return Err(format!("vcgen: unknown effect `{name}`"));
                 }
+            }
+            // REQ-LLL-157a: `big`/`to_int` are IDENTITY in the proof — `Big` and `Int`
+            // share the Z3 `Int` sort, so the conversion carries no obligation and the
+            // arithmetic reasons across the boundary exactly as if the value were `Int`.
+            Expr::Call(name, args)
+                if (name == "big" || name == "to_int")
+                    && args.len() == 1
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                self.tr(&args[0], env, None)?
             }
             Expr::Call(name, args)
                 if is_array_builtin(name)
@@ -2912,7 +2927,7 @@ fn collect_user_type_refs(t: &Ty, out: &mut std::collections::BTreeSet<String>) 
                 collect_user_type_refs(c, out);
             }
         }
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::Var(_) | Ty::Never | Ty::Unit => {}
+        Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Var(_) | Ty::Never | Ty::Unit => {}
     }
 }
 

@@ -1564,6 +1564,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
 fn rs_ty(t: &Ty) -> String {
     match t {
         Ty::Int => "i64".to_string(),
+        Ty::Big => "i128".to_string(),
         Ty::Bool => "bool".to_string(),
         // exact rational → the runtime `Rat` i64-pair (REQ-LLL-054): a Copy value
         // type (by-value like Int/Bool, not heap), so borrow/clone handling is uniform.
@@ -1683,6 +1684,7 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
             format!("({})", inner.join(", "))
         }
         Ty::Int => "i64".to_string(),
+        Ty::Big => "i128".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Rational => "Rat".to_string(),
     }
@@ -1835,7 +1837,7 @@ fn collect_key_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_key_tvars(a, acc);
             }
         }
-        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
+        Ty::Var(_) | Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -1869,7 +1871,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
                 collect_tvars(a, acc);
             }
         }
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
+        Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => {}
     }
 }
 
@@ -3455,6 +3457,22 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 }
             }
         },
+        // REQ-LLL-157a: `big(x)` widens `Int` (i64) → `Big` (i128), lossless. `to_int(x)`
+        // narrows i128 → i64 and FAIL-STOPS if the value overflows (DEC-LLL-026: abort
+        // loudly, never truncate silently).
+        Expr::Call(name, args)
+            if (name == "big" || name == "to_int")
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            let x = expr(&args[0], cx, res)?;
+            if name == "big" {
+                format!("i128::from({x})")
+            } else {
+                format!("i64::try_from({x}).unwrap_or_else(|_| panic!(\"to_int: Big value {{}} exceeds i64 range\", {x}))")
+            }
+        }
         Expr::Call(name, args)
             if is_array_builtin(name)
                 && !cx.parts.contains(name)

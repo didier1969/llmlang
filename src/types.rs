@@ -1362,7 +1362,7 @@ fn ty_mentions_var(t: &Ty, v: &str) -> bool {
         Ty::Fun(ps, r) => ps.iter().any(|p| ty_mentions_var(p, v)) || ty_mentions_var(r, v),
         Ty::Tuple(cs) => cs.iter().any(|c| ty_mentions_var(c, v)),
         Ty::User(_, args) => args.iter().any(|a| ty_mentions_var(a, v)),
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => false,
+        Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => false,
     }
 }
 
@@ -1377,7 +1377,7 @@ fn ty_uses_only_var(t: &Ty, only: &str) -> bool {
         Ty::Fun(ps, r) => ps.iter().all(|p| ty_uses_only_var(p, only)) && ty_uses_only_var(r, only),
         Ty::Tuple(cs) => cs.iter().all(|c| ty_uses_only_var(c, only)),
         Ty::User(_, args) => args.iter().all(|a| ty_uses_only_var(a, only)),
-        Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => true,
+        Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => true,
     }
 }
 
@@ -1434,7 +1434,7 @@ pub(crate) fn check_given_satisfied(
 pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
     match t {
         Ty::Var(a) if a == var => with.clone(),
-        Ty::Var(_) | Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => t.clone(),
+        Ty::Var(_) | Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => t.clone(),
         Ty::User(n, args) => {
             Ty::User(n.clone(), args.iter().map(|a| subst_tyvar(a, var, with)).collect())
         }
@@ -3378,6 +3378,16 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
         OpClass::IntArith => {
             if ta == Ty::Int && tb == Ty::Int {
                 Ok(Ty::Int)
+            } else if ta == Ty::Big && tb == Ty::Big {
+                // REQ-LLL-157a: `Big` (128-bit) `+ - *` over the same Z3 `Int` sort. No
+                // mixing with `Int` (explicit `big`/`to_int`, DEC-LLL-051). div/mod are a
+                // follow-up (the euclidean codegen is i64-specific) — rejected here via the
+                // SINGLE-SOURCE divisor flag, no duplicated operator knowledge.
+                if crate::opsem::form(op).nonzero_divisor {
+                    Err("division/modulo on Big is not supported yet (v1 Big: + - * only)".into())
+                } else {
+                    Ok(Ty::Big)
+                }
             } else if ta == Ty::Rational && tb == Ty::Rational {
                 // Rational arithmetic (REQ-LLL-054): `+ - *` in this slice. Division /
                 // modulo on rationals is a later increment, so reject them here via
@@ -3396,10 +3406,10 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
             }
         }
         OpClass::IntCmp => {
-            if ta == Ty::Int && tb == Ty::Int {
+            if (ta == Ty::Int && tb == Ty::Int) || (ta == Ty::Big && tb == Ty::Big) {
                 Ok(Ty::Bool)
             } else {
-                Err(format!("comparison needs Int operands, got {ta} and {tb}"))
+                Err(format!("comparison needs two Int or two Big operands, got {ta} and {tb}"))
             }
         }
         OpClass::Equality => {
@@ -3480,6 +3490,7 @@ fn unify_arg(pat: &Ty, arg: &Ty, subst: &mut HashMap<String, Ty>) -> Result<(), 
 fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
     match t {
         Ty::Int => Ty::Int,
+        Ty::Big => Ty::Big,
         Ty::Bool => Ty::Bool,
         Ty::Rational => Ty::Rational,
         Ty::Var(v) => subst.get(v).cloned().unwrap_or_else(|| Ty::Var(v.clone())),
@@ -4259,6 +4270,29 @@ fn check_expr(
         }
         // array primitives, UNLESS the module shadows the name with a user
         // part/constructor/local (then the user definition wins) — REQ-LLL-037.
+        // REQ-LLL-157a: the `Int`↔`Big` conversions — the ONLY bridge between the two
+        // (no implicit coercion). `big(x: Int) -> Big` widens; `to_int(x: Big) -> Int`
+        // narrows and FAIL-STOPS at runtime if the value exceeds i64 (DEC-LLL-026).
+        Expr::Call(name, args)
+            if (name == "big" || name == "to_int")
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            if args.len() != 1 {
+                return Err(format!("part `{}`: `{name}` takes 1 argument", ctx.part.name));
+            }
+            let (want, from, to) = if name == "big" {
+                (Ty::Int, "Int", Ty::Big)
+            } else {
+                (Ty::Big, "Big", Ty::Int)
+            };
+            let ta = check_expr(ctx, &args[0], Some(&want))?;
+            if ta != want {
+                return Err(format!("part `{}`: `{name}` needs a {from}, got {ta}", ctx.part.name));
+            }
+            to
+        }
         Expr::Call(name, args)
             if is_array_builtin(name)
                 && !ctx.ctors.contains_key(name)

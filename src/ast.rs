@@ -300,6 +300,13 @@ pub struct Part {
 pub enum Ty {
     Int,
     Bool,
+    /// A 128-bit exact integer `Big` (REQ-LLL-157a): the same value semantics as `Int`
+    /// but 4× the range (~±1.7e38). Proven with the SAME Z3 `Int` sort (unbounded — so
+    /// partial correctness modulo an i128 overflow trap, exactly like `Int`, DEC-LLL-026);
+    /// runtime as `i128`, fail-stop on overflow. No implicit coercion to/from `Int` —
+    /// convert explicitly with `big(x)` / `to_int(x)`. Arbitrary precision (`num_bigint`)
+    /// is a tracked follow-up.
+    Big,
     /// An exact rational number `Rational` (REQ-LLL-054, DEC-LLL-051/042): a pair of
     /// integers num/den, always kept in canonical form (gcd-reduced, den > 0), so a
     /// value has a unique representation. Proven via Z3's native `Real` theory (LRA,
@@ -368,7 +375,7 @@ impl Ty {
     /// True when the type mentions no type variable (fully concrete).
     pub fn is_concrete(&self) -> bool {
         match self {
-            Ty::Int | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => true,
+            Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit => true,
             Ty::User(_, args) => args.iter().all(Ty::is_concrete),
             Ty::Var(_) => false,
             Ty::List(e) | Ty::Array(e) => e.is_concrete(),
@@ -384,6 +391,7 @@ impl std::fmt::Display for Ty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Ty::Int => write!(f, "Int"),
+            Ty::Big => write!(f, "Big"),
             Ty::Bool => write!(f, "Bool"),
             Ty::Rational => write!(f, "Rational"),
             Ty::Var(a) => write!(f, "{a}"),
