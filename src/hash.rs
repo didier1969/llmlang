@@ -209,10 +209,14 @@ fn collect_dep_names(body: &[Stmt], out: &mut Vec<String>) {
     }
 }
 fn collect_dep_expr(e: &Expr, out: &mut Vec<String>) {
-    e.walk(&mut |x| {
-        if let Expr::Call(n, _) = x {
-            out.push(n.clone());
-        }
+    e.walk(&mut |x| match x {
+        Expr::Call(n, _) => out.push(n.clone()),
+        // REQ-LLL-129 hole 2: a by-value part reference (`Var`) is also a dependency for HASH
+        // ORDERING — the callee must be hashed before the caller so its def-hash is available to
+        // fold. `condensed_order` keeps only names that are real parts (in `scc_id`), so locals and
+        // constructors are harmlessly ignored; a plain part gains no spurious ordering edge.
+        Expr::Var(n) => out.push(n.clone()),
+        _ => {}
     });
 }
 
@@ -385,8 +389,29 @@ fn normalize_part(
     // measure, so it must fold into the identity (DEC-LLL-020: the text is the
     // single source of truth, everything that defines behavior is hashed).
     let examples: Vec<String> = part.examples.iter().map(|e| n.expr(e)).collect();
+    // REQ-LLL-129 hole 1 (audit Fable-5, DEC-LLL-020): a `given Class[a]` constraint is
+    // behaviourally significant — it changes the contract (what the caller must supply) and which
+    // opaque method the body resolves (DEC-LLL-047) — so it MUST fold into identity, else two parts
+    // differing only by `given` share a hash (a `lll dedup --merge` false-merge). The tyvar is
+    // canonicalized via `ty_rename` (α-blind like the signature); the class name is significant
+    // (never renamed); entries are sorted (constraint order is not semantic). An EMPTY given yields
+    // the empty string ⇒ the form is BYTE-IDENTICAL to the pre-fix hash, so only given-carrying
+    // parts migrate — every existing plain-part identity is preserved.
+    let given_clause = if part.given.is_empty() {
+        String::new()
+    } else {
+        let mut gs: Vec<String> = part
+            .given
+            .iter()
+            .map(|(class, tv)| {
+                format!("{class}[{}]", ty_rename.get(tv).cloned().unwrap_or_else(|| tv.clone()))
+            })
+            .collect();
+        gs.sort();
+        format!(" (given {})", gs.join(" "))
+    };
     let mut s = format!(
-        "(part (params {}) (ret {}) (eff {effects}) (req {}) (ens {}) (meas {measure}) (ex {})",
+        "(part (params {}) (ret {}) (eff {effects}){given_clause} (req {}) (ens {}) (meas {measure}) (ex {})",
         params.join(" "),
         canon_ty(&part.ret, &ty_rename),
         requires.join(" "),
@@ -497,7 +522,24 @@ impl<'a> Norm<'a> {
             Expr::BoolLit(v) => format!("{v}"),
             Expr::Var(n) => match self.db(n) {
                 Some(i) => format!("%{i}"),
-                None => format!("!free:{n}"), // unreachable post-typecheck; kept total
+                None => {
+                    // REQ-LLL-129 hole 2 (audit Fable-5, DEC-LLL-020/038): a top-level PART
+                    // referenced BY VALUE (a HOF argument, e.g. `apply(dbl, x)`) folds the callee's
+                    // def-hash — transitive à la Unison, exactly like a `Call` — so editing the
+                    // callee changes the caller's identity and a rename does not. A data constructor
+                    // or a genuinely-free name (not a part) keeps its prior `!free:` token
+                    // BYTE-IDENTICAL, so only by-value part references migrate. (The old comment
+                    // "unreachable post-typecheck" was FALSE — DEC-LLL-038 first-class parts.)
+                    if n == self.self_name {
+                        "(val $self)".to_string()
+                    } else if let Some(tok) = self.peers.get(n) {
+                        format!("(val {tok})")
+                    } else if let Some(h) = self.dep_hashes.get(n) {
+                        format!("(val {h})")
+                    } else {
+                        format!("!free:{n}")
+                    }
+                }
             },
             Expr::ListLit(items) => {
                 // normalized as a cons-chain so `[1,2]` and `1 :: 2 :: []`

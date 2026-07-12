@@ -156,6 +156,64 @@ fn alpha_equivalent_defs_share_hash() {
 }
 
 
+#[test]
+fn given_constraint_is_folded_into_identity_req129() {
+    // REQ-LLL-129 hole 1 (audit Fable-5, DEC-LLL-020): a `given Class[a]` constraint is
+    // behaviourally significant — it changes the part's contract (what the caller must supply) and
+    // which opaque method the body resolves. Two parts TEXT-IDENTICAL except the given CLASS must
+    // therefore have different identity, else `lll dedup --merge` could silently merge them.
+    // Both classes declare `eq` so the body `yield eq(x, y)` type-checks under either constraint.
+    let a = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n";
+    let b = "module T:\n\n  class Cmp[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Cmp[a]:\n    yield eq(x, y)\n";
+    let (_, ha) = full(a);
+    let (_, hb) = full(b);
+    // BEFORE the fix these were EQUAL (given absent from the normal form) — the false-merge gap.
+    assert_ne!(
+        ha.def_hash["same"], hb.def_hash["same"],
+        "parts differing only by their `given` class must have different def_hash (REQ-LLL-129)"
+    );
+    assert_ne!(
+        ha.contract_hash["same"], hb.contract_hash["same"],
+        "a `given` constraint is part of the contract (the caller-facing firewall)"
+    );
+    // Non-regression: the empty-given case is byte-identical to the pre-fix form — a plain part is
+    // unaffected (only given-carrying parts migrate). A part with the same given twice hashes stably.
+    let c = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n";
+    let (_, hc) = full(c);
+    assert_eq!(ha.def_hash["same"], hc.def_hash["same"], "same given ⇒ same identity (determinism)");
+}
+
+
+#[test]
+fn part_passed_by_value_folds_callee_def_hash_req129() {
+    // REQ-LLL-129 hole 2 (audit Fable-5, DEC-LLL-020/038): a part passed BY VALUE to a HOF is a
+    // `Expr::Var` at a non-de-Bruijn position. It used to normalize to `!free:<name>` — using the
+    // NAME, which breaks BOTH Unison transitivity (editing the callee's body should change the
+    // caller's identity) AND rename-invariance. It must fold the callee's def-hash, exactly like a
+    // Call. `dbl` here is passed by value to `apply`.
+    let base = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part dbl(n: Int) -> Int:\n    yield n + n\n\n  part usef(x: Int) -> Int:\n    yield apply(dbl, x)\n";
+    let (_, h1) = full(base);
+
+    // (1) TRANSITIVITY: editing the by-value callee's BODY changes the caller's def_hash.
+    let body_edit = base.replace("yield n + n", "yield n + n + 0");
+    let (_, h2) = full(&body_edit);
+    assert_ne!(h1.def_hash["dbl"], h2.def_hash["dbl"], "the callee body edit must change its own hash");
+    assert_ne!(
+        h1.def_hash["usef"], h2.def_hash["usef"],
+        "a by-value callee's body edit must propagate to the caller's identity (REQ-LLL-129 transitivity)"
+    );
+
+    // (2) RENAME-INVARIANCE: renaming the by-value callee (+ its reference) preserves the caller's
+    // identity — because the caller folds the callee's HASH, not its name.
+    let renamed = hash::rename_part_in_source(base, "dbl", "double").unwrap();
+    let (_, h3) = full(&renamed);
+    assert_eq!(
+        h1.def_hash["usef"], h3.def_hash["usef"],
+        "renaming a by-value callee must not change the caller's identity (REQ-LLL-129 rename-invariance)"
+    );
+}
+
+
 // ---- verification (target 1) ----
 
 #[test]
