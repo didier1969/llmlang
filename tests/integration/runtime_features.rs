@@ -858,16 +858,54 @@ fn ffi_json_non_integer_number_fails_stop_not_silently_truncated() {
 
 
 #[test]
-fn ffi_json_object_variant_is_deferred_compile_error() {
-    // REQ-LLL-060: Array is now supported (List[Self], see the recursive round-trip test);
-    // Object stays DEFERRED — it needs Map-typed ctor fields, a `valid_field_ty` relaxation
-    // tracked as its own decision. Mapping Object is a COMPILE error — never a silent partial.
-    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadObj:\n\n  type Json = JNull | JObj\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull, Object -> JObj ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
-    let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("an Object mapping must be rejected");
+fn ffi_json_object_nested_round_trips_via_cargo() {
+    // DEC-LLL-074 (Option A, assoc-list): a JSON Object maps to `List[Entry]`, `Entry` a
+    // user ADT `(Str, Self)`. `echo` is identity on serde_json::Value, so calling it
+    // marshals the llmlang object OUT to a real serde `Map` (the IN arm) and back IN to a
+    // llmlang `List[Entry]` (the OUT arm). The value is ITSELF an object (`{"a": {"b": 5}}`),
+    // so reaching the leaf `5` forces the RECURSIVE `__json_out`/`__json_in` calls on the
+    // nested object in BOTH directions — a flat scalar value would never exercise recursion.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{repo}/tests/fixtures/ffi_json");
+    let map = "enum serde_json::Value [ Null -> JNull, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]";
+    let src = format!(
+        "depends ffi_json \"1.0.0\" from \"{fixture}\"\ndepends serde_json \"1.0.150\"\n\nmodule JsonObj:\n\n  type Json = JNull | JNum(Int) | JStr(List[Int]) | JArr(List[Json]) | JObj(List[Entry])\n\n  type Entry = E(List[Int], Json)\n\n  effect J:\n    echo(Json) -> Json = extern \"ffi_json::echo\" as ({map}) -> {map}\n\n  part unobj(j: Json) -> List[Entry]:\n    match j:\n      JObj(es) -> yield es\n      _        -> yield []\n\n  part hde(es: List[Entry]) -> Entry:\n    match es:\n      []     -> yield E(\"z\", JNull)\n      e :: t -> yield e\n\n  part valof(e: Entry) -> Json:\n    match e:\n      E(k, v) -> yield v\n\n  part numof(j: Json) -> Int:\n    match j:\n      JNum(n) -> yield n\n      _       -> yield 0 - 1\n\n  part main() -> Int via IO, J:\n    let inner = JObj(E(\"b\", JNum(5)) :: [])\n    let obj = JObj(E(\"a\", inner) :: [])\n    let back = J.echo(obj)\n    yield IO.print(numof(valof(hde(unobj(valof(hde(unobj(back))))))))\n"
+    );
+    let dir = tempdir();
+    let f = dir.join("json_obj.lll");
+    std::fs::write(&f, &src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&f)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
     assert!(
-        err.contains("DEFERRED") && err.contains("Object"),
-        "expected an Object-deferred error, got: {err}"
+        out.status.success(),
+        "object round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("=> 5"),
+        "expected 5 (nested object leaf round-tripped both ways through recursive marshal), got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+
+#[test]
+fn ffi_json_object_requires_entry_str_self_shape() {
+    // DEC-LLL-074: an Object ctor must carry `List[Entry]` with `Entry` = `(Str, Self)`.
+    // A wrong Entry shape (here a `(Int, Self)` key) is a COMPILE error — never a silent
+    // mis-mapping. Also proves the rejection is the JSON shape check, NOT a `valid_field_ty`
+    // error: the types themselves are valid (List of a User ADT) — no surface was relaxed.
+    let src = "depends ffi_json \"1.0.0\" from \"tests/fixtures/ffi_json\"\n\nmodule BadObj:\n\n  type Json = JNull | JObj(List[Bad])\n\n  type Bad = B(Int, Json)\n\n  effect J:\n    f(List[Int]) -> Json = extern \"ffi_json::parse\" as (str) -> enum serde_json::Value [ Null -> JNull, Object -> JObj ]\n\n  part g(s: List[Int]) -> Json via J:\n    yield J.f(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("an ill-shaped Object Entry must be rejected");
+    assert!(
+        err.contains("Entry") && (err.contains("Str, Self") || err.contains("List[Entry]")),
+        "expected an Entry-shape error, got: {err}"
     );
 }
 

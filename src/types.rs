@@ -1508,9 +1508,9 @@ fn unify_left_vars(got: &Ty, want: &Ty, subst: &mut HashMap<String, Ty>) -> bool
 
 /// Validate a named foreign-enum `as` clause (REQ-LLL-056, umbrella REQ-LLL-052).
 /// v1 (tranche-1) gates `serde_json::Value` and its 4 simple variants {Null, Bool,
-/// String, Number}, mapped BY NAME to the constructors of a user ADT. Any other path,
-/// an Object (DEFERRED), an unknown variant, a wrong ctor payload shape, a
-/// duplicate mapping, or an ADT constructor left unmapped is a COMPILE error — never a
+/// String, Number}, plus the recursive {Array, Object} (DEC-LLL-074), mapped BY NAME to
+/// the constructors of a user ADT. Any other path, an unknown variant, a wrong ctor
+/// payload shape, a duplicate mapping, or an ADT constructor left unmapped is a COMPILE error — never a
 /// silent mis-mapping (DEC-LLL-015). Full coverage (every ADT ctor mapped) keeps the
 /// generated IN match exhaustive, so a value round-trips both ways.
 fn check_json_enum(
@@ -1579,21 +1579,44 @@ fn check_json_enum(
                 fields.len() == 1 && fields[0] == Ty::list(Ty::User(td.name.clone(), vec![])),
                 "one `List[Self]` field (a list of the same JSON ADT)",
             ),
-            // Object stays DEFERRED: a JSON object needs Map-typed ctor fields, which
-            // `valid_field_ty` forbids today. Relaxing it broadens the language surface
-            // (every ADT would gain Map fields), so it is a DISTINCT decision + child REQ,
-            // never folded into this slice (REQ-LLL-056, umbrella REQ-LLL-052).
+            // Object (DEC-LLL-074 Option A, assoc-list): a JSON object maps to
+            // `List[Entry]` where `Entry` is a user ADT with ONE ctor `(Str, Self)` —
+            // a `List[Int]` key paired with a nested value of the SAME Json ADT. The
+            // decisive reason for the assoc-list is that it ALREADY passes
+            // `valid_field_ty` (a List of a User type), so it needs NO surface relaxation
+            // — every other ADT is unchanged (holds the line that deferred Object under
+            // REQ-LLL-056). It is NOT chosen for round-trip fidelity: crossing the serde
+            // boundary erases both duplicate keys (serde_json's Map collapses, last-wins)
+            // and entry order (BTreeMap sorts unless the build enables `preserve_order`).
+            // The assoc-list keeps order/dups only WITHIN llmlang, never through serde.
             "Object" => {
-                return Err(format!(
-                    "effect `{eff}` op `{op}`: serde_json::Value variant `Object` is DEFERRED in \
-                     v1 — a JSON object needs Map-typed constructor fields (a `valid_field_ty` \
-                     relaxation tracked as its own decision), REQ-LLL-056 umbrella REQ-LLL-052"
-                ))
+                let entry_name = match fields.first() {
+                    Some(Ty::List(inner)) => match &**inner {
+                        Ty::User(en, args) if args.is_empty() => Some(en.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let shape_ok = fields.len() == 1
+                    && entry_name.as_ref().is_some_and(|en| {
+                        module.types.iter().find(|t| &t.name == en).is_some_and(|et| {
+                            et.ctors.len() == 1
+                                && et.ctors[0].1.len() == 2
+                                && et.ctors[0].1[0] == Ty::list(Ty::Int)
+                                && et.ctors[0].1[1] == Ty::User(td.name.clone(), vec![])
+                        })
+                    });
+                (
+                    shape_ok,
+                    "one `List[Entry]` field where `Entry` is a user ADT with one ctor \
+                     `(Str, Self)` — a `List[Int]` key paired with the same JSON ADT \
+                     (DEC-LLL-074 assoc-list)",
+                )
             }
             other => {
                 return Err(format!(
                     "effect `{eff}` op `{op}`: `{other}` is not a serde_json::Value variant \
-                     (v1: Null, Bool, String, Number)"
+                     (v1: Null, Bool, String, Number, Array, Object)"
                 ))
             }
         };

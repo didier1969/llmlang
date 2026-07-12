@@ -557,12 +557,31 @@ fn marshal_out(f: &Foreign, val: &str) -> String {
     }
 }
 
+/// Resolve the `(EntryI, EntryCtor)` codegen names for an Object-mapped ctor `obj_ctor`
+/// of the JSON ADT `jn` (DEC-LLL-074): the ctor carries `List[Entry]`, and `Entry` is a
+/// user ADT with a single ctor. The checker (`check_json_enum`) has already proven the
+/// `(Str, Self)` shape, so this trusts it.
+fn json_entry_info(types: &[TypeDecl], jn: &str, obj_ctor: &str) -> (String, String) {
+    let jd = types.iter().find(|t| t.name == jn).expect("json ADT present");
+    let fields = &jd.ctors.iter().find(|(cn, _)| cn == obj_ctor).expect("object ctor present").1;
+    let entry_name = match &fields[0] {
+        Ty::List(inner) => match &**inner {
+            Ty::User(en, _) => en.clone(),
+            _ => unreachable!("checker proved `List[Entry]`"),
+        },
+        _ => unreachable!("checker proved `List[Entry]`"),
+    };
+    let et = types.iter().find(|t| t.name == entry_name).expect("entry ADT present");
+    (format!("{entry_name}I"), et.ctors[0].0.clone())
+}
+
 /// One arm of the OUT (Rust `serde_json::Value` → llmlang ADT) match, mapped BY NAME
 /// (REQ-LLL-056): the Rust variant `rustv` builds the llmlang ctor `ctor` of the inner
 /// enum `ei`. A `Number` that is not an integer fail-stops at the boundary (no float in
 /// v1 — DEC-LLL-051), mirroring the `Vec<u8>` out-of-range fail-stop. The checker has
-/// already proven `rustv ∈ {Null, Bool, String, Number}` with a shape-matching ctor.
-fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
+/// already proven `rustv ∈ {Null, Bool, String, Number, Array, Object}` with a shape-
+/// matching ctor. `types`/`jn` are consulted only by the Object arm (DEC-LLL-074).
+fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str, types: &[TypeDecl], jn: &str) -> String {
     match rustv {
         "Null" => format!("{path}::Null => Rc::new({ei}::{ctor}), "),
         "Bool" => format!("{path}::Bool(__b) => Rc::new({ei}::{ctor}(__b)), "),
@@ -582,8 +601,23 @@ fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
              for __e in __arr.into_iter().rev() {{ \
              __acc = Rc::new(LstI::Cons(__json_out(__e), __acc)); }} __acc }})), "
         ),
+        // Object (DEC-LLL-074, assoc-list): build `List[Entry]` where each Entry pairs a
+        // `List[Int]` key (from the Rust String) with the recursively-marshalled value.
+        // serde_json's Map iterates by (sorted or insertion) key order; cons the reversed
+        // sequence to keep that order in the llmlang list.
+        "Object" => {
+            let (entry_ei, entry_ctor) = json_entry_info(types, jn, ctor);
+            format!(
+                "{path}::Object(__map) => Rc::new({ei}::{ctor}({{ \
+                 let mut __acc: Lst<Rc<{entry_ei}>> = Rc::new(LstI::Nil); \
+                 let __pairs: Vec<(String, {path})> = __map.into_iter().collect(); \
+                 for (__k, __val) in __pairs.into_iter().rev() {{ \
+                 __acc = Rc::new(LstI::Cons(Rc::new({entry_ei}::{entry_ctor}(\
+                 __lll_str_of_rust(&__k), __json_out(__val))), __acc)); }} __acc }})), "
+            )
+        }
         _ => unreachable!(
-            "checker restricts a serde_json::Value arm to Null/Bool/String/Number/Array"
+            "checker restricts a serde_json::Value arm to Null/Bool/String/Number/Array/Object"
         ),
     }
 }
@@ -592,7 +626,7 @@ fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
 /// (REQ-LLL-056): the llmlang ctor `ctor` of inner enum `ei` builds the Rust variant
 /// `rustv`. Every conversion is total (any `Int` is a valid JSON number), so IN never
 /// fail-stops. The checker guarantees the ADT's ctors are fully covered → exhaustive.
-fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
+fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str, types: &[TypeDecl], jn: &str) -> String {
     match rustv {
         "Null" => format!("{ei}::{ctor} => {path}::Null, "),
         "Bool" => format!("{ei}::{ctor}(__b) => {path}::Bool(*__b), "),
@@ -609,8 +643,26 @@ fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str) -> String {
              LstI::Cons(__h, __t) => {{ __v.push(__json_in(&**__h)); __cur = __t.clone(); }} }} }} \
              __v }}), "
         ),
+        // Object (DEC-LLL-074, assoc-list): walk the `List[Entry]`, inserting each
+        // `(key, value)` into a `serde_json::Map` — the key back to a Rust String, the
+        // value recursively through `__json_in`. Entry has a single ctor (checker), so the
+        // inner match is exhaustive with no `_` arm.
+        "Object" => {
+            let (entry_ei, entry_ctor) = json_entry_info(types, jn, ctor);
+            format!(
+                "{ei}::{ctor}(__lst) => {path}::Object({{ \
+                 let mut __m = serde_json::Map::new(); \
+                 let mut __cur = __lst.clone(); \
+                 loop {{ match &*__cur {{ \
+                 LstI::Nil => break, \
+                 LstI::Cons(__h, __t) => {{ match &**__h {{ \
+                 {entry_ei}::{entry_ctor}(__k, __val) => {{ \
+                 __m.insert(__lll_str_to_rust(__k), __json_in(&**__val)); }} }} \
+                 __cur = __t.clone(); }} }} }} __m }}), "
+            )
+        }
         _ => unreachable!(
-            "checker restricts a serde_json::Value arm to Null/Bool/String/Number/Array"
+            "checker restricts a serde_json::Value arm to Null/Bool/String/Number/Array/Object"
         ),
     }
 }
@@ -797,8 +849,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                             };
                             let ei = format!("{n}I");
                             if path == "serde_json::Value" {
-                                let marms: String =
-                                    arms.iter().map(|(r, c)| json_in_arm(path, r, &ei, c)).collect();
+                                let marms: String = arms
+                                    .iter()
+                                    .map(|(r, c)| json_in_arm(path, r, &ei, c, &cm.module.types, &n))
+                                    .collect();
                                 // a local recursive fn so an Array arm can recurse into itself
                                 // (REQ-LLL-060); the ADT ctors are fully covered → exhaustive.
                                 format!(
@@ -882,14 +936,17 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                         };
                         let ei = format!("{n}I");
                         if path == "serde_json::Value" {
-                            let marms: String =
-                                arms.iter().map(|(r, c)| json_out_arm(path, r, &ei, c)).collect();
-                            // a local recursive fn so an Array arm can recurse into itself
-                            // (REQ-LLL-060); an UNDECLARED variant (e.g. Object) fail-stops.
+                            let marms: String = arms
+                                .iter()
+                                .map(|(r, c)| json_out_arm(path, r, &ei, c, &cm.module.types, &n))
+                                .collect();
+                            // a local recursive fn so Array/Object arms can recurse into
+                            // themselves (REQ-LLL-060 / DEC-LLL-074); an UNDECLARED variant
+                            // fail-stops — never a silent mis-mapping.
                             format!(
                                 "{{ fn __json_out(__v: {path}) -> Rc<{ei}> {{ match __v {{ {marms}\
                                  __other => panic!(\"FFI boundary: serde_json::Value variant \
-                                 {{__other:?}} is unsupported in v1 (Object deferred — REQ-LLL-056)\") \
+                                 {{__other:?}} has no mapping in this enum clause (REQ-LLL-056)\") \
                                  }} }} __json_out({call}) }}"
                             )
                         } else {
