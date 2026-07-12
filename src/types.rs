@@ -1928,6 +1928,20 @@ fn validate_extern_path(
              — only {HTTP_RUNTIME_PATHS:?} are built in (REQ-LLL-151)"
         ));
     }
+    // REQ-LLL-154: the emitted `lll_msgpack_runtime` glue (src/codegen.rs
+    // `emit_msgpack_runtime`) — binary MessagePack interop reusing the shared `Json`
+    // marshalling. A narrow EXACT set, same discipline as the other runtimes.
+    const MSGPACK_RUNTIME_PATHS: &[&str] =
+        &["lll_msgpack_runtime::encode", "lll_msgpack_runtime::decode"];
+    if root == "lll_msgpack_runtime" {
+        if MSGPACK_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_msgpack_runtime` \
+             path — only {MSGPACK_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
+        ));
+    }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends
     // my-crate "1.0"`), but Rust always exposes it as an UNDERSCORED module
     // path (`extern "my_crate::func"`, never `my-crate::func` — hyphens are

@@ -191,6 +191,27 @@ mod lll_fs_runtime {
     );
 }
 
+/// REQ-LLL-154: the built-in MessagePack runtime, emitted iff an op binds to
+/// `lll_msgpack_runtime::…`. Binary interop that reuses the SHARED `Json` marshalling
+/// end-to-end: `rmp_serde` round-trips through `serde_json::Value` (any serde type), so a
+/// program works with the SAME `Json` ADT — including recursive objects (REQ-LLL-074) —
+/// it uses for JSON. Kept in its OWN module (not `lll_fmt_runtime`) so a CSV-only program
+/// never references `rmp_serde`. `rmp-serde` is USER-declared via `depends`. Faults fail-stop.
+fn emit_msgpack_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_msgpack_runtime {
+    pub fn decode(bytes: Vec<u8>) -> serde_json::Value {
+        rmp_serde::from_slice(&bytes).unwrap_or_else(|e| panic!("lll_msgpack_runtime::decode: {e}"))
+    }
+    pub fn encode(v: serde_json::Value) -> Vec<u8> {
+        rmp_serde::to_vec(&v).unwrap_or_else(|e| panic!("lll_msgpack_runtime::encode: {e}"))
+    }
+}
+"#,
+    );
+}
+
 /// REQ-LLL-151: the built-in HTTP runtime, emitted iff an op binds to
 /// `lll_http_runtime::…`. A pure-`std` blocking HTTP/1.1 `GET` (a `TcpStream` with a
 /// `Connection: close` request) — no network crate, so it links single-file. Returns the
@@ -944,6 +965,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // REQ-LLL-151: emit the built-in HTTP runtime iff an op binds to it (pure `std`).
     if extern_ops.values().any(|p| p.starts_with("lll_http_runtime::")) {
         emit_http_runtime(&mut out);
+    }
+    // REQ-LLL-154: emit the built-in MessagePack runtime iff an op binds to it.
+    if extern_ops.values().any(|p| p.starts_with("lll_msgpack_runtime::")) {
+        emit_msgpack_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

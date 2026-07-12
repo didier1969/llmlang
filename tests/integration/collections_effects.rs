@@ -437,6 +437,41 @@ fn verified_http_get_body_req151() {
 }
 
 #[test]
+fn verified_msgpack_encode_decode_roundtrip_req154() {
+    // REQ-LLL-154: MessagePack (std/msgpack.lll) — the first BINARY format — reuses the
+    // shared `Json` marshalling. `encode` a `JNum(42)` to msgpack bytes, `decode` back,
+    // and recover 42 — a full binary round-trip through the FFI Json bridge (bytes as
+    // Vec<u8>, REQ-051). Needs the Cargo path (rmp-serde/serde_json), so drive `lll run`.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/msgpack.lll\"\n\nmodule T:\n\n  part main() -> Int via IO, Msgpack:\n    let bytes = Msgpack.encode(JNum(42))\n    let back = Msgpack.decode(bytes)\n    yield IO.print(unnum(back))\n"
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&entry)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "msgpack round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("42"),
+        "msgpack encode(JNum(42))->decode->unnum = 42, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn verified_csv_parse_write_roundtrip_req154() {
     // REQ-LLL-154: CSV interop (std/csv.lll) reuses the shared `Json` marshalling — a CSV
     // text parses to an Array of row-Arrays of String cells (the DB `query` shape), and

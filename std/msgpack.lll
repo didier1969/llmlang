@@ -1,0 +1,27 @@
+depends serde_json "1.0.150"
+depends rmp-serde "1.3.1"
+
+module Std.Msgpack:
+
+  # Verified MessagePack interop (REQ-LLL-154) — the first BINARY format. `encode`/`decode`
+  # reuse the SHARED `Json` marshalling end-to-end: `rmp_serde` round-trips through
+  # `serde_json::Value`, so a program works with the SAME recursive `Json` ADT (objects
+  # included, REQ-LLL-074) it uses for JSON. The compiler emits a `lll_msgpack_runtime`
+  # shim; bytes cross as `Vec<u8>` (REQ-LLL-051). Faults fail-stop (DEC-LLL-026).
+
+  type Json  = JNull | JBool(Bool) | JNum(Int) | JStr(List[Int]) | JArr(List[Json]) | JObj(List[Entry])
+  type Entry = E(List[Int], Json)
+
+  effect Msgpack:
+    decode(List[Int]) -> Json        = extern "lll_msgpack_runtime::decode" as (Vec<u8>) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]
+    encode(Json) -> List[Int]        = extern "lll_msgpack_runtime::encode" as (enum serde_json::Value [ Null -> JNull, Bool -> JBool, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]) -> Vec<u8>
+
+  # the Int carried by a JNum; an out-of-band sentinel for any other form.
+  part unnum(j: Json) -> Int:
+    match j:
+      JNum(n)  -> yield n
+      JNull    -> yield 0 - 1
+      JBool(b) -> yield 0 - 2
+      JStr(s)  -> yield 0 - 3
+      JArr(xs) -> yield 0 - 4
+      JObj(es) -> yield 0 - 5
