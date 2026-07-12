@@ -283,6 +283,50 @@ fn incremental_verification_only_reproves_the_edited_module_req141() {
 }
 
 
+#[test]
+fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
+    // REQ-LLL-148 (interprocedural slice): `driver.arr` is never updated in `driver`, so
+    // the base borrow model borrows it (`&Rc`). But `driver` feeds `arr` at its LAST use
+    // to `upd`'s OWNED parameter (upd updates it), and EVERY call site of `driver` can
+    // supply `arr` owned without cloning (main's `xs` is a let at last use; the recursion
+    // supplies the owned `upd(...)` result). The call-graph ownership fixpoint therefore
+    // FLIPS `driver.arr` to owned, so the `upd(arr, 0)` frontier becomes a MOVE, not a
+    // clone. Distinct names (`arr` vs upd's `a`) target the frontier site precisely — the
+    // base-case `then arr` return still clones once (O(N) once), which is fine.
+    let src = "module T:\n\n  part upd(a: Array[Int], i: Int) -> Array[Int]:\n    requires 0 <= i, i <= length(a)\n    measure length(a) - i\n    yield if i == length(a) then a else upd(set(a, i, 99), i + 1)\n\n  part driver(arr: Array[Int], k: Int) -> Array[Int]:\n    requires k >= 0\n    measure k\n    yield if k == 0 then arr else driver(upd(arr, 0), k - 1)\n\n  part main() -> Int via IO:\n    let xs = array(10, 20, 30)\n    let done = driver(xs, 2)\n    yield IO.print(get(done, 0))\n";
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    // the `upd(arr, 0)` frontier must MOVE `arr` (interproc flipped driver.arr to owned).
+    assert!(
+        rust.contains("lll_upd(u_arr, 0i64)"),
+        "REQ-148: driver.arr fed to upd's owned param must be MOVED (interproc flip):\n{rust}"
+    );
+    assert!(
+        !rust.contains("lll_upd(u_arr.clone()"),
+        "REQ-148: the upd(arr,0) frontier must not clone the interproc-owned arr:\n{rust}"
+    );
+    // compiles + runs: upd sets every slot to 99 → get(done,0)=99, unchanged by the flip.
+    let dir = tempdir();
+    let rs = dir.join("r148ip.rs");
+    let bin = dir.join("r148ip_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "REQ-148 interproc codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("99"), "driver→upd([10,20,30]) then get(_,0) must print 99, got: {stdout}");
+}
+
+
 // ---- REQ-LLL-149: imports by NAME (`import std.list`) via an `lll.toml` manifest ----
 
 /// A fresh project dir under the temp root, unique per test name so parallel

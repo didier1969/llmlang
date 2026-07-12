@@ -1056,6 +1056,72 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             }
         }
     }
+    // REQ-LLL-148 (interprocedural ownership propagation): a heap param the base model
+    // BORROWED is flipped to OWNED when the part FEEDS it (by value, at its last use) to a
+    // callee's OWNED position AND every call site of the part can already supply that
+    // argument owned without a fresh clone. Owning it lets the feed site MOVE instead of
+    // clone (part_call_args); reads still borrow the owned `Rc` for free. The
+    // "every-caller-supplies-owned" guard stops a flip from merely RELOCATING the clone to
+    // a caller — and the corpus-wide clone-count in the REQ-148 gate is the final arbiter
+    // (a flip that nets zero is reverted wholesale). rustc borrowck backstops any wrong
+    // move as a build error, never a wrong result. Monotone fixpoint over the call graph;
+    // only clears borrow bits, never sets them.
+    {
+        let last_use_by_part: std::collections::HashMap<&str, PtrSet> = cm
+            .module
+            .parts
+            .iter()
+            .map(|p| {
+                (
+                    p.name.as_str(),
+                    analyze_moves(&p.body, &updated_params(&p.body)).1,
+                )
+            })
+            .collect();
+        let mut owned: std::collections::HashMap<String, Vec<bool>> = borrow_mask
+            .iter()
+            .map(|(k, m)| (k.clone(), m.iter().map(|b| !b).collect()))
+            .collect();
+        loop {
+            let mut changed = false;
+            for part in &cm.module.parts {
+                for i in 0..part.params.len() {
+                    if owned[&part.name][i] || !is_heap(&part.params[i].1) {
+                        continue;
+                    }
+                    let pvar = &part.params[i].0;
+                    let lu = &last_use_by_part[part.name.as_str()];
+                    if feeds_owned_at_lastuse(&part.body, pvar, &owned, &parts, lu)
+                        && all_callers_supply_owned(
+                            &part.name,
+                            i,
+                            &cm.module.parts,
+                            &owned,
+                            &parts,
+                            &ctors,
+                            &last_use_by_part,
+                        )
+                    {
+                        owned.get_mut(&part.name).unwrap()[i] = true;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for part in &cm.module.parts {
+            let om = &owned[&part.name];
+            if let Some(mask) = borrow_mask.get_mut(&part.name) {
+                for (i, m) in mask.iter_mut().enumerate() {
+                    if om.get(i).copied().unwrap_or(false) {
+                        *m = false;
+                    }
+                }
+            }
+        }
+    }
     let g = Globals {
         ctors: &ctors,
         ctor_ei: &ctor_ei,
@@ -1332,6 +1398,7 @@ fn emit_instance_impl(
             borrow_mask: &empty_bmask,
             refs: std::collections::HashSet::new(),
             movable: &empty_ptrset,
+            last_use: &empty_ptrset,
             abort: &empty_names,
             extern_ops: &empty_smap,
             abort_ops: &empty_names,
@@ -1561,43 +1628,54 @@ fn updated_params(body: &[Stmt]) -> Names {
 /// so the site falls back to a clone — always sound, since a wrongly-emitted move is a
 /// `rustc` use-after-move error (build-time, loud), never a wrong result. `Expr` is a
 /// `Box`-tree (no `Rc<Expr>` sharing), so a node address uniquely identifies its occurrence.
-fn movable_updates(body: &[Stmt], updated: &Names) -> std::collections::HashSet<*const Expr> {
+/// Backward-liveness over a part body, computing BOTH move opportunities in one pass:
+/// the movable in-place-update nodes (REQ-LLL-146) and the last-use `Var` nodes
+/// (REQ-LLL-148). A `Var` occurrence is a LAST USE when the variable is not live
+/// AFTER it — the caller may then MOVE (not clone) an owned binding at that point.
+fn analyze_moves(body: &[Stmt], updated: &Names) -> (PtrSet, PtrSet) {
     let mut movable = std::collections::HashSet::new();
-    live_stmts(body, &Names::new(), updated, &mut movable);
-    movable
+    let mut last_use = std::collections::HashSet::new();
+    live_stmts(body, &Names::new(), updated, &mut movable, &mut last_use);
+    (movable, last_use)
 }
 
 type PtrSet = std::collections::HashSet<*const Expr>;
 
 /// Live-in of a statement sequence given `live_out` (variables used after it), recording
 /// movable update nodes along the way. Statements run in order, so we fold in REVERSE.
-fn live_stmts(stmts: &[Stmt], live_out: &Names, updated: &Names, movable: &mut PtrSet) -> Names {
+fn live_stmts(
+    stmts: &[Stmt],
+    live_out: &Names,
+    updated: &Names,
+    movable: &mut PtrSet,
+    last_use: &mut PtrSet,
+) -> Names {
     let mut acc = live_out.clone();
     for s in stmts.iter().rev() {
         acc = match s {
-            Stmt::Yield(e) => live_expr(e, &acc, updated, movable),
+            Stmt::Yield(e) => live_expr(e, &acc, updated, movable, last_use),
             Stmt::Let(name, e) => {
                 // `name` is defined here → dead before this point; the rhs is evaluated
                 // under the continuation's liveness minus `name`.
                 let mut after = acc.clone();
                 after.remove(name);
-                live_expr(e, &after, updated, movable)
+                live_expr(e, &after, updated, movable, last_use)
             }
             Stmt::Match(scrut, arms) => {
                 // arms are alternative paths (union their live-ins); each arm's pattern
                 // binders are local to the arm, so they never propagate to the scrutinee.
                 let mut branch = Names::new();
                 for a in arms {
-                    let mut al = live_stmts(&a.body, &acc, updated, movable);
+                    let mut al = live_stmts(&a.body, &acc, updated, movable, last_use);
                     if let Some(g) = &a.guard {
-                        al = live_expr(g, &al, updated, movable);
+                        al = live_expr(g, &al, updated, movable, last_use);
                     }
                     for b in pattern_binds(&a.pattern) {
                         al.remove(&b);
                     }
                     branch.extend(al);
                 }
-                live_expr(scrut, &branch, updated, movable)
+                live_expr(scrut, &branch, updated, movable, last_use)
             }
             Stmt::Handle(h) => {
                 // effect handlers reorder control (tail resumptions); stay conservative —
@@ -1630,9 +1708,20 @@ fn live_stmts(stmts: &[Stmt], live_out: &Names, updated: &Names, movable: &mut P
 }
 
 /// Live-in of an expression given `live_out`, recording movable update nodes.
-fn live_expr(e: &Expr, live_out: &Names, updated: &Names, movable: &mut PtrSet) -> Names {
+fn live_expr(
+    e: &Expr,
+    live_out: &Names,
+    updated: &Names,
+    movable: &mut PtrSet,
+    last_use: &mut PtrSet,
+) -> Names {
     match e {
         Expr::Var(n) => {
+            // REQ-LLL-148: this occurrence is a LAST USE iff `n` is not live after it —
+            // an owned binding here may be MOVED (not cloned) at a caller frontier.
+            if !live_out.contains(n) {
+                last_use.insert(e as *const Expr);
+            }
             let mut s = live_out.clone();
             s.insert(n.clone());
             s
@@ -1641,24 +1730,24 @@ fn live_expr(e: &Expr, live_out: &Names, updated: &Names, movable: &mut PtrSet) 
             live_out.clone()
         }
         Expr::Not(a) | Expr::Neg(a) | Expr::Proj(a, _) | Expr::Field(a, _) => {
-            live_expr(a, live_out, updated, movable)
+            live_expr(a, live_out, updated, movable, last_use)
         }
         Expr::Bin(_, l, r) => {
-            let lr = live_expr(r, live_out, updated, movable);
-            live_expr(l, &lr, updated, movable)
+            let lr = live_expr(r, live_out, updated, movable, last_use);
+            live_expr(l, &lr, updated, movable, last_use)
         }
         Expr::Cons(h, t) => {
-            let lt = live_expr(t, live_out, updated, movable);
-            live_expr(h, &lt, updated, movable)
+            let lt = live_expr(t, live_out, updated, movable, last_use);
+            live_expr(h, &lt, updated, movable, last_use)
         }
         Expr::If(c, a, b) => {
-            let la = live_expr(a, live_out, updated, movable);
-            let lb = live_expr(b, live_out, updated, movable);
+            let la = live_expr(a, live_out, updated, movable, last_use);
+            let lb = live_expr(b, live_out, updated, movable, last_use);
             let mut branch = la;
             branch.extend(lb);
-            live_expr(c, &branch, updated, movable)
+            live_expr(c, &branch, updated, movable, last_use)
         }
-        Expr::Tuple(xs) | Expr::ListLit(xs) => seq_live(xs, live_out, updated, movable),
+        Expr::Tuple(xs) | Expr::ListLit(xs) => seq_live(xs, live_out, updated, movable, last_use),
         Expr::Call(name, args) | Expr::EffCall(name, args) => {
             // record THIS node's movability from `live_out` (what is live AFTER the whole
             // update); the update's own arg reads of the variable are hoisted before the
@@ -1670,13 +1759,13 @@ fn live_expr(e: &Expr, live_out: &Names, updated: &Names, movable: &mut PtrSet) 
                     }
                 }
             }
-            seq_live(args, live_out, updated, movable)
+            seq_live(args, live_out, updated, movable, last_use)
         }
         Expr::Lambda(params, body) => {
             // a lambda defers evaluation and may run after this point → treat its free
             // variables (minus its own params) as live. v1 forbids captures of enclosing
             // locals, so this is usually a no-op; over-approximating only suppresses moves.
-            let mut b = live_expr(body, &Names::new(), updated, movable);
+            let mut b = live_expr(body, &Names::new(), updated, movable, last_use);
             for (p, _) in params {
                 b.remove(p);
             }
@@ -1699,7 +1788,7 @@ fn live_expr(e: &Expr, live_out: &Names, updated: &Names, movable: &mut PtrSet) 
             // desugared away before codegen (unreachable); be safe if ever reached.
             let mut acc = live_out.clone();
             for (_, x) in fields.iter().rev() {
-                acc = live_expr(x, &acc, updated, movable);
+                acc = live_expr(x, &acc, updated, movable, last_use);
             }
             acc
         }
@@ -1707,10 +1796,16 @@ fn live_expr(e: &Expr, live_out: &Names, updated: &Names, movable: &mut PtrSet) 
 }
 
 /// Live-in of a left-to-right argument sequence (fold in reverse over `live_out`).
-fn seq_live(xs: &[Expr], live_out: &Names, updated: &Names, movable: &mut PtrSet) -> Names {
+fn seq_live(
+    xs: &[Expr],
+    live_out: &Names,
+    updated: &Names,
+    movable: &mut PtrSet,
+    last_use: &mut PtrSet,
+) -> Names {
     let mut acc = live_out.clone();
     for x in xs.iter().rev() {
-        acc = live_expr(x, &acc, updated, movable);
+        acc = live_expr(x, &acc, updated, movable, last_use);
     }
     acc
 }
@@ -1954,7 +2049,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         })
         .collect();
     // REQ-LLL-146: update nodes whose collection variable is at its last use → movable.
-    let movable = movable_updates(&part.body, &updated_params(&part.body));
+    let (movable, last_use) = analyze_moves(&part.body, &updated_params(&part.body));
     // a part whose row carries an abort effect returns `Result<Ret, i64>` — the
     // abort payload is the raised Int; a raise compiles to an early `Err`, and
     // callers propagate with `?` or discharge the effect with a `handle` match.
@@ -2015,6 +2110,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         borrow_mask: g.borrow_mask,
         refs,
         movable: &movable,
+        last_use: &last_use,
         abort: g.abort,
         extern_ops: g.extern_ops,
         abort_ops: g.abort_ops,
@@ -2122,7 +2218,7 @@ fn emit_specialized_part(
         }
     }
     // REQ-LLL-146: update nodes whose collection variable is at its last use → movable.
-    let movable = movable_updates(&part.body, &updated_params(&part.body));
+    let (movable, last_use) = analyze_moves(&part.body, &updated_params(&part.body));
     // the part's own evidence params for the row (forwarded to f / nested generics)
     let mut row_ev: Vec<String> = Vec::new();
     if is_state {
@@ -2168,6 +2264,7 @@ fn emit_specialized_part(
         borrow_mask: g.borrow_mask,
         refs,
         movable: &movable,
+        last_use: &last_use,
         abort: g.abort,
         extern_ops: g.extern_ops,
         abort_ops: g.abort_ops,
@@ -2265,6 +2362,10 @@ struct Cx<'a> {
     /// LAST use → MOVE it into `Rc::make_mut` for the O(1) path (REQ-LLL-146). Empty
     /// for emitters that never lower a part body with linear updates.
     movable: &'a PtrSet,
+    /// `Var` nodes (by address) at their LAST use → an OWNED binding here is MOVED, not
+    /// cloned, when passed to a callee's owned parameter (REQ-LLL-148). Empty for
+    /// emitters that never lower a part body.
+    last_use: &'a PtrSet,
     abort: &'a Names,
     /// dotted op name → bound Rust function path (FFI, REQ-LLL-022)
     extern_ops: &'a std::collections::HashMap<String, String>,
@@ -2393,6 +2494,7 @@ fn emit_body(
                     borrow_mask: cx.borrow_mask,
                     refs: cx.refs.clone(),
                     movable: cx.movable,
+                    last_use: cx.last_use,
                     abort: cx.abort,
                     extern_ops: cx.extern_ops,
                     abort_ops: cx.abort_ops,
@@ -2471,6 +2573,7 @@ fn emit_body(
                         borrow_mask: cx.borrow_mask,
                         refs: Names::new(),
                         movable: cx.movable,
+                        last_use: cx.last_use,
                         abort: cx.abort,
                         extern_ops: cx.extern_ops,
                         abort_ops: cx.abort_ops,
@@ -2505,6 +2608,7 @@ fn emit_body(
                     borrow_mask: cx.borrow_mask,
                     refs: cx.refs.clone(),
                     movable: cx.movable,
+                    last_use: cx.last_use,
                     abort: cx.abort,
                     extern_ops: cx.extern_ops,
                     abort_ops: cx.abort_ops,
@@ -2707,11 +2811,145 @@ fn part_call_args(
         let borrow = mask.map(|m| m.get(i).copied().unwrap_or(false)).unwrap_or(false);
         xs.push(if borrow {
             borrowed(a, cx, res)?
+        } else if let Some(mv) = move_if_last_use(a, cx) {
+            // REQ-LLL-148: owned position + owned binding at its last use → MOVE, not clone.
+            mv
         } else {
             expr(a, cx, res)?
         });
     }
     Ok(xs)
+}
+
+/// REQ-LLL-148: when `a` is a plain value binding at its LAST use, lower it as a MOVE
+/// (the bare local) rather than the owned lowering's `.clone()`, so the callee's owned
+/// parameter takes ownership without a frontier refcount bump. Disqualified: a `&Rc`
+/// borrow (`cx.refs` — cannot move out of a reference), a nullary constructor, or a
+/// part-name fn value. Sound + MONOTONE: a wrongly-emitted move is a `rustc`
+/// use-after-move (build-time, loud), never a wrong result, and only a dead-after
+/// binding ever moves — so no clone is ever added.
+fn move_if_last_use(a: &Expr, cx: &Cx) -> Option<String> {
+    if let Expr::Var(n) = a {
+        if !cx.refs.contains(n)
+            && !cx.ctors.contains(n)
+            && !cx.parts.contains(n)
+            && cx.last_use.contains(&(a as *const Expr))
+        {
+            return Some(local(n));
+        }
+    }
+    None
+}
+
+/// REQ-LLL-148: does `body` feed the variable `pvar` (by value, at its LAST use) to a
+/// USER-PART call position that is currently OWNED? Such a feed is a frontier clone the
+/// interproc flip can remove. Builtin update sites (`set`/`push`/…) are already owned by
+/// REQ-146, so only user-part calls (names in `parts`) at an owned position count.
+fn feeds_owned_at_lastuse(
+    body: &[Stmt],
+    pvar: &str,
+    owned: &std::collections::HashMap<String, Vec<bool>>,
+    parts: &Names,
+    last_use: &PtrSet,
+) -> bool {
+    let mut found = false;
+    walk_body_exprs(body, &mut |e| {
+        if found {
+            return;
+        }
+        if let Expr::Call(g, args) = e {
+            if parts.contains(g) {
+                if let Some(gmask) = owned.get(g) {
+                    for (j, arg) in args.iter().enumerate() {
+                        if gmask.get(j).copied().unwrap_or(false) {
+                            if let Expr::Var(v) = arg {
+                                if v == pvar && last_use.contains(&(arg as *const Expr)) {
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    found
+}
+
+/// REQ-LLL-148 safety guard: can EVERY call site of `fname` supply argument `i` OWNED
+/// without a fresh clone? If any caller would be forced to clone, flipping `fname.i` to
+/// owned merely RELOCATES the clone — so the flip is refused.
+#[allow(clippy::too_many_arguments)]
+fn all_callers_supply_owned(
+    fname: &str,
+    i: usize,
+    parts_decls: &[Part],
+    owned: &std::collections::HashMap<String, Vec<bool>>,
+    parts: &Names,
+    ctors: &Names,
+    last_use_by_part: &std::collections::HashMap<&str, PtrSet>,
+) -> bool {
+    let mut ok = true;
+    for caller in parts_decls {
+        let lu = &last_use_by_part[caller.name.as_str()];
+        let cowned = &owned[&caller.name];
+        walk_body_exprs(&caller.body, &mut |e| {
+            if !ok {
+                return;
+            }
+            if let Expr::Call(g, args) = e {
+                if g == fname {
+                    if let Some(arg) = args.get(i) {
+                        if !supplies_owned(arg, caller, cowned, parts, ctors, lu) {
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        });
+        if !ok {
+            break;
+        }
+    }
+    ok
+}
+
+/// REQ-LLL-148: does `e` provide an OWNED, move-able value at this argument position
+/// without a fresh clone? A bare `Var` qualifies only if it is a value binding (a `let`,
+/// or an already-OWNED param) at its LAST use — a borrowed `&Rc` param would have to be
+/// cloned. Fresh-value expressions (calls, literals, cons/list/tuple) are owned by
+/// construction; an `if` is owned iff both branches are. Anything else is conservatively
+/// treated as NOT owned-supplied (never a wrong flip, only a missed one).
+fn supplies_owned(
+    e: &Expr,
+    caller: &Part,
+    cowned: &[bool],
+    parts: &Names,
+    ctors: &Names,
+    last_use: &PtrSet,
+) -> bool {
+    match e {
+        Expr::Var(n) => {
+            if ctors.contains(n) || parts.contains(n) {
+                return false;
+            }
+            let borrowed_param = caller
+                .params
+                .iter()
+                .position(|(pn, _)| pn == n)
+                .map(|k| !cowned.get(k).copied().unwrap_or(true))
+                .unwrap_or(false);
+            !borrowed_param && last_use.contains(&(e as *const Expr))
+        }
+        Expr::Call(..) | Expr::EffCall(..) | Expr::ListLit(..) | Expr::Cons(..) | Expr::Tuple(..) => {
+            true
+        }
+        Expr::If(_, a, b) => {
+            supplies_owned(a, caller, cowned, parts, ctors, last_use)
+                && supplies_owned(b, caller, cowned, parts, ctors, last_use)
+        }
+        _ => false,
+    }
 }
 
 fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
