@@ -4408,7 +4408,31 @@ fn check_expr(
                     }
                     Ty::Bool
                 }
-                _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+                // REQ-LLL-150: `keys(m)`/`values(m)` iterate a Map into ascending-by-key
+                // `List`s. CODE ops (value-producing), NOT spec terms — rejected in contracts.
+                "keys" | "values" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "part `{}`: `{name}` takes 1 argument (map)",
+                            ctx.part.name
+                        ));
+                    }
+                    let (mk, mv) = match check_expr(ctx, &args[0], None)? {
+                        Ty::Map(k, v) => (*k, *v),
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `{name}` needs a Map, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    if name == "keys" {
+                        Ty::list(mk)
+                    } else {
+                        Ty::list(mv)
+                    }
+                }
+                _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey/keys/values"),
             }
         }
         // set primitives (REQ-LLL-037, DEC-LLL-043 §5) — a thin layer on the map.

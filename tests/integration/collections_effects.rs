@@ -390,6 +390,18 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
 }
 
 #[test]
+fn verified_map_keys_and_values_iterate_req150() {
+    // REQ-LLL-150 (Map half): `keys(m)` / `values(m)` iterate a Map into ascending-by-key
+    // `List`s, so std/list folds apply. Same code-only / VC-opaque design as `elems`.
+    // Runtime yields the real keys (1+2+3=6) and values (100+200+300=600).
+    let src = "module MapIter:\n\n  part suml(xs: List[Int]) -> Int:\n    measure length(xs)\n    match xs:\n      []     -> yield 0\n      h :: t -> yield h + suml(t)\n\n  part ksum(m: Map[Int, Int]) -> Int:\n    yield suml(keys(m))\n\n  part vsum(m: Map[Int, Int]) -> Int:\n    yield suml(values(m))\n\n  part mk() -> Map[Int, Int]:\n    yield insert(insert(insert(map(), 1, 100), 2, 200), 3, 300)\n\n  part main() -> Int via IO:\n    let a = IO.print(ksum(mk()))\n    yield IO.print(vsum(mk()))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "keys/values composition must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("6\n600"), "ksum then vsum must be 6 then 600, got: {out}");
+}
+
+#[test]
 fn set_elems_rejected_in_contract_req150() {
     // REQ-LLL-150: `elems` is a CODE op, not a spec term — mentioning it in a contract
     // is a disallowed call (DEC-LLL-017), like `insert`/`add`.

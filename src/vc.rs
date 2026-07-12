@@ -2017,7 +2017,35 @@ impl<'a> Emit<'a> {
                         let k = self.tr(&args[1], env, None)?;
                         format!("(not (= (select {m} {k}) none))")
                     }
-                    _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+                    // REQ-LLL-150: `keys`/`values` are CODE-ONLY (not spec terms) and not
+                    // modeled by the Array theory — havoc a FRESH opaque `Lst` (assumes
+                    // nothing, so no false fact is provable). Element sort from the map
+                    // arg's type (a param) or the expected `List[T]`.
+                    "keys" | "values" => {
+                        let elem = self
+                            .operand_ty(&args[0])
+                            .and_then(|t| match t {
+                                Ty::Map(k, v) => Some(if name == "keys" { *k } else { *v }),
+                                _ => None,
+                            })
+                            .or_else(|| match expected {
+                                Some(Ty::List(e)) => Some((**e).clone()),
+                                _ => None,
+                            });
+                        let _ = self.tr(&args[0], env, None)?;
+                        match elem {
+                            Some(e) => self.fresh(&smt_ty(&Ty::list(e))),
+                            None => {
+                                return Err(format!(
+                                    "part `{}`: cannot infer the element type of `{name}(...)` \
+                                     here — apply it to a map variable or use it where a \
+                                     `List[T]` is expected",
+                                    self.part.name
+                                ))
+                            }
+                        }
+                    }
+                    _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey/keys/values"),
                 }
             }
             Expr::Call(name, args)

@@ -509,7 +509,7 @@ pub fn is_array_spec_term(name: &str) -> bool {
 /// Distinct from the array accessors (`get`/`set`) so the receiver kind is
 /// explicit at the call site with no type-directed dispatch (criterion #1).
 pub fn is_map_builtin(name: &str) -> bool {
-    matches!(name, "map" | "insert" | "lookup" | "haskey")
+    matches!(name, "map" | "insert" | "lookup" | "haskey" | "keys" | "values")
 }
 
 /// The subset of map builtins admitted as SPEC TERMS inside contracts: the

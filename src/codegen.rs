@@ -3164,7 +3164,18 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     let k = expr(&args[1], cx, res)?;
                     format!("(**{m}).contains_key(&({k}))")
                 }
-                _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey"),
+                // REQ-LLL-150: `keys`/`values` → the map's keys / values as ascending-by-key
+                // `Lst`s. Read-only, so the map is borrowed; generic runtime helpers build
+                // the lists so the empty-map case needs no element-type annotation here.
+                "keys" => {
+                    let m = borrowed(&args[0], cx, res)?;
+                    format!("__map_keys({m})")
+                }
+                "values" => {
+                    let m = borrowed(&args[0], cx, res)?;
+                    format!("__map_values({m})")
+                }
+                _ => unreachable!("is_map_builtin covers map/insert/lookup/haskey/keys/values"),
             }
         }
         Expr::Call(name, args)
@@ -3310,6 +3321,17 @@ pub type Lst<T> = Rc<LstI<T>>;
 fn __set_elems<T: Clone + Ord>(s: &std::rc::Rc<std::collections::BTreeMap<T, ()>>) -> Lst<T> {
     let mut acc: Lst<T> = Rc::new(LstI::Nil);
     for k in s.keys().rev() { acc = Rc::new(LstI::Cons(k.clone(), acc)); }
+    acc
+}
+// REQ-LLL-150: a Map's keys / values as ASCENDING-by-key `Lst`s (BTreeMap order).
+fn __map_keys<K: Clone + Ord, V>(m: &std::rc::Rc<std::collections::BTreeMap<K, V>>) -> Lst<K> {
+    let mut acc: Lst<K> = Rc::new(LstI::Nil);
+    for k in m.keys().rev() { acc = Rc::new(LstI::Cons(k.clone(), acc)); }
+    acc
+}
+fn __map_values<K: Ord, V: Clone>(m: &std::rc::Rc<std::collections::BTreeMap<K, V>>) -> Lst<V> {
+    let mut acc: Lst<V> = Rc::new(LstI::Nil);
+    for v in m.values().rev() { acc = Rc::new(LstI::Cons(v.clone(), acc)); }
     acc
 }
 
