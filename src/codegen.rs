@@ -191,6 +191,58 @@ mod lll_fs_runtime {
     );
 }
 
+/// REQ-LLL-152: the built-in data-format runtime, emitted iff an op binds to
+/// `lll_fmt_runtime::…`. Formats beyond JSON (REQ-LLL-154) reuse the SHARED `Json`
+/// marshalling: each op hands back / takes a `serde_json::Value`, mapped BY NAME into
+/// the user `Json` ADT via the same `enum serde_json::Value […]` clause the DB `query`
+/// and the JSON bridge use. This first slice is CSV (Array of row-Arrays of String
+/// cells — the exact shape `lll_db_runtime::query` returns, so `Std.DbJson`'s
+/// destructors apply unchanged). Simple CSV (comma/newline, trimmed, no quoting yet);
+/// quoted-field parsing via the `csv` crate is a logged follow-up.
+fn emit_fmt_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_fmt_runtime {
+    pub fn csv_parse(text: &str) -> serde_json::Value {
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                serde_json::Value::Array(
+                    line.split(',')
+                        .map(|f| serde_json::Value::String(f.trim().to_string()))
+                        .collect(),
+                )
+            })
+            .collect();
+        serde_json::Value::Array(rows)
+    }
+    pub fn csv_write(v: serde_json::Value) -> String {
+        let mut out = String::new();
+        if let serde_json::Value::Array(rows) = v {
+            for row in rows {
+                if let serde_json::Value::Array(fields) = row {
+                    let cells: Vec<String> = fields
+                        .iter()
+                        .map(|f| match f {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            _ => String::new(),
+                        })
+                        .collect();
+                    out.push_str(&cells.join(","));
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+}
+"#,
+    );
+}
+
 /// REQ-LLL-066 / DEC-LLL-064: the built-in SQLite runtime, emitted iff an op binds to
 /// `lll_db_runtime::…` — mirror of `emit_actor_runtime`. A process-global registry maps
 /// an `i64` handle to a live `rusqlite::Connection`; ops look a connection up by handle.
@@ -844,6 +896,11 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // silent wrong result. The FFI layer marshals `List[Int]`↔`String` (REQ-LLL-042).
     if extern_ops.values().any(|p| p.starts_with("lll_fs_runtime::")) {
         emit_fs_runtime(&mut out);
+    }
+    // REQ-LLL-154: emit the built-in data-format runtime iff an op binds to it. Formats
+    // beyond JSON reuse the shared `serde_json::Value` ↔ `Json` marshalling.
+    if extern_ops.values().any(|p| p.starts_with("lll_fmt_runtime::")) {
+        emit_fmt_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

@@ -1902,6 +1902,20 @@ fn validate_extern_path(
              — only {FS_RUNTIME_PATHS:?} are built in (REQ-LLL-152)"
         ));
     }
+    // REQ-LLL-154: the emitted `lll_fmt_runtime` glue (src/codegen.rs `emit_fmt_runtime`) —
+    // data-format shims (CSV first) that hand back / take a `serde_json::Value`, reusing the
+    // shared `Json` marshalling. A narrow EXACT set, same discipline as the other runtimes.
+    const FMT_RUNTIME_PATHS: &[&str] =
+        &["lll_fmt_runtime::csv_parse", "lll_fmt_runtime::csv_write"];
+    if root == "lll_fmt_runtime" {
+        if FMT_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_fmt_runtime` path \
+             — only {FMT_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
+        ));
+    }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends
     // my-crate "1.0"`), but Rust always exposes it as an UNDERSCORED module
     // path (`extern "my_crate::func"`, never `my-crate::func` — hyphens are

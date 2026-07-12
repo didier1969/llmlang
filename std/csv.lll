@@ -1,0 +1,27 @@
+import "db_json.lll"
+
+depends serde_json "1.0.150"
+
+module Std.Csv:
+
+  # Verified CSV interop (REQ-LLL-154) — the first data format beyond JSON. A CSV text
+  # parses to the SHARED `Json` ADT (imported from Std.DbJson): an Array of row-Arrays of
+  # String cells — the EXACT shape `Db.query` returns, so every `Std.DbJson` destructor
+  # (unarr/nth/count) applies unchanged. Marshalling reuses the same `enum serde_json::Value`
+  # bridge as JSON and the DB backends; the compiler emits a `lll_fmt_runtime` shim.
+  # Simple CSV for now (comma-separated, newline rows, trimmed fields, no quoting) — a
+  # quoted-field parser via the `csv` crate is a logged follow-up.
+
+  effect Csv:
+    parse(List[Int]) -> Json = extern "lll_fmt_runtime::csv_parse" as (str) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum, Array -> JArr ]
+    write(Json) -> List[Int] = extern "lll_fmt_runtime::csv_write" as (enum serde_json::Value [ Null -> JNull, Bool -> JBool, String -> JStr, Number -> JNum, Array -> JArr ]) -> String
+
+  # the codepoints of the text cell at column `col` of a row (a JArr of cells); [] for a
+  # non-string cell or an out-of-range column.
+  part cell_str(row: Json, col: Int) -> List[Int]:
+    match nth(unarr(row), col):
+      JStr(s)  -> yield s
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JArr(xs) -> yield []

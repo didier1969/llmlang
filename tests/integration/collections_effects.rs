@@ -390,6 +390,44 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
 }
 
 #[test]
+fn verified_csv_parse_write_roundtrip_req154() {
+    // REQ-LLL-154: CSV interop (std/csv.lll) reuses the shared `Json` marshalling — a CSV
+    // text parses to an Array of row-Arrays of String cells (the DB `query` shape), and
+    // writes back. This round-trips parse -> write -> parse and pulls out cell (row 0,
+    // col 2) = "c" -> 'c' = 99, exercising BOTH directions through the FFI Json bridge (the
+    // intermediate `write` emits real newlines that the re-`parse` consumes).
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/csv.lll\"\n\nmodule T:\n\n  part main() -> Int via IO, Csv:\n    let p1 = Csv.parse(\"a,b,c\")\n    let text = Csv.write(p1)\n    let p2 = Csv.parse(text)\n    let cell = cell_str(nth(unarr(p2), 0), 2)\n    match cell:\n      h :: t -> yield IO.print(h)\n      []     -> yield IO.print(0 - 1)\n"
+        ),
+    )
+    .unwrap();
+    // `depends serde_json` (via the shared Json bridge) needs the Cargo build path, so
+    // drive `lll run` rather than a single-file `rustc`.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&entry)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "CSV round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("99"),
+        "CSV parse->write->parse cell (0,2)='c'=99, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn verified_sys_file_roundtrip_req152() {
     // REQ-LLL-152: the `Sys` effect (std/sys.lll) writes a file and reads it back through
     // the compiler-emitted `lll_fs_runtime` shim — a REAL filesystem round-trip. The FFI
