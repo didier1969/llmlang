@@ -90,24 +90,37 @@ check/VC/hash, DEC-LLL-020). `push`/`insert`/`add` lower through the same move, 
 in-place ops are O(1) when linearly threaded. This is the LINEAR-WRITE case DEC-031 flagged reuse
 *would* help — distinct from the SHARED-READ reuse-Perceus écarté there.
 
-**Residual — a constant-factor boundary clone (follow-up REQ-LLL-148).** llmlang is now **~54× C**
-(0.12s vs ~0.0022s), down from ~10⁴×: the **asymptotic regime is fixed** (O(N²)/pass → O(N)/pass),
-but a per-round O(N) clone remains at the `passes → pass` boundary. `passes` READS its array param
-(borrowed, DEC-031) yet hands it to `pass`, which now OWNS it — so the borrowed `&Rc` is `.clone()`d
-once per round to supply an owned `Rc`:
+**Residual — a per-round O(N) clone, and the MEASURED ceiling that decides how to close it.**
+The **asymptotic regime is fixed** (O(N²)/pass → O(N)/pass); one O(N) copy per round remains at the
+`passes → pass` boundary. Mechanism: `passes` borrows its array (`&Arr`, DEC-031) and keeps that
+borrow live while `pass` runs, so at the first `set` of each pass `make_mut` sees **refcount 2** and
+does a COW copy (the `u_a.clone()` at the boundary is only an O(1) refcount bump — the O(N) copy is
+downstream, inside `pass`):
 ```rust
-lll_passes(&(lll_pass(u_a.clone(), 0i64)), k-1)   // ^ borrowed→owned handoff clones O(N)/round
+lll_passes(&(lll_pass(u_a.clone(), 0i64)), k-1)   // borrow kept live ⇒ make_mut in `pass` COWs O(N)/round
 ```
-Closing it needs a SECOND lever — **linear ownership inference**: own a param that is passed, at its
-last use, to an *owning* callee, and move it there. That is a call-graph fixpoint (own-set propagates
-transitively), distinct from the *local* update-site move REQ-146 delivers, and worth its own design
-+ non-regression gate (over-owning could shift clones to other call boundaries). Tracked as
-**REQ-LLL-148**. It removes the O(N)/round *clone* (the per-round term) — but the residual constant
-vs C is **unmeasured and not assumed to be ~1×**: `pass` recurses per element, so ~8M function calls +
-`make_mut` refcount checks + bounds checks remain against C's tight 8M-write loop, structural
-persistent-`Rc` costs that reads (fib/listsum) never pay. Whether the WRITE regime can reach genuine
-C-parity *at all* without dropping persistent-`Rc` is the DEC-LLL-071 **Option B** question — an
-operator decision, not foreclosed here.
+Two ways to close it — **REQ-LLL-148** (linear ownership inference: make `passes` OWN the array and
+MOVE it into `pass` at its last use, a call-graph fixpoint) vs **DEC-LLL-071 Option B** (drop
+persistent-`Rc` for the ephemeral/linear case). To choose on DATA not hand-wave, `ceiling/run.sh`
+measures the SAME aset kernel at four points. The absolute ×C **wobbles** on a sub-10ms kernel
+(warm-amortized ~9–12× C here; cold single-shot ~54× C above), so the load-bearing result is the
+**relative decomposition**, stable across N=1000/2000:
+
+| point | isolates | N=2000 | share of gap |
+|---|---|---|---|
+| current (REQ-146) | borrow + COW/round | ~9–11× C | — |
+| **Point A** ≡ REQ-148 | remove boundary clone, keep `Rc` | ~8× C | boundary clone = **~20–29%** |
+| **Point B** ≡ Option B | raw `Vec`, identical recursive kernel | **~0.5× C** | persistent-`Rc` tax = **~76–88%** |
+| C | in-place loop | 1× | recursion (B−C) ≈ 0 |
+
+**Decision, now founded on measurement:** REQ-148 removes only the ~20–29% boundary-clone slice → it
+**CAPS at ~7–8× C, NOT write-parity**. The persistent-`Rc` machinery (refcount + `make_mut` +
+indirection) is ~76–88% of the gap; a raw `Vec` on the identical recursive kernel measures
+**at/beyond C-parity** (Point B ~0.5× C), and Point B ≈ C rules out a rustc/backend cause — cleanly
+implicating the data structure. **Genuine write-parity (VIS-LLL-001) therefore requires DEC-071
+Option B**, not REQ-148. REQ-148 stays a real but BOUNDED win (its own design + non-regression gate:
+over-owning can shift clones to other call boundaries); it does not, alone, reach "as fast as C" on
+writes. This is an operator decision — see `ceiling/` for the reproducer.
 
 ## map — associative read: verified `Rc<BTreeMap>` vs C sorted-array bsearch (`mapbench.lll`)
 Build a map of `n` entries, then `r` rounds each counting `haskey` over keys `1..n`
@@ -139,16 +152,16 @@ the EPHEMERAL/linear case, where C is O(1) and llmlang is needlessly O(N).
 | read traversal     | listsum | 0.9× C (post REQ-017 borrow)   | **C-competitive** |
 | associative read   | map     | ~1.1× C ordered bsearch        | **C-competitive** |
 | optimizer          | cse     | 1.97× its own `--no-opt`       | LLVM-invisible win |
-| **functional UPDATE** | **aset** | **~54× C (O(1)/op, ×2) — was 10⁴×** | **⚠ REQ-146 fixed the asymptote; VIS-001 write-parity still OPEN (REQ-147 targets the constant)** |
+| **functional UPDATE** | **aset** | **O(1)/op, ×2 scaling — was O(N)/op** | **⚠ REQ-146 fixed the asymptote; write-parity OPEN — measured: needs Option B (drop `Rc`), not REQ-148 (`ceiling/`)** |
 
 - **Reads are as fast as C across the board** (compute, list traversal, associative).
 - **Functional UPDATE-in-a-loop**: REQ-LLL-146 (DEC-LLL-071 A) closed the per-`set`/`push`/
   `insert`/`add` **asymptotic** gap — ≥O(N)/op → **O(1)/op** by owning the updated param and
   MOVING it into `Rc::make_mut` at its last use (159× at N=2000, ×2 scaling, listsum reads
   un-regressed). A residual **constant-factor** boundary clone remains (borrowed→owned handoff,
-  O(N)/round). **VIS-LLL-001's "as fast as C" is NOT yet met on writes (~54× C)** — the asymptote
-  is fixed, the constant open. **REQ-LLL-148** (linear ownership inference, call-graph fixpoint)
-  removes the O(N)/round *clone*, but the residual constant vs C is **unmeasured**: persistent-`Rc`
-  carries a per-write refcount/bounds cost reads never pay, so genuine ~1× C on writes may require
-  dropping persistent-`Rc` — the DEC-LLL-071 **Option B** question, an operator call. Both levers are
-  distinct from the SHARED-READ reuse-Perceus écarté by DEC-031.
+  O(N)/round). **VIS-LLL-001's "as fast as C" is NOT yet met on writes** — the asymptote is fixed, the
+  constant open. The `ceiling/` experiment now MEASURES the fork: **REQ-LLL-148** (linear ownership
+  inference) removes only the ~20–29% boundary-clone slice → **caps at ~7–8× C, not parity**; the
+  persistent-`Rc` tax is ~76–88% of the gap, and a raw `Vec` on the same kernel measures **at C-parity**
+  — so genuine write-parity requires **DEC-LLL-071 Option B** (drop persistent-`Rc`), an operator call,
+  NOT REQ-148 alone. Both levers are distinct from the SHARED-READ reuse-Perceus écarté by DEC-031.
