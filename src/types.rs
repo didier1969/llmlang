@@ -1947,6 +1947,18 @@ fn validate_extern_path(
              path — only {MSGPACK_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
         ));
     }
+    // REQ-LLL-154: the emitted `lll_json_runtime` glue (first-class JSON parse/serialize).
+    const JSON_RUNTIME_PATHS: &[&str] =
+        &["lll_json_runtime::parse", "lll_json_runtime::serialize"];
+    if root == "lll_json_runtime" {
+        if JSON_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_json_runtime` path \
+             — only {JSON_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
+        ));
+    }
     // REQ-LLL-154: the emitted `lll_toml_runtime` glue (TOML config parsing).
     const TOML_RUNTIME_PATHS: &[&str] = &["lll_toml_runtime::parse"];
     if root == "lll_toml_runtime" {

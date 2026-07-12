@@ -639,6 +639,40 @@ fn verified_http_get_body_req151() {
 }
 
 #[test]
+fn verified_json_parse_serialize_roundtrip_req154() {
+    // REQ-LLL-154: first-class JSON (std/json.lll) — `parse`/`serialize` the shared `Json`
+    // ADT via serde_json. Round-trip parse -> serialize -> parse of `[7, 8]` and pull out
+    // element 0 = 7. (A JSON array avoids escaped quotes, which the lexer keeps literal.)
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/json.lll\"\n\nmodule JsonApp:\n\n  part main() -> Int via IO, Json:\n    let v = Json.parse(\"[7, 8]\")\n    let text = Json.serialize(v)\n    let back = Json.parse(text)\n    yield IO.print(unnum(nth(unarr(back), 0)))\n"
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&entry)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "JSON round-trip failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("7"),
+        "JSON [7,8] element 0 = 7, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn verified_msgpack_encode_decode_roundtrip_req154() {
     // REQ-LLL-154: MessagePack (std/msgpack.lll) — the first BINARY format — reuses the
     // shared `Json` marshalling. `encode` a `JNum(42)` to msgpack bytes, `decode` back,

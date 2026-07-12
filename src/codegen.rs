@@ -265,6 +265,24 @@ mod lll_codec_runtime {
     );
 }
 
+/// REQ-LLL-154: the built-in JSON runtime — first-class JSON parse/serialize (previously
+/// only reachable via a test-fixture crate). `serde_json` maps text ↔ the shared `Json`
+/// ADT (recursive objects included, REQ-LLL-074). Own module; parse faults fail-stop.
+fn emit_json_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_json_runtime {
+    pub fn parse(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap_or_else(|e| panic!("lll_json_runtime::parse: {e}"))
+    }
+    pub fn serialize(v: serde_json::Value) -> String {
+        serde_json::to_string(&v).unwrap_or_else(|e| panic!("lll_json_runtime::serialize: {e}"))
+    }
+}
+"#,
+    );
+}
+
 /// REQ-LLL-154: the built-in TOML runtime — config parsing that reuses the shared `Json`
 /// marshalling. `toml::from_str::<serde_json::Value>` maps a TOML document to the same
 /// recursive `Json` ADT (tables → objects). Its OWN module (uses `toml`), so a program
@@ -1095,6 +1113,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // REQ-LLL-154: emit the built-in MessagePack runtime iff an op binds to it.
     if extern_ops.values().any(|p| p.starts_with("lll_msgpack_runtime::")) {
         emit_msgpack_runtime(&mut out);
+    }
+    // REQ-LLL-154: emit the built-in JSON runtime iff an op binds to it.
+    if extern_ops.values().any(|p| p.starts_with("lll_json_runtime::")) {
+        emit_json_runtime(&mut out);
     }
     // REQ-LLL-154: emit the built-in TOML runtime iff an op binds to it.
     if extern_ops.values().any(|p| p.starts_with("lll_toml_runtime::")) {

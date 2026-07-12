@@ -1,0 +1,70 @@
+depends serde_json "1.0.150"
+
+module Std.Json:
+
+  # First-class verified JSON (REQ-LLL-154) — `parse`/`serialize` the recursive `Json`
+  # ADT (objects included, REQ-LLL-074) via the compiler-emitted `lll_json_runtime` shim
+  # (serde_json). Previously JSON was reachable only through a test-fixture crate; this is
+  # the canonical stdlib module. Parse faults fail-stop (DEC-LLL-026). The ADT + pure
+  # destructors below are the shared contract other formats (CSV/TOML/msgpack) mirror.
+
+  type Json  = JNull | JBool(Bool) | JNum(Int) | JStr(List[Int]) | JArr(List[Json]) | JObj(List[Entry])
+  type Entry = E(List[Int], Json)
+
+  effect Json:
+    parse(List[Int]) -> Json     = extern "lll_json_runtime::parse"     as (str) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]
+    serialize(Json) -> List[Int] = extern "lll_json_runtime::serialize" as (enum serde_json::Value [ Null -> JNull, Bool -> JBool, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]) -> String
+
+  # the Int of a JNum ; an out-of-band sentinel otherwise.
+  part unnum(j: Json) -> Int:
+    match j:
+      JNum(n)  -> yield n
+      JNull    -> yield 0 - 1
+      JBool(b) -> yield 0 - 2
+      JStr(s)  -> yield 0 - 3
+      JArr(xs) -> yield 0 - 4
+      JObj(es) -> yield 0 - 5
+
+  # the codepoints of a JStr ; [] otherwise.
+  part unstr(j: Json) -> List[Int]:
+    match j:
+      JStr(s)  -> yield s
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JArr(xs) -> yield []
+      JObj(es) -> yield []
+
+  # the elements of a JArr ; [] otherwise.
+  part unarr(j: Json) -> List[Json]:
+    match j:
+      JArr(xs) -> yield xs
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JStr(s)  -> yield []
+      JObj(es) -> yield []
+
+  # the entries of a JObj ; [] otherwise.
+  part unobj(j: Json) -> List[Entry]:
+    match j:
+      JObj(es) -> yield es
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JStr(s)  -> yield []
+      JArr(xs) -> yield []
+
+  # the i-th element of a JSON list (array elements or object entries as values) ; JNull past the end.
+  part nth(xs: List[Json], i: Int) -> Json:
+    match xs:
+      []     -> yield JNull
+      h :: t ->
+        match i == 0:
+          true  -> yield h
+          false -> yield nth(t, i - 1)
+
+  # the value carried by an entry.
+  part valof(e: Entry) -> Json:
+    match e:
+      E(k, v) -> yield v
