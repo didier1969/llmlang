@@ -1884,6 +1884,24 @@ fn validate_extern_path(
              path — only {DB_MULTI_RUNTIME_PATHS:?} are built in (REQ-LLL-094)"
         ));
     }
+    // REQ-LLL-152: the emitted `lll_fs_runtime` glue (src/codegen.rs `emit_fs_runtime`) —
+    // a narrow EXACT set of built-in filesystem/system paths (pure `std`, fail-stop), NOT
+    // an open escape hatch. Same discipline as the actor/db whitelists.
+    const FS_RUNTIME_PATHS: &[&str] = &[
+        "lll_fs_runtime::read_file",
+        "lll_fs_runtime::write_file",
+        "lll_fs_runtime::getenv",
+        "lll_fs_runtime::now",
+    ];
+    if root == "lll_fs_runtime" {
+        if FS_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_fs_runtime` path \
+             — only {FS_RUNTIME_PATHS:?} are built in (REQ-LLL-152)"
+        ));
+    }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends
     // my-crate "1.0"`), but Rust always exposes it as an UNDERSCORED module
     // path (`extern "my_crate::func"`, never `my-crate::func` — hyphens are

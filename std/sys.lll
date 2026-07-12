@@ -1,0 +1,18 @@
+module Std.Sys:
+
+  # Verified system effects (REQ-LLL-152) — filesystem, environment, clock. Each op binds
+  # to the compiler-emitted `lll_fs_runtime` shim (src/codegen.rs `emit_fs_runtime`), a
+  # pure-`std` frontier that FAIL-STOPS on I/O faults (DEC-LLL-026: abort loudly, never a
+  # silently-wrong value). The FFI layer marshals `List[Int]`↔`String` (REQ-LLL-042), so
+  # paths and file contents are ordinary text (`List[Int]` codepoints). Import to get the
+  # `Sys` effect, then call `Sys.read_file` / `Sys.write_file` / `Sys.getenv` / `Sys.now`.
+  #
+  # These are EFFECTS: their results cross the DEC-LLL-017 havoc boundary (the pure-core
+  # proof never depends on what a file contained or the wall clock). Files are UTF-8 text
+  # (config, source, CSV, JSON, logs); a raw-bytes variant is a logged follow-up.
+
+  effect Sys:
+    read_file(List[Int]) -> List[Int]        = extern "lll_fs_runtime::read_file"  as (str) -> String
+    write_file(List[Int], List[Int]) -> Int  = extern "lll_fs_runtime::write_file" as (str, str) -> i64
+    getenv(List[Int]) -> List[Int]           = extern "lll_fs_runtime::getenv"     as (str) -> String
+    now() -> Int                              = extern "lll_fs_runtime::now"

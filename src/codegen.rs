@@ -152,6 +152,45 @@ mod lll_actor_runtime {{
     ));
 }
 
+/// REQ-LLL-152: the built-in filesystem/system runtime, emitted iff an op binds to
+/// `lll_fs_runtime::…` (mirror of `emit_db_runtime`). A pure `std` shim — no external
+/// crate — with FFI-friendly `&str`/`i64` signatures; the FFI frontier marshals
+/// `List[Int]`↔`String` (REQ-LLL-042). Faults FAIL-STOP (DEC-LLL-026): a missing file or
+/// unreadable path aborts loudly, never returns a silently-wrong value. Files are read/
+/// written as UTF-8 text (the common CLI case: config, source, CSV, JSON, logs); a raw-
+/// bytes variant is a logged follow-up.
+fn emit_fs_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_fs_runtime {
+    // read a whole file as UTF-8 text; fail-stop on any I/O or decode error.
+    pub fn read_file(path: &str) -> String {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("lll_fs_runtime::read_file `{path}`: {e}"))
+    }
+    // write text to a file (create/truncate); fail-stop; returns the byte count written.
+    pub fn write_file(path: &str, content: &str) -> i64 {
+        std::fs::write(path, content)
+            .unwrap_or_else(|e| panic!("lll_fs_runtime::write_file `{path}`: {e}"));
+        content.len() as i64
+    }
+    // an environment variable's value, or the empty string when unset (total, no fault).
+    pub fn getenv(name: &str) -> String {
+        std::env::var(name).unwrap_or_default()
+    }
+    // wall-clock time as whole Unix seconds (0 before the epoch — total, no fault).
+    pub fn now() -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+"#,
+    );
+}
+
 /// REQ-LLL-066 / DEC-LLL-064: the built-in SQLite runtime, emitted iff an op binds to
 /// `lll_db_runtime::…` — mirror of `emit_actor_runtime`. A process-global registry maps
 /// an `i64` handle to a live `rusqlite::Connection`; ops look a connection up by handle.
@@ -798,6 +837,13 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // les deux backends à la fois (handle enum) → sélection au runtime + deux backends vivants.
     if extern_ops.values().any(|p| p.starts_with("lll_db_multi_runtime::")) {
         emit_db_multi_runtime(&mut out);
+    }
+    // REQ-LLL-152: emit the built-in filesystem/system runtime iff any op binds to it
+    // (checker whitelists the exact `lll_fs_runtime::…` paths). A pure `std` shim with
+    // FFI-friendly `&str`/`i64` signatures — faults FAIL-STOP (DEC-LLL-026), never a
+    // silent wrong result. The FFI layer marshals `List[Int]`↔`String` (REQ-LLL-042).
+    if extern_ops.values().any(|p| p.starts_with("lll_fs_runtime::")) {
+        emit_fs_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

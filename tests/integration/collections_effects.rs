@@ -390,6 +390,48 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
 }
 
 #[test]
+fn verified_sys_file_roundtrip_req152() {
+    // REQ-LLL-152: the `Sys` effect (std/sys.lll) writes a file and reads it back through
+    // the compiler-emitted `lll_fs_runtime` shim — a REAL filesystem round-trip. The FFI
+    // frontier marshals List[Int]<->String; a fault would fail-stop. No `depends`: the
+    // shim is pure `std`. Asserts both the returned content AND the on-disk file.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let target = dir.join("greeting.txt");
+    let tpath = target.to_str().unwrap();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/sys.lll\"\n\nmodule T:\n\n  part run(path: List[Int]) -> Int via Sys:\n    let n = Sys.write_file(path, \"hello\")\n    let back = Sys.read_file(path)\n    match back:\n      h :: t -> yield h\n      []     -> yield 0 - 1\n\n  part main() -> Int via IO, Sys:\n    yield IO.print(run(\"{tpath}\"))\n"
+        ),
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(entry.to_str().unwrap()).expect("load std/sys");
+    let cm = types::check_module(m).expect("check");
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("sys.rs");
+    let bin = dir.join("sys_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "std/sys compile: {}", String::from_utf8_lossy(&st.stderr));
+    let out = String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout)
+        .to_string();
+    // "hello" first char 'h' = 104; and the file must exist on disk with that content.
+    assert!(out.contains("104"), "Sys write+read roundtrip first char 'h'=104, got: {out}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "hello",
+        "the file must actually be written to disk"
+    );
+}
+
+#[test]
 fn verified_set_stdlib_compositions_run_req156() {
     // REQ-LLL-156: verified collection COMPOSITIONS (`std/set.lll`) built on the
     // iteration primitive `elems` (REQ-150) — `union`/`intersect`/`from_list`/`to_list`.
