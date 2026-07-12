@@ -513,6 +513,57 @@ fn std_root_imports_verified_stdlib_by_name_req144() {
     assert!(cm.index.contains_key("main"), "root part lost");
 }
 
+#[test]
+fn lockfile_pins_and_detects_dependency_change_req155() {
+    // REQ-LLL-155: `lll lock` records the content-hash of every resolved module; then
+    // `lll check --locked` verifies reproducibility — a changed dependency is a HARD
+    // error, never a silent drift. The lockfile is the local-package core of a package
+    // system (versioned `[dependencies]` + a hosted registry build on top).
+    let dir = req149_project("lock");
+    std::fs::write(
+        dir.join("helper.lll"),
+        "module H:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n",
+    )
+    .unwrap();
+    let main = dir.join("main.lll");
+    std::fs::write(
+        &main,
+        "import \"helper.lll\"\n\nmodule M:\n\n  part main() -> Int:\n    yield inc(41)\n",
+    )
+    .unwrap();
+    let lll = env!("CARGO_BIN_EXE_lll");
+    let lock = std::process::Command::new(lll).arg("lock").arg(&main).output().unwrap();
+    assert!(lock.status.success(), "lll lock failed: {}", String::from_utf8_lossy(&lock.stderr));
+    assert!(dir.join("lll.lock").is_file(), "lll.lock must be written next to the entry");
+    // nothing changed → --locked passes.
+    let ok = std::process::Command::new(lll)
+        .arg("check")
+        .arg(&main)
+        .arg("--locked")
+        .output()
+        .unwrap();
+    assert!(ok.status.success(), "check --locked must pass unchanged: {}", String::from_utf8_lossy(&ok.stderr));
+    // change the dependency → --locked must fail loudly (reproducibility violated).
+    std::fs::write(
+        dir.join("helper.lll"),
+        "module H:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n  # edit\n",
+    )
+    .unwrap();
+    let bad = std::process::Command::new(lll)
+        .arg("check")
+        .arg(&main)
+        .arg("--locked")
+        .output()
+        .unwrap();
+    assert!(!bad.status.success(), "check --locked must fail after a dependency change");
+    let msg = format!(
+        "{}{}",
+        String::from_utf8_lossy(&bad.stdout),
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    assert!(msg.contains("reproducibility"), "failure must name the reproducibility violation: {msg}");
+}
+
 
 #[test]
 fn typeclass_given_clause_surface_parses() {
