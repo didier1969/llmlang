@@ -11,14 +11,153 @@
 //! definition and the duplicate is silently dropped (cross-file dedup,
 //! DEC-LLL-019 made visible).
 
-use crate::ast::{Class, Dep, EffectDecl, Instance, Module, Part, TypeDecl};
+use crate::ast::{Class, Dep, EffectDecl, Import, Instance, Module, Part, TypeDecl};
 use crate::hash::blind_normal_form;
 use crate::parser;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// The project `lll.toml` manifest (REQ-LLL-149). It maps a dotted-import root
+/// segment to a directory RELATIVE to the manifest, so `import std.list` with
+/// `std = "vendor/std"` resolves to `<manifest dir>/vendor/std/list.lll`. Roots are
+/// manifest-relative (never absolute) so a project is self-contained and portable;
+/// the manifest is an ADDITIONAL source (alongside the `.lll` text) for a named
+/// import's resolution, not a derived cache (DEC-LLL-020).
+struct Manifest {
+    /// Directory the `lll.toml` lives in — the anchor for all root paths.
+    dir: PathBuf,
+    /// `[imports]` root segment → manifest-relative directory.
+    roots: HashMap<String, String>,
+}
+
+/// Discover the nearest `lll.toml` by walking up from the ENTRY file's directory
+/// (never the cwd — `lll check foo.lll` must resolve the same from any working
+/// directory). The first manifest found in the ancestry wins and anchors EVERY
+/// named import in the whole program, including those inside imported files
+/// (resolution always anchors to the root project manifest — a vendored dependency
+/// cannot shadow it). `None` = no manifest found: quoted-path imports still work,
+/// named imports error.
+fn find_manifest(entry: &Path) -> Result<Option<Manifest>, String> {
+    let start = canon(entry)?;
+    let mut cur = start.parent();
+    while let Some(d) = cur {
+        let cand = d.join("lll.toml");
+        if cand.is_file() {
+            return Ok(Some(parse_manifest(&cand)?));
+        }
+        cur = d.parent();
+    }
+    Ok(None)
+}
+
+/// Parse the `[imports]` section of an `lll.toml` — a deliberately tiny subset of
+/// TOML (`key = "value"` lines under `[imports]`) parsed in-house rather than
+/// pulling a TOML crate. Any malformed line inside `[imports]` is a hard error;
+/// unknown sections are ignored (forward-compatible).
+fn parse_manifest(path: &Path) -> Result<Manifest, String> {
+    let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut roots = HashMap::new();
+    let mut section = String::new();
+    for (i, raw) in src.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(sec) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            section = sec.trim().to_string();
+            continue;
+        }
+        if section != "imports" {
+            continue; // other sections are not our concern
+        }
+        let (k, v) = line.split_once('=').ok_or_else(|| {
+            format!(
+                "{}: malformed lll.toml at line {}: expected `root = \"path\"`, found `{}`",
+                path.display(),
+                i + 1,
+                line
+            )
+        })?;
+        let key = k.trim();
+        let val = v.trim();
+        let val = val
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .ok_or_else(|| {
+                format!(
+                    "{}: malformed lll.toml at line {}: import root `{}` must map to a \
+                     quoted path, found `{}`",
+                    path.display(),
+                    i + 1,
+                    key,
+                    val
+                )
+            })?;
+        if key.is_empty() {
+            return Err(format!(
+                "{}: malformed lll.toml at line {}: empty import root name",
+                path.display(),
+                i + 1
+            ));
+        }
+        roots.insert(key.to_string(), val.to_string());
+    }
+    Ok(Manifest { dir, roots })
+}
+
+/// Resolve one `import` clause to a concrete file path. A quoted path is relative to
+/// the importing file's directory (unchanged); a dotted name is resolved through the
+/// manifest roots relative to the manifest dir (REQ-LLL-149). Both forms feed the
+/// SAME `load_rec`, so merge/dedup/cycle/diamond handling is identical.
+fn resolve_import(
+    imp: &Import,
+    importer_dir: &Path,
+    manifest: Option<&Manifest>,
+) -> Result<PathBuf, String> {
+    match imp {
+        Import::Path(p) => Ok(importer_dir.join(p)),
+        Import::Name(segs) => {
+            let manifest = manifest.ok_or_else(|| {
+                format!(
+                    "named import `{}` needs a project `lll.toml` with an `[imports]` root, \
+                     but none was found in any ancestor directory",
+                    segs.join(".")
+                )
+            })?;
+            let (root, rest) = segs.split_first().expect("named import has >= 2 segments");
+            let base = manifest.roots.get(root).ok_or_else(|| {
+                let mut avail: Vec<&str> = manifest.roots.keys().map(String::as_str).collect();
+                avail.sort_unstable();
+                format!(
+                    "named import `{}`: unknown import root `{}` (available roots in lll.toml: {})",
+                    segs.join("."),
+                    root,
+                    if avail.is_empty() {
+                        "none".to_string()
+                    } else {
+                        avail.join(", ")
+                    }
+                )
+            })?;
+            let mut p = manifest.dir.join(base);
+            for seg in rest {
+                p.push(seg);
+            }
+            p.set_extension("lll");
+            Ok(p)
+        }
+    }
+}
+
 pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let root = PathBuf::from(path);
+    // Discover the project manifest ONCE from the entry file; it anchors every
+    // named import in the program (REQ-LLL-149).
+    let manifest = find_manifest(&root)?;
     let mut in_stack: Vec<PathBuf> = Vec::new();
     let mut merged_names: HashMap<String, String> = HashMap::new(); // name -> blind form
     let mut parts: Vec<Part> = Vec::new();
@@ -31,6 +170,7 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let (src, name) = load_rec(
         &root,
         true,
+        manifest.as_ref(),
         &mut in_stack,
         &mut visited,
         &mut merged_names,
@@ -85,14 +225,16 @@ fn canon(p: &Path) -> Result<PathBuf, String> {
 /// paths are returned so workspace-wide operations (e.g. `lll rename`,
 /// REQ-LLL-012) can rewrite each file in place.
 pub fn workspace_files(root: &str) -> Result<Vec<PathBuf>, String> {
+    let manifest = find_manifest(Path::new(root))?;
     let mut files = Vec::new();
     let mut seen = HashSet::new();
-    collect_files(Path::new(root), &mut files, &mut seen)?;
+    collect_files(Path::new(root), manifest.as_ref(), &mut files, &mut seen)?;
     Ok(files)
 }
 
 fn collect_files(
     path: &Path,
+    manifest: Option<&Manifest>,
     files: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
@@ -105,7 +247,7 @@ fn collect_files(
     files.push(path.to_path_buf());
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for imp in &module.imports {
-        collect_files(&base.join(imp), files, seen)?;
+        collect_files(&resolve_import(imp, base, manifest)?, manifest, files, seen)?;
     }
     Ok(())
 }
@@ -114,6 +256,7 @@ fn collect_files(
 fn load_rec(
     path: &Path,
     is_root: bool,
+    manifest: Option<&Manifest>,
     in_stack: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
     merged_names: &mut HashMap<String, String>,
@@ -142,10 +285,11 @@ fn load_rec(
     // imports first (depth-first), relative to THIS file
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for imp in &module.imports {
-        let child = base.join(imp);
+        let child = resolve_import(imp, base, manifest)?;
         load_rec(
             &child,
             false,
+            manifest,
             in_stack,
             visited,
             merged_names,

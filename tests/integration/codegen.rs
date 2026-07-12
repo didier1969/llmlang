@@ -283,6 +283,163 @@ fn incremental_verification_only_reproves_the_edited_module_req141() {
 }
 
 
+// ---- REQ-LLL-149: imports by NAME (`import std.list`) via an `lll.toml` manifest ----
+
+/// A fresh project dir under the temp root, unique per test name so parallel
+/// tests don't collide. Returns the dir (already created).
+fn req149_project(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("lll-r149-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn named_import_resolves_via_lll_toml_manifest_req149() {
+    // REQ-LLL-149: `import mylib.util` resolves through a project `lll.toml`
+    // `[imports]` root (mylib -> "lib") to <manifest_dir>/lib/util.lll — no quoted
+    // path. The resolved file feeds the SAME loader, so the named-imported part
+    // merges and type-checks exactly as a quoted-path import would.
+    let dir = req149_project("named");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lll.toml"), "[imports]\nmylib = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.join("lib/util.lll"),
+        "module U:\n\n  part util(x: Int) -> Int:\n    ensures result == x\n    yield x\n",
+    )
+    .unwrap();
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &root,
+        "import mylib.util\n\nmodule M:\n\n  part main() -> Int:\n    yield util(7)\n",
+    )
+    .unwrap();
+    let (_, m) =
+        loader::load_program(root.to_str().unwrap()).expect("named import must resolve");
+    let cm = types::check_module(m).expect("named-imported def must type-check");
+    assert!(cm.index.contains_key("util"), "named-imported part not merged");
+    assert!(cm.index.contains_key("main"), "root part lost");
+}
+
+#[test]
+fn named_import_is_identity_transparent_with_path_import_req149() {
+    // REQ-LLL-149 SOUNDNESS LOCK: reaching the SAME file by name vs by quoted path
+    // yields IDENTICAL definitions/hashes — resolution is identity-TRANSPARENT
+    // (DEC-LLL-019: modules are a naming overlay of zero semantic weight; identity
+    // is content-hash, path-independent). This pins that import-by-name adds no
+    // semantic divergence: a green here means the two resolution routes are the
+    // same definition, not merely "both compile".
+    let dir = req149_project("idtransp");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lll.toml"), "[imports]\nmylib = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.join("lib/util.lll"),
+        "module U:\n\n  part util(x: Int) -> Int:\n    ensures result == x\n    yield x\n",
+    )
+    .unwrap();
+    let by_name = dir.join("by_name.lll");
+    let by_path = dir.join("by_path.lll");
+    std::fs::write(
+        &by_name,
+        "import mylib.util\n\nmodule A:\n\n  part run() -> Int:\n    yield util(1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &by_path,
+        "import \"lib/util.lll\"\n\nmodule B:\n\n  part run() -> Int:\n    yield util(1)\n",
+    )
+    .unwrap();
+    let util_hash = |p: &std::path::Path| {
+        let (_, m) = loader::load_program(p.to_str().unwrap()).unwrap();
+        let cm = types::check_module(m).unwrap();
+        hash::hash_module(&cm).unwrap().def_hash["util"].clone()
+    };
+    assert_eq!(
+        util_hash(&by_name),
+        util_hash(&by_path),
+        "name vs path resolution diverged in identity"
+    );
+}
+
+#[test]
+fn same_file_by_name_and_path_merges_once_req149() {
+    // REQ-LLL-149: importing one file BOTH by name and by quoted path canonicalizes
+    // to the same PathBuf, so the loader's `visited` guard fires BEFORE any
+    // part-merge — a single merge, no false name-collision.
+    let dir = req149_project("bothways");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lll.toml"), "[imports]\nmylib = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.join("lib/util.lll"),
+        "module U:\n\n  part util(x: Int) -> Int:\n    yield x\n",
+    )
+    .unwrap();
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &root,
+        "import mylib.util\nimport \"lib/util.lll\"\n\nmodule M:\n\n  part main() -> Int:\n    yield util(3)\n",
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(root.to_str().unwrap())
+        .expect("same file both ways must not collide");
+    assert_eq!(
+        m.parts.iter().filter(|p| p.name == "util").count(),
+        1,
+        "util was merged more than once"
+    );
+}
+
+#[test]
+fn named_import_unknown_root_lists_available_roots_req149() {
+    // Adverse: an import whose root segment is not declared in `[imports]` errors
+    // loudly AND lists the roots that ARE available (a resolver's most common miss).
+    let dir = req149_project("unkroot");
+    std::fs::write(dir.join("lll.toml"), "[imports]\nmylib = \"lib\"\n").unwrap();
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &root,
+        "import nope.util\n\nmodule M:\n\n  part main() -> Int:\n    yield 0\n",
+    )
+    .unwrap();
+    let err = loader::load_program(root.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("nope"), "error must name the unknown root: {err}");
+    assert!(err.contains("mylib"), "error must list available roots: {err}");
+}
+
+#[test]
+fn named_import_missing_file_errors_clearly_req149() {
+    // Adverse: a well-formed named import whose resolved file does not exist errors
+    // with the missing module referenced (not a bare io-error on an opaque path).
+    let dir = req149_project("missfile");
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lll.toml"), "[imports]\nmylib = \"lib\"\n").unwrap();
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &root,
+        "import mylib.ghost\n\nmodule M:\n\n  part main() -> Int:\n    yield 0\n",
+    )
+    .unwrap();
+    let err = loader::load_program(root.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("ghost"), "error must reference the missing module: {err}");
+}
+
+#[test]
+fn malformed_lll_toml_errors_clearly_req149() {
+    // Adverse: a manifest line inside `[imports]` that is not `key = "path"` is
+    // malformed and must error against the manifest, not silently ignore the root.
+    let dir = req149_project("badtoml");
+    std::fs::write(dir.join("lll.toml"), "[imports]\nmylib lib\n").unwrap();
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &root,
+        "import mylib.util\n\nmodule M:\n\n  part main() -> Int:\n    yield 0\n",
+    )
+    .unwrap();
+    let err = loader::load_program(root.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("lll.toml"), "error must reference the manifest: {err}");
+}
+
+
 #[test]
 fn typeclass_given_clause_surface_parses() {
     // REQ-LLL-039 slice B inc.1 — the `given Class[a]` constraint clause parses.

@@ -318,10 +318,34 @@ impl Parser {
         while self.peek() == &Tok::Import {
             self.pos += 1;
             match self.bump() {
-                Tok::Str(path) => imports.push(path),
+                // `import "relative/path.lll"` — the quoted-path form (wave 3).
+                Tok::Str(path) => imports.push(Import::Path(path)),
+                // `import Std.List` — an UPPERCASE-headed qualified name that the
+                // lexer glued into a single `Dotted` token (REQ-LLL-149).
+                Tok::Dotted(name) => {
+                    imports.push(Import::Name(name.split('.').map(str::to_string).collect()));
+                }
+                // `import std.list` — a lowercase-headed dotted name. The lexer only
+                // glues `.` for an uppercase head, so a lowercase module path arrives
+                // as `Ident (Dot Ident)*` — reassemble the segments (REQ-LLL-149).
+                Tok::Ident(first) => {
+                    let mut segs = vec![first];
+                    while self.peek() == &Tok::Dot {
+                        self.pos += 1;
+                        segs.push(self.ident()?);
+                    }
+                    if segs.len() < 2 {
+                        return Err(self.err(
+                            "a named import needs a dotted module path like `std.list` \
+                             (at least two segments); use a quoted \"path.lll\" for a single file",
+                        ));
+                    }
+                    imports.push(Import::Name(segs));
+                }
                 other => {
                     return Err(self.err(&format!(
-                        "expected a quoted path after `import`, found {other:?}"
+                        "expected a quoted path or a dotted module name after `import`, \
+                         found {other:?}"
                     )))
                 }
             }

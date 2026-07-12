@@ -4,12 +4,27 @@
 
 use serde::{Deserialize, Serialize};
 
+/// An `import` clause. A definition's identity is content-hash and PATH-independent
+/// (DEC-LLL-019: modules are a naming overlay of zero semantic weight), so the two
+/// forms below are two routes to the SAME text, never two definitions — resolution
+/// is identity-transparent (REQ-LLL-149).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Import {
+    /// `import "relative/path.lll"` — a quoted path, resolved relative to the
+    /// importing file (the original wave-3 form).
+    Path(String),
+    /// `import std.list` — a dotted module name, resolved through the project
+    /// `lll.toml` `[imports]` roots relative to the manifest (REQ-LLL-149). The
+    /// segments are the dotted parts, e.g. `["std", "list"]`.
+    Name(Vec<String>),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     pub name: String,
-    /// `import "relative/path.lll"` clauses (resolved by the loader)
+    /// `import` clauses — quoted path or dotted name (resolved by the loader)
     #[serde(default)]
-    pub imports: Vec<String>,
+    pub imports: Vec<Import>,
     /// `depends <crate> "<version>" [from "<path>"]` — external Cargo crate
     /// dependencies (REQ-LLL-038). A non-empty list switches `lll build` from the
     /// single-file rustc path to a generated Cargo project.
