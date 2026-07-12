@@ -390,6 +390,53 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
 }
 
 #[test]
+fn verified_http_get_body_req151() {
+    // REQ-LLL-151: the `Http` effect (std/http.lll) performs a REAL HTTP GET through the
+    // pure-`std` `lll_http_runtime` shim. Self-contained: a loopback `TcpListener` thread
+    // serves one fixed response "hello"; the compiled llmlang program fetches it and
+    // extracts the body's first char 'h' = 104. No external network, no crate.
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf); // consume the request line/headers (ignored)
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            );
+        }
+    });
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/http.lll\"\n\nmodule T:\n\n  part main() -> Int via IO, Http:\n    let body = Http.get(\"http://127.0.0.1:{port}/\")\n    match body:\n      h :: t -> yield IO.print(h)\n      []     -> yield IO.print(0 - 1)\n"
+        ),
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(entry.to_str().unwrap()).expect("load std/http");
+    let cm = types::check_module(m).expect("check");
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("h.rs");
+    let bin = dir.join("h_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "std/http compile: {}", String::from_utf8_lossy(&st.stderr));
+    let out = String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout)
+        .to_string();
+    let _ = server.join();
+    assert!(out.contains("104"), "Http.get body first char 'h'=104, got: {out}");
+}
+
+#[test]
 fn verified_csv_parse_write_roundtrip_req154() {
     // REQ-LLL-154: CSV interop (std/csv.lll) reuses the shared `Json` marshalling — a CSV
     // text parses to an Array of row-Arrays of String cells (the DB `query` shape), and

@@ -1,0 +1,15 @@
+module Std.Http:
+
+  # Verified HTTP client (REQ-LLL-151) — the services/API reach. `get(url)` performs a
+  # blocking HTTP/1.1 GET and returns the response BODY as text (`List[Int]` codepoints).
+  # Binds to the compiler-emitted `lll_http_runtime` shim (src/codegen.rs
+  # `emit_http_runtime`), a pure-`std` `TcpStream` client — NO network crate, no `depends`.
+  # The FFI frontier marshals the `String` body to `List[Int]` (REQ-LLL-042). Connect/read
+  # faults FAIL-STOP (DEC-LLL-026). Plain `http://` only for this slice; `https://` (TLS),
+  # status codes, response headers, and `POST` are logged follow-ups.
+  #
+  # This is an EFFECT: the response crosses the DEC-LLL-017 havoc boundary (the pure-core
+  # proof never depends on what a server returned). Import to get `Http`, call `Http.get`.
+
+  effect Http:
+    get(List[Int]) -> List[Int] = extern "lll_http_runtime::get" as (str) -> String

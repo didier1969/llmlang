@@ -191,6 +191,45 @@ mod lll_fs_runtime {
     );
 }
 
+/// REQ-LLL-151: the built-in HTTP runtime, emitted iff an op binds to
+/// `lll_http_runtime::…`. A pure-`std` blocking HTTP/1.1 `GET` (a `TcpStream` with a
+/// `Connection: close` request) — no network crate, so it links single-file. Returns the
+/// response BODY as text; the FFI frontier marshals it to `List[Int]` (REQ-LLL-042).
+/// Connect/read faults FAIL-STOP (DEC-LLL-026). Plain `http://` only (TLS needs a crate);
+/// status codes, headers, `POST`, chunked decoding, and `https://` are logged follow-ups.
+fn emit_http_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_http_runtime {
+    use std::io::{Read, Write};
+    pub fn get(url: &str) -> String {
+        let u = url
+            .strip_prefix("http://")
+            .unwrap_or_else(|| panic!("lll_http_runtime::get: only http:// URLs are supported, got `{url}`"));
+        let (hostport, path) = match u.find('/') {
+            Some(i) => (&u[..i], &u[i..]),
+            None => (u, "/"),
+        };
+        let addr = if hostport.contains(':') { hostport.to_string() } else { format!("{hostport}:80") };
+        let host = hostport.split(':').next().unwrap_or(hostport);
+        let mut stream = std::net::TcpStream::connect(&addr)
+            .unwrap_or_else(|e| panic!("lll_http_runtime::get connect `{addr}`: {e}"));
+        let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap_or_else(|e| panic!("lll_http_runtime::get write: {e}"));
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).unwrap_or_else(|e| panic!("lll_http_runtime::get read: {e}"));
+        let text = String::from_utf8_lossy(&resp);
+        // the body is everything after the blank line separating headers from body.
+        match text.find("\r\n\r\n") {
+            Some(i) => text[i + 4..].to_string(),
+            None => String::new(),
+        }
+    }
+}
+"#,
+    );
+}
+
 /// REQ-LLL-152: the built-in data-format runtime, emitted iff an op binds to
 /// `lll_fmt_runtime::…`. Formats beyond JSON (REQ-LLL-154) reuse the SHARED `Json`
 /// marshalling: each op hands back / takes a `serde_json::Value`, mapped BY NAME into
@@ -901,6 +940,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // beyond JSON reuse the shared `serde_json::Value` ↔ `Json` marshalling.
     if extern_ops.values().any(|p| p.starts_with("lll_fmt_runtime::")) {
         emit_fmt_runtime(&mut out);
+    }
+    // REQ-LLL-151: emit the built-in HTTP runtime iff an op binds to it (pure `std`).
+    if extern_ops.values().any(|p| p.starts_with("lll_http_runtime::")) {
+        emit_http_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning
