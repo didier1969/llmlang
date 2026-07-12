@@ -1,0 +1,45 @@
+module Std.Set:
+
+  # Verified Set COMPOSITIONS over the point builtins (emptyset/add/member) and the
+  # iteration primitive `elems` (REQ-LLL-150). Each part is total and terminating
+  # (`measure length`); functional specs stay light for now (elems is opaque in the
+  # VC — proving membership laws is the richer-contracts slice, REQ-LLL-158). Runtime
+  # correctness is what these guarantee today. Importable by name: `import std.set`.
+
+  # union: every element of `sb` inserted into `sa`.
+  part union_go(acc: Set[t], xs: List[t]) -> Set[t]:
+    measure length(xs)
+    match xs:
+      []        -> yield acc
+      h :: rest -> yield union_go(add(acc, h), rest)
+
+  part union(sa: Set[t], sb: Set[t]) -> Set[t]:
+    yield union_go(sa, elems(sb))
+
+  # from_list: build a set from a list (deduplicates by construction).
+  part from_list(xs: List[t]) -> Set[t]:
+    yield union_go(emptyset(), xs)
+
+  # to_list: the set's elements as an ascending list.
+  part to_list(s: Set[t]) -> List[t]:
+    yield elems(s)
+
+  # intersect: the elements of `sa` that are also in `sb`.
+  part intersect_go(acc: Set[t], keep: Set[t], xs: List[t]) -> Set[t]:
+    measure length(xs)
+    match xs:
+      []        -> yield acc
+      h :: rest -> yield intersect_go(if member(keep, h) then add(acc, h) else acc, keep, rest)
+
+  part intersect(sa: Set[t], sb: Set[t]) -> Set[t]:
+    yield intersect_go(emptyset(), sb, elems(sa))
+
+  # difference: the elements of `sa` NOT in `sb`.
+  part diff_go(acc: Set[t], excl: Set[t], xs: List[t]) -> Set[t]:
+    measure length(xs)
+    match xs:
+      []        -> yield acc
+      h :: rest -> yield diff_go(if member(excl, h) then acc else add(acc, h), excl, rest)
+
+  part difference(sa: Set[t], sb: Set[t]) -> Set[t]:
+    yield diff_go(emptyset(), sb, elems(sa))

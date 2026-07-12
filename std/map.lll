@@ -1,0 +1,23 @@
+module Std.Map:
+
+  # Verified Map COMPOSITIONS over the point builtins (map/insert/lookup/haskey) and the
+  # iteration primitives `keys`/`values` (REQ-LLL-150). Total and terminating
+  # (`measure length`). `merge` guards every `lookup` behind a `haskey` so the
+  # key-present obligation is discharged from the path condition (the iterated key is
+  # always present at runtime, so the else-branch is dead). Importable: `import std.map`.
+
+  part keys_of(m: Map[k, v]) -> List[k]:
+    yield keys(m)
+
+  part values_of(m: Map[k, v]) -> List[v]:
+    yield values(m)
+
+  # merge: `a` overlaid with every entry of `b` (b wins on a key collision).
+  part merge_go(acc: Map[k, v], src: Map[k, v], ks: List[k]) -> Map[k, v]:
+    measure length(ks)
+    match ks:
+      []        -> yield acc
+      h :: rest -> yield merge_go(if haskey(src, h) then insert(acc, h, lookup(src, h)) else acc, src, rest)
+
+  part merge(a: Map[k, v], b: Map[k, v]) -> Map[k, v]:
+    yield merge_go(a, b, keys(b))

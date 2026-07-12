@@ -390,6 +390,40 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
 }
 
 #[test]
+fn verified_set_stdlib_compositions_run_req156() {
+    // REQ-LLL-156: verified collection COMPOSITIONS (`std/set.lll`) built on the
+    // iteration primitive `elems` (REQ-150) — `union`/`intersect`/`from_list`/`to_list`.
+    // Each is proven total+terminating standalone; here they compose through a real
+    // import and run: union {1,2,3,4} sums to 10, intersect {2,3} sums to 5 → 1005.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/set.lll\"\n\nmodule T:\n\n  part suml(xs: List[Int]) -> Int:\n    measure length(xs)\n    match xs:\n      []     -> yield 0\n      h :: t -> yield h + suml(t)\n\n  part main() -> Int via IO:\n    let a = from_list([1, 2, 3])\n    let b = from_list([2, 3, 4])\n    let u = union(a, b)\n    let i = intersect(a, b)\n    yield IO.print(suml(to_list(u)) * 100 + suml(to_list(i)))\n"
+        ),
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(entry.to_str().unwrap()).expect("load std/set composition");
+    let cm = types::check_module(m).expect("check");
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("s.rs");
+    let bin = dir.join("s_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "std/set compile: {}", String::from_utf8_lossy(&st.stderr));
+    let out = String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout)
+        .to_string();
+    assert!(out.contains("1005"), "union(sum 10)*100 + intersect(sum 5) = 1005, got: {out}");
+}
+
+#[test]
 fn verified_map_keys_and_values_iterate_req150() {
     // REQ-LLL-150 (Map half): `keys(m)` / `values(m)` iterate a Map into ascending-by-key
     // `List`s, so std/list folds apply. Same code-only / VC-opaque design as `elems`.
