@@ -210,6 +210,80 @@ fn typeclass_class_and_instance_merge_across_imports() {
 
 
 #[test]
+fn incremental_verification_only_reproves_the_edited_module_req141() {
+    // REQ-LLL-141 (R1): the proof cache is keyed per-part on proof_hash+env_hash
+    // (vc::cache_key), and the loader flattens a multi-FILE workspace into one
+    // module (DEC-LLL-019). Together these give INCREMENTAL verification across
+    // module boundaries for free: editing one file's part re-proves only that
+    // part (plus, transitively, callers whose CONTRACT-fold changed) while every
+    // untouched part in every other file hits the cache and skips Z3. This pins
+    // the "incremental verification" half of R1 — a regression in cache-key
+    // granularity (over- OR under-invalidation) surfaces loudly.
+    use vc::PartVerdict::{CachedProved, Proved};
+    let dir = std::env::temp_dir().join(format!("lll-incr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cache = dir.join("cache");
+    let lib = dir.join("lib.lll");
+    let root = dir.join("main.lll");
+    let lib_src = |bar_body: &str| {
+        format!(
+            "module L:\n\n  part foo(x: Int) -> Int:\n    ensures result >= x\n    yield x + 10\n\n  \
+             part bar(x: Int) -> Int:\n    ensures result >= x\n    yield {bar_body}\n"
+        )
+    };
+    std::fs::write(&lib, lib_src("x + 1")).unwrap();
+    std::fs::write(
+        &root,
+        "import \"lib.lll\"\n\nmodule M:\n\n  part main() -> Int via IO:\n    yield IO.print(foo(41))\n",
+    )
+    .unwrap();
+    let root_s = root.to_str().unwrap().to_string();
+
+    let tag = |r: &vc::VerifyReport, name: &str| -> &'static str {
+        for (n, v) in &r.parts {
+            if n.as_str() == name {
+                return match v {
+                    Proved { .. } => "proved",
+                    CachedProved => "cached",
+                    _ => "other",
+                };
+            }
+        }
+        "missing"
+    };
+    let run = || {
+        let (_, m) = loader::load_program(&root_s).unwrap();
+        let cm = types::check_module(m).unwrap();
+        let hm = hash::hash_module(&cm).unwrap();
+        vc::verify(&cm, &hm, &cache, true).expect("verify")
+    };
+
+    // 1. cold cache: every part is proved fresh.
+    let r0 = run();
+    assert!(r0.ok());
+    assert_eq!(tag(&r0, "foo"), "proved");
+    assert_eq!(tag(&r0, "bar"), "proved");
+    assert_eq!(tag(&r0, "main"), "proved");
+
+    // 2. warm cache, no edit: every part hits the cache — Z3 is skipped entirely.
+    let r1 = run();
+    assert_eq!(tag(&r1, "foo"), "cached");
+    assert_eq!(tag(&r1, "bar"), "cached");
+    assert_eq!(tag(&r1, "main"), "cached");
+
+    // 3. edit ONLY bar's body (contract unchanged; nothing calls bar): bar is
+    //    re-proved fresh, while foo and the importing `main` stay cached — the
+    //    incremental, cross-file guarantee.
+    std::fs::write(&lib, lib_src("x + 2")).unwrap();
+    let r2 = run();
+    assert!(r2.ok());
+    assert_eq!(tag(&r2, "bar"), "proved", "edited part must be re-proved");
+    assert_eq!(tag(&r2, "foo"), "cached", "untouched sibling must stay cached");
+    assert_eq!(tag(&r2, "main"), "cached", "untouched importer must stay cached");
+}
+
+
+#[test]
 fn typeclass_given_clause_surface_parses() {
     // REQ-LLL-039 slice B inc.1 — the `given Class[a]` constraint clause parses.
     let src = "module T:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n\n  part refl(x: a) -> Bool given Eq[a]:\n    yield eq(x, x)\n";
