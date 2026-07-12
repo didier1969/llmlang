@@ -365,6 +365,47 @@ fn verified_set_is_polymorphic() {
 
 
 #[test]
+fn verified_set_elems_iterates_and_stays_opaque_req150() {
+    // REQ-LLL-150: `elems(s)` turns a Set into a `List` of its elements (ascending
+    // BTreeMap order), so all of std/list applies — the iteration primitive the point
+    // builtins (add/member) lacked. The list flows into ordinary verified code
+    // (`suml` folds it); the whole program checks and, at runtime, yields the real
+    // elements (10+20+30 = 60).
+    let src = "module SetElems:\n\n  part suml(xs: List[Int]) -> Int:\n    measure length(xs)\n    match xs:\n      []     -> yield 0\n      h :: t -> yield h + suml(t)\n\n  part total(s: Set[Int]) -> Int:\n    yield suml(elems(s))\n\n  part mk() -> Set[Int]:\n    yield add(add(add(emptyset(), 10), 20), 30)\n\n  part main() -> Int via IO:\n    yield IO.print(total(mk()))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "elems composition must verify: {:?}", failures(&report));
+    let out = build_run(src);
+    assert!(out.contains("60"), "total(elems([10,20,30])) must be 60, got: {out}");
+}
+
+#[test]
+fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
+    // REQ-LLL-150 SOUNDNESS (must-NOT-prove): `elems` is havoc'd OPAQUE in the VC, so a
+    // contract asserting a SPECIFIC value of the iteration's contents must NOT verify —
+    // the model admits any list, so the head is arbitrary. A green here would mean the
+    // havoc leaked a false fact.
+    let src = "module BadElems:\n\n  part head_is_ten(s: Set[Int]) -> Int:\n    ensures result == 10\n    match elems(s):\n      []     -> yield 0\n      h :: t -> yield h\n";
+    let report = verify_src(src);
+    assert!(!report.ok(), "elems opaque: proving its head == 10 must be impossible");
+}
+
+#[test]
+fn set_elems_rejected_in_contract_req150() {
+    // REQ-LLL-150: `elems` is a CODE op, not a spec term — mentioning it in a contract
+    // is a disallowed call (DEC-LLL-017), like `insert`/`add`.
+    let m = parser::parse_module(
+        "module ElemsContract:\n\n  part f(s: Set[Int]) -> Int:\n    requires length(elems(s)) > 0\n    yield 1\n",
+    )
+    .expect("parse");
+    let err = types::check_module(m).unwrap_err();
+    assert!(
+        err.contains("elems") || err.contains("calls are not allowed"),
+        "elems in a contract must be rejected: {err}"
+    );
+}
+
+
+#[test]
 fn depends_features_clause_parses() {
     // REQ-LLL-053: `features "f1,f2"` on a `depends` line — needed because most
     // crates (tokio included) enable little to nothing by default.

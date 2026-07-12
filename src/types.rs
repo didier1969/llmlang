@@ -4491,7 +4491,27 @@ fn check_expr(
                     }
                     Ty::Bool
                 }
-                _ => unreachable!("is_set_builtin covers emptyset/add/member"),
+                // REQ-LLL-150: `elems(s)` iterates a Set into an ascending `List[T]`. A
+                // CODE op (value-producing), NOT a spec term — rejected in contracts.
+                "elems" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "part `{}`: `elems` takes 1 argument (set)",
+                            ctx.part.name
+                        ));
+                    }
+                    let se = match check_expr(ctx, &args[0], None)? {
+                        Ty::Set(e) => *e,
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `elems` needs a Set, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    };
+                    Ty::list(se)
+                }
+                _ => unreachable!("is_set_builtin covers emptyset/add/member/elems"),
             }
         }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {

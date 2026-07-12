@@ -523,7 +523,7 @@ pub fn is_map_spec_term(name: &str) -> bool {
 /// A set is a thin layer on the map, so these lower to the map ops over a
 /// `Map[T, Unit]`. `emptyset` is the empty-set literal; `add`/`member` are v1.
 pub fn is_set_builtin(name: &str) -> bool {
-    matches!(name, "emptyset" | "add" | "member")
+    matches!(name, "emptyset" | "add" | "member" | "elems")
 }
 
 /// The subset of set builtins admitted as SPEC TERMS inside contracts: `member`

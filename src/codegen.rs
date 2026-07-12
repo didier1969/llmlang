@@ -3190,7 +3190,14 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     let x = expr(&args[1], cx, res)?;
                     format!("(**{s}).contains_key(&({x}))")
                 }
-                _ => unreachable!("is_set_builtin covers emptyset/add/member"),
+                // REQ-LLL-150: `elems(s)` → the set's keys as an ascending `Lst`. A
+                // read-only op, so the set is borrowed; a generic runtime helper builds
+                // the list so the empty-set case needs no element-type annotation here.
+                "elems" => {
+                    let s = borrowed(&args[0], cx, res)?;
+                    format!("__set_elems({s})")
+                }
+                _ => unreachable!("is_set_builtin covers emptyset/add/member/elems"),
             }
         }
         Expr::Call(name, args) => {
@@ -3296,6 +3303,15 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LstI<T> { Nil, Cons(T, Lst<T>) }
 pub type Lst<T> = Rc<LstI<T>>;
+
+// REQ-LLL-150: a Set (`Rc<BTreeMap<T, ()>>`) iterated to an ASCENDING `Lst<T>` of its
+// elements. Generic, so the empty-set case infers `T` from the argument (no annotation
+// at the call site); BTreeMap keys are ascending, so consing over `.rev()` yields ascending.
+fn __set_elems<T: Clone + Ord>(s: &std::rc::Rc<std::collections::BTreeMap<T, ()>>) -> Lst<T> {
+    let mut acc: Lst<T> = Rc::new(LstI::Nil);
+    for k in s.keys().rev() { acc = Rc::new(LstI::Cons(k.clone(), acc)); }
+    acc
+}
 
 // Exact rational number `Rational` (REQ-LLL-054, DEC-LLL-051/042): a Copy i64 pair
 // kept in CANONICAL form — gcd-reduced with `den > 0` — so equality is structural

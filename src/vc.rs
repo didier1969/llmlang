@@ -2064,7 +2064,39 @@ impl<'a> Emit<'a> {
                         }
                         format!("(not (= (select {s} {x}) none))")
                     }
-                    _ => unreachable!("is_set_builtin covers emptyset/add/member"),
+                    "elems" => {
+                        // REQ-LLL-150: `elems` is CODE-ONLY (not a spec term) and is not
+                        // modeled by the Array theory (a `Map[T,Unit]` has no cardinality
+                        // or enumeration in Z3). Havoc a FRESH opaque `Lst` — it assumes
+                        // NOTHING, so no false fact about the iteration is provable, while
+                        // `length(elems(s)) >= 0` still proves via the abstract `len`
+                        // axiom. Element sort from the set arg's type (a param) or the
+                        // expected `List[T]`; a nested/untyped position is a clear error
+                        // (mirror of the empty-literal rule).
+                        let elem = self
+                            .operand_ty(&args[0])
+                            .and_then(|t| match t {
+                                Ty::Set(e) => Some(*e),
+                                _ => None,
+                            })
+                            .or_else(|| match expected {
+                                Some(Ty::List(e)) => Some((**e).clone()),
+                                _ => None,
+                            });
+                        let _ = self.tr(&args[0], env, None)?;
+                        match elem {
+                            Some(e) => self.fresh(&smt_ty(&Ty::list(e))),
+                            None => {
+                                return Err(format!(
+                                    "part `{}`: cannot infer the element type of `elems(...)` \
+                                     here — apply it to a set variable or use it where a \
+                                     `List[T]` is expected",
+                                    self.part.name
+                                ))
+                            }
+                        }
+                    }
+                    _ => unreachable!("is_set_builtin covers emptyset/add/member/elems"),
                 }
             }
             Expr::Call(name, args) => {
