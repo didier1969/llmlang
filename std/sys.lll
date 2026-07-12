@@ -18,3 +18,6 @@ module Std.Sys:
     now() -> Int                              = extern "lll_fs_runtime::now"
     read_bytes(List[Int]) -> List[Int]       = extern "lll_fs_runtime::read_bytes"  as (str) -> Vec<u8>
     write_bytes(List[Int], List[Int]) -> Int = extern "lll_fs_runtime::write_bytes" as (str, Vec<u8>) -> i64
+    path_exists(List[Int]) -> Int            = extern "lll_fs_runtime::exists" as (str) -> i64
+    remove(List[Int]) -> Int                 = extern "lll_fs_runtime::remove" as (str) -> i64
+    mkdir(List[Int]) -> Int                  = extern "lll_fs_runtime::mkdir"  as (str) -> i64

@@ -12,4 +12,5 @@ module Std.Http:
   # proof never depends on what a server returned). Import to get `Http`, call `Http.get`.
 
   effect Http:
-    get(List[Int]) -> List[Int] = extern "lll_http_runtime::get" as (str) -> String
+    get(List[Int]) -> List[Int]                = extern "lll_http_runtime::get"  as (str) -> String
+    post(List[Int], List[Int]) -> List[Int]    = extern "lll_http_runtime::post" as (str, str) -> String

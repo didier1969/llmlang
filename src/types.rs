@@ -1894,6 +1894,9 @@ fn validate_extern_path(
         "lll_fs_runtime::now",
         "lll_fs_runtime::read_bytes",
         "lll_fs_runtime::write_bytes",
+        "lll_fs_runtime::exists",
+        "lll_fs_runtime::remove",
+        "lll_fs_runtime::mkdir",
     ];
     if root == "lll_fs_runtime" {
         if FS_RUNTIME_PATHS.contains(&p) {
@@ -1920,7 +1923,7 @@ fn validate_extern_path(
     }
     // REQ-LLL-151: the emitted `lll_http_runtime` glue (src/codegen.rs `emit_http_runtime`)
     // — a pure-`std` HTTP GET. A narrow EXACT set, same discipline as the other runtimes.
-    const HTTP_RUNTIME_PATHS: &[&str] = &["lll_http_runtime::get"];
+    const HTTP_RUNTIME_PATHS: &[&str] = &["lll_http_runtime::get", "lll_http_runtime::post"];
     if root == "lll_http_runtime" {
         if HTTP_RUNTIME_PATHS.contains(&p) {
             return Ok(());
@@ -1964,6 +1967,18 @@ fn validate_extern_path(
         return Err(format!(
             "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_httpx_runtime` path \
              — only {HTTPX_RUNTIME_PATHS:?} are built in (REQ-LLL-151)"
+        ));
+    }
+    // REQ-LLL-154 (codec): the emitted `lll_codec_runtime` glue (hex encode/decode).
+    const CODEC_RUNTIME_PATHS: &[&str] =
+        &["lll_codec_runtime::hex_encode", "lll_codec_runtime::hex_decode"];
+    if root == "lll_codec_runtime" {
+        if CODEC_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_codec_runtime` path \
+             — only {CODEC_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
         ));
     }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends

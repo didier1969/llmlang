@@ -199,6 +199,20 @@ mod lll_fs_runtime {
             .unwrap_or_else(|e| panic!("lll_fs_runtime::write_bytes `{path}`: {e}"));
         n
     }
+    // does a path exist? 1 = yes, 0 = no (total, no fault — a query never aborts).
+    pub fn exists(path: &str) -> i64 {
+        if std::path::Path::new(path).exists() { 1 } else { 0 }
+    }
+    // delete a file; fail-stop on error; returns 1 (the operation is a command, not a query).
+    pub fn remove(path: &str) -> i64 {
+        std::fs::remove_file(path).unwrap_or_else(|e| panic!("lll_fs_runtime::remove `{path}`: {e}"));
+        1
+    }
+    // create a directory and all its parents; fail-stop; returns 1. Idempotent (already-exists is OK).
+    pub fn mkdir(path: &str) -> i64 {
+        std::fs::create_dir_all(path).unwrap_or_else(|e| panic!("lll_fs_runtime::mkdir `{path}`: {e}"));
+        1
+    }
 }
 "#,
     );
@@ -219,6 +233,32 @@ mod lll_msgpack_runtime {
     }
     pub fn encode(v: serde_json::Value) -> Vec<u8> {
         rmp_serde::to_vec(&v).unwrap_or_else(|e| panic!("lll_msgpack_runtime::encode: {e}"))
+    }
+}
+"#,
+    );
+}
+
+/// REQ-LLL-154 (codec): the built-in byte/text codec runtime — hex encode/decode, pure
+/// `std`, no crate. Bytes cross the FFI as `Vec<u8>` (REQ-LLL-051), the hex text as
+/// `String`. `hex_decode` fail-stops on malformed input (odd length / non-hex digit).
+fn emit_codec_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_codec_runtime {
+    pub fn hex_encode(bytes: Vec<u8>) -> String {
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes { s.push_str(&format!("{:02x}", b)); }
+        s
+    }
+    pub fn hex_decode(text: &str) -> Vec<u8> {
+        let t = text.trim();
+        if t.len() % 2 != 0 { panic!("lll_codec_runtime::hex_decode: odd-length hex string"); }
+        (0..t.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&t[i..i + 2], 16)
+                .unwrap_or_else(|e| panic!("lll_codec_runtime::hex_decode `{}`: {e}", &t[i..i + 2])))
+            .collect()
     }
 }
 "#,
@@ -310,6 +350,27 @@ mod lll_http_runtime {
             Some(i) => text[i + 4..].to_string(),
             None => String::new(),
         }
+    }
+    // POST a text body and return the response BODY (REQ-LLL-151 follow-up). Same pure-std
+    // TcpStream path as `get`, with a Content-Length'd body. Faults fail-stop; http:// only.
+    pub fn post(url: &str, body: &str) -> String {
+        let u = url
+            .strip_prefix("http://")
+            .unwrap_or_else(|| panic!("lll_http_runtime::post: only http:// URLs are supported, got `{url}`"));
+        let (hostport, path) = match u.find('/') { Some(i) => (&u[..i], &u[i..]), None => (u, "/") };
+        let addr = if hostport.contains(':') { hostport.to_string() } else { format!("{hostport}:80") };
+        let host = hostport.split(':').next().unwrap_or(hostport);
+        let mut stream = std::net::TcpStream::connect(&addr)
+            .unwrap_or_else(|e| panic!("lll_http_runtime::post connect `{addr}`: {e}"));
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).unwrap_or_else(|e| panic!("lll_http_runtime::post write: {e}"));
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).unwrap_or_else(|e| panic!("lll_http_runtime::post read: {e}"));
+        let text = String::from_utf8_lossy(&resp);
+        match text.find("\r\n\r\n") { Some(i) => text[i + 4..].to_string(), None => String::new() }
     }
 }
 "#,
@@ -1042,6 +1103,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // REQ-LLL-151: emit the full-response HTTP runtime iff an op binds to it.
     if extern_ops.values().any(|p| p.starts_with("lll_httpx_runtime::")) {
         emit_httpx_runtime(&mut out);
+    }
+    // REQ-LLL-154 (codec): emit the built-in hex codec runtime iff an op binds to it.
+    if extern_ops.values().any(|p| p.starts_with("lll_codec_runtime::")) {
+        emit_codec_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

@@ -1,0 +1,11 @@
+module Std.Codec:
+
+  # Verified byte/text codecs (REQ-LLL-154) — hex encode/decode, for crypto, binary
+  # display, and wire formats. Binds to the compiler-emitted `lll_codec_runtime` shim
+  # (pure `std`, no crate). Bytes are `List[Int]`, the hex text is `List[Int]` codepoints;
+  # `hex_decode` fail-stops on malformed input (DEC-LLL-026). An EFFECT only because it
+  # crosses the FFI frontier — the codec itself is pure/total.
+
+  effect Codec:
+    hex_encode(List[Int]) -> List[Int] = extern "lll_codec_runtime::hex_encode" as (Vec<u8>) -> String
+    hex_decode(List[Int]) -> List[Int] = extern "lll_codec_runtime::hex_decode" as (str) -> Vec<u8>

@@ -389,6 +389,95 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
     assert!(!report.ok(), "elems opaque: proving its head == 10 must be impossible");
 }
 
+/// Emit + compile (single-file rustc) + run a pure-`std` program, returning stdout.
+fn run_pure_std(entry: &std::path::Path, dir: &std::path::Path, stem: &str) -> String {
+    let (_, m) = loader::load_program(entry.to_str().unwrap()).expect("load");
+    let cm = types::check_module(m).expect("check");
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join(format!("{stem}.rs"));
+    let bin = dir.join(format!("{stem}_bin"));
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "{stem} compile: {}", String::from_utf8_lossy(&st.stderr));
+    String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout).to_string()
+}
+
+#[test]
+fn verified_sys_fs_ops_req152() {
+    // REQ-LLL-152 follow-up: filesystem ops — `mkdir`/`path_exists`/`remove`. Make a dir,
+    // write a file (exists → 1), remove it (exists → 0): 1*10 + 0 = 10.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let fp = dir.join("sub/f.txt");
+    let fp = fp.to_str().unwrap();
+    let subp = dir.join("sub");
+    let subp = subp.to_str().unwrap();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/sys.lll\"\n\nmodule SysOpsApp:\n\n  part main() -> Int via IO, Sys:\n    let d = Sys.mkdir(\"{subp}\")\n    let w = Sys.write_file(\"{fp}\", \"hi\")\n    let e1 = Sys.path_exists(\"{fp}\")\n    let r = Sys.remove(\"{fp}\")\n    let e2 = Sys.path_exists(\"{fp}\")\n    yield IO.print(e1 * 10 + e2)\n"
+        ),
+    )
+    .unwrap();
+    let out = run_pure_std(&entry, &dir, "sysops");
+    assert!(out.contains("10"), "mkdir/write/exists=1/remove/exists=0 → 10, got: {out}");
+}
+
+#[test]
+fn verified_codec_hex_roundtrip_req154() {
+    // REQ-LLL-154 (codec): hex encode/decode round-trip. [255,16] → "ff10" → [255,16];
+    // recover the first byte 255.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/codec.lll\"\n\nmodule CodecApp:\n\n  part main() -> Int via IO, Codec:\n    let h = Codec.hex_encode(255 :: 16 :: [])\n    let b = Codec.hex_decode(h)\n    match b:\n      x :: t -> yield IO.print(x)\n      []     -> yield IO.print(0 - 1)\n"
+        ),
+    )
+    .unwrap();
+    let out = run_pure_std(&entry, &dir, "codec");
+    assert!(out.contains("255"), "hex round-trip first byte 255, got: {out}");
+}
+
+#[test]
+fn verified_http_post_body_req151() {
+    // REQ-LLL-151 follow-up: `Http.post` sends a body and returns the response body. A
+    // loopback server replies "posted"; the program recovers 'p' = 112.
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nposted",
+            );
+        }
+    });
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/http.lll\"\n\nmodule HttpPostApp:\n\n  part main() -> Int via IO, Http:\n    let resp = Http.post(\"http://127.0.0.1:{port}/\", \"data\")\n    match resp:\n      h :: t -> yield IO.print(h)\n      []     -> yield IO.print(0 - 1)\n"
+        ),
+    )
+    .unwrap();
+    let out = run_pure_std(&entry, &dir, "httppost");
+    let _ = server.join();
+    assert!(out.contains("112"), "Http.post response body first char 'p'=112, got: {out}");
+}
+
 #[test]
 fn verified_sys_bytes_roundtrip_req152() {
     // REQ-LLL-152 follow-up: raw-bytes file I/O (`Sys.read_bytes`/`write_bytes`) for
