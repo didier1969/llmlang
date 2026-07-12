@@ -439,6 +439,36 @@ fn malformed_lll_toml_errors_clearly_req149() {
     assert!(err.contains("lll.toml"), "error must reference the manifest: {err}");
 }
 
+#[test]
+fn std_root_imports_verified_stdlib_by_name_req144() {
+    // REQ-LLL-144 + REQ-LLL-149: the canonical `std` namespace is importable by
+    // NAME. This dogfoods import-by-name on the REAL verified stdlib source (copied
+    // here so the test is hermetic): `import std.list` resolves through a `std`
+    // root to the shipped, Z3-verified Std.List, and the whole program type-checks.
+    // Blessing `std` is only sound because every std module passes `check`
+    // standalone — pre-verified before this landed.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = req149_project("stdroot");
+    let std_dir = dir.join("std");
+    std::fs::create_dir_all(&std_dir).unwrap();
+    // Std.List path-imports `option.lll` relative to itself — copy both.
+    for m in ["option.lll", "list.lll"] {
+        std::fs::copy(format!("{repo}/std/{m}"), std_dir.join(m)).unwrap();
+    }
+    std::fs::write(dir.join("lll.toml"), "[imports]\nstd = \"std\"\n").unwrap();
+    let root = dir.join("main.lll");
+    std::fs::write(
+        &root,
+        "import std.list\n\nmodule M:\n\n  part main() -> Int:\n    yield len([1, 2, 3])\n",
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(root.to_str().unwrap())
+        .expect("`import std.list` must resolve through the std root");
+    let cm = types::check_module(m).expect("named-imported verified stdlib must type-check");
+    assert!(cm.index.contains_key("len"), "Std.List.len not merged via `std.list`");
+    assert!(cm.index.contains_key("main"), "root part lost");
+}
+
 
 #[test]
 fn typeclass_given_clause_surface_parses() {

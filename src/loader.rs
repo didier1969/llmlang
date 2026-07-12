@@ -30,6 +30,31 @@ struct Manifest {
     roots: HashMap<String, String>,
 }
 
+/// How named imports resolve for one whole program (REQ-LLL-149 / REQ-LLL-144). The
+/// project manifest and the built-in `std` directory are read ONCE at
+/// `load_program` and threaded down, so resolution is deterministic and free of
+/// mid-load environment reads. Precedence for a dotted root: an explicit manifest
+/// root wins (a project may override or vendor `std`), else the built-in `std` root
+/// resolves through `std_dir` (from `$LLL_STD`), else it is an error.
+struct Resolver {
+    manifest: Option<Manifest>,
+    /// The bundled stdlib directory (`$LLL_STD`), backing the canonical `std.*`
+    /// namespace when no manifest root shadows it. `None` = `$LLL_STD` unset.
+    std_dir: Option<PathBuf>,
+}
+
+/// `<base>/<seg1>/<seg2>/…/<last>.lll` — build a module file path from a base
+/// directory and the non-root dotted segments. Segments are identifiers (no dots),
+/// so the `.lll` extension lands on the final segment.
+fn module_path(base: PathBuf, rest: &[String]) -> PathBuf {
+    let mut p = base;
+    for seg in rest {
+        p.push(seg);
+    }
+    p.set_extension("lll");
+    p
+}
+
 /// Discover the nearest `lll.toml` by walking up from the ENTRY file's directory
 /// (never the cwd — `lll check foo.lll` must resolve the same from any working
 /// directory). The first manifest found in the ancestry wins and anchors EVERY
@@ -116,48 +141,64 @@ fn parse_manifest(path: &Path) -> Result<Manifest, String> {
 fn resolve_import(
     imp: &Import,
     importer_dir: &Path,
-    manifest: Option<&Manifest>,
+    resolver: &Resolver,
 ) -> Result<PathBuf, String> {
     match imp {
         Import::Path(p) => Ok(importer_dir.join(p)),
         Import::Name(segs) => {
-            let manifest = manifest.ok_or_else(|| {
-                format!(
-                    "named import `{}` needs a project `lll.toml` with an `[imports]` root, \
-                     but none was found in any ancestor directory",
-                    segs.join(".")
-                )
-            })?;
             let (root, rest) = segs.split_first().expect("named import has >= 2 segments");
-            let base = manifest.roots.get(root).ok_or_else(|| {
-                let mut avail: Vec<&str> = manifest.roots.keys().map(String::as_str).collect();
-                avail.sort_unstable();
-                format!(
-                    "named import `{}`: unknown import root `{}` (available roots in lll.toml: {})",
-                    segs.join("."),
-                    root,
-                    if avail.is_empty() {
-                        "none".to_string()
-                    } else {
-                        avail.join(", ")
-                    }
-                )
-            })?;
-            let mut p = manifest.dir.join(base);
-            for seg in rest {
-                p.push(seg);
+            // 1. an explicit manifest root wins — a project may vendor or override
+            //    any name, including `std`.
+            if let Some(m) = &resolver.manifest {
+                if let Some(base) = m.roots.get(root) {
+                    return Ok(module_path(m.dir.join(base), rest));
+                }
             }
-            p.set_extension("lll");
-            Ok(p)
+            // 2. the built-in `std` root, backed by `$LLL_STD` (the bundled,
+            //    verified stdlib). Content-hash identity means a mis-pointed
+            //    `$LLL_STD` diverges LOUDLY (different def-hash), never silently.
+            if root == "std" {
+                let std_dir = resolver.std_dir.as_ref().ok_or_else(|| {
+                    format!(
+                        "named import `{}`: the built-in `std` root needs the `LLL_STD` \
+                         environment variable set to the stdlib directory, or a `std` entry \
+                         in lll.toml's `[imports]`",
+                        segs.join(".")
+                    )
+                })?;
+                return Ok(module_path(std_dir.clone(), rest));
+            }
+            // 3. unknown root.
+            let mut avail: Vec<&str> = resolver
+                .manifest
+                .as_ref()
+                .map(|m| m.roots.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            avail.sort_unstable();
+            Err(format!(
+                "named import `{}`: unknown import root `{}` (available roots in lll.toml: {}; \
+                 the built-in `std` root needs `$LLL_STD`)",
+                segs.join("."),
+                root,
+                if avail.is_empty() {
+                    "none".to_string()
+                } else {
+                    avail.join(", ")
+                }
+            ))
         }
     }
 }
 
 pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let root = PathBuf::from(path);
-    // Discover the project manifest ONCE from the entry file; it anchors every
-    // named import in the program (REQ-LLL-149).
-    let manifest = find_manifest(&root)?;
+    // Build the name resolver ONCE from the entry file: the project manifest
+    // (REQ-LLL-149) plus the built-in `std` directory from `$LLL_STD`
+    // (REQ-LLL-144). Both anchor every named import in the whole program.
+    let resolver = Resolver {
+        manifest: find_manifest(&root)?,
+        std_dir: std::env::var_os("LLL_STD").map(PathBuf::from),
+    };
     let mut in_stack: Vec<PathBuf> = Vec::new();
     let mut merged_names: HashMap<String, String> = HashMap::new(); // name -> blind form
     let mut parts: Vec<Part> = Vec::new();
@@ -170,7 +211,7 @@ pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let (src, name) = load_rec(
         &root,
         true,
-        manifest.as_ref(),
+        &resolver,
         &mut in_stack,
         &mut visited,
         &mut merged_names,
@@ -225,16 +266,19 @@ fn canon(p: &Path) -> Result<PathBuf, String> {
 /// paths are returned so workspace-wide operations (e.g. `lll rename`,
 /// REQ-LLL-012) can rewrite each file in place.
 pub fn workspace_files(root: &str) -> Result<Vec<PathBuf>, String> {
-    let manifest = find_manifest(Path::new(root))?;
+    let resolver = Resolver {
+        manifest: find_manifest(Path::new(root))?,
+        std_dir: std::env::var_os("LLL_STD").map(PathBuf::from),
+    };
     let mut files = Vec::new();
     let mut seen = HashSet::new();
-    collect_files(Path::new(root), manifest.as_ref(), &mut files, &mut seen)?;
+    collect_files(Path::new(root), &resolver, &mut files, &mut seen)?;
     Ok(files)
 }
 
 fn collect_files(
     path: &Path,
-    manifest: Option<&Manifest>,
+    resolver: &Resolver,
     files: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
@@ -247,7 +291,7 @@ fn collect_files(
     files.push(path.to_path_buf());
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for imp in &module.imports {
-        collect_files(&resolve_import(imp, base, manifest)?, manifest, files, seen)?;
+        collect_files(&resolve_import(imp, base, resolver)?, resolver, files, seen)?;
     }
     Ok(())
 }
@@ -256,7 +300,7 @@ fn collect_files(
 fn load_rec(
     path: &Path,
     is_root: bool,
-    manifest: Option<&Manifest>,
+    resolver: &Resolver,
     in_stack: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
     merged_names: &mut HashMap<String, String>,
@@ -285,11 +329,11 @@ fn load_rec(
     // imports first (depth-first), relative to THIS file
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for imp in &module.imports {
-        let child = resolve_import(imp, base, manifest)?;
+        let child = resolve_import(imp, base, resolver)?;
         load_rec(
             &child,
             false,
-            manifest,
+            resolver,
             in_stack,
             visited,
             merged_names,
@@ -340,4 +384,68 @@ fn load_rec(
     in_stack.pop();
     visited.insert(canon_path);
     Ok((src, module.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name(segs: &[&str]) -> Import {
+        Import::Name(segs.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn manifest(dir: &str, roots: &[(&str, &str)]) -> Manifest {
+        Manifest {
+            dir: PathBuf::from(dir),
+            roots: roots
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    // REQ-LLL-144: the built-in `std` root resolves through `$LLL_STD` (here the
+    // Resolver's std_dir, set directly to keep the test free of process-global env).
+    #[test]
+    fn std_root_resolves_through_std_dir() {
+        let r = Resolver {
+            manifest: None,
+            std_dir: Some(PathBuf::from("/opt/lll-std")),
+        };
+        let p = resolve_import(&name(&["std", "list"]), Path::new("."), &r).unwrap();
+        assert_eq!(p, PathBuf::from("/opt/lll-std/list.lll"));
+    }
+
+    // Multi-segment `std.collections.map` nests under the stdlib dir.
+    #[test]
+    fn std_root_resolves_nested_module() {
+        let r = Resolver {
+            manifest: None,
+            std_dir: Some(PathBuf::from("/opt/lll-std")),
+        };
+        let p = resolve_import(&name(&["std", "collections", "map"]), Path::new("."), &r).unwrap();
+        assert_eq!(p, PathBuf::from("/opt/lll-std/collections/map.lll"));
+    }
+
+    // A manifest `std` root OVERRIDES the built-in — a project may vendor its own std.
+    #[test]
+    fn manifest_root_overrides_builtin_std() {
+        let r = Resolver {
+            manifest: Some(manifest("/proj", &[("std", "vendor/std")])),
+            std_dir: Some(PathBuf::from("/opt/lll-std")),
+        };
+        let p = resolve_import(&name(&["std", "list"]), Path::new("."), &r).unwrap();
+        assert_eq!(p, PathBuf::from("/proj/vendor/std/list.lll"));
+    }
+
+    // `std` import with neither a manifest `std` root nor `$LLL_STD` errors, naming LLL_STD.
+    #[test]
+    fn std_without_std_dir_errors_naming_lll_std() {
+        let r = Resolver {
+            manifest: None,
+            std_dir: None,
+        };
+        let err = resolve_import(&name(&["std", "list"]), Path::new("."), &r).unwrap_err();
+        assert!(err.contains("LLL_STD"), "error must name LLL_STD: {err}");
+    }
 }
