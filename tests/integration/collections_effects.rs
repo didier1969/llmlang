@@ -429,6 +429,22 @@ fn verified_bigint_i128_arithmetic_beyond_i64_req157() {
 }
 
 #[test]
+fn bigint_to_int_binds_arg_once_req157() {
+    // REQ-LLL-157a (regression, advisor-caught): `to_int(f(...))` where `f` CONSUMES a
+    // non-Copy value must not emit `f(...)` twice (that would move the value twice →
+    // rustc E0382). `arr_big` updates its array (owns + moves it), so `to_int(arr_big(a))`
+    // is exactly the consuming case. get(set(a,0,42),0) = 42.
+    let src = "module ToIntOnce:\n\n  part arr_big(a: Array[Int]) -> Big:\n    requires length(a) >= 1\n    yield big(get(set(a, 0, 42), 0))\n\n  part main() -> Int via IO:\n    let a = array(1, 2, 3)\n    yield IO.print(to_int(arr_big(a)))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "arr_big must verify: {:?}", failures(&report));
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(&entry, src).unwrap();
+    let out = run_pure_std(&entry, &dir, "toint1");
+    assert!(out.contains("42"), "to_int of a consuming Big call must compile+run → 42, got: {out}");
+}
+
+#[test]
 fn bigint_contract_is_not_vacuous_req157() {
     // REQ-LLL-157a SOUNDNESS: a FALSE `Big` contract must NOT verify — `result > x` cannot
     // be proven when the body just returns `x`. A green here would mean Big proofs are vacuous.

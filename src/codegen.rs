@@ -3470,7 +3470,10 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             if name == "big" {
                 format!("i128::from({x})")
             } else {
-                format!("i64::try_from({x}).unwrap_or_else(|_| panic!(\"to_int: Big value {{}} exceeds i64 range\", {x}))")
+                // bind ONCE — the argument may be a call that consumes a non-Copy value,
+                // and emitting it twice would move it twice (rustc E0382). i128 is Copy,
+                // so reusing `__v` in the panic is free.
+                format!("{{ let __v = {x}; i64::try_from(__v).unwrap_or_else(|_| panic!(\"to_int: Big value {{}} exceeds i64 range\", __v)) }}")
             }
         }
         Expr::Call(name, args)
