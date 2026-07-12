@@ -1,0 +1,52 @@
+depends serde_json "1.0.150"
+
+module Std.Httpx:
+
+  # Verified HTTP with a FULL response (REQ-LLL-151 follow-up) — `request(url)` returns a
+  # `[status, body]` pair as the shared `Json` ADT (status a JNum, body a JStr). Binds to
+  # the compiler-emitted `lll_httpx_runtime` shim (pure-`std` TcpStream GET, mapped to a
+  # serde_json Array). Kept separate from `std/http.lll` (body-only `get`, no serde_json)
+  # so each program pulls only what it uses. Faults fail-stop ; plain `http://` only.
+
+  type Json  = JNull | JBool(Bool) | JNum(Int) | JStr(List[Int]) | JArr(List[Json]) | JObj(List[Entry])
+  type Entry = E(List[Int], Json)
+
+  effect Httpx:
+    request(List[Int]) -> Json = extern "lll_httpx_runtime::request" as (str) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]
+
+  part unarr(j: Json) -> List[Json]:
+    match j:
+      JArr(xs) -> yield xs
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JStr(s)  -> yield []
+      JObj(es) -> yield []
+
+  part nth(xs: List[Json], i: Int) -> Json:
+    match xs:
+      []     -> yield JNull
+      h :: t ->
+        match i == 0:
+          true  -> yield h
+          false -> yield nth(t, i - 1)
+
+  # HTTP status code of a response.
+  part status_of(resp: Json) -> Int:
+    match nth(unarr(resp), 0):
+      JNum(n)  -> yield n
+      JNull    -> yield 0 - 1
+      JBool(b) -> yield 0 - 1
+      JStr(s)  -> yield 0 - 1
+      JArr(xs) -> yield 0 - 1
+      JObj(es) -> yield 0 - 1
+
+  # response body codepoints.
+  part body_of(resp: Json) -> List[Int]:
+    match nth(unarr(resp), 1):
+      JStr(s)  -> yield s
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JArr(xs) -> yield []
+      JObj(es) -> yield []

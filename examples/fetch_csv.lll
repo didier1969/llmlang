@@ -1,0 +1,20 @@
+import "../std/http.lll"
+import "../std/csv.lll"
+
+module App.FetchCsv:
+
+  # Dogfood (REQ-LLL-151 + REQ-LLL-154) : the "fetch then parse" flow every data tool
+  # needs, composed from the new ecosystem effects. GET a CSV document over HTTP with
+  # `Http`, parse it with `Csv` into the shared `Json` ADT, and pull out the first cell.
+  # Pure llmlang glue; the network + CSV parsing are the compiler-emitted shims, and the
+  # `Std.DbJson` destructors (imported transitively via std/csv.lll) read the result.
+
+  part first_cell(rows: Json) -> List[Int]:
+    yield cell_str(nth(unarr(rows), 0), 0)
+
+  part main() -> Int via IO, Http, Csv:
+    let body = Http.get("http://127.0.0.1:8080/data.csv")
+    let table = Csv.parse(body)
+    match first_cell(table):
+      h :: t -> yield IO.print(h)
+      []     -> yield IO.print(0 - 1)

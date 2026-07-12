@@ -1,0 +1,17 @@
+import "../std/toml.lll"
+import "../std/sys.lll"
+
+module App.LoadConfig:
+
+  # Dogfood (REQ-LLL-152 + REQ-LLL-154) : a real config-loading flow composing the new
+  # ecosystem effects. Read a TOML file off disk with `Sys`, parse it with `Toml` into the
+  # shared `Json` ADT, and pull the first setting out — the pattern any CLI tool needs.
+  # Pure llmlang glue; the messy edges (disk, TOML) are the compiler-emitted shims.
+
+  part first_setting(cfg: Json) -> Int:
+    yield unnum(entry_val(unobj(cfg), 0))
+
+  part main() -> Int via IO, Sys, Toml:
+    let text = Sys.read_file("app.toml")
+    let cfg = Toml.parse(text)
+    yield IO.print(first_setting(cfg))

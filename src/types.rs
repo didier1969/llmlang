@@ -1892,6 +1892,8 @@ fn validate_extern_path(
         "lll_fs_runtime::write_file",
         "lll_fs_runtime::getenv",
         "lll_fs_runtime::now",
+        "lll_fs_runtime::read_bytes",
+        "lll_fs_runtime::write_bytes",
     ];
     if root == "lll_fs_runtime" {
         if FS_RUNTIME_PATHS.contains(&p) {
@@ -1940,6 +1942,28 @@ fn validate_extern_path(
         return Err(format!(
             "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_msgpack_runtime` \
              path — only {MSGPACK_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
+        ));
+    }
+    // REQ-LLL-154: the emitted `lll_toml_runtime` glue (TOML config parsing).
+    const TOML_RUNTIME_PATHS: &[&str] = &["lll_toml_runtime::parse"];
+    if root == "lll_toml_runtime" {
+        if TOML_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_toml_runtime` path \
+             — only {TOML_RUNTIME_PATHS:?} are built in (REQ-LLL-154)"
+        ));
+    }
+    // REQ-LLL-151: the emitted `lll_httpx_runtime` glue (HTTP GET with a full response).
+    const HTTPX_RUNTIME_PATHS: &[&str] = &["lll_httpx_runtime::request"];
+    if root == "lll_httpx_runtime" {
+        if HTTPX_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_httpx_runtime` path \
+             — only {HTTPX_RUNTIME_PATHS:?} are built in (REQ-LLL-151)"
         ));
     }
     // REQ-LLL-053 (4): Cargo accepts a hyphenated package name (`depends

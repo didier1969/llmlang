@@ -186,6 +186,19 @@ mod lll_fs_runtime {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     }
+    // read a file's RAW bytes (REQ-LLL-152 follow-up) — for binary files the UTF-8
+    // `read_file` cannot handle. Fail-stop on I/O error. The FFI marshals `Vec<u8>` to
+    // `List[Int]` bytes (REQ-LLL-051).
+    pub fn read_bytes(path: &str) -> Vec<u8> {
+        std::fs::read(path).unwrap_or_else(|e| panic!("lll_fs_runtime::read_bytes `{path}`: {e}"))
+    }
+    // write raw bytes to a file (create/truncate); fail-stop; returns the byte count.
+    pub fn write_bytes(path: &str, content: Vec<u8>) -> i64 {
+        let n = content.len() as i64;
+        std::fs::write(path, content)
+            .unwrap_or_else(|e| panic!("lll_fs_runtime::write_bytes `{path}`: {e}"));
+        n
+    }
 }
 "#,
     );
@@ -206,6 +219,58 @@ mod lll_msgpack_runtime {
     }
     pub fn encode(v: serde_json::Value) -> Vec<u8> {
         rmp_serde::to_vec(&v).unwrap_or_else(|e| panic!("lll_msgpack_runtime::encode: {e}"))
+    }
+}
+"#,
+    );
+}
+
+/// REQ-LLL-154: the built-in TOML runtime — config parsing that reuses the shared `Json`
+/// marshalling. `toml::from_str::<serde_json::Value>` maps a TOML document to the same
+/// recursive `Json` ADT (tables → objects). Its OWN module (uses `toml`), so a program
+/// that only needs CSV/msgpack never references `toml`. Parse faults fail-stop.
+fn emit_toml_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_toml_runtime {
+    pub fn parse(text: &str) -> serde_json::Value {
+        toml::from_str(text).unwrap_or_else(|e| panic!("lll_toml_runtime::parse: {e}"))
+    }
+}
+"#,
+    );
+}
+
+/// REQ-LLL-151: the built-in HTTP runtime with a full RESPONSE — a pure-`std` blocking
+/// `GET` that returns a `serde_json` Array `[status, body]` (status as a Number, body as a
+/// String), mapped into the shared `Json` ADT. Its OWN module (uses `serde_json`), so a
+/// body-only `get` program never references `serde_json`. Connect/read faults fail-stop;
+/// plain `http://` only.
+fn emit_httpx_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_httpx_runtime {
+    use std::io::{Read, Write};
+    pub fn request(url: &str) -> serde_json::Value {
+        let u = url
+            .strip_prefix("http://")
+            .unwrap_or_else(|| panic!("lll_httpx_runtime::request: only http:// URLs are supported, got `{url}`"));
+        let (hostport, path) = match u.find('/') { Some(i) => (&u[..i], &u[i..]), None => (u, "/") };
+        let addr = if hostport.contains(':') { hostport.to_string() } else { format!("{hostport}:80") };
+        let host = hostport.split(':').next().unwrap_or(hostport);
+        let mut stream = std::net::TcpStream::connect(&addr)
+            .unwrap_or_else(|e| panic!("lll_httpx_runtime::request connect `{addr}`: {e}"));
+        let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap_or_else(|e| panic!("lll_httpx_runtime::request write: {e}"));
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).unwrap_or_else(|e| panic!("lll_httpx_runtime::request read: {e}"));
+        let text = String::from_utf8_lossy(&resp);
+        let status: i64 = text.lines().next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = match text.find("\r\n\r\n") { Some(i) => text[i + 4..].to_string(), None => String::new() };
+        serde_json::json!([status, body])
     }
 }
 "#,
@@ -969,6 +1034,14 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     // REQ-LLL-154: emit the built-in MessagePack runtime iff an op binds to it.
     if extern_ops.values().any(|p| p.starts_with("lll_msgpack_runtime::")) {
         emit_msgpack_runtime(&mut out);
+    }
+    // REQ-LLL-154: emit the built-in TOML runtime iff an op binds to it.
+    if extern_ops.values().any(|p| p.starts_with("lll_toml_runtime::")) {
+        emit_toml_runtime(&mut out);
+    }
+    // REQ-LLL-151: emit the full-response HTTP runtime iff an op binds to it.
+    if extern_ops.values().any(|p| p.starts_with("lll_httpx_runtime::")) {
+        emit_httpx_runtime(&mut out);
     }
     // user tail-resumptive effects (REQ-LLL-026 item 2, DEC-LLL-037): effect →
     // its ops (sorted). An effect is user-tail iff every op is value-returning

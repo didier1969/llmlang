@@ -1,0 +1,50 @@
+depends serde_json "1.0.150"
+depends toml "0.8.23"
+
+module Std.Toml:
+
+  # Verified TOML config parsing (REQ-LLL-154) — reuses the shared `Json` marshalling.
+  # `toml::from_str::<serde_json::Value>` maps a TOML document to the SAME recursive `Json`
+  # ADT (tables → objects, REQ-LLL-074) used for JSON/msgpack. The compiler emits a
+  # `lll_toml_runtime` shim; parse faults fail-stop (DEC-LLL-026). Read-only (parse) for
+  # this slice; serialization is a follow-up.
+
+  type Json  = JNull | JBool(Bool) | JNum(Int) | JStr(List[Int]) | JArr(List[Json]) | JObj(List[Entry])
+  type Entry = E(List[Int], Json)
+
+  effect Toml:
+    parse(List[Int]) -> Json = extern "lll_toml_runtime::parse" as (str) -> enum serde_json::Value [ Null -> JNull, Bool -> JBool, Number -> JNum, String -> JStr, Array -> JArr, Object -> JObj ]
+
+  # the entries of a JObj table ; [] for a non-object.
+  part unobj(j: Json) -> List[Entry]:
+    match j:
+      JObj(es) -> yield es
+      JNull    -> yield []
+      JBool(b) -> yield []
+      JNum(n)  -> yield []
+      JStr(s)  -> yield []
+      JArr(xs) -> yield []
+
+  # the value carried by an entry.
+  part valof(e: Entry) -> Json:
+    match e:
+      E(k, v) -> yield v
+
+  # the value of the entry at index `i` of a table's entry list ; JNull past the end.
+  part entry_val(es: List[Entry], i: Int) -> Json:
+    match es:
+      []     -> yield JNull
+      e :: t ->
+        match i == 0:
+          true  -> yield valof(e)
+          false -> yield entry_val(t, i - 1)
+
+  # the Int carried by a JNum ; an out-of-band sentinel otherwise.
+  part unnum(j: Json) -> Int:
+    match j:
+      JNum(n)  -> yield n
+      JNull    -> yield 0 - 1
+      JBool(b) -> yield 0 - 2
+      JStr(s)  -> yield 0 - 3
+      JArr(xs) -> yield 0 - 4
+      JObj(es) -> yield 0 - 5

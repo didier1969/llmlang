@@ -16,3 +16,5 @@ module Std.Sys:
     write_file(List[Int], List[Int]) -> Int  = extern "lll_fs_runtime::write_file" as (str, str) -> i64
     getenv(List[Int]) -> List[Int]           = extern "lll_fs_runtime::getenv"     as (str) -> String
     now() -> Int                              = extern "lll_fs_runtime::now"
+    read_bytes(List[Int]) -> List[Int]       = extern "lll_fs_runtime::read_bytes"  as (str) -> Vec<u8>
+    write_bytes(List[Int], List[Int]) -> Int = extern "lll_fs_runtime::write_bytes" as (str, Vec<u8>) -> i64

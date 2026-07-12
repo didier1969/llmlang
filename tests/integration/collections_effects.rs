@@ -390,6 +390,119 @@ fn set_elems_is_opaque_cannot_prove_specific_value_req150() {
 }
 
 #[test]
+fn verified_sys_bytes_roundtrip_req152() {
+    // REQ-LLL-152 follow-up: raw-bytes file I/O (`Sys.read_bytes`/`write_bytes`) for
+    // binary files. Pure `std`, single-file. Write [104,105]=("hi" bytes), read back,
+    // recover the first byte 104.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let target = dir.join("bin.dat");
+    let tpath = target.to_str().unwrap();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/sys.lll\"\n\nmodule T:\n\n  part main() -> Int via IO, Sys:\n    let n = Sys.write_bytes(\"{tpath}\", 104 :: 105 :: [])\n    let bs = Sys.read_bytes(\"{tpath}\")\n    match bs:\n      h :: t -> yield IO.print(h)\n      []     -> yield IO.print(0 - 1)\n"
+        ),
+    )
+    .unwrap();
+    let (_, m) = loader::load_program(entry.to_str().unwrap()).expect("load sys bytes");
+    let cm = types::check_module(m).expect("check");
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let rs = dir.join("b.rs");
+    let bin = dir.join("b_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(st.status.success(), "sys bytes compile: {}", String::from_utf8_lossy(&st.stderr));
+    let out = String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout)
+        .to_string();
+    assert!(out.contains("104"), "Sys.write_bytes then read_bytes first byte 104, got: {out}");
+    assert_eq!(std::fs::read(&target).unwrap(), vec![104u8, 105], "the bytes must hit disk");
+}
+
+#[test]
+fn verified_toml_parse_req154() {
+    // REQ-LLL-154 follow-up: TOML config parsing (std/toml.lll) reuses the shared `Json`
+    // marshalling — `x = 42` parses to a table (JObj) whose first entry's value is 42.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/toml.lll\"\n\nmodule TomlApp:\n\n  part main() -> Int via IO, Toml:\n    let cfg = Toml.parse(\"x = 42\")\n    yield IO.print(unnum(entry_val(unobj(cfg), 0)))\n"
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&entry)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    assert!(
+        out.status.success(),
+        "TOML parse failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("42"),
+        "TOML `x = 42` first value = 42, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn verified_httpx_status_req151() {
+    // REQ-LLL-151 follow-up: full HTTP response (std/httpx.lll) — `request` returns
+    // [status, body]; a loopback server returns 200, and `status_of` recovers it.
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+        }
+    });
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let dir = tempdir();
+    let entry = dir.join("main.lll");
+    std::fs::write(
+        &entry,
+        format!(
+            "import \"{repo}/std/httpx.lll\"\n\nmodule HttpxApp:\n\n  part main() -> Int via IO, Httpx:\n    let resp = Httpx.request(\"http://127.0.0.1:{port}/\")\n    yield IO.print(status_of(resp))\n"
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("run")
+        .arg(&entry)
+        .current_dir(repo)
+        .output()
+        .expect("run lll");
+    let _ = server.join();
+    assert!(
+        out.status.success(),
+        "httpx request failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("200"),
+        "httpx status_of = 200, got:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
 fn verified_http_get_body_req151() {
     // REQ-LLL-151: the `Http` effect (std/http.lll) performs a REAL HTTP GET through the
     // pure-`std` `lll_http_runtime` shim. Self-contained: a loopback `TcpListener` thread
@@ -448,7 +561,7 @@ fn verified_msgpack_encode_decode_roundtrip_req154() {
     std::fs::write(
         &entry,
         format!(
-            "import \"{repo}/std/msgpack.lll\"\n\nmodule T:\n\n  part main() -> Int via IO, Msgpack:\n    let bytes = Msgpack.encode(JNum(42))\n    let back = Msgpack.decode(bytes)\n    yield IO.print(unnum(back))\n"
+            "import \"{repo}/std/msgpack.lll\"\n\nmodule MsgpackApp:\n\n  part main() -> Int via IO, Msgpack:\n    let bytes = Msgpack.encode(JNum(42))\n    let back = Msgpack.decode(bytes)\n    yield IO.print(unnum(back))\n"
         ),
     )
     .unwrap();
@@ -484,7 +597,7 @@ fn verified_csv_parse_write_roundtrip_req154() {
     std::fs::write(
         &entry,
         format!(
-            "import \"{repo}/std/csv.lll\"\n\nmodule T:\n\n  part main() -> Int via IO, Csv:\n    let p1 = Csv.parse(\"a,b,c\")\n    let text = Csv.write(p1)\n    let p2 = Csv.parse(text)\n    let cell = cell_str(nth(unarr(p2), 0), 2)\n    match cell:\n      h :: t -> yield IO.print(h)\n      []     -> yield IO.print(0 - 1)\n"
+            "import \"{repo}/std/csv.lll\"\n\nmodule CsvApp:\n\n  part main() -> Int via IO, Csv:\n    let p1 = Csv.parse(\"a,b,c\")\n    let text = Csv.write(p1)\n    let p2 = Csv.parse(text)\n    let cell = cell_str(nth(unarr(p2), 0), 2)\n    match cell:\n      h :: t -> yield IO.print(h)\n      []     -> yield IO.print(0 - 1)\n"
         ),
     )
     .unwrap();
