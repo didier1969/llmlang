@@ -1,0 +1,53 @@
+module Ledger:
+
+  # A verified single-account ledger. Every operation carries the invariant that a
+  # balance never goes negative (no overdraft) — proved by Z3, not hoped for. This is the
+  # dogfood subject for the big-project bench: an LLM editing any part only needs these
+  # CONTRACTS, never the bodies, to stay correct.
+
+  # Deposit `amt` into `bal`. Balance can only grow.
+  part deposit(bal: Int, amt: Int) -> Int:
+    requires bal >= 0
+    requires amt >= 0
+    ensures result >= bal
+    ensures result == bal + amt
+    yield bal + amt
+
+  # Withdraw `amt` from `bal`. The precondition `amt <= bal` is what makes "no overdraft"
+  # provable: the result is machine-checked non-negative.
+  part withdraw(bal: Int, amt: Int) -> Int:
+    requires bal >= 0
+    requires amt >= 0
+    requires amt <= bal
+    ensures result >= 0
+    ensures result == bal - amt
+    yield bal - amt
+
+  # The conservation law, as a proved identity: moving `amt` from one account to another
+  # leaves the total untouched. Z3 discharges `(from - amt) + (to + amt) == from + to`.
+  part conserved(src: Int, dst: Int, amt: Int) -> Bool:
+    requires src >= 0
+    requires dst >= 0
+    requires amt >= 0
+    requires amt <= src
+    ensures result == true
+    yield (src - amt) + (dst + amt) == src + dst
+
+  # Post `n` deposits of `step` onto a starting balance — non-structural recursion, so it
+  # carries a `measure`. The running balance stays non-negative by construction.
+  part accrue(bal: Int, step: Int, n: Int) -> Int:
+    requires bal >= 0
+    requires step >= 0
+    requires n >= 0
+    measure n
+    ensures result >= bal
+    match n:
+      0 -> yield bal
+      _ -> yield accrue(deposit(bal, step), step, n - 1)
+
+  part main() -> Int via IO:
+    let opening = 100
+    let after_pay = deposit(opening, 250)
+    let after_rent = withdraw(after_pay, 300)
+    let grown = accrue(after_rent, 10, 5)
+    yield IO.print(grown)
