@@ -65,16 +65,21 @@ fn lsp_streams_diagnostics_for_open_documents_req160() {
     let dir = tempdir();
     let good_uri = format!("file://{}/good.lll", dir.display());
     let bad_uri = format!("file://{}/bad.lll", dir.display());
+    let hole_uri = format!("file://{}/hole.lll", dir.display());
     // CLEAN: no contract, no holes → verifies with zero diagnostics.
     let good = "module Good:\n\n  part f(x: Int) -> Int:\n    yield x\n";
-    // BROKEN: `ensures result > x` while returning `x` — an undischarged obligation.
+    // BROKEN: `ensures result > x` while returning `x` — an undischarged obligation
+    // whose Z3 model decodes to a concrete counterexample.
     let bad = "module Bad:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x\n";
+    // INCOMPLETE: a typed hole `?` — carries an expected type and in-scope binders.
+    let hole = "module Hole:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
 
     let mut input = String::new();
     input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
     input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"initialized","params":{}})));
     input.push_str(&frame(&did_open(&good_uri, good)));
     input.push_str(&frame(&did_open(&bad_uri, bad)));
+    input.push_str(&frame(&did_open(&hole_uri, hole)));
     input.push_str(&frame(&json!({"jsonrpc":"2.0","id":2,"method":"shutdown"})));
     input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
 
@@ -109,14 +114,31 @@ fn lsp_streams_diagnostics_for_open_documents_req160() {
         "clean document should have no diagnostics"
     );
 
-    // 3) the broken document publishes at least one ERROR diagnostic.
+    // 3) the broken document publishes an ERROR diagnostic whose structured `data`
+    //    carries the DECODED counterexample — the repair menu, reached through the
+    //    REAL verifier verdict (not a hand-built Diagnostic). This is the LSP's whole
+    //    reason to exist for an LLM agent, so it must be verified end-to-end.
     let bad_pub = publish_for(&frames, &bad_uri).expect("no publishDiagnostics for bad doc");
     let bad_diags = bad_pub["params"]["diagnostics"].as_array().unwrap();
     assert!(!bad_diags.is_empty(), "broken document should have a diagnostic");
     assert_eq!(bad_diags[0]["severity"], json!(1), "an undischarged obligation is an error");
     assert_eq!(bad_diags[0]["source"], json!("lll"));
+    let ce = bad_diags[0]["data"]["counterexample"].as_array().expect("data.counterexample present");
+    assert!(!ce.is_empty(), "the counterexample must be non-empty and reach the agent");
+    assert!(ce[0].get("var").is_some() && ce[0].get("value").is_some(), "decoded var=value");
 
-    // 4) shutdown is acknowledged (result: null for id 2).
+    // 4) the holey document publishes a WARNING diagnostic whose `data` is the typed-hole
+    //    repair menu — expected type + in-scope binders — again through the real pipeline.
+    let hole_pub = publish_for(&frames, &hole_uri).expect("no publishDiagnostics for hole doc");
+    let hole_diags = hole_pub["params"]["diagnostics"].as_array().unwrap();
+    assert!(!hole_diags.is_empty(), "holey document should have a diagnostic");
+    assert_eq!(hole_diags[0]["severity"], json!(2), "a typed hole is incomplete, not an error");
+    assert_eq!(hole_diags[0]["data"]["expected_type"], json!("Int"), "the hole's expected type");
+    let scope = hole_diags[0]["data"]["scope"].as_array().expect("data.scope present");
+    let names: Vec<&str> = scope.iter().filter_map(|a| a["var"].as_str()).collect();
+    assert!(names.contains(&"n") && names.contains(&"acc"), "in-scope binders reach the agent: {names:?}");
+
+    // 5) shutdown is acknowledged (result: null for id 2).
     let sd = frames.iter().find(|m| m["id"] == json!(2)).expect("no shutdown response");
     assert_eq!(sd["result"], json!(null));
 }
