@@ -109,7 +109,14 @@ impl Server {
     where
         F: Fn(&str, &str) -> diag::Report,
     {
-        let report = check(uri, text);
+        // A language server is long-running: a panic anywhere in the checker (e.g.
+        // deep in `verify`) must NOT tear down the process and silently strand the
+        // editor. Catch it and report it as a diagnostic, keeping the server alive —
+        // the robustness contract the one-shot CLI never needed (mirrors `fuzz_one`).
+        let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(uri, text)))
+            .unwrap_or_else(|_| {
+                err_report("lsp: internal error while checking this document (checker panicked)")
+            });
         publish(uri, report_to_diagnostics(&report, text))
     }
 }
@@ -239,9 +246,20 @@ where
     if std::fs::write(&tmp, text).is_err() {
         return err_report("lsp: cannot write buffer to a temp file for checking");
     }
-    let report = check_file(&tmp.to_string_lossy());
-    let _ = std::fs::remove_file(&tmp);
-    report
+    // RAII so the temp is removed on the normal path AND on an unwind (a checker
+    // panic must not leak `.lll-lsp-*` into the user's directory).
+    let _guard = TmpFile(tmp.clone());
+    check_file(&tmp.to_string_lossy())
+}
+
+/// Removes its path on drop — including during unwind — so a panic in the checker
+/// never leaves a stray buffer temp behind.
+struct TmpFile(PathBuf);
+
+impl Drop for TmpFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn err_report(msg: &str) -> diag::Report {
@@ -441,6 +459,30 @@ mod tests {
         // a NOTIFICATION (no id) for an unknown method → silently ignored.
         let notif = s.handle(&json!({"jsonrpc":"2.0","method":"$/setTrace","params":{}}), &fake_check);
         assert!(notif.is_empty());
+    }
+
+    #[test]
+    fn a_panicking_checker_does_not_kill_the_server() {
+        // A long-running server must survive a checker panic: the offending document
+        // gets an error diagnostic, and the NEXT message is still served.
+        fn panicky(_uri: &str, text: &str) -> diag::Report {
+            if text.contains("PANIC") {
+                panic!("boom in the checker");
+            }
+            diag::Report { ok: true, status: None, module: None, diagnostics: vec![] }
+        }
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic's backtrace
+        let mut s = Server::new();
+        let out = s.handle(&did_open("file:///m.lll", "PANIC now\n"), &panicky);
+        std::panic::set_hook(prev);
+        assert_eq!(out.len(), 1);
+        let diags = out[0]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1, "a panic must surface as one error diagnostic");
+        assert_eq!(diags[0]["severity"], json!(1));
+        // server still usable: a clean subsequent edit publishes zero diagnostics.
+        let after = s.handle(&did_open("file:///ok.lll", "fine\n"), &panicky);
+        assert_eq!(after[0]["params"]["diagnostics"].as_array().unwrap().len(), 0);
     }
 
     #[test]

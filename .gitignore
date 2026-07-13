@@ -3,6 +3,8 @@
 *.zip
 .lll-cache/
 /build
+# lsp buffer temp (REQ-LLL-160) — sibling of the edited file, normally auto-removed
+.lll-lsp-*
 
 # Agent worktrees / local tooling state
 .claude/
