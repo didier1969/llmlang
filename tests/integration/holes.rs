@@ -179,6 +179,32 @@ fn holey_module_check_exits_2_build_refuses_then_filling_verifies_and_builds() {
 
 
 #[test]
+fn moving_a_hole_preserves_identity_but_filling_changes_it_req161() {
+    // REQ-LLL-161 SOUNDNESS DISCRIMINATOR (DEC-LLL-020): a `?` now carries its own source
+    // LINE so its diagnostic squiggles the hole itself, not the enclosing `part`. That line
+    // is a DIAGNOSTIC position — ERASED from the content-hash exactly like `Part.line`. This
+    // test is the guard that the erase is REAL and not a leak: two byte-for-byte-identical
+    // DEFINITIONS whose ONLY difference is a blank line shifting the `?` onto a different
+    // source line MUST share one def-hash (moving a hole is not a new definition). It goes
+    // RED the instant the canon leaks the position (e.g. `(hole {line})` instead of the bare
+    // `(hole)`) — verified by flipping the canon locally during development.
+    let hole_on_line4 = "module M:\n\n  part f(n: Int) -> Int:\n    yield ?\n";
+    let hole_on_line5 = "module M:\n\n  part f(n: Int) -> Int:\n\n    yield ?\n";
+    let h4 = hash::hash_module(&full(hole_on_line4).0).unwrap().def_hash["f"].clone();
+    let h5 = hash::hash_module(&full(hole_on_line5).0).unwrap().def_hash["f"].clone();
+    assert_eq!(
+        h4, h5,
+        "moving a hole to another source line preserves identity — the position is erased from the hash"
+    );
+    // companion invariant (still holds): FILLING the hole IS a new definition — the `(hole)`
+    // token becomes the term, so the def-hash changes. Position-erased ≠ hole-erased.
+    let filled = "module M:\n\n  part f(n: Int) -> Int:\n    yield n\n";
+    let hf = hash::hash_module(&full(filled).0).unwrap().def_hash["f"].clone();
+    assert_ne!(h4, hf, "filling the hole changes identity (hole token → term)");
+}
+
+
+#[test]
 fn typed_hole_scope_includes_let_and_pattern_binders() {
     // REQ-LLL-059 / DEC-LLL-052 (A1 feedback contract): `HoleInfo.scope` is documented as
     // "params + lets + pattern binders", yet only the params case was pinned. The other two

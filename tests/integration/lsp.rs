@@ -148,6 +148,14 @@ fn lsp_streams_diagnostics_for_open_documents_req160() {
     let hole_diags = hole_pub["params"]["diagnostics"].as_array().unwrap();
     assert!(!hole_diags.is_empty(), "holey document should have a diagnostic");
     assert_eq!(hole_diags[0]["severity"], json!(2), "a typed hole is incomplete, not an error");
+    // REQ-LLL-161: the hole squiggles its OWN line — the `yield ?` at line 5 (0-based 4) —
+    // not the enclosing `part` signature (line 3). The carried line is a diagnostic position
+    // erased from identity, so precision here costs the hash nothing.
+    assert_eq!(
+        hole_diags[0]["range"]["start"]["line"],
+        json!(4),
+        "the hole anchors on the `?` line, not the part signature"
+    );
     assert_eq!(hole_diags[0]["data"]["expected_type"], json!("Int"), "the hole's expected type");
     let scope = hole_diags[0]["data"]["scope"].as_array().expect("data.scope present");
     let names: Vec<&str> = scope.iter().filter_map(|a| a["var"].as_str()).collect();

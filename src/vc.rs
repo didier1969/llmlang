@@ -655,7 +655,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
             Box::new(inline_methods(b, class, inst)?),
         ),
         Expr::Var(_) | Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit
-        | Expr::Hole => e.clone(),
+        | Expr::Hole(_) => e.clone(),
         Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
     })
 }
@@ -672,7 +672,7 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
 pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
     match e {
         Expr::Var(n) => map.get(n.as_str()).map(|v| (*v).clone()).unwrap_or_else(|| e.clone()),
-        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => e.clone(),
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole(_) => e.clone(),
         Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
         Expr::Bin(op, a, b) => {
             Expr::Bin(*op, Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map)))
@@ -1530,7 +1530,7 @@ impl<'a> Emit<'a> {
             // Defensive (DEC-LLL-052): a holey part is marked Incomplete and SKIPPED
             // before obligation generation, so the encoder must never reach a hole. If
             // it does, fail LOUDLY — never silently encode a hole into an obligation.
-            Expr::Hole => {
+            Expr::Hole(_) => {
                 return Err(
                     "vcgen: reached a hole `?` — a holey part must be skipped before \
                      obligation generation (internal invariant, DEC-LLL-052)"

@@ -74,7 +74,7 @@ pub(crate) fn expand_spec_predicates(mut module: Module) -> Result<Module, Strin
         let mut impure: Option<&'static str> = None;
         body.walk(&mut |x| match x {
             Expr::EffCall(..) => impure = Some("an effect operation"),
-            Expr::Hole => impure = Some("a typed hole `?`"),
+            Expr::Hole(_) => impure = Some("a typed hole `?`"),
             _ => {}
         });
         if let Some(what) = impure {
@@ -203,7 +203,7 @@ fn inline(e: &Expr, defs: &SpecDefs) -> Result<Expr, String> {
         | Expr::RatLit(..)
         | Expr::BoolLit(_)
         | Expr::Unit
-        | Expr::Hole => Ok(e.clone()),
+        | Expr::Hole(_) => Ok(e.clone()),
         Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
     }
 }
@@ -235,7 +235,7 @@ fn alpha_fresh(e: &Expr, counter: &mut usize, ren: &HashMap<String, String>) -> 
         | Expr::RatLit(..)
         | Expr::BoolLit(_)
         | Expr::Unit
-        | Expr::Hole => e.clone(),
+        | Expr::Hole(_) => e.clone(),
         Expr::Bin(op, a, b) => Expr::Bin(*op, Box::new(recur(a, counter)), Box::new(recur(b, counter))),
         Expr::Not(a) => Expr::Not(Box::new(recur(a, counter))),
         Expr::Neg(a) => Expr::Neg(Box::new(recur(a, counter))),

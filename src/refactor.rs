@@ -72,7 +72,7 @@ fn free_vars(e: &Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
 /// op crosses a handler boundary, and a hole is an incomplete term — neither may be relocated.
 fn is_impure(e: &Expr) -> bool {
     match e {
-        Expr::EffCall(..) | Expr::Hole => true,
+        Expr::EffCall(..) | Expr::Hole(_) => true,
         Expr::Bin(_, a, b) | Expr::Cons(a, b) => is_impure(a) || is_impure(b),
         Expr::Not(a) | Expr::Neg(a) | Expr::Proj(a, _) | Expr::Field(a, _) => is_impure(a),
         Expr::If(c, a, b) => is_impure(c) || is_impure(a) || is_impure(b),

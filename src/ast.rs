@@ -611,7 +611,14 @@ pub enum Expr {
     /// `build`/`run`. Term position only — a hole is rejected in a contract
     /// (requires/ensures/measure) so `contract_hash` never contains one. Part of
     /// identity like any other node (DEC-LLL-020): filling it is a new definition.
-    Hole,
+    ///
+    /// The carried `usize` is the 1-based SOURCE LINE of the `?` — a DIAGNOSTIC
+    /// position only (REQ-LLL-161): it moves the squiggle/feedback onto the hole's
+    /// own line, off the enclosing `part` signature. It is ERASED from the
+    /// content-hash exactly like `Part.line`/`Class.line` — `hash.rs` canonicalises
+    /// every hole to the bare token `(hole)` regardless of position — so FILLING a
+    /// hole changes identity while MOVING (or reformatting) one does not (DEC-LLL-020).
+    Hole(usize),
     /// A BOUNDED universal quantifier (REQ-LLL-087). CONTRACT-ONLY — the mirror of
     /// [`Expr::Hole`] (term-only): rejected in `measure` and in term position, allowed in
     /// `requires`/`ensures` (Tranche 1 ensures + A1 requires). `var` binds over a FINITE

@@ -45,8 +45,10 @@ pub struct CheckedModule {
 
 /// One typed hole recorded during checking (CPT-LLL-002, DEC-LLL-052): its part, the
 /// context-EXPECTED type the completion must have, and the in-scope binders (with
-/// types) visible at the hole — the LLM's completion menu. `line` points at the
-/// enclosing `part` (a hole carries no span of its own in v1).
+/// types) visible at the hole — the LLM's completion menu. `line` is the hole's
+/// OWN 1-based source line (REQ-LLL-161): a diagnostic position that moves the
+/// squiggle/feedback onto the `?` itself, off the enclosing `part` signature. It is
+/// erased from the content-hash (see `Expr::Hole`), so it never touches identity.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HoleInfo {
     pub part: String,
@@ -93,7 +95,7 @@ pub fn render_contract_clause(e: &Expr) -> String {
         }
     }
     match e {
-        Expr::Hole => "?".to_string(),
+        Expr::Hole(_) => "?".to_string(),
         // a conditional in a rendered path fact (REQ-LLL-124): its branch condition may be
         // an `if`. `if` is rejected in contract clauses (type_of_pure), so this only renders
         // body-derived facts, never a contract clause.
@@ -199,7 +201,7 @@ fn collect_free_vars(e: &Expr, acc: &mut HashSet<String>) {
         Expr::Var(n) => {
             acc.insert(n.clone());
         }
-        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => {}
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole(_) => {}
         Expr::ListLit(xs) | Expr::Tuple(xs) => {
             for x in xs {
                 collect_free_vars(x, acc);
@@ -2595,7 +2597,7 @@ fn collect_part_refs(
                     ex(w, in_lambda, is_part, strong, weak);
                 }
             }
-            Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => {}
+            Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole(_) => {}
         }
     }
     for s in body {
@@ -2936,7 +2938,7 @@ fn type_of_pure(
         // A hole `?` is a TERM-position placeholder only — forbidden in a contract so
         // `contract_hash` never contains one and no caller's cached proof depends on a
         // holey `ensures` (DEC-LLL-052). Rejected here, independently of the body path.
-        Expr::Hole => {
+        Expr::Hole(_) => {
             return Err(
                 "holes `?` are not allowed in a contract (requires/ensures/measure) — a hole \
                  is a term-position placeholder only (DEC-LLL-052)"
@@ -3939,7 +3941,7 @@ fn check_expr(
                 ctx.part.name
             ))
         }
-        Expr::Hole => {
+        Expr::Hole(hole_line) => {
             // A typed hole `?` (CPT-LLL-002, DEC-LLL-052). Term position only: a `?` in
             // an instance method body carries `Reject` policy and errors here; a
             // contract `?` never reaches this fn (typed by `type_of_pure`).
@@ -3983,7 +3985,7 @@ fn check_expr(
                 .collect();
             ctx.holes.push(HoleInfo {
                 part: ctx.part.name.clone(),
-                line: ctx.part.line,
+                line: *hole_line,
                 expected: expected.cloned(),
                 scope,
                 goal,

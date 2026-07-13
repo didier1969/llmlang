@@ -2101,7 +2101,7 @@ fn live_expr(
             s.insert(n.clone());
             s
         }
-        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole => {
+        Expr::IntLit(_) | Expr::RatLit(..) | Expr::BoolLit(_) | Expr::Unit | Expr::Hole(_) => {
             live_out.clone()
         }
         Expr::Not(a) | Expr::Neg(a) | Expr::Proj(a, _) | Expr::Field(a, _) => {
@@ -3332,7 +3332,7 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         // Fail-stop (DEC-LLL-052, DEC-LLL-015): a holey module refuses to build at the
         // CLI boundary, so codegen must never reach a hole. If it does, error LOUDLY —
         // never emit a placeholder into real code.
-        Expr::Hole => {
+        Expr::Hole(_) => {
             return Err(
                 "codegen: reached a hole `?` — a program with holes is incomplete and not \
                  buildable (DEC-LLL-052)"

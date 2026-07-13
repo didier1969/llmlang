@@ -291,7 +291,7 @@ fn fill_stmt(s: &Stmt, c: &Expr) -> Stmt {
 
 fn fill_expr(e: &Expr, c: &Expr) -> Expr {
     match e {
-        Expr::Hole => c.clone(),
+        Expr::Hole(_) => c.clone(),
         Expr::Bin(op, a, b) => Expr::Bin(*op, Box::new(fill_expr(a, c)), Box::new(fill_expr(b, c))),
         Expr::Cons(a, b) => Expr::Cons(Box::new(fill_expr(a, c)), Box::new(fill_expr(b, c))),
         Expr::Not(a) => Expr::Not(Box::new(fill_expr(a, c))),

@@ -511,8 +511,11 @@ impl<'a> Norm<'a> {
         match e {
             // a typed hole `?` is part of the text ⇒ part of identity (DEC-LLL-020):
             // a distinct, stable token so a holey definition and its filled version
-            // are different definitions (different def-hash) — DEC-LLL-052.
-            Expr::Hole => "(hole)".to_string(),
+            // are different definitions (different def-hash) — DEC-LLL-052. The hole's
+            // carried source LINE (REQ-LLL-161) is a DIAGNOSTIC position, ERASED by the
+            // `_` exactly as `Part.line` is: MOVING/reformatting a hole preserves
+            // identity; only FILLING it (token `(hole)` → the term) changes the hash.
+            Expr::Hole(_) => "(hole)".to_string(),
             Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
             Expr::Unit => "(unit)".to_string(),
             Expr::IntLit(v) => format!("{v}"),
