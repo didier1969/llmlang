@@ -33,6 +33,7 @@ module M:
       "severity": "error",
       "category": "contract",
       "message": "undischarged obligation: ensures #1 holds at yield [sat]",
+      "line": 3,
       "part": "clamp",
       "fix": "fails on hi=0, x=1, lo=0 — handle this case or strengthen `requires` · a Z3-verified SUFFICIENT strengthening (not necessarily necessary): `requires x < lo` or `requires x <= lo` or `requires x == lo` or `requires x < hi` or `requires x <= hi` or `requires x == hi`",
       "counterexample": [

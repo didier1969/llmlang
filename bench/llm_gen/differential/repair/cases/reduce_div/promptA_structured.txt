@@ -33,6 +33,7 @@ module M:
       "severity": "error",
       "category": "contract",
       "message": "undischarged obligation: divisor is non-zero in `div` [sat]",
+      "line": 3,
       "part": "reduceDiv",
       "fix": "fails on xs=[0], acc=0 — handle this case or strengthen `requires`",
       "counterexample": [

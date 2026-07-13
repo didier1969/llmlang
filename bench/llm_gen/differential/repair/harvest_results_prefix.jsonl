@@ -1,0 +1,244 @@
+{"kind": "gen", "task": "t1", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t1", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 97}
+{"kind": "repair", "task": "t1", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 100}
+{"kind": "gen", "task": "t1", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 100}
+{"kind": "repair", "task": "t1", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 94}
+{"kind": "repair", "task": "t1", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 119}
+{"kind": "gen", "task": "t1", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 104}
+{"kind": "repair", "task": "t1", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 100}
+{"kind": "repair", "task": "t1", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 98}
+{"kind": "gen", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 93}
+{"kind": "repair", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "repair", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 133}
+{"kind": "gen", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 91}
+{"kind": "repair", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 160}
+{"kind": "repair", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 159}
+{"kind": "gen", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 102}
+{"kind": "repair", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 88}
+{"kind": "repair", "task": "t1", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 139}
+{"kind": "gen", "task": "t1", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t1", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t1", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t2", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": true, "codes": [], "completion_tokens": 92}
+{"kind": "gen", "task": "t2", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": true, "codes": [], "completion_tokens": 92}
+{"kind": "gen", "task": "t2", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": true, "codes": [], "completion_tokens": 92}
+{"kind": "gen", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 136}
+{"kind": "repair", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 188}
+{"kind": "repair", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 192}
+{"kind": "gen", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 114}
+{"kind": "repair", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 149}
+{"kind": "repair", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 192}
+{"kind": "gen", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 154}
+{"kind": "repair", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 199}
+{"kind": "repair", "task": "t2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 156}
+{"kind": "gen", "task": "t2", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t2", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t2", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t3", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 96}
+{"kind": "repair", "task": "t3", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 94}
+{"kind": "repair", "task": "t3", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 94}
+{"kind": "gen", "task": "t3", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t3", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t3", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "gen", "task": "t3", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 96}
+{"kind": "repair", "task": "t3", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 94}
+{"kind": "repair", "task": "t3", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 94}
+{"kind": "gen", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 119}
+{"kind": "repair", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 117}
+{"kind": "repair", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 117}
+{"kind": "gen", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 135}
+{"kind": "repair", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 133}
+{"kind": "repair", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 133}
+{"kind": "gen", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 154}
+{"kind": "repair", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 209}
+{"kind": "repair", "task": "t3", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 239}
+{"kind": "gen", "task": "t3", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t3", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t3", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t6", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 184}
+{"kind": "repair", "task": "t6", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 162}
+{"kind": "repair", "task": "t6", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 169}
+{"kind": "gen", "task": "t6", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 118}
+{"kind": "repair", "task": "t6", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 116}
+{"kind": "repair", "task": "t6", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 110}
+{"kind": "gen", "task": "t6", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 161}
+{"kind": "repair", "task": "t6", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 159}
+{"kind": "repair", "task": "t6", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 149}
+{"kind": "gen", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 183}
+{"kind": "repair", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 177}
+{"kind": "repair", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 215}
+{"kind": "gen", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 109}
+{"kind": "repair", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 69}
+{"kind": "repair", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 74}
+{"kind": "gen", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 123}
+{"kind": "repair", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 176}
+{"kind": "repair", "task": "t6", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 74}
+{"kind": "gen", "task": "t6", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t6", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t6", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t7", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 113}
+{"kind": "repair", "task": "t7", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t7", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "gen", "task": "t7", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 102}
+{"kind": "repair", "task": "t7", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 100}
+{"kind": "repair", "task": "t7", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 100}
+{"kind": "gen", "task": "t7", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 84}
+{"kind": "repair", "task": "t7", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t7", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 71}
+{"kind": "gen", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 141}
+{"kind": "repair", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 92}
+{"kind": "repair", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 281}
+{"kind": "gen", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 185}
+{"kind": "repair", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 191}
+{"kind": "repair", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 223}
+{"kind": "gen", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 252}
+{"kind": "repair", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 136}
+{"kind": "repair", "task": "t7", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 176}
+{"kind": "gen", "task": "t7", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t7", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t7", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t8", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 108}
+{"kind": "repair", "task": "t8", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 106}
+{"kind": "repair", "task": "t8", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 105}
+{"kind": "gen", "task": "t8", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 110}
+{"kind": "repair", "task": "t8", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 108}
+{"kind": "repair", "task": "t8", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 114}
+{"kind": "gen", "task": "t8", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 110}
+{"kind": "repair", "task": "t8", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 108}
+{"kind": "repair", "task": "t8", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 108}
+{"kind": "gen", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 106}
+{"kind": "repair", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 120}
+{"kind": "repair", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 100}
+{"kind": "gen", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 143}
+{"kind": "repair", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 212}
+{"kind": "repair", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 79}
+{"kind": "gen", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 280}
+{"kind": "repair", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 115}
+{"kind": "repair", "task": "t8", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 79}
+{"kind": "gen", "task": "t8", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t8", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t8", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t9", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 143}
+{"kind": "repair", "task": "t9", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 141}
+{"kind": "repair", "task": "t9", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 141}
+{"kind": "gen", "task": "t9", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 141}
+{"kind": "repair", "task": "t9", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 139}
+{"kind": "repair", "task": "t9", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 143}
+{"kind": "gen", "task": "t9", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 153}
+{"kind": "repair", "task": "t9", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 145}
+{"kind": "repair", "task": "t9", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 145}
+{"kind": "gen", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 98}
+{"kind": "repair", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 82}
+{"kind": "repair", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 134}
+{"kind": "gen", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 111}
+{"kind": "repair", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 127}
+{"kind": "repair", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 80}
+{"kind": "gen", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 295}
+{"kind": "repair", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 86}
+{"kind": "repair", "task": "t9", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 132}
+{"kind": "gen", "task": "t9", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t9", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t9", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t11", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 127}
+{"kind": "repair", "task": "t11", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 120}
+{"kind": "repair", "task": "t11", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 121}
+{"kind": "gen", "task": "t11", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 115}
+{"kind": "repair", "task": "t11", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 113}
+{"kind": "repair", "task": "t11", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 112}
+{"kind": "gen", "task": "t11", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 115}
+{"kind": "repair", "task": "t11", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 113}
+{"kind": "repair", "task": "t11", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 112}
+{"kind": "gen", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 137}
+{"kind": "repair", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 165}
+{"kind": "repair", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 96}
+{"kind": "gen", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 135}
+{"kind": "repair", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 85}
+{"kind": "repair", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 162}
+{"kind": "gen", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 83}
+{"kind": "repair", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 82}
+{"kind": "repair", "task": "t11", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 176}
+{"kind": "gen", "task": "t11", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t11", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t11", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t12", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t12", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t12", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "gen", "task": "t12", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t12", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t12", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "gen", "task": "t12", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t12", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t12", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "gen", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 1400}
+{"kind": "repair", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 150}
+{"kind": "repair", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 279}
+{"kind": "gen", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 69}
+{"kind": "repair", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 68}
+{"kind": "repair", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 68}
+{"kind": "gen", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 71}
+{"kind": "repair", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 66}
+{"kind": "repair", "task": "t12", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 74}
+{"kind": "gen", "task": "t12", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t12", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t12", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t13", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 100}
+{"kind": "repair", "task": "t13", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t13", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "gen", "task": "t13", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t13", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 99}
+{"kind": "repair", "task": "t13", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 98}
+{"kind": "gen", "task": "t13", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 99}
+{"kind": "repair", "task": "t13", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 94}
+{"kind": "repair", "task": "t13", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 97}
+{"kind": "gen", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 105}
+{"kind": "repair", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 139}
+{"kind": "repair", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 144}
+{"kind": "gen", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": true, "codes": [], "completion_tokens": 97}
+{"kind": "gen", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E5001"], "completion_tokens": 101}
+{"kind": "repair", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E5001"], "is_z3_fail": true, "completion_tokens": 137}
+{"kind": "repair", "task": "t13", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E5001"], "is_z3_fail": true, "completion_tokens": 167}
+{"kind": "gen", "task": "t13", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t13", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t13", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t14", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 92}
+{"kind": "repair", "task": "t14", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "repair", "task": "t14", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "gen", "task": "t14", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 92}
+{"kind": "repair", "task": "t14", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "repair", "task": "t14", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "gen", "task": "t14", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 92}
+{"kind": "repair", "task": "t14", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "repair", "task": "t14", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 90}
+{"kind": "gen", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 154}
+{"kind": "repair", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 119}
+{"kind": "repair", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 164}
+{"kind": "gen", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 195}
+{"kind": "repair", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 440}
+{"kind": "repair", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 356}
+{"kind": "gen", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 107}
+{"kind": "repair", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 145}
+{"kind": "repair", "task": "t14", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 240}
+{"kind": "gen", "task": "t14", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t14", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t14", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t15", "model": "openai/gpt-4o-mini", "sample": 0, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 99}
+{"kind": "repair", "task": "t15", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 88}
+{"kind": "repair", "task": "t15", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 97}
+{"kind": "gen", "task": "t15", "model": "openai/gpt-4o-mini", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 67}
+{"kind": "repair", "task": "t15", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 82}
+{"kind": "repair", "task": "t15", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 82}
+{"kind": "gen", "task": "t15", "model": "openai/gpt-4o-mini", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 80}
+{"kind": "repair", "task": "t15", "model": "openai/gpt-4o-mini", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 72}
+{"kind": "repair", "task": "t15", "model": "openai/gpt-4o-mini", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 76}
+{"kind": "gen", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "sample": 0, "pass1": false, "codes": ["LLL-E3001"], "completion_tokens": 89}
+{"kind": "repair", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 0, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 37}
+{"kind": "repair", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 0, "verified": false, "fail_codes": ["LLL-E3001"], "is_z3_fail": false, "completion_tokens": 106}
+{"kind": "gen", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "sample": 1, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 45}
+{"kind": "repair", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 39}
+{"kind": "repair", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 1, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 39}
+{"kind": "gen", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "sample": 2, "pass1": false, "codes": ["LLL-E1001"], "completion_tokens": 43}
+{"kind": "repair", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 42}
+{"kind": "repair", "task": "t15", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "from": 2, "verified": false, "fail_codes": ["LLL-E1001"], "is_z3_fail": false, "completion_tokens": 42}
+{"kind": "gen", "task": "t15", "model": "google/gemini-flash-latest", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t15", "model": "google/gemini-flash-latest", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"kind": "gen", "task": "t15", "model": "google/gemini-flash-latest", "sample": 2, "error": "HTTP Error 400: Bad Request"}

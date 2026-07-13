@@ -13,3 +13,13 @@
 /.devenv/
 /.devenv.flake.nix
 /.direnv/
+
+# bench LLM — artefacts générés (générations modèle verbatim, caches, logs)
+bench/llm_gen/differential/repair/harvest_auto/
+bench/llm_gen/differential/repair/runs_auto/
+bench/llm_gen/differential/repair/*.raw
+bench/llm_gen/differential/repair/*.out
+bench/llm_gen/differential/repair/*_prefix.log
+bench/llm_gen/differential/repair/pilot_expanded.log
+bench/llm_gen/differential/repair/harvest_full.log
+bench/**/.lll-cache/

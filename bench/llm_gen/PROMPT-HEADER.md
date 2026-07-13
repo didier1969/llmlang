@@ -6,11 +6,12 @@ contracts. Grammar:
 ```
 module Name:
 
-  part name(arg: Type, ...) -> Type [via IO]:
-    requires <Bool expr>[, <Bool expr>...]     # optional
+  part name(arg: Type, ...) -> Type:          # a PURE part
+  part name(arg: Type, ...) -> Type via IO:   # EFFECTFUL — append `via IO`, NO brackets
+    requires <Bool expr>                       # optional; repeat comma-separated: `requires a >= 0, b >= 0`
     ensures  <Bool expr over params + result>  # optional
-    measure  <Int expr> [, <Int expr>...]      # non-structural recursion; a comma-list is
-                                               # a LEXICOGRAPHIC tuple (e.g. `measure m, n`)
+    measure  <Int expr>                        # non-structural recursion; comma-separate for a
+                                               # LEXICOGRAPHIC tuple (e.g. `measure m, n`)
     let x = <expr>                             # zero or more
     yield <expr>                               # OR a match, as the LAST statement
     match <expr>:
@@ -22,6 +23,9 @@ module Name:
 ```
 
 Rules:
+- Square brackets `[...]` appear ONLY inside a TYPE (`List[Int]`, `Array[Int]`, `Option[a]`).
+  NEVER wrap `via IO`, `requires`, `ensures`, or `measure` in brackets — write `-> Int via IO:`,
+  not `-> Int [via IO]:`.
 - Types: `Int`, `Bool`, `List[Int]`. Operators: `+ - * div mod < <= > >= == != and or not`.
   `div`/`mod` are Euclidean; **the divisor must be provably non-zero**.
 - Pure parts cannot call `IO.*` nor `via IO` parts. Effects: `IO.print(Int) -> Int`
