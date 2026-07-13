@@ -136,11 +136,19 @@ pub fn report_to_diagnostics(report: &diag::Report, text: &str) -> Vec<Value> {
                 "hole" => 2,  // Warning — incomplete, not a proof failure
                 _ => 3,       // Information
             };
-            let message = match &d.fix {
-                Some(fix) => format!("{}\n\nfix: {fix}", d.message),
-                None => d.message.clone(),
-            };
-            json!({
+            // The expected type of a typed hole is THE key fact — surface it in the
+            // visible message (many clients render only `message` on hover), the rest
+            // of the repair menu goes to structured `data` below.
+            let mut message = d.message.clone();
+            if let Some(t) = &d.expected_type {
+                if !message.contains(t.as_str()) {
+                    message.push_str(&format!("\n\nexpected type: {t}"));
+                }
+            }
+            if let Some(fix) = &d.fix {
+                message.push_str(&format!("\n\nfix: {fix}"));
+            }
+            let mut o = json!({
                 "range": {
                     "start": { "line": line0, "character": 0 },
                     "end": { "line": line0, "character": end_char }
@@ -149,9 +157,47 @@ pub fn report_to_diagnostics(report: &diag::Report, text: &str) -> Vec<Value> {
                 "code": d.code,
                 "source": "lll",
                 "message": message
-            })
+            });
+            // The full REPAIR MENU as structured `data` (LSP 3.16 — arbitrary, preserved
+            // through to a future code-action request): the concrete counterexample, the
+            // typed hole's expected type + in-scope binders + goal + hypotheses, and any
+            // Z3-verified sufficient strengthening — the same richness the `--format=json`
+            // channel gives an LLM agent, which is the LSP's whole reason to exist here.
+            let data = repair_menu(d);
+            if !data.is_empty() {
+                o["data"] = Value::Object(data);
+            }
+            o
         })
         .collect()
+}
+
+/// The structured repair-menu fields of a diagnostic (non-empty ones only), mirroring
+/// what `check --format=json` exposes — for an LLM agent consuming diagnostics live.
+fn repair_menu(d: &diag::Diagnostic) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    if let Some(p) = &d.part {
+        m.insert("part".to_string(), json!(p));
+    }
+    if let Some(t) = &d.expected_type {
+        m.insert("expected_type".to_string(), json!(t));
+    }
+    if !d.scope.is_empty() {
+        m.insert("scope".to_string(), json!(d.scope));
+    }
+    if !d.goal.is_empty() {
+        m.insert("goal".to_string(), json!(d.goal));
+    }
+    if !d.hypotheses.is_empty() {
+        m.insert("hypotheses".to_string(), json!(d.hypotheses));
+    }
+    if !d.counterexample.is_empty() {
+        m.insert("counterexample".to_string(), json!(d.counterexample));
+    }
+    if !d.sufficient_hypotheses.is_empty() {
+        m.insert("sufficient_hypotheses".to_string(), json!(d.sufficient_hypotheses));
+    }
+    m
 }
 
 fn nth_line_len(text: &str, line0: usize) -> usize {
@@ -483,6 +529,70 @@ mod tests {
         // server still usable: a clean subsequent edit publishes zero diagnostics.
         let after = s.handle(&did_open("file:///ok.lll", "fine\n"), &panicky);
         assert_eq!(after[0]["params"]["diagnostics"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn typed_hole_surfaces_expected_type_and_scope_as_repair_menu() {
+        let hole = diag::Diagnostic {
+            code: "LLL-H0001".to_string(),
+            severity: "hole".to_string(),
+            category: "hole".to_string(),
+            message: "hole `?` in part `f`".to_string(),
+            line: Some(4),
+            part: Some("f".to_string()),
+            fix: Some("fill this `?`".to_string()),
+            counterexample: vec![],
+            expected_type: Some("Int".to_string()),
+            scope: vec![diag::Assignment { var: "acc".to_string(), value: "Int".to_string() }],
+            goal: vec!["result >= 0".to_string()],
+            hypotheses: vec!["n >= 0".to_string()],
+            sufficient_hypotheses: vec![],
+        };
+        let report = diag::Report {
+            ok: false,
+            status: Some("incomplete".to_string()),
+            module: Some("M".to_string()),
+            diagnostics: vec![hole],
+        };
+        let diags = report_to_diagnostics(&report, "a\nb\nc\nd\n");
+        assert_eq!(diags[0]["severity"], json!(2)); // hole → warning
+        assert!(diags[0]["message"].as_str().unwrap().contains("expected type: Int"));
+        let data = &diags[0]["data"];
+        assert_eq!(data["expected_type"], json!("Int"));
+        assert_eq!(data["scope"][0]["var"], json!("acc"));
+        assert_eq!(data["goal"][0], json!("result >= 0"));
+        assert_eq!(data["hypotheses"][0], json!("n >= 0"));
+    }
+
+    #[test]
+    fn failed_obligation_surfaces_the_counterexample_as_repair_menu() {
+        let obl = diag::Diagnostic {
+            code: "LLL-E5001".to_string(),
+            severity: "error".to_string(),
+            category: "contract".to_string(),
+            message: "undischarged obligation".to_string(),
+            line: None,
+            part: Some("g".to_string()),
+            fix: Some("fails on x=0".to_string()),
+            counterexample: vec![diag::Assignment { var: "x".to_string(), value: "0".to_string() }],
+            expected_type: None,
+            scope: vec![],
+            goal: vec![],
+            hypotheses: vec![],
+            sufficient_hypotheses: vec!["x > 0".to_string()],
+        };
+        let report = diag::Report {
+            ok: false,
+            status: Some("failed".to_string()),
+            module: Some("M".to_string()),
+            diagnostics: vec![obl],
+        };
+        let diags = report_to_diagnostics(&report, "");
+        let data = &diags[0]["data"];
+        assert_eq!(data["counterexample"][0]["var"], json!("x"));
+        assert_eq!(data["counterexample"][0]["value"], json!("0"));
+        assert_eq!(data["sufficient_hypotheses"][0], json!("x > 0"));
+        assert_eq!(data["part"], json!("g"));
     }
 
     #[test]
