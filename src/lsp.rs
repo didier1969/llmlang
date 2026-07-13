@@ -9,12 +9,15 @@
 //! is unit-testable with a fake checker (no Z3, no filesystem). `run_stdio` is the
 //! thin real loop: framed read → dispatch with the real checker → framed write.
 //!
-//! Scope of this slice — single-file diagnostics on `didOpen`/`didChange`/
-//! `didClose`, mapped to LSP `publishDiagnostics`. The `diag::Diagnostic` carries a
-//! 1-based `line` but no column, so a diagnostic squiggles the WHOLE line (LSP
-//! ranges are 0-based). Traced follow-ups (child REQs of 160): column-precise
-//! spans (needs the parser/checker to thread columns), import-aware INCREMENTAL
-//! re-check (REQ-141/149), and `hover` / code actions.
+//! Scope — single-file diagnostics on `didOpen`/`didChange`/`didClose`, mapped to
+//! LSP `publishDiagnostics`, plus `textDocument/codeAction` quick-fixes that apply a
+//! Z3-VERIFIED repair (REQ-LLL-161): insert a proved `requires` on a failed
+//! obligation (slice 1) and fill a `?` with a proved completion (slice 2b). A
+//! diagnostic squiggles the WHOLE line (LSP ranges are 0-based), EXCEPT a typed hole
+//! now anchors on its OWN line — the `?` line, not the enclosing `part` (slice 2a).
+//! Traced follow-ups (child REQs of 160): column-precise spans (thread columns
+//! through parser/checker; a hole fill re-derives its `?` column server-side for
+//! now), import-aware INCREMENTAL re-check (REQ-141/149), and `hover`.
 
 use crate::diag;
 use serde_json::{json, Value};
@@ -22,17 +25,37 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+/// A hole-completion backend (REQ-LLL-161 slice 2b): given a buffer's text, returns
+/// for each typed hole its 1-based source line and the Z3-PROVED completions
+/// synthesised for it. Boxed so the pure protocol harness can inject a stub and the
+/// real loop can install `suggest_buffer` without a generic bound leaking onto
+/// `handle`.
+type SuggestFn = dyn Fn(&str) -> Vec<(usize, Vec<String>)>;
+
 /// Server state across one stdio session: the open documents (uri → current text)
 /// and the lifecycle latches the LSP spec mandates.
 #[derive(Default)]
 pub struct Server {
     docs: HashMap<String, String>,
     shutdown: bool,
+    /// Optional hole-completion backend (slice 2b). `None` in the pure unit harness
+    /// (no synthesis wired); `run_stdio` installs the real one. Invoked ONLY from
+    /// `code_actions` — a user-triggered request — never on `didChange`, so live
+    /// diagnostics stay Z3-cheap.
+    suggest: Option<Box<SuggestFn>>,
 }
 
 impl Server {
     pub fn new() -> Server {
         Server::default()
+    }
+
+    /// Install the hole-completion backend used by `code_actions` (slice 2b). Kept
+    /// off the pure `handle`/`diagnose` path so the JSON-RPC protocol stays testable
+    /// without synthesis or Z3.
+    pub fn with_suggest(mut self, suggest: Box<SuggestFn>) -> Server {
+        self.suggest = Some(suggest);
+        self
     }
 
     /// Once a `shutdown` request has been honoured, the stdio loop stops on the
@@ -126,12 +149,15 @@ impl Server {
     }
 
     /// Answer a `textDocument/codeAction` request with quick-fixes that apply a
-    /// Z3-VERIFIED repair (REQ-LLL-161, slice 1). For each diagnostic the client
-    /// echoes back whose `data.sufficient_hypotheses` names a strengthening that
-    /// Z3 proved would suffice (REQ-088), offer to insert `requires <H>` on a fresh
-    /// clause line under the enclosing part's signature. PURE: reads the request +
-    /// the open-document store, no I/O — so it is unit-testable. The completion
-    /// path (a hole → `lll suggest`) needs synthesis and lands in slice 2.
+    /// Z3-VERIFIED repair (REQ-LLL-161), each drawn from a diagnostic the client echoes
+    /// back. A failed OBLIGATION whose `data.sufficient_hypotheses` names a Z3-proved
+    /// strengthening (REQ-088) offers to insert `requires <H>` under the part signature
+    /// (slice 1); a typed HOLE (its `data` names the expected type) offers to fill the
+    /// `?` with a Z3-PROVED completion synthesised on demand via the `suggest` backend
+    /// (slice 2b) — only proved candidates are offered, and the user re-checks. The
+    /// obligation path is PURE; the hole path consults `self.suggest` (Z3), invoked here
+    /// and NOWHERE on the `didChange` path, so live diagnostics stay cheap. With no
+    /// backend installed (the pure unit harness) the hole path is inert.
     fn code_actions(&self, msg: &Value) -> Value {
         let uri = match text_document_uri(msg) {
             Some(u) => u,
@@ -148,22 +174,42 @@ impl Server {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // Synthesise hole completions AT MOST ONCE per request, and only when a hole
+        // diagnostic is actually present and a backend is installed — never on the
+        // obligation-only path (no needless Z3).
+        let is_hole = |d: &Value| d["data"]["expected_type"].is_string();
+        let fills: Vec<(usize, Vec<String>)> = match &self.suggest {
+            Some(s) if diags.iter().any(is_hole) => s(text),
+            _ => Vec::new(),
+        };
         let mut actions = Vec::new();
         for d in &diags {
             let line0 = match d["range"]["start"]["line"].as_u64() {
                 Some(l) => l as usize,
                 None => continue,
             };
-            let hyps = match d["data"]["sufficient_hypotheses"].as_array() {
-                Some(h) => h,
-                None => continue,
-            };
-            for h in hyps.iter().filter_map(Value::as_str) {
-                actions.push(json!({
-                    "title": format!("Add `requires {h}` — a Z3-verified sufficient strengthening"),
-                    "kind": "quickfix",
-                    "edit": { "changes": { &uri: [requires_insertion_edit(text, line0, h)] } }
-                }));
+            // (1) failed obligation → `requires <H>` (slice 1).
+            if let Some(hyps) = d["data"]["sufficient_hypotheses"].as_array() {
+                for h in hyps.iter().filter_map(Value::as_str) {
+                    actions.push(json!({
+                        "title": format!("Add `requires {h}` — a Z3-verified sufficient strengthening"),
+                        "kind": "quickfix",
+                        "edit": { "changes": { &uri: [requires_insertion_edit(text, line0, h)] } }
+                    }));
+                }
+            }
+            // (2) typed hole → fill with a proved completion (slice 2b). Match the
+            //     synthesised fills to THIS hole by its (now precise) source line.
+            if is_hole(d) {
+                for cand in fills.iter().filter(|(hl, _)| *hl == line0 + 1).flat_map(|(_, c)| c) {
+                    if let Some(edit) = hole_fill_edit(text, line0, cand) {
+                        actions.push(json!({
+                            "title": format!("Fill hole with `{cand}` — a Z3-verified completion"),
+                            "kind": "quickfix",
+                            "edit": { "changes": { &uri: [edit] } }
+                        }));
+                    }
+                }
             }
         }
         Value::Array(actions)
@@ -186,6 +232,24 @@ fn requires_insertion_edit(text: &str, sig_line0: usize, h: &str) -> Value {
         },
         "newText": new_text
     })
+}
+
+/// A `TextEdit` replacing the `?` on line `line0` (0-based) with a synthesised
+/// completion. The AST carries the hole's LINE but not its column (REQ-LLL-161), so
+/// the column is re-derived here from the buffer: the FIRST `?` on the line is the
+/// hole. Returns `None` when the line has no `?` (the buffer moved under a stale
+/// diagnostic), so a doomed edit is never offered. v1 fills the first hole on a line;
+/// a second `?` on the same line is a documented follow-up.
+fn hole_fill_edit(text: &str, line0: usize, candidate: &str) -> Option<Value> {
+    let line = text.lines().nth(line0)?;
+    let col = line.chars().position(|c| c == '?')?;
+    Some(json!({
+        "range": {
+            "start": { "line": line0, "character": col },
+            "end": { "line": line0, "character": col + 1 }
+        },
+        "newText": candidate
+    }))
 }
 
 /// Map a `diag::Report` to a vector of LSP `Diagnostic` JSON objects. The report's
@@ -365,6 +429,32 @@ where
     check_file(&tmp.to_string_lossy())
 }
 
+/// The real hole-completion backend for `run_stdio` (REQ-LLL-161 slice 2b): parse +
+/// check the buffer and, for each typed hole, return its 1-based source line with the
+/// Z3-PROVED completions `synth::suggest` finds — only completions that discharge the
+/// part's FULL contract (propose ≠ accept is preserved; the user still re-checks). A
+/// parse/type error, an unsupported multi-hole part, or a hole with no proved
+/// completion yields no entry, so a fill action is offered ONLY when a verified
+/// completion actually exists. Runs on demand (from `code_actions`), never per change.
+pub fn suggest_buffer(text: &str) -> Vec<(usize, Vec<String>)> {
+    let module = match crate::parser::parse_module(text) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    let cm = match crate::types::check_module(module) {
+        Ok(cm) => cm,
+        Err(_) => return Vec::new(),
+    };
+    match crate::synth::suggest(&cm, None, 16) {
+        Ok(sugs) => sugs
+            .into_iter()
+            .filter(|s| s.unsupported.is_none() && !s.candidates.is_empty())
+            .map(|s| (s.line, s.candidates))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Removes its path on drop — including during unwind — so a panic in the checker
 /// never leaves a stray buffer temp behind.
 struct TmpFile(PathBuf);
@@ -393,7 +483,7 @@ where
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
     let stdout = std::io::stdout();
-    let mut server = Server::new();
+    let mut server = Server::new().with_suggest(Box::new(suggest_buffer));
     while let Some(msg) = read_message(&mut reader)? {
         let is_exit = msg.get("method").and_then(Value::as_str) == Some("exit");
         let out = server.handle(&msg, &check);
@@ -713,6 +803,68 @@ mod tests {
         });
         let out = s.handle(&req, &fake_check);
         assert_eq!(out[0]["result"].as_array().unwrap().len(), 0, "no verified strengthening → no action");
+    }
+
+    #[test]
+    fn code_action_offers_verified_hole_completion_req161() {
+        // slice 2b: a typed-hole diagnostic (its `data` names the expected type) draws a
+        // "Fill hole" quick-fix from the injected suggest backend — a Z3-PROVED completion,
+        // placed by REPLACING the `?` (its column re-derived from the buffer, since the AST
+        // carries only the line). The stub stands in for `synth::suggest` here; the E2E test
+        // drives the real synthesiser end to end.
+        let mut s = Server::new().with_suggest(Box::new(|_text| vec![(5, vec!["acc".to_string()])]));
+        let text = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+        let _ = s.handle(&did_open("file:///h.lll", text), &fake_check);
+        let req = json!({
+            "jsonrpc": "2.0", "id": 7, "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": "file:///h.lll" },
+                "range": { "start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 0} },
+                "context": { "diagnostics": [ {
+                    "range": { "start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 11} },
+                    "severity": 2, "code": "LLL-H0001", "source": "lll",
+                    "message": "hole `?`",
+                    "data": { "part": "f", "expected_type": "Int" }
+                } ] }
+            }
+        });
+        let out = s.handle(&req, &fake_check);
+        let actions = out[0]["result"].as_array().expect("codeAction result is an array");
+        assert_eq!(actions.len(), 1, "one proved completion → one fill action");
+        assert!(actions[0]["title"].as_str().unwrap().contains("Fill hole with `acc`"));
+        assert_eq!(actions[0]["kind"], json!("quickfix"));
+        let edit = &actions[0]["edit"]["changes"]["file:///h.lll"][0];
+        assert_eq!(edit["newText"], json!("acc"), "replaces `?` with the verified completion");
+        // the `?` sits at char 10 of `    yield ?` — a precise 1-char replace, not a whole line.
+        assert_eq!(edit["range"]["start"]["line"], json!(4));
+        assert_eq!(edit["range"]["start"]["character"], json!(10));
+        assert_eq!(edit["range"]["end"]["character"], json!(11));
+    }
+
+    #[test]
+    fn code_action_hole_is_inert_without_a_suggest_backend_req161() {
+        // The pure protocol harness installs NO suggest backend: a hole diagnostic must then
+        // draw NO fill action (synthesis is the only source of a completion — a fill is never
+        // fabricated without a Z3-proved candidate). This pins that `handle`/`code_actions`
+        // stay testable without Z3, and that a fill is offered ONLY when a backend proved one.
+        let mut s = Server::new();
+        let text = "module M:\n\n  part f(n: Int) -> Int:\n    yield ?\n";
+        let _ = s.handle(&did_open("file:///h.lll", text), &fake_check);
+        let req = json!({
+            "jsonrpc": "2.0", "id": 8, "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": "file:///h.lll" },
+                "range": { "start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 0} },
+                "context": { "diagnostics": [ {
+                    "range": { "start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 11} },
+                    "severity": 2, "code": "LLL-H0001", "source": "lll",
+                    "message": "hole `?`",
+                    "data": { "part": "f", "expected_type": "Int" }
+                } ] }
+            }
+        });
+        let out = s.handle(&req, &fake_check);
+        assert_eq!(out[0]["result"].as_array().unwrap().len(), 0, "no backend → no fabricated fill");
     }
 
     #[test]

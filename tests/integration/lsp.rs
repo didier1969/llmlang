@@ -231,3 +231,74 @@ fn lsp_code_action_inserts_verified_requires_that_re_verifies_req161() {
     let (code, so, se) = check_lll_src("req161-patched", &patched);
     assert_eq!(code, Some(0), "the patched module must verify:\npatched:\n{patched}\nstdout:{so}\nstderr:{se}");
 }
+
+#[test]
+fn lsp_code_action_fills_hole_with_verified_completion_req161() {
+    let dir = tempdir();
+    let uri = format!("file://{}/h.lll", dir.display());
+    // A holey part whose ONLY Z3-proved completion is `acc` (ensures result >= acc; of the
+    // in-scope Ints and literals, only `acc` entails the contract — n/0/1 are plausible but
+    // false and are NOT offered). The hole `?` is on source line 5 (0-based 4), char 10.
+    let src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
+
+    let mut input = String::new();
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
+    input.push_str(&frame(&did_open(&uri, src)));
+    // a compliant client echoes the published hole diagnostic (its `data` + range) back.
+    let echoed = json!({
+        "range": { "start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 11} },
+        "severity": 2, "code": "LLL-H0001", "source": "lll",
+        "message": "hole `?`",
+        "data": { "part": "f", "expected_type": "Int" }
+    });
+    input.push_str(&frame(&json!({
+        "jsonrpc":"2.0","id":3,"method":"textDocument/codeAction",
+        "params": {
+            "textDocument": {"uri": uri},
+            "range": { "start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 0} },
+            "context": { "diagnostics": [echoed] }
+        }
+    })));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lll lsp");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let out = child.wait_with_output().expect("wait lll lsp");
+    let frames = parse_frames(&out.stdout);
+
+    // (a) the hole is published on its OWN line (0-based 4), carrying the expected type —
+    //     i.e. exactly what a real client echoes into the codeAction context.
+    let pubd = publish_for(&frames, &uri).expect("no publishDiagnostics");
+    let d0 = &pubd["params"]["diagnostics"][0];
+    assert_eq!(d0["range"]["start"]["line"], json!(4), "hole squiggles the `?` line");
+    assert_eq!(d0["data"]["expected_type"], json!("Int"), "hole carries its expected type");
+
+    // (b) the codeAction offers to fill the hole with the Z3-PROVED completion `acc`,
+    //     synthesised on demand by the real backend (not a hand-built stub).
+    let ca = frames.iter().find(|m| m["id"] == json!(3)).expect("no codeAction response");
+    let actions = ca["result"].as_array().expect("codeAction result is an array");
+    assert!(!actions.is_empty(), "a proved completion yields a fill action");
+    let fill = actions
+        .iter()
+        .find(|a| a["title"].as_str().map(|t| t.contains("Fill hole")).unwrap_or(false))
+        .expect("a `Fill hole` action");
+    let edit = &fill["edit"]["changes"][&uri][0];
+    assert_eq!(edit["newText"], json!("acc"), "fills the `?` with the verified completion");
+
+    // (c) applying the server's OWN edit (a precise 1-char replace of the `?`) yields a
+    //     module that RE-VERIFIES (exit 0). propose → apply → prove closes on the wire.
+    let line0 = edit["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let c0 = edit["range"]["start"]["character"].as_u64().unwrap() as usize;
+    let c1 = edit["range"]["end"]["character"].as_u64().unwrap() as usize;
+    let at = offset_of(src, line0, c0);
+    let end = offset_of(src, line0, c1);
+    let patched = format!("{}{}{}", &src[..at], edit["newText"].as_str().unwrap(), &src[end..]);
+    let (code, so, se) = check_lll_src("req161-hole-filled", &patched);
+    assert_eq!(code, Some(0), "the filled module must verify:\npatched:\n{patched}\nstdout:{so}\nstderr:{se}");
+}
