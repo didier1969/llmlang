@@ -169,6 +169,7 @@ impl Diagnostic {
         part: &str,
         f: &FailedObligation,
         sufficient: Vec<String>,
+        part_line: Option<usize>,
     ) -> Diagnostic {
         let counterexample = f.model.as_deref().map(decode_model).unwrap_or_default();
         let mut fix = if counterexample.is_empty() {
@@ -208,7 +209,10 @@ impl Diagnostic {
             severity: "error".to_string(),
             category: "contract".to_string(),
             message: format!("undischarged obligation: {} [{}]", f.descr, f.status),
-            line: None,
+            // Point at the enclosing part (its `part` line) so an editor squiggles the
+            // right part and a code-action can anchor a `requires` insertion there — the
+            // obligation has no source span of its own (REQ-LLL-161).
+            line: part_line,
             part: Some(part.to_string()),
             fix: Some(fix),
             counterexample,

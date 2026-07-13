@@ -526,7 +526,8 @@ fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
                 // real counterexample, name any Z3-VERIFIED sufficient `requires` strengthening.
                 // Additive to the counterexample; never replaces it, never posts a verdict.
                 let sufficient = vc::sufficient_hypotheses(f, &cm);
-                diagnostics.push(diag::Diagnostic::from_failed_obligation(part, f, sufficient));
+                let part_line = cm.module.parts.iter().find(|p| p.name == *part).map(|p| p.line);
+                diagnostics.push(diag::Diagnostic::from_failed_obligation(part, f, sufficient, part_line));
             }
         }
     }

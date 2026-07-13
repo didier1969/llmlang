@@ -54,8 +54,12 @@ impl Server {
             "initialize" => vec![response(
                 id,
                 json!({
-                    // Full-document sync: every didChange carries the whole text.
-                    "capabilities": { "textDocumentSync": 1 },
+                    "capabilities": {
+                        // Full-document sync: every didChange carries the whole text.
+                        "textDocumentSync": 1,
+                        // Quick-fixes that apply a Z3-VERIFIED repair (REQ-LLL-161).
+                        "codeActionProvider": true
+                    },
                     "serverInfo": { "name": "lll-lsp", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )],
@@ -86,6 +90,7 @@ impl Server {
                     _ => vec![],
                 }
             }
+            "textDocument/codeAction" => vec![response(id, self.code_actions(msg))],
             "textDocument/didClose" => match text_document_uri(msg) {
                 // Clear the editor's squiggles for a document no longer open.
                 Some(uri) => {
@@ -119,6 +124,68 @@ impl Server {
             });
         publish(uri, report_to_diagnostics(&report, text))
     }
+
+    /// Answer a `textDocument/codeAction` request with quick-fixes that apply a
+    /// Z3-VERIFIED repair (REQ-LLL-161, slice 1). For each diagnostic the client
+    /// echoes back whose `data.sufficient_hypotheses` names a strengthening that
+    /// Z3 proved would suffice (REQ-088), offer to insert `requires <H>` on a fresh
+    /// clause line under the enclosing part's signature. PURE: reads the request +
+    /// the open-document store, no I/O — so it is unit-testable. The completion
+    /// path (a hole → `lll suggest`) needs synthesis and lands in slice 2.
+    fn code_actions(&self, msg: &Value) -> Value {
+        let uri = match text_document_uri(msg) {
+            Some(u) => u,
+            None => return Value::Array(vec![]),
+        };
+        let text = match self.docs.get(&uri) {
+            Some(t) => t.as_str(),
+            None => return Value::Array(vec![]),
+        };
+        let diags = msg
+            .get("params")
+            .and_then(|p| p.get("context"))
+            .and_then(|c| c.get("diagnostics"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut actions = Vec::new();
+        for d in &diags {
+            let line0 = match d["range"]["start"]["line"].as_u64() {
+                Some(l) => l as usize,
+                None => continue,
+            };
+            let hyps = match d["data"]["sufficient_hypotheses"].as_array() {
+                Some(h) => h,
+                None => continue,
+            };
+            for h in hyps.iter().filter_map(Value::as_str) {
+                actions.push(json!({
+                    "title": format!("Add `requires {h}` — a Z3-verified sufficient strengthening"),
+                    "kind": "quickfix",
+                    "edit": { "changes": { &uri: [requires_insertion_edit(text, line0, h)] } }
+                }));
+            }
+        }
+        Value::Array(actions)
+    }
+}
+
+/// A `TextEdit` inserting `requires <h>` on a fresh clause line directly under the
+/// part's signature (line `sig_line0`, 0-based). The clause sits one indent step
+/// (two spaces) deeper than the signature; multiple `requires` lines are valid
+/// (the parser accumulates them), so this never has to touch an existing clause.
+fn requires_insertion_edit(text: &str, sig_line0: usize, h: &str) -> Value {
+    let line_text = text.lines().nth(sig_line0).unwrap_or("");
+    let indent = line_text.len() - line_text.trim_start().len();
+    let end_char = line_text.chars().count();
+    let new_text = format!("\n{}requires {h}", " ".repeat(indent + 2));
+    json!({
+        "range": {
+            "start": { "line": sig_line0, "character": end_char },
+            "end": { "line": sig_line0, "character": end_char }
+        },
+        "newText": new_text
+    })
 }
 
 /// Map a `diag::Report` to a vector of LSP `Diagnostic` JSON objects. The report's
@@ -593,6 +660,59 @@ mod tests {
         assert_eq!(data["counterexample"][0]["value"], json!("0"));
         assert_eq!(data["sufficient_hypotheses"][0], json!("x > 0"));
         assert_eq!(data["part"], json!("g"));
+    }
+
+    #[test]
+    fn code_action_offers_verified_requires_strengthening() {
+        let mut s = Server::new();
+        // `part f` is on line index 2 (0-based); a client would echo the obligation
+        // diagnostic there, carrying the Z3-verified sufficient hypothesis in `data`.
+        let text = "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    yield a div b\n";
+        let _ = s.handle(&did_open("file:///d.lll", text), &fake_check);
+        let req = json!({
+            "jsonrpc": "2.0", "id": 5, "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": "file:///d.lll" },
+                "range": { "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 0} },
+                "context": { "diagnostics": [ {
+                    "range": { "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 30} },
+                    "severity": 1, "code": "LLL-E5001", "source": "lll",
+                    "message": "undischarged obligation",
+                    "data": { "part": "f", "sufficient_hypotheses": ["b != 0"] }
+                } ] }
+            }
+        });
+        let out = s.handle(&req, &fake_check);
+        assert_eq!(out.len(), 1);
+        let actions = out[0]["result"].as_array().expect("codeAction result is an array");
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0]["title"].as_str().unwrap().contains("requires b != 0"));
+        assert_eq!(actions[0]["kind"], json!("quickfix"));
+        let edit = &actions[0]["edit"]["changes"]["file:///d.lll"][0];
+        // insert a fresh clause line under the signature, indented one step deeper.
+        assert_eq!(edit["newText"], json!("\n    requires b != 0"));
+        assert_eq!(edit["range"]["start"]["line"], json!(2));
+        assert_eq!(edit["range"]["start"]["character"], json!("  part f(a: Int, b: Int) -> Int:".chars().count()));
+    }
+
+    #[test]
+    fn code_action_without_sufficient_hypothesis_offers_nothing() {
+        let mut s = Server::new();
+        let _ = s.handle(&did_open("file:///d.lll", "module M:\n\n  part f(x: Int) -> Int:\n    yield x\n"), &fake_check);
+        let req = json!({
+            "jsonrpc": "2.0", "id": 6, "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": "file:///d.lll" },
+                "range": { "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 0} },
+                "context": { "diagnostics": [ {
+                    "range": { "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 10} },
+                    "severity": 1, "code": "LLL-E5001", "message": "undischarged obligation",
+                    "data": { "part": "f" }
+                } ] }
+            }
+        });
+        let out = s.handle(&req, &fake_check);
+        assert_eq!(out[0]["result"].as_array().unwrap().len(), 0, "no verified strengthening → no action");
     }
 
     #[test]

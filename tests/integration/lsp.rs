@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use super::prelude::tempdir;
+use super::prelude::{check_lll_src, tempdir};
 
 fn frame(msg: &Value) -> String {
     let body = msg.to_string();
@@ -58,6 +58,21 @@ fn publish_for<'a>(frames: &'a [Value], uri: &str) -> Option<&'a Value> {
     frames.iter().find(|m| {
         m["method"] == json!("textDocument/publishDiagnostics") && m["params"]["uri"] == json!(uri)
     })
+}
+
+/// Byte offset of a 0-based (line, char) position in `text` (char-indexed within
+/// the line). Used to apply a returned `TextEdit` insertion faithfully.
+fn offset_of(text: &str, line0: usize, char0: usize) -> usize {
+    let mut off = 0;
+    for (i, l) in text.split_inclusive('\n').enumerate() {
+        if i == line0 {
+            let bare = l.strip_suffix('\n').unwrap_or(l);
+            let byte = bare.char_indices().nth(char0).map(|(b, _)| b).unwrap_or(bare.len());
+            return off + byte;
+        }
+        off += l.len();
+    }
+    off
 }
 
 #[test]
@@ -141,4 +156,70 @@ fn lsp_streams_diagnostics_for_open_documents_req160() {
     // 5) shutdown is acknowledged (result: null for id 2).
     let sd = frames.iter().find(|m| m["id"] == json!(2)).expect("no shutdown response");
     assert_eq!(sd["result"], json!(null));
+}
+
+#[test]
+fn lsp_code_action_inserts_verified_requires_that_re_verifies_req161() {
+    let dir = tempdir();
+    let uri = format!("file://{}/d.lll", dir.display());
+    // A div-by-zero obligation whose Z3-verified sufficient strengthening is `b != 0`.
+    let src = "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    yield a div b\n";
+
+    let mut input = String::new();
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
+    input.push_str(&frame(&did_open(&uri, src)));
+    // A compliant client echoes the published diagnostic (its `data` + line) back in
+    // the codeAction context — here we supply the same diagnostic the server publishes.
+    let echoed = json!({
+        "range": { "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 30} },
+        "severity": 1, "code": "LLL-E5001", "source": "lll",
+        "message": "undischarged obligation",
+        "data": { "part": "f", "sufficient_hypotheses": ["b != 0"] }
+    });
+    input.push_str(&frame(&json!({
+        "jsonrpc":"2.0","id":3,"method":"textDocument/codeAction",
+        "params": {
+            "textDocument": {"uri": uri},
+            "range": { "start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 0} },
+            "context": { "diagnostics": [echoed] }
+        }
+    })));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lll lsp");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let out = child.wait_with_output().expect("wait lll lsp");
+    let frames = parse_frames(&out.stdout);
+
+    // (a) the server PUBLISHES the obligation anchored at its part line, carrying the
+    //     sufficient hypothesis — i.e. what a real client would echo back.
+    let pubd = publish_for(&frames, &uri).expect("no publishDiagnostics");
+    let d0 = &pubd["params"]["diagnostics"][0];
+    assert_eq!(d0["range"]["start"]["line"], json!(2), "obligation squiggles its part line");
+    assert!(
+        d0["data"]["sufficient_hypotheses"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        "obligation carries a sufficient hypothesis: {d0}"
+    );
+
+    // (b) the codeAction response offers to insert `requires b != 0`.
+    let ca = frames.iter().find(|m| m["id"] == json!(3)).expect("no codeAction response");
+    let actions = ca["result"].as_array().expect("codeAction result is an array");
+    assert!(!actions.is_empty(), "expected a quick-fix action");
+    let edit = &actions[0]["edit"]["changes"][&uri][0];
+    let new_text = edit["newText"].as_str().expect("edit newText");
+    assert!(new_text.contains("requires b != 0"), "the edit inserts the verified requires: {new_text}");
+
+    // (c) applying the server's OWN edit yields a module that RE-VERIFIES (exit 0).
+    let line0 = edit["range"]["start"]["line"].as_u64().unwrap() as usize;
+    let char0 = edit["range"]["start"]["character"].as_u64().unwrap() as usize;
+    let at = offset_of(src, line0, char0);
+    let patched = format!("{}{}{}", &src[..at], new_text, &src[at..]);
+    let (code, so, se) = check_lll_src("req161-patched", &patched);
+    assert_eq!(code, Some(0), "the patched module must verify:\npatched:\n{patched}\nstdout:{so}\nstderr:{se}");
 }
