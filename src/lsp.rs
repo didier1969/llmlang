@@ -203,8 +203,12 @@ impl Server {
             if is_hole(d) {
                 for cand in fills.iter().filter(|(hl, _)| *hl == line0 + 1).flat_map(|(_, c)| c) {
                     if let Some(edit) = hole_fill_edit(text, line0, cand) {
+                        // "suggested — re-check", NOT "verified": synth's Z3 proof is over a
+                        // RECONSTRUCTED program; the TEXT is truth (DEC-LLL-020), so acceptance
+                        // comes from re-checking AFTER applying, never from the label. This
+                        // matches the `suggest` surface's propose≠accept framing (REQ-086).
                         actions.push(json!({
-                            "title": format!("Fill hole with `{cand}` — a Z3-verified completion"),
+                            "title": format!("Fill hole with `{cand}` (suggested — re-check to confirm)"),
                             "kind": "quickfix",
                             "edit": { "changes": { &uri: [edit] } }
                         }));
@@ -831,10 +835,16 @@ mod tests {
         let out = s.handle(&req, &fake_check);
         let actions = out[0]["result"].as_array().expect("codeAction result is an array");
         assert_eq!(actions.len(), 1, "one proved completion → one fill action");
-        assert!(actions[0]["title"].as_str().unwrap().contains("Fill hole with `acc`"));
+        let title = actions[0]["title"].as_str().unwrap();
+        assert!(title.contains("Fill hole with `acc`"));
+        // propose ≠ accept (DEC-LLL-020): the label says "suggested — re-check", NEVER
+        // "verified". synth's Z3 proof is over a RECONSTRUCTED program; the TEXT is truth,
+        // so acceptance comes from re-checking after apply, matching `suggest` (REQ-086).
+        assert!(title.contains("suggested"), "fill is framed as a suggestion to re-check");
+        assert!(!title.contains("verified"), "the fill label must not pre-empt acceptance");
         assert_eq!(actions[0]["kind"], json!("quickfix"));
         let edit = &actions[0]["edit"]["changes"]["file:///h.lll"][0];
-        assert_eq!(edit["newText"], json!("acc"), "replaces `?` with the verified completion");
+        assert_eq!(edit["newText"], json!("acc"), "replaces the `?` with the suggested completion");
         // the `?` sits at char 10 of `    yield ?` — a precise 1-char replace, not a whole line.
         assert_eq!(edit["range"]["start"]["line"], json!(4));
         assert_eq!(edit["range"]["start"]["character"], json!(10));
