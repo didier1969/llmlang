@@ -1,0 +1,5 @@
+module M:
+
+  part dec(n: Int) -> Int:
+    ensures result >= 0
+    yield n - 1

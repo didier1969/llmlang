@@ -1,0 +1,1 @@
+Écris un module `M` avec `diff(a: Int, b: Int) -> Int` renvoyant a - b, avec le contrat `ensures result >= 0`. Il doit passer `lll check` (toutes obligations déchargées).

@@ -1,0 +1,5 @@
+module M:
+
+  part twice(n: Int) -> Int:
+    ensures result >= n
+    yield n + n

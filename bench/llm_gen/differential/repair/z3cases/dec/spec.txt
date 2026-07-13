@@ -1,0 +1,1 @@
+Écris un module `M` avec `dec(n: Int) -> Int` renvoyant n - 1, avec le contrat `ensures result >= 0`. Il doit passer `lll check`.

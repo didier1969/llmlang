@@ -1,0 +1,1 @@
+Écris un module `M` avec `twice(n: Int) -> Int` renvoyant n + n, avec le contrat `ensures result >= n`. Il doit passer `lll check`.
