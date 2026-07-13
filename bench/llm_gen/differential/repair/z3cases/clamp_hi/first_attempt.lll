@@ -1,0 +1,5 @@
+module M:
+
+  part clamp_hi(x: Int, hi: Int) -> Int:
+    ensures result <= hi
+    yield x

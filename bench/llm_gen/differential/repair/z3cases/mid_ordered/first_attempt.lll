@@ -1,0 +1,5 @@
+module M:
+
+  part mid(a: Int, b: Int) -> Int:
+    ensures result >= a
+    yield (a + b) div 2

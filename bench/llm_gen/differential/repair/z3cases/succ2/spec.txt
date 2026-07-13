@@ -1,0 +1,1 @@
+Écris `M` avec `succ(n: Int) -> Int` renvoyant n + 1 (avec `requires n >= 0`), contrat `ensures result >= 2`. Doit passer `lll check`.

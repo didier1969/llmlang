@@ -38,9 +38,10 @@ MODELS = os.environ.get("BENCH_MODELS",
                         "openai/gpt-4o-mini,qwen/qwen-2.5-7b-instruct").split(",")
 SAMPLES = int(os.environ.get("BENCH_SAMPLES", "3"))
 MAX_CALLS = int(os.environ.get("BENCH_MAX_CALLS", "200"))
-# fixtures: hand-frozen Z3 traps + the two original repair cases
-FIX = [os.path.join(HERE, "z3cases", d) for d in
-       ("safe_sub", "dec", "twice_ge", "avg_nonneg")] + \
+# fixtures: every hand-frozen Z3 trap under z3cases/ + the two original repair cases
+_z3 = os.path.join(HERE, "z3cases")
+FIX = sorted(os.path.join(_z3, d) for d in os.listdir(_z3)
+             if os.path.isfile(os.path.join(_z3, d, "first_attempt.lll"))) + \
       [os.path.join(HERE, "cases", d) for d in ("reduce_div", "clamp")]
 
 _primer = open(HEADER).read() if os.path.exists(HEADER) else ""
@@ -109,6 +110,14 @@ def main():
             safe = model.replace("/", "_")
             for arm, prompt in arms.items():
                 for n in range(SAMPLES):
+                    tag = f"{name}__{safe}__{arm}__{n}"
+                    saved = os.path.join(OUT, tag + ".lll")
+                    if os.path.exists(saved):  # resume: re-judge a saved output, no API call
+                        ok, _ = check(saved)
+                        rows.append({"fix": name, "model": model, "arm": arm, "sample": n,
+                                     "verified": ok, "reused": True,
+                                     "completion_tokens": None})
+                        continue
                     try:
                         reply, usage = call(model, prompt)
                     except SystemExit:
@@ -116,7 +125,7 @@ def main():
                     except Exception as e:
                         rows.append({"fix": name, "model": model, "arm": arm,
                                      "sample": n, "error": str(e)[:150]}); continue
-                    ok = judge(extract(reply), f"{name}__{safe}__{arm}__{n}")
+                    ok = judge(extract(reply), tag)
                     rows.append({"fix": name, "model": model, "arm": arm, "sample": n,
                                  "verified": ok,
                                  "completion_tokens": usage.get("completion_tokens")})

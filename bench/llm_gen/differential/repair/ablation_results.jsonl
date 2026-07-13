@@ -1,72 +1,330 @@
-{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 40}
-{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 40}
-{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 40}
-{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 42}
-{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 42}
-{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 41}
-{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 40}
-{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 42}
-{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 40}
-{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 121}
-{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 42}
-{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 40}
-{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 38}
-{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 38}
-{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 38}
-{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 40}
-{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 40}
-{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 40}
-{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 38}
-{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 73}
-{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 77}
-{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 91}
-{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 107}
-{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 106}
-{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 36}
-{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 36}
-{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 36}
-{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 37}
-{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 37}
-{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 37}
-{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 36}
-{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 38}
-{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 36}
-{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 103}
-{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 102}
-{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 29}
-{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 51}
-{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 51}
-{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 51}
-{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 53}
-{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 53}
-{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 53}
-{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 53}
-{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 53}
-{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 53}
-{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 112}
-{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 107}
-{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 108}
-{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 110}
-{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 131}
-{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 130}
-{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 148}
-{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 137}
-{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 82}
-{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 75}
-{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 75}
-{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 126}
-{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 86}
-{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 164}
-{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 131}
-{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 71}
-{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 74}
-{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 74}
-{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 59}
-{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 74}
-{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 71}
-{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 61}
-{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 113}
-{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 61}
-{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 61}
-{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 93}
-{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 61}
+{"fix": "abs_strict", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "abs_strict", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "avg_nonneg", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "clamp_hi", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "clamp_hi", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 39}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 38}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 40}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 40}
+{"fix": "clamp_hi", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "clamp_hi", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 39}
+{"fix": "clamp_hi", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 39}
+{"fix": "clamp_hi", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 39}
+{"fix": "clamp_hi", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 39}
+{"fix": "clamp_hi", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 39}
+{"fix": "clamp_hi", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 39}
+{"fix": "dec", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 110}
+{"fix": "dec", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 37}
+{"fix": "dec", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 128}
+{"fix": "dec", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 105}
+{"fix": "dec", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 115}
+{"fix": "dec", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 88}
+{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "dec", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"fix": "dec", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"fix": "dec", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"fix": "dec", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"fix": "dec", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"fix": "dec", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"fix": "dec", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 38}
+{"fix": "dec", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "dec", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "dec", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 38}
+{"fix": "dec", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "dec", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "half_le", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 116}
+{"fix": "half_le", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 91}
+{"fix": "half_le", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 105}
+{"fix": "half_le", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 177}
+{"fix": "half_le", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 130}
+{"fix": "half_le", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 48}
+{"fix": "half_le", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 37}
+{"fix": "half_le", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 30}
+{"fix": "half_le", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 30}
+{"fix": "half_le", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 30}
+{"fix": "half_le", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 30}
+{"fix": "half_le", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 30}
+{"fix": "half_le", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"fix": "half_le", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"fix": "half_le", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "half_le", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 31}
+{"fix": "half_le", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 113}
+{"fix": "half_le", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 31}
+{"fix": "half_le", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 37}
+{"fix": "half_le", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 39}
+{"fix": "half_le", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 46}
+{"fix": "half_le", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 39}
+{"fix": "mid_ordered", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 130}
+{"fix": "mid_ordered", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 128}
+{"fix": "mid_ordered", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 40}
+{"fix": "mid_ordered", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 163}
+{"fix": "mid_ordered", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 152}
+{"fix": "mid_ordered", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 66}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 47}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 46}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 46}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 46}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 46}
+{"fix": "mid_ordered", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 45}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 45}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 45}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 47}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 39}
+{"fix": "mid_ordered", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 41}
+{"fix": "mid_ordered", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 44}
+{"fix": "mid_ordered", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 40}
+{"fix": "mid_ordered", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 40}
+{"fix": "mid_ordered", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 40}
+{"fix": "safe_sub", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 106}
+{"fix": "safe_sub", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 117}
+{"fix": "safe_sub", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 136}
+{"fix": "safe_sub", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 110}
+{"fix": "safe_sub", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 126}
+{"fix": "safe_sub", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 159}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 41}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 41}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 41}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 43}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 43}
+{"fix": "safe_sub", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 43}
+{"fix": "safe_sub", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 40}
+{"fix": "safe_sub", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 40}
+{"fix": "safe_sub", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 40}
+{"fix": "safe_sub", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 43}
+{"fix": "safe_sub", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 43}
+{"fix": "safe_sub", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 43}
+{"fix": "succ2", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 37}
+{"fix": "succ2", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 86}
+{"fix": "succ2", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 118}
+{"fix": "succ2", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 255}
+{"fix": "succ2", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 52}
+{"fix": "succ2", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 99}
+{"fix": "succ2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 47}
+{"fix": "succ2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 47}
+{"fix": "succ2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 47}
+{"fix": "succ2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 50}
+{"fix": "succ2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 42}
+{"fix": "succ2", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 40}
+{"fix": "succ2", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 39}
+{"fix": "succ2", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 56}
+{"fix": "succ2", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "error": "HTTP Error 400: Bad Request"}
+{"fix": "succ2", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "error": "HTTP Error 400: Bad Request"}
+{"fix": "succ2", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "error": "HTTP Error 400: Bad Request"}
+{"fix": "succ2", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 39}
+{"fix": "succ2", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "error": "'choices'"}
+{"fix": "succ2", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 39}
+{"fix": "succ2", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 38}
+{"fix": "succ2", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 38}
+{"fix": "twice_ge", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 138}
+{"fix": "twice_ge", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 123}
+{"fix": "twice_ge", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 40}
+{"fix": "twice_ge", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 116}
+{"fix": "twice_ge", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 100}
+{"fix": "twice_ge", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 41}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 35}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 37}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 35}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 28}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 28}
+{"fix": "twice_ge", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 77}
+{"fix": "twice_ge", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 36}
+{"fix": "twice_ge", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 36}
+{"fix": "twice_ge", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 36}
+{"fix": "twice_ge", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 37}
+{"fix": "twice_ge", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 37}
+{"fix": "twice_ge", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 37}
+{"fix": "reduce_div", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 55}
+{"fix": "reduce_div", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 139}
+{"fix": "reduce_div", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 137}
+{"fix": "reduce_div", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 180}
+{"fix": "reduce_div", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 131}
+{"fix": "reduce_div", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 165}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": false, "reused": true, "completion_tokens": null}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 65}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 65}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 99}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 65}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 65}
+{"fix": "reduce_div", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 65}
+{"fix": "reduce_div", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": false, "completion_tokens": 68}
+{"fix": "reduce_div", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": false, "completion_tokens": 68}
+{"fix": "reduce_div", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": false, "completion_tokens": 68}
+{"fix": "reduce_div", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": false, "completion_tokens": 68}
+{"fix": "reduce_div", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 68}
+{"fix": "reduce_div", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": false, "completion_tokens": 68}
+{"fix": "clamp", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 96}
+{"fix": "clamp", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 143}
+{"fix": "clamp", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 121}
+{"fix": "clamp", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 102}
+{"fix": "clamp", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 1, "verified": false, "completion_tokens": 219}
+{"fix": "clamp", "model": "meta-llama/llama-3.1-8b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 135}
+{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "qwen/qwen-2.5-7b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "A_structured", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 0, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 1, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "openai/gpt-4o-mini", "arm": "B_bare", "sample": 2, "verified": true, "reused": true, "completion_tokens": null}
+{"fix": "clamp", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 60}
+{"fix": "clamp", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 60}
+{"fix": "clamp", "model": "qwen/qwen-2.5-72b-instruct", "arm": "A_structured", "sample": 2, "error": "'choices'"}
+{"fix": "clamp", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 0, "error": "'choices'"}
+{"fix": "clamp", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 58}
+{"fix": "clamp", "model": "qwen/qwen-2.5-72b-instruct", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 58}
+{"fix": "clamp", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 0, "verified": true, "completion_tokens": 59}
+{"fix": "clamp", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 1, "verified": true, "completion_tokens": 59}
+{"fix": "clamp", "model": "openai/gpt-4o", "arm": "A_structured", "sample": 2, "verified": true, "completion_tokens": 59}
+{"fix": "clamp", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 0, "verified": true, "completion_tokens": 59}
+{"fix": "clamp", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 1, "verified": true, "completion_tokens": 59}
+{"fix": "clamp", "model": "openai/gpt-4o", "arm": "B_bare", "sample": 2, "verified": true, "completion_tokens": 59}

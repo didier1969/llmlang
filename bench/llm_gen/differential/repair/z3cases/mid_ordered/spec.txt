@@ -1,0 +1,1 @@
+Écris `M` avec `mid(a: Int, b: Int) -> Int` renvoyant (a + b) div 2, contrat `ensures result >= a`. Doit passer `lll check`.

@@ -25,3 +25,4 @@ bench/llm_gen/differential/repair/harvest_full.log
 bench/**/.lll-cache/
 bench/llm_gen/differential/repair/ablation_auto/
 bench/llm_gen/differential/repair/ablation.log
+bench/llm_gen/differential/repair/ablation_scaled.log

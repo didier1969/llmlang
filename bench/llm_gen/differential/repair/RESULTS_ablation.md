@@ -2,48 +2,70 @@
 
 **The measurement PROTOCOL.md marked `PENDING(run)`.** On frozen, type-clean first attempts
 that fail a specific Z3 `ensures`/`div` obligation with a concrete counterexample, does the
-**structured** diagnostic (obligation + counterexample) actually beat a **bare** "verification
-failed" at one-shot repair? Harness: `fixture_ablation.py`. Models (reach the Z3 stage,
-cheap API tier, no `claude -p`): `gpt-4o-mini`, `qwen-2.5-7b`. 6 fixtures × 2 arms × 3 samples.
+**structured** diagnostic (obligation + counterexample) beat a **bare** "verification failed"
+at one-shot repair? Harness: `fixture_ablation.py` (verbatim capture, dumb extraction,
+resumable, hard cap). Models reach the Z3 stage and stay on the cheap API tier (each call
+≪ $0.02, so no `claude -p`). **11 hand-frozen Z3-trap fixtures × 5 non-Claude models × 3
+samples.** The ONLY variable between arms is the diagnostic, so any A>B gap is the value of
+the structured counterexample.
 
-## Result — the structured counterexample ~doubles one-shot repair
+## Headline — the structured counterexample ~doubles one-shot repair
 
-| | repaired | avg out-tokens when repaired |
-|---|---|---|
-| **A — structured (obligation + counterexample)** | **27/36 (75 %)** | 49 |
-| **B — bare ("verification failed")** | **16/36 (44 %)** | 54 |
+| | repaired |
+|---|---|
+| **A — structured (obligation + counterexample)** | **122/156 (78 %)** |
+| **B — bare ("verification failed")** | **66/160 (41 %)** |
 
-Per fixture (A = structured, B = bare):
+## The strength ladder — the weaker the model, the more the counterexample matters
+
+| model (weak → strong) | A structured | B bare | gap |
+|---|---|---|---|
+| `llama-3.1-8b` | 24/33 (72 %) | **2/33 (6 %)** | **+66 pts** |
+| `qwen-2.5-7b` | 20/33 (60 %) | 5/33 (15 %) | +45 pts |
+| `gpt-4o-mini` | 27/33 (81 %) | 20/33 (60 %) | +21 pts |
+| `qwen-2.5-72b`¹ | 21/24 (87 %) | 15/28 (53 %) | +34 pts |
+| `gpt-4o` | 30/33 (90 %) | 24/33 (72 %) | +18 pts |
+
+The weakest model **cannot repair a Z3 failure without the counterexample (6 %)**; the
+counterexample lifts it to 72 %. The strongest model already succeeds often (72 %) and gains
+less (+18). **The rich diagnostic is the lever that raises weak, cheap models toward
+strong-model reliability on the verify↔repair task** — the commercial crux of "llmlang makes
+economy models as safe as expensive ones." ¹ `qwen-2.5-72b` hit 14 provider errors → lower
+coverage; directional.
+
+## Per fixture — the counterexample decides when the failing input is non-obvious
 
 | fixture | Z3 counterexample | A | B | reading |
 |---|---|---|---|---|
-| `twice_ge` (`n+n ≥ n`) | `n = -1` | **6/6** | **0/6** | clean discriminator: no one repairs without it, everyone with it |
-| `avg_nonneg` (`(a+b)/2 ≥ 0`) | `a=0, b=-1` | 6/6 | 3/6 | counterexample lifts the weak model 0/3 → 3/3 |
-| `safe_sub` (`a-b ≥ 0`) | `a=0, b=1` | 6/6 | 4/6 | same shape, weak model 1/3 → 3/3 |
-| `clamp` (missing `x>hi` branch) | `x=hi+1` | 6/6 | 6/6 | tie — fix is obvious from the spec alone |
-| `dec` (`n-1 ≥ 0`) | `n=0` | 3/6 | 3/6 | tie — trivial for gpt, out of reach for qwen either way |
-| `reduce_div` (div-by-elem) | `xs=[0]` | 0/6 | 0/6 | needs a `forall` precondition neither model can write — the signal can't rescue missing language fluency |
+| `half_le` (`n div 2 ≤ n`) | `n = -2` | **13/13** | **0/15** | crown discriminator — the *negative* Euclidean-`div` case no one guesses, everyone fixes once shown |
+| `twice_ge` (`n+n ≥ n`) | `n = -1` | 15/15 | 3/15 | near-perfect discriminator |
+| `mid_ordered` (`(a+b)/2 ≥ a`) | `a=0, b=-2` | 14/15 | 2/15 | strong |
+| `avg_nonneg` (`(a+b)/2 ≥ 0`) | `a=0, b=-1` | 14/15 | 7/15 | clear |
+| `safe_sub` (`a-b ≥ 0`) | `a=0, b=1` | 15/15 | 10/15 | clear |
+| `succ2` (`n+1 ≥ 2`) | `n=0` | 12/12 | 8/14 | clear |
+| `clamp` / `clamp_hi` / `abs_strict` / `dec` | various | ≈ | ≈ | tie — fix obvious from the spec alone |
+| `reduce_div` (div-by-elem) | `xs=[0]` | 0/15 | 0/15 | honest ceiling — fix needs a `forall` precondition no model can write |
 
 ## What it means
 
 1. **The vision's central claim is empirically supported (not theatre).** On the
-   Z3-obligation class, the structured counterexample raises one-shot repair from **44 % to
-   75 %** — and does it in *fewer* output tokens (49 vs 54): the model aims at the failing
-   input instead of flailing. `twice_ge` is the crisp proof: 0/6 → 6/6.
-2. **The weaker model benefits most.** `gpt-4o-mini` is often strong enough to guess the fix
-   from the spec (ties on several fixtures); `qwen-2.5-7b` is not — the counterexample is
-   what lifts it from ~0 to correct (`avg_nonneg`, `safe_sub`, `twice_ge`). The rich
-   diagnostic democratises correct code across model tiers.
-3. **Honest limits.** Where the fix is obvious (`clamp`) both arms tie; where the fix needs
-   language expressiveness the model lacks (`reduce_div` → `forall`) neither arm helps — a
-   counterexample tells you *what* breaks, not *how* to say the precondition. The win is
-   real and bounded, on failures that reach verification.
+   Z3-obligation class, the structured counterexample raises one-shot repair from **41 % to
+   78 %** across 5 non-Claude models. `half_le` and `twice_ge` are crisp proofs (0 → ~100 %).
+2. **The weaker the model, the bigger the win** — a clean, near-monotone ladder from +66 pts
+   (llama-8b) to +18 pts (gpt-4o). The diagnostic democratises correct code across tiers.
+3. **Honest limits.** Where the fix is obvious (`clamp`, `dec`) both arms tie; where it needs
+   language expressiveness the model lacks (`reduce_div` → `forall`) neither works — a
+   counterexample tells you *what* breaks, not *how* to phrase the precondition. Repair-token
+   counts are comparable between arms (A ~56, B ~46 when repaired): the win is *success*, not
+   token count.
 
 ## Scope / honesty
 
-- Small (6 fixtures, 2 models, 3 samples); a directional, reproducible signal, not a paper.
-- Fixtures are hand-frozen naive attempts (verbatim, never edited); the fix for the four
-  `z3cases` is "add the `requires` the counterexample points to" — exactly the
-  requires-strengthening surfaced by REQ-LLL-088/161.
+- 11 fixtures × 5 models × 3 samples; a robust directional signal, not a paper. `qwen-2.5-72b`
+  under-covered (provider errors). One background run was cut mid-flight; the harness is
+  resumable (re-judges saved outputs from disk), so no attempt was re-billed.
+- Fixtures are hand-frozen naive attempts (verbatim, never edited); the fix for the `z3cases`
+  is "add the `requires` the counterexample points to" — exactly the requires-strengthening
+  surfaced by REQ-LLL-088/161.
 - Complements the harvest (weak models starve at the *syntax* layer): this isolates the
   *verification* layer by starting from type-clean Z3 failures.

@@ -1,0 +1,1 @@
+Écris `M` avec `half(n: Int) -> Int` renvoyant n div 2, contrat `ensures result <= n`. Doit passer `lll check`.

@@ -1,0 +1,1 @@
+Écris `M` avec `pabs(x: Int) -> Int` = valeur absolue de x, contrat `ensures result > 0`. Doit passer `lll check`.

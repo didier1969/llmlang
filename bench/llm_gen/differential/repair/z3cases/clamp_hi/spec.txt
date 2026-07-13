@@ -1,0 +1,1 @@
+Écris `M` avec `clamp_hi(x: Int, hi: Int) -> Int` qui borne x par le haut à hi, contrat `ensures result <= hi`. Doit passer `lll check`.

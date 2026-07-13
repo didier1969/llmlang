@@ -1,0 +1,5 @@
+module M:
+
+  part half(n: Int) -> Int:
+    ensures result <= n
+    yield n div 2

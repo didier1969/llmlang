@@ -1,0 +1,6 @@
+module M:
+
+  part succ(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 2
+    yield n + 1
