@@ -27,3 +27,5 @@ mod fuzz;
 mod refactor;
 #[path = "integration/spec_predicates.rs"]
 mod spec_predicates;
+#[path = "integration/lsp.rs"]
+mod lsp;

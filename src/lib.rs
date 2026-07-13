@@ -14,6 +14,7 @@ pub mod explain;
 pub mod hash;
 pub mod lexer;
 pub mod loader;
+pub mod lsp;
 pub mod mcp;
 pub mod opsem;
 pub mod optimize;

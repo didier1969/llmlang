@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
         .to_string()
 }
 
@@ -1096,6 +1096,24 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         ["mcp", file] => mcp::serve(file),
+        ["lsp"] => {
+            // REQ-LLL-160 — language server: live structured diagnostics streamed
+            // to the editor / LLM agent over the SAME `diag::Report` the JSON channel
+            // emits. The buffer (possibly unsaved) is checked via a sibling temp file
+            // so imports resolve as `lll check` would; `check_report_json` is reused
+            // verbatim as the checker (single source of truth for a verdict).
+            lsp::run_stdio(|uri, text| match lsp::uri_to_path(uri) {
+                Some(path) => lsp::check_buffer(&path, text, |f| check_report_json(f, false)),
+                None => diag::Report {
+                    ok: false,
+                    status: Some("failed".to_string()),
+                    module: None,
+                    diagnostics: vec![diag::Diagnostic::from_error(&format!(
+                        "lsp: unsupported document uri `{uri}` (only file:// is handled)"
+                    ))],
+                },
+            })
+        }
         ["audit", file] => {
             let (src, cm, hm) = load(file)?;
             let cache: std::collections::HashMap<String, vc::CacheEntry> =
