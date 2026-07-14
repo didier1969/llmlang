@@ -84,7 +84,9 @@ Donc **atteindre une PREUVE en llmlang coûte moins de la MOITIÉ d'atteindre un
 confiance TESTÉE en Rust** — et une preuve ≫ des tests. (Le 4ᵉ essai : opus a ship le bug
 subtil, la boucle l'a réparé jusqu'à la preuve en 4 tours, 0,14 $ — outlier, toujours prouvé.)
 Le win *token* pur reste le banc contexte (#1) ; ici c'est le **coût-de-la-confiance** qui
-penche pour llmlang.
+penche pour llmlang. **Robuste sur 8 tâches** (isqrt + gcd/clamp/abs_val/power/max3) : atteindre
+une PREUVE coûte **~2× moins** qu'atteindre une confiance *testée* en Rust — **8/8**, sans
+exception (le surcoût Rust = écrire les tests ; llmlang = `lll check` gratuit).
 
 **(b) Sûreté — overflow silencieux (spectaculaire).** `sum_of_squares([3037000500])` (carré
 au-delà de i64) : le Rust **idiomatique naturel d'opus** (`.map(|x| x*x).sum()`, aucune garde)

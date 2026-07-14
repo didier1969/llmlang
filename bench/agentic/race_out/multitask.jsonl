@@ -1,0 +1,5 @@
+{"task": "gcd", "proved": true, "rounds": 1, "llmlang_cost": 0.0201, "rust_cost": 0.0402}
+{"task": "clamp", "proved": true, "rounds": 1, "llmlang_cost": 0.0198, "rust_cost": 0.0406}
+{"task": "abs_val", "proved": true, "rounds": 1, "llmlang_cost": 0.0189, "rust_cost": 0.0295}
+{"task": "power", "proved": true, "rounds": 1, "llmlang_cost": 0.02, "rust_cost": 0.0403}
+{"task": "max3", "proved": true, "rounds": 1, "llmlang_cost": 0.0197, "rust_cost": 0.0406}

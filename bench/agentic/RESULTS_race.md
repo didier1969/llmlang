@@ -34,6 +34,24 @@ the calibrated Goldilocks `isqrt` (trips even opus). One trial, labelled **preli
 4. **Escaped-bug axis = 0 on `isqrt`** (opus writes a correct small function). The latent-bug
    gap shows up on overflow-prone tasks — see `overflow/RESULTS.md` (4/4 silently wrong).
 
+## Breadth — 5 more verifiable tasks, same verdict (5/5)
+
+A multi-task cost-of-trust sweep (`multitask.py`, no trap battery — cost-to-trust only). opus
+proved all five in llmlang in 1 round; llmlang is cheaper than Rust-to-tested on **5/5**:
+
+| task | llmlang → PROVED | Rust → tested |
+|---|---|---|
+| `gcd` | $0.020 | $0.040 |
+| `clamp` | $0.020 | $0.041 |
+| `abs_val` | $0.019 | $0.030 |
+| `power` | $0.020 | $0.040 |
+| `max3` | $0.020 | $0.041 |
+| **total** | **$0.099** | **$0.191 (×1.9)** |
+
+Together with the `isqrt` sweep (×2.2), across **8 tasks** reaching a machine **PROOF** costs
+**~2× less** than reaching mere **tested-confidence** in Rust — 8/8, no exception. The Rust
+premium is the test-authoring cost; llmlang's proof is `lll check` (free).
+
 ## Where this leaves the big-project claim
 
 - **Cost-to-trust favours llmlang** on this task: reaching a **proof** (~$0.026) is cheaper
