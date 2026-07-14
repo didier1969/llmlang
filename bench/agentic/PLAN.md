@@ -59,6 +59,20 @@ Euclidean sign) the hidden battery probes: **(a) tokens to machine-checked trust
 on the Rust final artifact. This does not require Claude to err in llmlang; it measures the
 asymmetric cost of *reaching* trust, which is the real big-project claim.
 
+### Hardening — DONE: `isqrt` O(log n) trips even Claude (calibrated)
+
+Per the operator's steer ("harden the task first" so we also capture the verify↔repair
+differential for a strong agent), a task WAS found where Claude (opus) errs on a real Z3
+obligation: **efficient (O(log n)) `isqrt`** (`isqrt/spec.md`). Claude's attempt
+(`isqrt/claude_first_attempt.lll`) is a genuine bisection with an invariant + `measure`, yet
+`ensures result*result <= n` is undischarged (counterexample `n=2`): the overflow-safe test
+`mid <= n div mid` does not exactly maintain the loop invariant across the recursion. A
+subtle, *real* reasoning bug — not a syntax slip, not a gotcha. So the hardened race captures
+BOTH axes: (verify↔repair) llmlang catches the bug with a precise counterexample → Claude
+repairs; (escaped bug) the same wrong bisection in Rust compiles and returns a wrong root on
+some input, caught only by the trap battery. `isqrt` is the locked race subject.
+(Caveat: isqrt is *long* for Claude — probes need a ≥300 s timeout; one of two probes timed out.)
+
 ## Scaffolding to build ON GREENLIGHT (deterministic, not yet built)
 
 1. **Rust control port** of the task (same spec, prose contracts the agent is trusted to honour).
