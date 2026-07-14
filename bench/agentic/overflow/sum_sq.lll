@@ -1,0 +1,11 @@
+module Sq:
+
+  part sum_sq(xs: List[Int]) -> Int:
+    ensures result >= 0
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h * h + sum_sq(t)
+
+  part main() -> Int via IO:
+    let xs = [3037000500]
+    yield IO.print(sum_sq(xs))
