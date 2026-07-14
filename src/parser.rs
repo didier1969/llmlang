@@ -355,10 +355,21 @@ fn desugar_str_lit(s: &str) -> Result<Expr, String> {
     if !lit.is_empty() {
         pieces.push(codepoints(&lit));
     }
-    // Left-fold the pieces with `str_cat` (deterministic, so the hash is canonical).
-    let mut it = pieces.into_iter();
-    let first = it.next().unwrap_or_else(|| Expr::ListLit(Vec::new()));
-    Ok(it.fold(first, |acc, p| Expr::Call("str_cat".into(), vec![acc, p])))
+    // RIGHT-fold the pieces with `str_cat` — and the direction is not cosmetic, it is the
+    // difference between O(n) and O(n²).
+    //
+    // `str_cat(a, b)` must walk the whole of `a` to copy it (a cons list has no cheap
+    // append), so it costs O(|a|). A LEFT fold therefore re-walks the ENTIRE accumulated
+    // prefix at every step — `"a{x}b{y}c{z}d"` copies the growing head k times, giving
+    // O(k·n) in the number of fragments. Folding RIGHT makes each `str_cat` walk only its
+    // own (short) left piece exactly once: O(n), linear.
+    //
+    // The result is IDENTICAL because list concatenation is ASSOCIATIVE — this is a free
+    // win, not a trade-off. Still deterministic, so the content-hash stays canonical
+    // (DEC-LLL-020); it is simply a different, better canonical shape.
+    let mut it = pieces.into_iter().rev();
+    let last = it.next().unwrap_or_else(|| Expr::ListLit(Vec::new()));
+    Ok(it.fold(last, |acc, p| Expr::Call("str_cat".into(), vec![p, acc])))
 }
 
 /// Parse a single interpolation expression `{ … }` in isolation (REQ-LLL-067):

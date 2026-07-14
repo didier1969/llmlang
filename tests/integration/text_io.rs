@@ -63,9 +63,28 @@ fn interpolation_is_pure_sugar_same_hash_as_explicit_form() {
     // The DEC-LLL-020 guard: the interpolated string and the explicit
     // str_cat/str_of form are the SAME definition (identical content-hash) —
     // proving interpolation is sugar, not a language extension.
+    // The pieces are folded RIGHT, not left: `str_cat(a, b)` walks all of `a`, so a LEFT
+    // fold re-walks the whole accumulated prefix at every step — O(n²) in the number of
+    // fragments. Right-folding is O(n), and gives the IDENTICAL result because list
+    // concatenation is associative. The canonical shape is therefore right-nested.
     let interp = "module M:\n\n  part f(x: Int) -> List[Int]:\n    yield \"a{x}b\"\n";
-    let explicit = "module M:\n\n  part f(x: Int) -> List[Int]:\n    yield str_cat(str_cat(\"a\", str_of(x)), \"b\")\n";
+    let explicit = "module M:\n\n  part f(x: Int) -> List[Int]:\n    yield str_cat(\"a\", str_cat(str_of(x), \"b\"))\n";
     assert_same_identity(interp, explicit);
+}
+
+/// The fold DIRECTION is a complexity guarantee, so pin it structurally — a timing test
+/// would be at the mercy of the machine, but the AST shape is not. Three interpolants give
+/// a RIGHT-nested chain; left-nesting it would silently reintroduce the quadratic blow-up.
+#[test]
+fn interpolation_folds_right_so_concatenation_stays_linear() {
+    let interp = "module M:\n\n  part f(x: Int, y: Int) -> List[Int]:\n    yield \"a{x}b{y}c\"\n";
+    // right-nested: cat("a", cat(str_of(x), cat("b", cat(str_of(y), "c"))))
+    let right = "module M:\n\n  part f(x: Int, y: Int) -> List[Int]:\n    yield str_cat(\"a\", str_cat(str_of(x), str_cat(\"b\", str_cat(str_of(y), \"c\"))))\n";
+    assert_same_identity(interp, right);
+    let out = build_run(
+        "module M:\n\n  part main() -> Int via IO:\n    let x = 4\n    let y = 2\n    yield IO.putln(\"a{x}b{y}c\")\n",
+    );
+    assert!(out.contains("a4b2c"), "the right fold must still produce the same text, got: {out:?}");
 }
 
 #[test]

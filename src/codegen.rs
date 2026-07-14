@@ -4256,18 +4256,21 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         Expr::Compr { var, iter, body } => {
             // List comprehension `[body for var in iter]` (REQ-LLL-067): fold over the
             // finite `iter` cons-list, binding each element to `var`, collecting `body`
-            // into a fresh list. The `loop { match &*cur }` shape (not `while let`) mirrors
-            // the proven `__lll_str_to_rust` walk so the in-loop reassignment `__csrc =
-            // __ct.clone()` borrow-checks. Values are cloned uniformly (the liveness pass
-            // records no moves for a comprehension). Names are `__c*`-prefixed; a nested
-            // comprehension shadows them in its own block.
+            // into a fresh list. Names are `__c*`-prefixed; a nested comprehension shadows
+            // them in its own block.
+            //
+            // The walk BORROWS (`__ccur = __ct`) rather than cloning the `Rc` at each node.
+            // The old `__csrc = __ct.clone()` cost a refcount increment — and a matching
+            // decrement on drop — PER ELEMENT, pure overhead on a read-only traversal. The
+            // source list is bound to `__csrc` first so it OUTLIVES the borrow that walks it.
             let it = expr(iter, cx, false)?;
             let bd = expr(body, cx, false)?;
             format!(
-                "{{ let mut __csrc = {it}; let mut __cout = ::std::vec::Vec::new(); \
-                 loop {{ match &*__csrc {{ \
+                "{{ let __csrc = {it}; let mut __ccur = &__csrc; \
+                 let mut __cout = ::std::vec::Vec::new(); \
+                 loop {{ match &**__ccur {{ \
                  LstI::Nil => break, \
-                 LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); __cout.push({bd}); __csrc = __ct.clone(); }} \
+                 LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); __cout.push({bd}); __ccur = __ct; }} \
                  }} }} \
                  let mut __cacc = Rc::new(LstI::Nil); \
                  for __ce in __cout.into_iter().rev() {{ __cacc = Rc::new(LstI::Cons(__ce, __cacc)); }} \
@@ -4692,12 +4695,16 @@ fn __lll_str_of_int(n: LllInt) -> Lst<LllInt> {
     __lll_str_of_rust(&n.to_string())
 }
 // REQ-LLL-067: List[Int] concatenation `a ++ b`. Total.
+// The traversal BORROWS instead of cloning the `Rc` at each node. `cur = t.clone()` was a
+// refcount increment (and a matching decrement on drop) PER ELEMENT — pure overhead on a
+// read-only walk, paid by every interpolation, every `IO.puts`, every FFI string argument.
+// Re-binding a reference costs nothing and is just as safe: the chain is owned by the caller.
 fn __lll_str_cat(a: Lst<LllInt>, b: Lst<LllInt>) -> Lst<LllInt> {
     let mut elems: Vec<LllInt> = Vec::new();
-    let mut cur = a;
-    while let LstI::Cons(h, t) = &*cur {
+    let mut cur: &Lst<LllInt> = &a;
+    while let LstI::Cons(h, t) = &**cur {
         elems.push(h.clone());
-        cur = t.clone();
+        cur = t;
     }
     let mut acc = b;
     for e in elems.into_iter().rev() {
@@ -4707,14 +4714,14 @@ fn __lll_str_cat(a: Lst<LllInt>, b: Lst<LllInt>) -> Lst<LllInt> {
 }
 fn __lll_str_to_rust(xs: &Lst<LllInt>) -> String {
     let mut s = String::new();
-    let mut cur = xs.clone();
+    let mut cur: &Lst<LllInt> = xs;
     loop {
-        match &*cur {
+        match &**cur {
             LstI::Nil => break,
             LstI::Cons(c, t) => {
                 s.push(u32::try_from(c.to_i64()).ok().and_then(char::from_u32)
                     .expect("FFI boundary: List[Int]->String has a non-Unicode-scalar codepoint"));
-                cur = t.clone();
+                cur = t;
             }
         }
     }
@@ -4737,15 +4744,15 @@ fn __lll_str_of_rust(s: &str) -> Lst<LllInt> {
 // from real bytes (FFI-returned or an in-range literal list).
 fn __lll_bytes_to_rust(xs: &Lst<LllInt>) -> Vec<u8> {
     let mut v = Vec::new();
-    let mut cur = xs.clone();
+    let mut cur: &Lst<LllInt> = xs;
     loop {
-        match &*cur {
+        match &**cur {
             LstI::Nil => break,
             LstI::Cons(c, t) => {
                 v.push(u8::try_from(c.to_i64()).unwrap_or_else(|_| {
                     panic!("FFI boundary: List[Int]->Vec<u8> has an out-of-range byte {c} (must be 0..=255)")
                 }));
-                cur = t.clone();
+                cur = t;
             }
         }
     }
