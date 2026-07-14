@@ -51,3 +51,5 @@ mod compr_range;
 mod cli_test_cmd;
 #[path = "integration/cli_fmt.rs"]
 mod cli_fmt;
+#[path = "integration/examples_smoke.rs"]
+mod examples_smoke;
