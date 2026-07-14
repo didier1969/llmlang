@@ -1,49 +1,52 @@
 # C-speed benchmark (REQ-LLL-015, REQ-LLL-140) — measured truth
 
-> ## ⚠ SUPERSEDED for every `Int`-carrying kernel — re-measured 2026-07-14 (REQ-LLL-162)
+> ## ⚠ RE-MEASURED 2026-07-14 — the `Int`-carrying numbers below are HISTORICAL
 >
-> `Int` became an EXACT arbitrary-precision integer (DEC-LLL-077, REQ-LLL-157). Every
-> number below that involves `Int` was measured when `Int` was a raw `i64`, and is now
-> **wrong**. In particular the fib finding — *"as fast as idiomatic hand-written Rust,
-> zero overhead"* — **no longer holds**. Current numbers (`bash bench/cspeed/run.sh`,
-> USER CPU, min of 5):
+> Two changes landed, in this order:
 >
-> | kernel | llmlang | Rust `i64` **equal work** | Rust `i64` as LLVM compiles it | C `gcc -O2` |
+> 1. **`Int` became EXACT** (arbitrary precision, DEC-LLL-077 / REQ-LLL-157). That made it
+>    BOXED — 16 bytes, non-`Copy`, drop glue — costing ~4-6x per operation across every
+>    kernel, and (worse) hiding the arithmetic from the optimizer.
+> 2. **Speculative execution recovered it** (REQ-LLL-162). Every pure, scalar part is now
+>    compiled TWICE: a raw-`i64` twin and the exact body. The twin runs first with CHECKED
+>    arithmetic; on any overflow it bails and the exact body recomputes. Re-running is free
+>    of consequence **because the language is pure** — there is no effect to replay. Sound
+>    by construction: the fallback IS the exact semantics.
+>
+> | kernel | llmlang (boxed only) | **llmlang (speculating)** | Rust `i64` | C `gcc -O2` |
 > |---|---|---|---|---|
-> | `lcg` 100M (arithmetic-bound) | 0.79s | 0.16s (**4.9x**) | 0.03s (26x) | 0.29s (2.7x) |
-> | `fib(40)` (call-heavy) | 2.32s | 0.65s (**3.6x**) | — | 0.31s (7.5x) |
-> | `listsum` (list fold) | 0.40s | — | — | 0.07s (5.7x) |
-> | `map` (associative read) | 0.65s | — | — | 0.39s (1.7x) |
+> | `lcg` 100M (arithmetic-bound) | 0.79s | **0.03s** | 0.02s | 0.28s |
+> | `fib(40)` (call-heavy) | 2.32s | **0.96s** | 0.68s | 0.32s |
+> | `listsum` (list fold) | 0.41s | **0.41s** — unchanged | — | 0.07s |
+> | `map` (associative read) | 0.65s | **0.52s** | — | 0.36s |
 >
-> Everything carries `-C overflow-checks=on`, the posture `lll build` ships (comparing a
-> checked binary to a wrapping one would measure the safety setting, not the language).
+> **`lcg` is back to ~10x faster than gcc -O2 C — and we finally know WHY.** Raw `i64` lets
+> LLVM see that `mod 2^31` makes the recurrence exact arithmetic in a ring where five
+> composed affine maps collapse into one, so it **algebraically fuses five LCG steps into a
+> single `imul`** (its loop counter advances by 5; it really runs 20M iterations, not 100M).
+> gcc never finds this — its truncated `%` needs a sign fixup that hides the ring structure.
+> So the old "10x faster than C" claim was never "llmlang is fast": it was "llmlang hands
+> LLVM arithmetic it can rewrite". Boxing took that away; speculation gives it back.
 >
-> **The per-operation tax is ~4-6x, consistently.** An exact `Int` is a 16-byte non-`Copy`
-> value with drop glue, so it never lives in registers. Only the associative read escapes
-> (1.7x) — its cost is the BTreeMap, not the integer.
+> ⚠ **A benchmark trap this exposed, worth remembering.** A number that is physically
+> impossible is the signal: 0.02s for 100M iterations of a dependent `imul` chain is ~0.6
+> cycles/step, below the instruction's own latency. Always check the two binaries do the
+> SAME WORK before publishing a ratio (`lcg_nofuse_ref.rs` blocks the fusion so the
+> per-operation cost can be measured honestly). Two more method bugs were fixed at the same
+> time: the harness measured WALL time with **no sanity filter**, so the negative `%e` that
+> `/usr/bin/time` intermittently reports on WSL always won the min-of-5 (observed:
+> `llmlang=-2.26s`); and it compared an overflow-checked llmlang binary against a *wrapping*
+> Rust reference, which measured the safety posture rather than the language.
 >
-> **Why `lcg` needs TWO Rust columns — a benchmark trap worth knowing.** LLVM sees that
-> `mod 2^31` makes the recurrence exact arithmetic in a ring where five composed affine maps
-> collapse into one, and algebraically FUSES five LCG steps into a single `imul`: its loop
-> counter advances by 5 and it really runs 20M iterations, not 100M (hence its
-> otherwise-impossible 0.03s — a dependent `imul` chain cannot retire faster than ~3
-> cycles/step). Scoring llmlang's 100M steps against that 20M-step binary inflated the
-> reported tax to ~41x; at EQUAL work it is **4.9x**.
+> **What is still slow, honestly: `listsum` at ~5x C.** It was at PARITY (0.9x) when `Int`
+> was an `i64`. The whole gap is the boxing of list ELEMENTS: a `List[Int]` is a cons-list
+> of 16-byte `LllInt`s, halving cache density and adding a clone/drop branch per node.
+> Speculation is signature-directed, so a list-carrying part does not qualify. **This is the
+> next frontier**, and the levers are known: proof-guided bounds-check elimination (every
+> `get` is ALREADY proven in-range by Z3, so the runtime check is provably dead code),
+> unboxed collections when the contract bounds the elements, and an 8-byte tagged `LllInt`.
 >
-> But the fused column is not a mirage either: **llmlang used to reach it**, back when `Int`
-> was a raw `i64`. That fusion — not llmlang being intrinsically fast — is where the old
-> *"~10x faster than gcc -O2 C"* claim actually came from. gcc never finds it (its truncated
-> `%` needs a sign fixup, which hides the ring structure). So boxing costs TWICE: ~5x per
-> operation, **and** every rewrite the optimizer can no longer see through. Way out:
-> **REQ-LLL-162** (proof-guided unboxing) — it recovers both halves at once.
->
-> Two method bugs were fixed at the same time, because they had been quietly corrupting
-> this file: the harness measured WALL time (which measures the machine, not the program)
-> and had **no sanity filter**, so the negative `%e` that `/usr/bin/time` intermittently
-> reports on WSL always won the min-of-5 (observed: `llmlang=-2.26s`). It now measures
-> USER CPU and discards garbage samples.
->
-> The `aset` / `map` analysis below (REQ-LLL-140, the write/associative regime) does NOT
+> The `aset` / `map` analysis below (REQ-LLL-140, the write/associative regime) does not
 > depend on the `Int` representation and still stands.
 
 Method: min of 3–5 runs; `rustc -O` (edition 2021) for llmlang/Rust, `gcc -O2` for C.

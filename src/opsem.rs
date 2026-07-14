@@ -65,11 +65,42 @@ impl OpForm {
         }
     }
 
-    /// Rust expression for this operator over two already-emitted operand exprs.
+    /// Rust expression over the EXACT `Int` (`LllInt`) — the always-correct path.
     pub fn rust(&self, a: &str, b: &str) -> String {
         match self.rust_sym {
             RustSym::Infix(sym) => format!("({a} {sym} {b})"),
             RustSym::Call(func) => format!("{func}({a}, {b})"),
+        }
+    }
+
+    /// Rust expression over a RAW `i64`, on the speculative fast path (REQ-LLL-162).
+    ///
+    /// THE INVARIANT THAT MAKES SPECULATION SOUND: every arithmetic operator here is
+    /// CHECKED and bails with `?` on overflow, so the fast path can only ever produce a
+    /// value the exact path would have produced — it never wraps, never truncates. An
+    /// operator that could silently wrap here would let a "verified" program return a
+    /// wrong answer, which is precisely what DEC-LLL-077 exists to prevent.
+    ///
+    /// And div/mod stay EUCLIDEAN (`checked_div_euclid`/`checked_rem_euclid`, DEC-LLL-026):
+    /// Rust's plain `/`/`%` TRUNCATE, so using them here would make `-7 mod 3` yield `-1`
+    /// where Z3 proved `2`. Same single source of truth as the SMT and exact forms — the
+    /// three cannot drift apart, because they are declared on one line each, together.
+    pub fn rust_fast(&self, a: &str, b: &str) -> String {
+        match (self.class, self.smt_sym) {
+            // the checked, bail-on-overflow arithmetic — `?` is valid because every
+            // `_fast` body returns `Option<_>`
+            (OpClass::IntArith, SmtSym::Bin("+")) => format!("({a}).checked_add({b})?"),
+            (OpClass::IntArith, SmtSym::Bin("-")) => format!("({a}).checked_sub({b})?"),
+            (OpClass::IntArith, SmtSym::Bin("*")) => format!("({a}).checked_mul({b})?"),
+            (OpClass::IntArith, SmtSym::Bin("div")) => {
+                format!("({a}).checked_div_euclid({b})?")
+            }
+            (OpClass::IntArith, SmtSym::Bin("mod")) => {
+                format!("({a}).checked_rem_euclid({b})?")
+            }
+            // comparisons / equality / boolean logic are total on i64 and bool: the
+            // ordinary infix form is already exactly right, and cannot overflow.
+            _ => self.rust(a, b),
         }
     }
 }
@@ -123,6 +154,35 @@ mod tests {
         assert_eq!(form(Mod).smt("a", "b"), "(mod a b)");
         assert_eq!(form(Mod).rust("a", "b"), "LllInt::rem_euclid(a, b)");
         assert!(form(Div).nonzero_divisor && form(Mod).nonzero_divisor);
+    }
+
+    /// The speculative fast path (REQ-LLL-162) is a THIRD backend for the same operator,
+    /// so it is a third place proof↔binary can silently diverge. Two properties lock it:
+    ///
+    ///  1. div/mod stay EUCLIDEAN. Rust's `/`/`%` truncate — using them would make
+    ///     `-7 mod 3` return `-1` where Z3 proved `2`: a wrong answer inside a "verified"
+    ///     program. Only `checked_div_euclid`/`checked_rem_euclid` will do.
+    ///  2. every arithmetic op is CHECKED and bails (`?`). A wrapping op here would let
+    ///     the fast path return a value the exact path never would — the exact
+    ///     unsoundness DEC-LLL-077 closed.
+    #[test]
+    fn the_fast_path_is_checked_and_euclidean() {
+        // euclidean, not truncating
+        assert_eq!(form(Div).rust_fast("a", "b"), "(a).checked_div_euclid(b)?");
+        assert_eq!(form(Mod).rust_fast("a", "b"), "(a).checked_rem_euclid(b)?");
+        // every arithmetic operator bails instead of wrapping
+        for op in [Add, Sub, Mul, Div, Mod] {
+            let f = form(op).rust_fast("a", "b");
+            assert!(f.starts_with("(a).checked_"), "{op:?} must be CHECKED on the fast path: {f}");
+            assert!(f.ends_with('?'), "{op:?} must BAIL on overflow, never wrap: {f}");
+        }
+        // comparisons/logic are total: plain infix, no bail
+        for op in [Lt, Le, Gt, Ge, Eq, And, Or] {
+            let f = form(op).rust_fast("a", "b");
+            assert!(!f.contains('?'), "{op:?} cannot overflow and must not bail: {f}");
+            assert_eq!(f, form(op).rust("a", "b"), "{op:?} has the same total form on both paths");
+        }
+        assert_eq!(form(Ne).rust_fast("a", "b"), "(a != b)");
     }
 
     /// Only div/mod impose the non-zero divisor obligation.

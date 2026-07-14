@@ -246,6 +246,17 @@ impl LllInt {
         matches!(self, LllInt::S(0))
     }
 
+    /// The gate into the speculative raw-`i64` fast path (REQ-LLL-162): `Some` iff this
+    /// value fits a machine word. `None` sends the caller to the exact path — which is
+    /// simply the ordinary, always-correct one, so a `None` costs speed and nothing else.
+    #[inline(always)]
+    pub fn as_small(&self) -> Option<i64> {
+        match self {
+            LllInt::S(v) => Some(*v),
+            LllInt::B(_) => None,
+        }
+    }
+
     /// The FFI/effect boundary (DEC-LLL-077): a foreign function really does take
     /// an `i64`. Out of range FAILS STOP — it never truncates. This is where the
     /// fail-stop of DEC-LLL-026 went; it did not disappear.

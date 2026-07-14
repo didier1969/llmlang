@@ -1594,7 +1594,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
             }
         }
     }
+    // REQ-LLL-162 — which parts get a speculative raw-`i64` twin (see `fast_eligible`).
+    let fast_ok = fast_eligible(&cm.module.parts, &cm.effect_generic);
     let g = Globals {
+        fast_ok: &fast_ok,
         ctors: &ctors,
         ctor_ei: &ctor_ei,
         parts: &parts,
@@ -1638,6 +1641,10 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         // (effect-monomorphization, DEC-LLL-038) — never in a plain form.
         if cm.effect_generic.contains_key(&part.name) {
             continue;
+        }
+        // REQ-LLL-162: the speculative raw-i64 twin, emitted alongside the exact body.
+        if fast_ok.contains(&part.name) {
+            emit_fast_part(&mut out, part, &g)?;
         }
         emit_part(&mut out, part, &g)?;
     }
@@ -1897,6 +1904,7 @@ fn emit_instance_impl(
             row: Vec::new(),
         // no self-recursion loop here (see `Cx::tail_self`)
         tail_self: None,
+        fast: false,
         };
         out.push_str(&format!(
             "    fn {mn}({}) -> {} {{ {} }}\n",
@@ -2490,6 +2498,131 @@ fn emit_enum(out: &mut String, td: &TypeDecl) {
     // and every ctor `{ei}::Ctor`, fully-qualified, so nothing collides (REQ-LLL-068).
 }
 
+/// Rust type of a scalar on the speculative path: the raw machine word, not the box.
+fn fast_ty(t: &Ty) -> &'static str {
+    match t {
+        Ty::Bool => "bool",
+        _ => "i64",
+    }
+}
+
+/// REQ-LLL-162 — emit a part's speculative raw-`i64` twin.
+///
+/// Same AST, same control flow, same operator declarations (`opsem`) — only the
+/// REPRESENTATION changes: `i64`/`bool` instead of `LllInt`, so values live in registers
+/// with no clone and no drop glue, and the arithmetic becomes visible to LLVM again.
+///
+/// It returns `Option`: every arithmetic op is checked and bails with `?` on overflow
+/// (`opsem::rust_fast`), so this function can only ever return a value the exact body
+/// would also have produced. `None` means "I would have had to wrap — ask the exact path",
+/// and the caller does exactly that. That is the whole soundness argument, and it holds
+/// only because the part is PURE: re-running it has no observable effect (DEC-LLL-003).
+fn emit_fast_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
+    let tail_self = tail_self_of(part, None, false);
+    let params: Vec<String> = part
+        .params
+        .iter()
+        .map(|(n, t)| {
+            let m = if tail_self.is_some() { "mut " } else { "" };
+            format!("{m}{}: {}", local(n), fast_ty(t))
+        })
+        .collect();
+    out.push_str(&format!(
+        "\n#[allow(unused_variables, clippy::all)]\nfn {}({}) -> ::core::option::Option<{}> {{\n",
+        mangle_fast(&part.name),
+        params.join(", "),
+        fast_ty(&part.ret),
+    ));
+    let (movable, last_use) = analyze_moves(&part.body, &updated_params(&part.body));
+    let empty: Names = std::collections::HashSet::new();
+    let no_methods: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let cx = Cx {
+        fns: &empty,
+        ctors: g.ctors,
+        ctor_ei: g.ctor_ei,
+        parts: g.parts,
+        borrows: g.borrows,
+        borrow_mask: g.borrow_mask,
+        refs: std::collections::HashSet::new(),
+        movable: &movable,
+        last_use: &last_use,
+        abort: g.abort,
+        extern_ops: g.extern_ops,
+        abort_ops: g.abort_ops,
+        stateful: g.stateful,
+        readerful: g.readerful,
+        state_ev: None,
+        reader_ev: None,
+        caps: std::collections::HashMap::new(),
+        user_tail: g.user_tail,
+        user_tail_ops: g.user_tail_ops,
+        part_caps: g.part_caps,
+        effect_generic: g.effect_generic,
+        abort_effects: g.abort_effects,
+        generic_fn_pos: g.generic_fn_pos,
+        part_row: g.part_row,
+        given_methods: &no_methods,
+        row_fn: None,
+        row_ev: Vec::new(),
+        row_abort: false,
+        row: Vec::new(),
+        fast: true,
+        tail_self: tail_self.clone(),
+    };
+    match &tail_self {
+        Some(_) => {
+            out.push_str("    '__tail: loop {\n");
+            emit_body(out, &part.body, 2, &cx, false)?;
+            out.push_str("    }\n}\n");
+        }
+        None => {
+            emit_body(out, &part.body, 1, &cx, false)?;
+            out.push_str("}\n");
+        }
+    }
+    Ok(())
+}
+
+/// The speculation itself, prepended to a part's EXACT body: if every `Int` argument
+/// already fits a machine word, try the twin; if it succeeds, we are done. Otherwise fall
+/// through into the exact body below, which is simply the ordinary implementation.
+///
+/// `as_small()` only BORROWS, so the exact body still owns its arguments unchanged — the
+/// fall-through is a plain continuation, not a recovery.
+fn fast_dispatch(part: &Part) -> String {
+    let mut guards: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    for (n, t) in &part.params {
+        if matches!(t, Ty::Bool) {
+            args.push(local(n)); // `bool` is Copy and always "small"
+        } else {
+            let b = format!("__fa_{n}");
+            guards.push(format!("{}.as_small()", local(n)));
+            binds.push(format!("::core::option::Option::Some({b})"));
+            args.push(b);
+        }
+    }
+    let call = format!("{}({})", mangle_fast(&part.name), args.join(", "));
+    let wrap = if matches!(part.ret, Ty::Bool) { "__fr".to_string() } else { "LllInt::S(__fr)".to_string() };
+    let body = format!(
+        "if let ::core::option::Option::Some(__fr) = {call} {{ return {wrap}; }}"
+    );
+    if guards.is_empty() {
+        format!("    // REQ-LLL-162: speculative raw-i64 path (pure ⇒ a bail-out is free to redo)\n    {body}\n")
+    } else {
+        format!(
+            "    // REQ-LLL-162: speculative raw-i64 path. Every Int argument must already fit a\n    \
+             // machine word; any overflow INSIDE makes the twin return None and we fall through to\n    \
+             // the exact body below. Sound because the part is PURE — redoing it observes nothing.\n    \
+             if let ({}) = ({}) {{ {body} }}\n",
+            binds.join(", "),
+            guards.join(", "),
+        )
+    }
+}
+
 fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     // type variables in the signature → Rust generic params (monomorphized by
     // rustc). Bounds Clone+PartialEq cover the operations the core can perform
@@ -2618,7 +2751,14 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         row_abort: false,
         row: Vec::new(),
         tail_self: tail_self.clone(),
+        fast: false,
     };
+    // REQ-LLL-162: try the speculative raw-i64 twin FIRST. It sits before the exact body —
+    // including before its `'__tail: loop` — so a bail-out simply falls through into the
+    // ordinary implementation with the arguments untouched (`as_small()` only borrows).
+    if g.fast_ok.contains(&part.name) {
+        out.push_str(&fast_dispatch(part));
+    }
     // The loop is LABELLED: a comprehension lowers to its own `loop`, so an unlabelled
     // `continue` in a tail call nested inside one would bind to the WRONG loop.
     // The loop never `break`s (every tail position `return`s or `continue`s), so it has
@@ -2788,6 +2928,7 @@ fn emit_specialized_part(
         // a SPECIALIZED (effect-monomorphized) body: its self-calls resolve through the
         // row-mangled name, so the loop rewrite does not apply — conservative, not silent.
         tail_self: None,
+        fast: false,
     };
     emit_body(out, &part.body, 1, &cx, has_abort)?;
     out.push_str("}\n");
@@ -2812,6 +2953,8 @@ type PartCaps = std::collections::HashMap<String, Vec<CapSig>>;
 /// Module-global name classifications (everything but the per-part `fns`),
 /// bundled so `emit_part` takes a single reference instead of many arguments.
 struct Globals<'a> {
+    /// REQ-LLL-162 — parts that get a speculative raw-`i64` twin (`fast_eligible`)
+    fast_ok: &'a Names,
     ctors: &'a Names,
     /// ctor name → inner-enum name `{Type}I`, for fully-qualified ctor emission
     ctor_ei: &'a std::collections::HashMap<String, String>,
@@ -2918,6 +3061,13 @@ struct Cx<'a> {
     /// this specialization's concrete row (only meaningful when `row_fn` is set) —
     /// used to name/forward when calling another generic part at the same row.
     row: Vec<String>,
+    /// REQ-LLL-162 — we are lowering the SPECULATIVE raw-`i64` twin, not the exact body.
+    /// Every `Int` is a plain `i64` (Copy: no clone, no drop glue, lives in a register),
+    /// arithmetic goes through `opsem::rust_fast` (checked, bails with `?`), and the
+    /// function returns `Option`. Nothing else about the lowering changes — same AST,
+    /// same control flow — which is why the two paths cannot disagree except by
+    /// overflowing, and overflowing is exactly what makes the fast one give up.
+    fast: bool,
     /// GUARANTEED tail-call elimination (REQ-LLL-157 follow-up). In a purely functional
     /// language a LOOP *is* a tail recursion, so an unbounded loop must not consume
     /// stack. This used to work only by ACCIDENT: `Int` was `i64`, which has no `Drop`
@@ -2932,6 +3082,138 @@ struct Cx<'a> {
     /// faithful (`tail_self_of`), and cleared inside handler closures, where a `continue`
     /// could not even compile.
     tail_self: Option<TailSelf>,
+}
+
+/// REQ-LLL-162 — which parts get a speculative raw-`i64` twin.
+///
+/// THE DEAL. The exact `Int` (DEC-LLL-077) is boxed, and boxing costs ~4-6× per operation
+/// plus every rewrite it hides from the optimizer. So each ELIGIBLE part is compiled TWICE:
+/// `{name}_fast` over raw `i64` (registers, no clone, no drop glue), and the exact
+/// `LllInt` body. The wrapper tries `_fast`; if any operation would overflow, `_fast`
+/// returns `None` and the exact body RECOMPUTES from scratch.
+///
+/// WHY RECOMPUTING IS SAFE — and it is the whole argument. llmlang is PURELY FUNCTIONAL
+/// (DEC-LLL-003). A pure body has nothing to replay: running it twice is observationally
+/// identical to running it once. That is what buys the speed. It is also exactly why the
+/// eligibility rule below is not a heuristic but a SOUNDNESS BOUNDARY — speculate on an
+/// effectful part and a bail-out would print twice, write twice, send twice.
+///
+/// SOUND BY CONSTRUCTION, with no new proof obligation: the fallback IS the exact
+/// semantics, and `opsem::rust_fast` makes every fast arithmetic op checked-and-bailing,
+/// so the fast path can only ever produce a value the exact path would also produce. The
+/// worst case is a recomputation (2× time), never a wrong answer. Nothing in the VC
+/// changes — this is a pure codegen refinement.
+///
+/// Eligibility (conservative; a `false` costs only speed, a wrong `true` would be a bug):
+///   * **PURE** — no effects. The soundness boundary above.
+///   * scalar in and out (`Int`/`Bool`) — a `List<LllInt>` cannot be cheaply re-typed to
+///     `List<i64>`, so heap-carrying parts stay on the exact path for now.
+///   * no typeclass `given`, no effect-row genericity — those monomorphize separately.
+///   * body uses only the scalar fragment, and every part it CALLS is itself eligible
+///     (a least-fixed-point over the call graph: an ineligible callee taints its callers).
+fn fast_eligible(parts: &[Part], g_effect_generic: &std::collections::HashMap<String, String>) -> Names {
+    let scalar = |t: &Ty| matches!(t, Ty::Int | Ty::Big | Ty::Bool);
+    // start optimistic on the shape-checkable conditions, then remove until a fixpoint:
+    // a part is only eligible if EVERY part it calls is too.
+    let mut ok: Names = parts
+        .iter()
+        .filter(|p| {
+            p.effects.is_empty()
+                && p.given.is_empty()
+                && !g_effect_generic.contains_key(&p.name)
+                && p.params.iter().all(|(_, t)| scalar(t))
+                && scalar(&p.ret)
+                && body_is_scalar_fragment(&p.body)
+        })
+        .map(|p| p.name.clone())
+        .collect();
+    let names: Names = parts.iter().map(|p| p.name.clone()).collect();
+    loop {
+        let mut changed = false;
+        for p in parts {
+            if !ok.contains(&p.name) {
+                continue;
+            }
+            // every part-call in the body must land on an eligible part
+            let mut all_calls_ok = true;
+            walk_body_exprs(&p.body, &mut |e| {
+                if let Expr::Call(n, _) = e {
+                    if names.contains(n) && !ok.contains(n) {
+                        all_calls_ok = false;
+                    }
+                }
+            });
+            if !all_calls_ok {
+                ok.remove(&p.name);
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            return ok;
+        }
+    }
+}
+
+/// Does this body stay inside the fragment the raw-`i64` twin can express? Anything
+/// heap-shaped (list, ADT, tuple, map, lambda, comprehension), effectful, or contract-only
+/// disqualifies it — conservatively, by listing what IS allowed rather than what is not, so
+/// a new AST node can never silently slip into the fast path.
+fn body_is_scalar_fragment(body: &[Stmt]) -> bool {
+    let mut ok = true;
+    walk_body_exprs(body, &mut |e| {
+        let allowed = match e {
+            Expr::IntLit(_)
+            | Expr::BoolLit(_)
+            | Expr::Var(_)
+            | Expr::Bin(..)
+            | Expr::Neg(_)
+            | Expr::Not(_)
+            | Expr::If(..) => true,
+            // A CALL IS NOT AUTOMATICALLY SCALAR. The eligibility fixpoint only taints
+            // calls to other PARTS — but the heap BUILT-INS (`array`/`length`/`get`,
+            // the Map/Set ops, `str_of`/`str_cat`) are `Expr::Call` nodes too, and they
+            // are not parts, so the fixpoint never sees them. A part with a scalar
+            // signature can still build a list inside; its twin would then try to lower
+            // `length(a)` to `LllInt::from_usize(..)` inside an `Option<i64>` body and the
+            // GENERATED code would not compile ("compiler bug" on a valid program).
+            // Eligibility is a soundness/compilability boundary, so it must exclude them
+            // explicitly. `big`/`to_int` survive: they are identity on both paths.
+            Expr::Call(n, _) => {
+                !(is_array_builtin(n)
+                    || is_map_builtin(n)
+                    || is_set_builtin(n)
+                    || n == "str_of"
+                    || n == "str_cat")
+            }
+            _ => false,
+        };
+        if !allowed {
+            ok = false;
+        }
+    });
+    if !ok {
+        return false;
+    }
+    // patterns: only Int/Bool literals, binders and wildcards reach i64/bool `match`
+    fn stmts_ok(b: &[Stmt]) -> bool {
+        b.iter().all(|s| match s {
+            Stmt::Let(..) | Stmt::Yield(_) => true,
+            Stmt::Match(_, arms) => arms.iter().all(|a| {
+                matches!(
+                    a.pattern,
+                    Pattern::IntLit(_) | Pattern::BoolLit(_) | Pattern::Wildcard | Pattern::Var(_)
+                ) && stmts_ok(&a.body)
+            }),
+            Stmt::Handle(_) => false,
+        })
+    }
+    stmts_ok(body)
+}
+
+/// Rust name of a part's speculative raw-`i64` twin.
+fn mangle_fast(name: &str) -> String {
+    format!("{}_fast", mangle(name))
 }
 
 /// The self-recursion a part's body can loop back into (see `Cx::tail_self`).
@@ -3040,6 +3322,14 @@ fn emit_tail(
             Ok(())
         }
         // a branch of a tail `if` that is NOT the self-call: an ordinary return
+        _ if cx.fast => {
+            out.push_str(&format!(
+                "{}return ::core::option::Option::Some({});\n",
+                indent(depth),
+                expr(e, cx, res)?
+            ));
+            Ok(())
+        }
         _ if res => {
             out.push_str(&format!("{}return Ok({});\n", indent(depth), expr(e, cx, res)?));
             Ok(())
@@ -3082,6 +3372,14 @@ fn emit_body(
                     // emit it as the diverging statement (REQ-LLL-018).
                     out.push_str(&format!(
                         "{}{};\n",
+                        indent(depth),
+                        expr(e, cx, res)?
+                    ));
+                } else if cx.fast {
+                    // REQ-LLL-162: the speculative twin returns `Option` — a normal result
+                    // is `Some`, and an overflow anywhere inside has already bailed with `?`.
+                    out.push_str(&format!(
+                        "{}return ::core::option::Option::Some({});\n",
                         indent(depth),
                         expr(e, cx, res)?
                     ));
@@ -3159,6 +3457,7 @@ fn emit_body(
                     row: cx.row.clone(),
                     // inside a `handle`: never loop back from here (see `Cx::tail_self`)
                     tail_self: None,
+        fast: false,
                 };
                 let ret_clause = h
                     .clauses
@@ -3241,6 +3540,7 @@ fn emit_body(
                         // a handler clause becomes a CLOSURE — a `continue` out of it
                         // would not even compile. Never loop back from here.
                         tail_self: None,
+        fast: false,
                     };
                     emit_body(out, &c.body, depth + 1, &clause_cx, false)?;
                     out.push_str(&format!("{}}};\n", indent(depth)));
@@ -3278,6 +3578,7 @@ fn emit_body(
                     row: cx.row.clone(),
                     // inside a `handle`: never loop back from here (see `Cx::tail_self`)
                     tail_self: None,
+        fast: false,
                 };
                 let call = expr(&h.call, &cx2, res)?;
                 let ret_clause = h
@@ -3371,7 +3672,9 @@ fn emit_match(
         }
         let pat = match &arm.pattern {
             // an Int pattern matches the small variant: normalization guarantees any
-            // i64-range value IS `S` (REQ-LLL-157), so this can never miss.
+            // i64-range value IS `S` (REQ-LLL-157), so this can never miss. On the
+            // speculative path the scrutinee IS an i64, so the literal matches directly.
+            Pattern::IntLit(v) if cx.fast => format!("{v}i64"),
             Pattern::IntLit(v) => format!("LllInt::S({v}i64)"),
             Pattern::BoolLit(v) => format!("{v}"),
             Pattern::Wildcard => "_".into(),
@@ -3627,6 +3930,8 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         Expr::Unit => "()".to_string(),
         // An `Int` literal is always in i64 range (the lexer rejects a bigger one — big
         // values are COMPUTED, REQ-LLL-157), so it lands directly on the small variant.
+        // On the speculative path it IS the raw machine word (REQ-LLL-162).
+        Expr::IntLit(v) if cx.fast => format!("{v}i64"),
         Expr::IntLit(v) => format!("LllInt::S({v}i64)"),
         // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already
         // gcd-reduced at parse; `Rat::new` re-normalizes idempotently so the runtime
@@ -3651,6 +3956,12 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 // a bare part name as a first-class function value → the fn item
                 // (coerces to the fn-pointer parameter type) (REQ-LLL-009)
                 mangle(n)
+            } else if cx.fast {
+                // REQ-LLL-162: on the speculative path every value is `i64`/`bool` — `Copy`.
+                // Dropping the `.clone()` is the POINT: the clone/drop pair on a boxed
+                // `LllInt` is a branch each, and they are what keep the value out of a
+                // register in a hot loop.
+                local(n)
             } else {
                 // `.clone()` is uniform: cheap for Copy (i64/bool), needed for Rc lists
                 format!("{}.clone()", local(n))
@@ -3711,7 +4022,14 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             // euclidean div/mod pairing can never silently drift (DEC-LLL-026).
             let ta = expr(a, cx, res)?;
             let tb = expr(b, cx, res)?;
-            crate::opsem::form(*op).rust(&ta, &tb)
+            // REQ-LLL-162: on the speculative path the SAME operator declaration yields the
+            // checked, bail-on-overflow i64 form — so the fast path can never wrap, and its
+            // div/mod stay euclidean. One source of truth, three backends.
+            if cx.fast {
+                crate::opsem::form(*op).rust_fast(&ta, &tb)
+            } else {
+                crate::opsem::form(*op).rust(&ta, &tb)
+            }
         }
         Expr::EffCall(name, args) => match name.as_str() {
             "IO.print" => format!("__lll_io_print({})", expr(&args[0], cx, res)?),
@@ -3926,6 +4244,16 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 }
                 _ => unreachable!("is_set_builtin covers emptyset/add/member/elems"),
             }
+        }
+        // REQ-LLL-162: inside the speculative twin, a call to another part goes to THAT
+        // part's twin — and propagates its bail-out with `?`. `fast_eligible` is a
+        // fixpoint, so an eligible part can only ever call eligible parts: the twin can
+        // never fall off the fast path into a boxed callee.
+        Expr::Call(name, args)
+            if cx.fast && cx.parts.contains(name) && !cx.ctors.contains(name) && !cx.fns.contains(name) =>
+        {
+            let xs: Result<Vec<String>, String> = args.iter().map(|a| expr(a, cx, res)).collect();
+            format!("{}({})?", mangle_fast(name), xs?.join(", "))
         }
         Expr::Call(name, args) => {
             // heap arguments are BORROWED at the positions the callee borrows

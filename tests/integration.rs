@@ -35,3 +35,5 @@ mod text_io;
 mod comprehensions;
 #[path = "integration/bignum.rs"]
 mod bignum;
+#[path = "integration/fastpath.rs"]
+mod fastpath;

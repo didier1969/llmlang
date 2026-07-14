@@ -38,46 +38,40 @@ module Demo.Core:
   model exactly. **Guaranteed tail-call elimination**: a self tail-call is
   emitted as a loop, so an unbounded loop runs in constant stack for ANY
   parameter type — not left to whether LLVM feels like it.
-- **The cost of exactness, measured, not hidden.** Making `Int` exact (DEC-LLL-077)
-  cost real speed. This README used to claim *"≤5% overhead vs hand-written Rust on
-  call-heavy fib(40)"* and *"~10x faster than gcc -O2 C on the LCG kernel"*. **Both
-  are retracted**: they were measured when `Int` was a raw `i64`. Reproduce the
-  current numbers with `bench/cspeed/run.sh` (user CPU, min of 5):
+- **Speculative execution: exact `Int` at machine speed (REQ-LLL-162).** Making `Int`
+  exact (DEC-LLL-077) made it BOXED — 16 bytes, non-`Copy`, drop glue — which cost ~4-6x
+  per operation and, worse, hid the arithmetic from the optimizer. Both are now recovered
+  by a trick **only a pure language can play**: every pure, scalar part is compiled TWICE
+  — once over raw `i64` (registers, no clone, no drop) and once exactly. The fast twin is
+  tried first; every one of its arithmetic ops is *checked*, so on any overflow it simply
+  gives up and the exact body recomputes. **Recomputing is free of consequence precisely
+  because llmlang is purely functional: there is no effect to replay.** Sound by
+  construction — the fallback IS the exact semantics, and no proof obligation changes.
 
-  | kernel | llmlang | Rust `i64`, **equal work** | Rust `i64`, as LLVM compiles it | C `gcc -O2` |
-  |---|---|---|---|---|
-  | lcg, 100M iters (arithmetic-bound) | 0.79s | 0.16s (**4.9x**) | 0.03s (26x) | 0.29s (2.7x) |
-  | fib(40) (call-heavy) | 2.32s | 0.65s (**3.6x**) | — | 0.31s (7.5x) |
-  | listsum (list fold) | 0.40s | — | — | 0.07s (5.7x) |
-  | map (associative read) | 0.65s | — | — | 0.39s (1.7x) |
+  Measured with `bench/cspeed/run.sh` (user CPU, min of 5; everything built with
+  `-C overflow-checks=on`, the posture `lll build` ships):
 
-  Everything is compiled with `-C overflow-checks=on` — the posture `lll build` ships;
-  comparing a checked binary against a wrapping one would measure the safety setting, not
-  the language.
+  | kernel | llmlang | hand-written Rust `i64` | C `gcc -O2` |
+  |---|---|---|---|
+  | lcg, 100M iters (arithmetic-bound) | **0.03s** | 0.02s | 0.28s |
+  | fib(40) (call-heavy) | 0.96s | 0.68s | 0.32s |
+  | listsum (list fold) | 0.41s | — | 0.07s |
+  | map (associative read) | 0.52s | — | 0.36s |
 
-  **The per-operation tax is ~4-6x, consistently.** Boxing is why: an exact `Int` is a
-  16-byte non-`Copy` value with drop glue, so it never lives in registers. Only the
-  associative read escapes (1.7x) — its cost is the BTreeMap, not the integer.
+  On the arithmetic kernel llmlang is back to **10x faster than gcc -O2 C** — and we now
+  know exactly why, which the old README did not: raw `i64` lets LLVM see that `mod 2^31`
+  makes the recurrence exact arithmetic in a ring, so it **algebraically fuses five LCG
+  steps into one multiply**. gcc never finds it (its truncated `%` needs a sign fixup that
+  hides the ring). The claim was never "llmlang is fast"; it is "llmlang hands LLVM
+  arithmetic it can rewrite" — and boxing had taken that away. `fib` is within **1.4x** of
+  hand-written Rust (it was 3.6x when boxed).
 
-  **The two `lcg` Rust columns are the second finding, and they matter.** LLVM notices that
-  `mod 2^31` makes that recurrence exact arithmetic in a ring where five composed affine
-  maps collapse into one, and *algebraically fuses five LCG steps into a single multiply* —
-  its loop really runs 20M iterations, not 100M. llmlang **used to get that rewrite too**,
-  back when `Int` was a raw `i64`: that fusion — not llmlang being intrinsically fast — is
-  where this README's old *"10x faster than gcc -O2 C"* claim actually came from. Boxing
-  forfeits it, because the arithmetic is no longer visible to the optimizer. So boxing costs
-  twice: **~5x per operation, plus every rewrite the optimizer can no longer see through.**
+  **What still costs, honestly.** A `List[Int]` is a cons-list of BOXED elements, so a list
+  fold stays ~5x C (it was at parity when `Int` was an `i64`): the speculation is
+  signature-directed and a list-carrying part does not qualify. That is the next frontier,
+  not a solved problem. And a computation that really does exceed `i64` pays a failed fast
+  attempt before the exact recompute — cheap and rare, but real.
 
-  Both old claims — *"≤5% overhead vs hand-written Rust on fib(40)"* and *"~10x faster than
-  gcc -O2 C"* — are **retracted**. Reproduce all of this with `bench/cspeed/run.sh`.
-
-  The principled fix is specified and not yet built (REQ-LLL-162): **let the PROOF pay for
-  the speed** — emit a raw `i64` wherever the verifier already proves the expression stays
-  in range (the lcg's `mod 2^31` bounds its seed trivially). That recovers both halves at
-  once: the per-op cost *and* the optimizations. Until
-  then exactness is the default, because a wrong answer is worse than a slow one
-  (DEC-LLL-071 Option A, DEC-LLL-077). This table exists so that nobody discovers the
-  trade-off in production — and so the claim can never drift unmeasured again.
 - **Exact `Int`, no overflow**: the verifier reasons over mathematical `Int` (ℤ),
   and so does the runtime — `Int` is an arbitrary-precision integer with an `i64`
   fast path (DEC-LLL-077). `25!` and `2^100` compute to their exact values, a
