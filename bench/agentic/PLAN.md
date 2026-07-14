@@ -36,13 +36,28 @@ differential to measure. The canonical trap is **no-overdraft**: `withdraw(bal,a
 with `ensures result >= 0`. Forget `requires amt <= bal` and llmlang fails `lll check` with
 the counterexample `amt>bal`; Rust compiles and returns a negative balance — a latent bug.
 
-**Calibration so far (cheap, done):** the subject exists and verifies — `examples/ledger.lll`
-(deposit/withdraw-no-overdraft/conservation, 23 Z3 obligations discharged). A `Bank` variant
-(deposit/withdraw/interest) run one-shot through **gpt-4o-mini** fails **2/4** → the task is
-non-trivial (viable Goldilocks band for a mid model). **Gated calibration remaining:** does
-**Claude** (the actual race agent) commit the *logic* trap (not just syntax)? Strong models
-are careful — this must be confirmed with a few `claude -p` probes before spending on the
-full race, or the task hardened (more coupled invariants) until Claude reliably errs.
+**Calibration DONE (cheap):** subject exists and verifies — `examples/ledger.lll`
+(no-overdraft + conservation, 23 obligations). `Bank` one-shot through **gpt-4o-mini** fails
+**2/4** (viable band for a mid model). But the decisive probe — **Claude (opus) on the same
+under-specified Bank task passes 3/3** (correct, invariants included, first shot). **So a
+small verified-system task is too easy for a strong agent: it does not err, so there is no
+verify↔repair differential in the llmlang arm.**
+
+### Reframe (from the calibration) — measure the COST OF TRUST, not the error rate
+
+For a strong agent the differential is not "who errs" but **what it costs to reach
+*machine-checked* correctness**, and it exists even when the agent "succeeds":
+- **llmlang:** write + `lll check` green ⇒ *proved*. Trust is free.
+- **Rust:** write + it compiles ⇒ *hoped*. To reach the *same* confidence the agent must
+  author a test battery (extra tokens) — and even then latent bugs escape: the differential
+  bench already measured **0 % (llmlang) vs 33 % (Rust) one-shot latent-bug escape**
+  (`../llm_gen/differential/RESULTS.md`).
+
+So the bounded first trial measures, on a task with a lurking numeric trap (overflow /
+Euclidean sign) the hidden battery probes: **(a) tokens to machine-checked trust** — llmlang
+`write+check` vs Rust `write + author-tests + run`; **(b) escaped bugs** — hidden trap battery
+on the Rust final artifact. This does not require Claude to err in llmlang; it measures the
+asymmetric cost of *reaching* trust, which is the real big-project claim.
 
 ## Scaffolding to build ON GREENLIGHT (deterministic, not yet built)
 
