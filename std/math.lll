@@ -1,0 +1,52 @@
+module Std.Math:
+
+  # ---- verified integer math, written IN llmlang (REQ-LLL-003) ----
+  # Every function is proved by the real Z3 pipeline. `Int` is exact and unbounded
+  # (DEC-LLL-077), so `pow`/`factorial` return their true value at any size — no
+  # overflow, no ceiling. `abs` carries `example` clauses, which `lll test` executes,
+  # pinning model≡binary concordance (DEC-LLL-020).
+
+  # Absolute value. `example` clauses are RUN by `lll test`.
+  part abs(x: Int) -> Int:
+    ensures result >= 0
+    ensures result == x or result == 0 - x
+    example abs(0 - 5) == 5
+    example abs(7) == 7
+    match x:
+      v when v >= 0 -> yield x
+      _             -> yield 0 - x
+
+  # Sign as -1 / 0 / +1.
+  part sign(x: Int) -> Int:
+    ensures result >= 0 - 1, result <= 1
+    match x:
+      v when v > 0 -> yield 1
+      v when v < 0 -> yield 0 - 1
+      _            -> yield 0
+
+  # Greatest common divisor (Euclid). `measure b` proves termination: `a mod b < b`
+  # for `b > 0` (Euclidean `mod` is in `[0, b)`), so the recursion strictly decreases.
+  part gcd(a: Int, b: Int) -> Int:
+    requires a >= 0, b >= 0
+    measure b
+    ensures result >= 0
+    match b:
+      0 -> yield a
+      _ -> yield gcd(b, a mod b)
+
+  # Integer power, `base^exp`. Exact — `pow(2, 100)` is the true 31-digit value.
+  part pow(base: Int, exp: Int) -> Int:
+    requires exp >= 0
+    measure exp
+    match exp:
+      0 -> yield 1
+      _ -> yield base * pow(base, exp - 1)
+
+  # Factorial. Exact — `factorial(25)` overflows i64 by ~1680× and is still correct.
+  part factorial(n: Int) -> Int:
+    requires n >= 0
+    measure n
+    ensures result >= 1
+    match n:
+      0 -> yield 1
+      _ -> yield n * factorial(n - 1)

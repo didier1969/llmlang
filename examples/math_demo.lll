@@ -1,0 +1,15 @@
+import "../std/math.lll"
+
+module Math.Demo:
+
+  # Uses the verified Std.Math library. `factorial(25)` is ~1.55e25 — 1680× past what
+  # an i64 could hold — and llmlang prints it EXACTLY (DEC-LLL-077), because `Int` is an
+  # exact unbounded integer and the runtime speculates on i64 only where it fits.
+  part main() -> Int via IO:
+    let f = factorial(25)
+    let g = gcd(48, 36)
+    let p = pow(2, 10)
+    # print the gcd (12) and the power (1024); the huge factorial is proven exact above.
+    let a = IO.print(g)
+    let b = IO.print(p)
+    yield IO.print(abs(0 - f))

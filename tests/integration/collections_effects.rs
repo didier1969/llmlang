@@ -40,6 +40,46 @@ fn stdlib_fully_verifies() {
 
 
 #[test]
+fn stdlib_math_verifies_and_computes_exactly() {
+    // std/math.lll (REQ-LLL-171): verified integer math showcasing the exact `Int`
+    // (DEC-LLL-077). The whole module must verify over Z3, and its demo must print
+    // `factorial(25)` EXACTLY — a value ~1680× past i64::MAX — proving the exact runtime
+    // agrees with the ℤ model end-to-end (model≡binary, DEC-LLL-020).
+    let math = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("std/math.lll");
+    let (_, module) = loader::load_program(math.to_str().unwrap()).expect("load std/math.lll");
+    let cm = types::check_module(module).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let r = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(r.ok(), "std/math.lll must verify: {:?}", failures(&r));
+
+    // and the demo that USES it runs and stays exact
+    let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/math_demo.lll");
+    let (_, dmod) = loader::load_program(demo.to_str().unwrap()).expect("load demo");
+    let dcm = types::check_module(dmod).expect("check demo");
+    let rust = codegen::emit_rust(&dcm).unwrap();
+    let d = tempdir();
+    let rs = d.join("math.rs");
+    let bin = d.join("math_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let got = String::from_utf8_lossy(&out.stdout);
+    assert!(got.contains("12"), "gcd(48,36) = 12, got: {got}");
+    assert!(got.contains("1024"), "pow(2,10) = 1024, got: {got}");
+    assert!(
+        got.contains("15511210043330985984000000"),
+        "factorial(25) must be EXACT (1680× past i64::MAX), got: {got}"
+    );
+}
+
+#[test]
 fn stdlib_demo_runs_correctly() {
     // loads examples/std_demo.lll which IMPORTS the stdlib — this test covers
     // the multi-file loader, cross-file verification, and codegen together
