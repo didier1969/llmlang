@@ -1,0 +1,13 @@
+{
+  "agent": "claude-p (opus-4.8, Max)",
+  "proved": true,
+  "rounds": 4,
+  "llmlang_cost": 1.8388,
+  "llmlang_out": 57635,
+  "rust_cost": 0.5235,
+  "rust_out": 11243,
+  "escaped": 0,
+  "compiles": true,
+  "total_cost": 2.3623,
+  "calls": 6
+}
