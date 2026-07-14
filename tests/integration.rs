@@ -47,3 +47,5 @@ mod rational_exact;
 mod compr_filter;
 #[path = "integration/compr_range.rs"]
 mod compr_range;
+#[path = "integration/cli_test_cmd.rs"]
+mod cli_test_cmd;

@@ -134,6 +134,29 @@ pub fn check_lll_src(tag: &str, src: &str) -> (Option<i32>, String, String) {
 }
 
 
+/// Run ANY `lll` subcommand over a source, in a fresh dir. `args` are the subcommand and
+/// its flags; the module file is appended. Returns (exit_code, stdout, stderr).
+///
+/// It runs from the temp dir (not the repo), so a command that writes artefacts (`build/`)
+/// cannot collide with a parallel test — the same isolation `check_lll_src` relies on.
+pub fn run_lll_cmd(tag: &str, src: &str, args: &[&str]) -> (Option<i32>, String, String) {
+    let dir = tempdir().join(tag);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("m.lll");
+    std::fs::write(&f, src).unwrap();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_lll"));
+    cmd.args(args).arg(f.to_str().unwrap()).current_dir(&dir);
+    if let Ok(z3) = std::env::var("LLL_Z3") {
+        cmd.env("LLL_Z3", z3);
+    }
+    let out = cmd.output().unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 // ---- parametric user ADTs `type T[a]` (REQ-LLL-068) ----
 
 /// Compile a loaded+checked module to a native binary and return its stdout. Mirrors

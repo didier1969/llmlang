@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
         .to_string()
 }
 
@@ -711,6 +711,151 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 build_cargo_project(&cm.module, &rust, unchecked)?
             };
             println!("✔ built {}", bin.display());
+            Ok(())
+        }
+        // REQ-LLL-167 — `lll new <dir>`: scaffold a project.
+        //
+        // A public language must have a first minute that WORKS. Today that minute was:
+        // guess a directory layout, guess the manifest shape, guess how a named import
+        // resolves. `lll new` writes the smallest thing that verifies, builds, runs and
+        // TESTS — so the first command a newcomer types after it succeeds.
+        //
+        // It also seeds `lll.toml`, which is what makes `import std.…` resolve by NAME
+        // (REQ-LLL-149) instead of `import "../../../std/list.lll"` — the friction the
+        // audit measured.
+        ["new", dir] => {
+            let root = Path::new(dir);
+            if root.exists() {
+                return Err(format!(
+                    "`{dir}` already exists — refusing to overwrite an existing directory"
+                ));
+            }
+            std::fs::create_dir_all(root.join("src")).map_err(|e| e.to_string())?;
+            let name = root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("app")
+                .to_string();
+            std::fs::write(
+                root.join("lll.toml"),
+                format!(
+                    "# llmlang project manifest.\n\
+                     [package]\n\
+                     name = \"{name}\"\n\
+                     \n\
+                     # Import roots: `import std.list` resolves to <root>/list.lll.\n\
+                     # Paths are relative to THIS file, so the project stays portable.\n\
+                     [imports]\n\
+                     # std = \"vendor/std\"\n"
+                ),
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::write(
+                root.join("src").join("main.lll"),
+                "module Main:\n\
+                 \n\
+                 \x20 # A contract is not a comment: `ensures` is PROVED by Z3 at compile time.\n\
+                 \x20 # Break it (say `result >= 0`, then pass a negative) and this will not build.\n\
+                 \x20 part double(x: Int) -> Int:\n\
+                 \x20   ensures result == x + x\n\
+                 \x20   example double(21) == 42\n\
+                 \x20   yield 2 * x\n\
+                 \n\
+                 \x20 part main() -> Int via IO:\n\
+                 \x20   yield IO.print(double(21))\n",
+            )
+            .map_err(|e| e.to_string())?;
+            println!(
+                "✔ created `{dir}`\n\
+                 \n\
+                 next:\n\
+                 \x20 cd {dir}\n\
+                 \x20 lll check src/main.lll    # prove the contracts\n\
+                 \x20 lll test  src/main.lll    # run the `example` clauses\n\
+                 \x20 lll run   src/main.lll    # compile and execute"
+            );
+            Ok(())
+        }
+        // REQ-LLL-167 — `lll test`: RUN the `example` clauses.
+        //
+        // An `example f(2,3) == 5` was already (a) a STATIC obligation discharged by Z3 and
+        // (b) compiled to a native Rust `#[test]`. But `lll build` compiles WITHOUT `--test`,
+        // so that `#[test]` was NEVER EXECUTED — half the feature existed and slept.
+        //
+        // Why it matters even though Z3 already PROVED the clause: an `example` is the only
+        // place the BINARY is confronted with an expected value. It does not re-check the
+        // logic — it checks model≡binary CONCORDANCE (DEC-LLL-020). It is the net that
+        // catches a CODEGEN bug, which Z3 cannot see by construction.
+        //
+        // It refuses to run anything that does not VERIFY: we never test unproven code
+        // (DEC-LLL-015 — no runtime fallback for a missing proof).
+        ["test", rest @ ..] => {
+            let mut file: Option<&str> = None;
+            for &t in rest {
+                match t {
+                    f if !f.starts_with("--") => file = Some(f),
+                    _ => return Err(usage()),
+                }
+            }
+            let file = file.ok_or_else(usage)?;
+            let (_, cm, hm) = load(file)?;
+            if !cm.holes.is_empty() {
+                print_holes(&cm);
+                return Err(format!(
+                    "module `{}` has {} hole(s) `?` — a program with holes is incomplete, not \
+                     testable (DEC-LLL-052)",
+                    cm.module.name,
+                    cm.holes.len()
+                ));
+            }
+            let report = vc::verify(&cm, &hm, &cache_dir(), true)?;
+            print_report(&report);
+            if !report.ok() {
+                return Err("verification failed — refusing to test unproven code".into());
+            }
+            let n_examples: usize = cm.module.parts.iter().map(|p| p.examples.len()).sum();
+            if n_examples == 0 {
+                // Say so rather than print a green we did not earn.
+                println!(
+                    "no `example` clause in `{}` — nothing to run. Add `example f(2, 3) == 5` \
+                     under a part to pin its model≡binary concordance.",
+                    cm.module.name
+                );
+                return Ok(());
+            }
+            let rust = codegen::emit_rust(&cm)?;
+            std::fs::create_dir_all("build").map_err(|e| e.to_string())?;
+            let modfile = cm.module.name.replace('.', "_");
+            let rs = Path::new("build").join(format!("{modfile}_test.rs"));
+            let bin = Path::new("build").join(format!("{modfile}_test"));
+            std::fs::write(&rs, &rust).map_err(|e| e.to_string())?;
+            // `--test` turns on `cfg(test)`, which is what compiles the emitted `#[test]`s
+            // and links libtest's harness. Same overflow posture as `lll build` (fail-stop).
+            let out = Command::new("rustc")
+                .args(["--test", "-C", "opt-level=2", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+                .arg(&bin)
+                .arg(&rs)
+                .output()
+                .map_err(|e| format!("rustc: {e}"))?;
+            if !out.status.success() {
+                return Err(format!(
+                    "rustc failed on the generated test harness (this is a compiler bug — the \
+                     vc fork accepted it):\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            println!("running {n_examples} example(s) from `{}`", cm.module.name);
+            let st = Command::new(&bin).status().map_err(|e| e.to_string())?;
+            if !st.success() {
+                // A failure HERE means the proof and the binary DISAGREE — the one thing a
+                // verified language must never let pass silently.
+                return Err(
+                    "an `example` FAILED at runtime: Z3 proved it, the binary contradicts it. \
+                     This is a model≡binary divergence (DEC-LLL-020), i.e. a CODEGEN bug — not \
+                     a bug in your program."
+                        .into(),
+                );
+            }
             Ok(())
         }
         ["run", file, rest @ ..] => {

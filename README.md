@@ -100,8 +100,10 @@ module Demo.Core:
 ## Commands
 
 ```
+lll new    <dir>                scaffold a project (lll.toml + a verified src/main.lll)
 lll check  <f.lll>              verify (proof cache in .lll-cache/)
 lll build  <f.lll>              verify + emit Rust + rustc -O3 (build/)
+lll test   <f.lll>              verify, then RUN the `example` clauses (model≡binary)
 lll run    <f.lll> [--trace t | --replay t]
 lll hash   <f.lll>              def/contract hashes
 lll rename <f.lll> <old> <new>  structural rename (hash-preserving, validated)

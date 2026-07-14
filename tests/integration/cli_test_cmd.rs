@@ -1,0 +1,99 @@
+use super::prelude::*;
+
+// ===================================================================
+// REQ-LLL-167 — `lll test` : exécuter les clauses `example`.
+//
+// LE TROU. Une clause `example f(2, 3) == 5` est déjà (a) une OBLIGATION statique déchargée
+// par Z3 et (b) compilée en un `#[test]` Rust natif. Mais `lll build` compile SANS `--test`,
+// donc ce `#[test]` n'était JAMAIS EXÉCUTÉ. La moitié dynamique de la fonctionnalité existait
+// et dormait.
+//
+// Pourquoi ça compte alors que Z3 a déjà prouvé la clause : l'`example` est le seul endroit
+// où le BINAIRE est confronté à une valeur attendue. Il ne re-vérifie pas la logique — il
+// vérifie la CONCORDANCE modèle≡binaire (DEC-LLL-020), c'est-à-dire précisément ce que ce
+// projet a passé la nuit à réparer (Int exact, Rational exact, folds en boucles). C'est le
+// filet qui attrape un bug de CODEGEN, que Z3 ne peut pas voir.
+// ===================================================================
+
+/// `lll test` exécute les examples et passe quand ils sont vrais.
+#[test]
+fn lll_test_runs_the_example_clauses_and_passes() {
+    let src = "module M:\n\n  part add(x: Int, y: Int) -> Int:\n    ensures result == x + y\n    example add(2, 3) == 5\n    example add(0, 0) == 0\n    yield x + y\n\n  part main() -> Int:\n    yield add(1, 2)\n";
+    let (code, out, err) = run_lll_cmd("tcmd_ok", src, &["test"]);
+    assert_eq!(code, Some(0), "a module whose examples hold must pass:\nstdout={out}\nstderr={err}");
+    assert!(
+        out.contains("2 passed") || out.contains("test result: ok"),
+        "the run must REPORT the examples it executed, got: {out}"
+    );
+}
+
+/// LE test qui donne son sens à la commande : un `example` que Z3 a prouvé mais que le
+/// BINAIRE contredit doit faire ÉCHOUER `lll test`. C'est le filet anti-bug-de-codegen —
+/// impossible à écrire ici sans casser le codegen, alors on épingle la moitié observable :
+/// un module SANS example ne prétend rien, et le dit.
+#[test]
+fn a_module_without_examples_says_so_instead_of_claiming_success() {
+    let src = "module M:\n\n  part main() -> Int:\n    yield 1\n";
+    let (code, out, err) = run_lll_cmd("tcmd_none", src, &["test"]);
+    assert_eq!(code, Some(0), "no examples is not a failure:\n{err}");
+    assert!(
+        out.contains("no `example`") || out.contains("0 example"),
+        "it must SAY there was nothing to run rather than print a green it did not earn, got: {out}"
+    );
+}
+
+/// LA PREMIÈRE MINUTE. Un langage public doit avoir un démarrage qui MARCHE. Ce test suit
+/// littéralement les instructions que `lll new` imprime — si l'une d'elles échoue, le premier
+/// contact avec le langage est cassé, ce qu'aucun test unitaire n'attraperait.
+#[test]
+fn lll_new_scaffolds_a_project_whose_printed_next_steps_all_work() {
+    let root = tempdir().join("scaffold");
+    let _ = std::fs::remove_dir_all(&root);
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let z3 = std::env::var("LLL_Z3").unwrap_or_default();
+
+    let out = std::process::Command::new(bin)
+        .args(["new", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "lll new failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(root.join("lll.toml").exists(), "a project needs its manifest (named imports, REQ-149)");
+    let entry = root.join("src").join("main.lll");
+    assert!(entry.exists(), "a project needs an entry point");
+
+    // exactement les trois commandes que `lll new` vient d'imprimer
+    for cmd in ["check", "test", "run"] {
+        let st = std::process::Command::new(bin)
+            .args([cmd, entry.to_str().unwrap()])
+            .current_dir(&root)
+            .env("LLL_Z3", &z3)
+            .output()
+            .unwrap();
+        assert!(
+            st.status.success(),
+            "`lll {cmd}` — a step `lll new` TOLD the user to run — failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&st.stdout),
+            String::from_utf8_lossy(&st.stderr)
+        );
+    }
+
+    // et il refuse d'écraser un projet existant
+    let again = std::process::Command::new(bin)
+        .args(["new", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!again.status.success(), "lll new must REFUSE to overwrite an existing directory");
+}
+
+/// `lll test` refuse un module qui ne VÉRIFIE pas — on ne teste jamais du code non prouvé
+/// (DEC-LLL-015 : pas de repli runtime).
+#[test]
+fn lll_test_refuses_a_module_that_does_not_verify() {
+    let src = "module M:\n\n  part bad(x: Int) -> Int:\n    ensures result > x + 1\n    example bad(1) == 2\n    yield x + 1\n\n  part main() -> Int:\n    yield bad(1)\n";
+    let (code, _out, err) = run_lll_cmd("tcmd_bad", src, &["test"]);
+    assert_ne!(code, Some(0), "an unverified module must NOT be tested");
+    assert!(
+        err.contains("verification") || err.contains("refus"),
+        "it must say the PROOF failed, not that a test failed, got: {err}"
+    );
+}
