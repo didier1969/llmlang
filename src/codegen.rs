@@ -2577,8 +2577,10 @@ fn emit_fast_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), Stri
     if looping {
         if let Some(ar) = &acc_rec {
             out.push_str(&match ar.kind {
-                AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, true)),
-                AccKind::Cons => "    let mut __cons = ::std::vec::Vec::new();\n".to_string(),
+                AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, &part.ret, true)),
+                AccKind::Cons | AccKind::Concat => {
+                    "    let mut __cons = ::std::vec::Vec::new();\n".to_string()
+                }
             });
         }
         out.push_str("    '__tail: loop {\n");
@@ -2780,8 +2782,10 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     if looping {
         if let Some(ar) = &acc_rec {
             out.push_str(&match ar.kind {
-                AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, false)),
-                AccKind::Cons => "    let mut __cons = ::std::vec::Vec::new();\n".to_string(),
+                AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, &part.ret, false)),
+                AccKind::Cons | AccKind::Concat => {
+                    "    let mut __cons = ::std::vec::Vec::new();\n".to_string()
+                }
             });
         }
         out.push_str("    '__tail: loop {\n");
@@ -3270,18 +3274,46 @@ enum AccKind {
     /// uses (REQ-LLL-067), and sound for the same reason: the language is pure, so the
     /// order of construction is unobservable, only the resulting list is.
     Cons,
+    /// `str_cat(E, f(x'))` — the recursive CONCATENATION (`join`). It overflowed the stack
+    /// too, and `str_cat` is an `Expr::Call`, not an `Expr::Bin`, so `Op` never saw it.
+    ///
+    /// ⚠ THE TRAP, and the reason this is its own kind rather than an `Op`. Folding it into
+    /// a growing accumulator (`acc = str_cat(acc, E)`) would be QUADRATIC: `str_cat(a, b)`
+    /// walks all of `a`, and here `a` is the accumulator that GROWS every step. That is
+    /// WORSE than the recursion it replaces, which is linear — an "optimization" that
+    /// silently degrades. So the pieces are COLLECTED and concatenated from the END, exactly
+    /// like `Cons`: each `str_cat` then walks only its own (short) piece, once. O(n).
+    ///
+    /// Concatenation is associative but **NOT commutative**, so unlike `Op` the direction
+    /// is load-bearing: the pieces must be replayed in source order.
+    Concat,
 }
 
 /// The operator's identity element, which seeds the accumulator.
-fn acc_identity(op: BinOp, fast: bool) -> String {
-    match (op, fast) {
-        (BinOp::Add, true) => "0i64".into(),
-        (BinOp::Add, false) => "LllInt::S(0)".into(),
-        (BinOp::Mul, true) => "1i64".into(),
-        (BinOp::Mul, false) => "LllInt::S(1)".into(),
-        (BinOp::And, _) => "true".into(),
-        (BinOp::Or, _) => "false".into(),
-        _ => unreachable!("acc_identity is only reached for an associative operator"),
+///
+/// It must be typed by the part's RETURN type, not assumed to be an integer: `*` is
+/// associative over ℚ too, so a `Rational` part folds — and seeding it with `LllInt::S(1)`
+/// would emit code that does not even compile. (It did; the exact-`Rational` tests caught it.)
+fn acc_identity(op: BinOp, ret: &Ty, fast: bool) -> String {
+    match ret {
+        Ty::Rational => match op {
+            BinOp::Add => "Rat::new(LllInt::S(0), LllInt::S(1))".into(),
+            BinOp::Mul => "Rat::new(LllInt::S(1), LllInt::S(1))".into(),
+            _ => unreachable!("only + and * are associative over the rationals"),
+        },
+        Ty::Bool => match op {
+            BinOp::And => "true".into(),
+            BinOp::Or => "false".into(),
+            _ => unreachable!("only and/or are associative over booleans"),
+        },
+        // Int / Big
+        _ => match (op, fast) {
+            (BinOp::Add, true) => "0i64".into(),
+            (BinOp::Add, false) => "LllInt::S(0)".into(),
+            (BinOp::Mul, true) => "1i64".into(),
+            (BinOp::Mul, false) => "LllInt::S(1)".into(),
+            _ => unreachable!("acc_identity is only reached for an associative operator"),
+        },
     }
 }
 
@@ -3328,6 +3360,16 @@ fn acc_rec_of(part: &Part, mask: Option<&Vec<bool>>, res: bool) -> Option<AccRec
             Expr::Cons(h, t) if is_self_call(t, &part.name, names.len()) => {
                 (AccKind::Cons, t.as_ref(), h.as_ref())
             }
+            // `str_cat(E, self(args'))` — the recursive concatenation. Only the RIGHT-
+            // recursive shape: concat is not commutative, so `str_cat(self(t), E)` would
+            // need the pieces replayed the other way and is left as a plain recursion.
+            Expr::Call(f, cargs)
+                if f == "str_cat"
+                    && cargs.len() == 2
+                    && is_self_call(&cargs[1], &part.name, names.len()) =>
+            {
+                (AccKind::Concat, &cargs[1], &cargs[0])
+            }
             _ => return,
         };
         if contains_self_call(other, &part.name) {
@@ -3371,6 +3413,11 @@ fn acc_rec_arm<'e>(e: &'e Expr, ar: &AccRec) -> Option<(&'e Expr, &'e Expr)> {
         }
         (Expr::Cons(h, t), AccKind::Cons) if is_self_call(t, &ar.name, n) => {
             Some((t.as_ref(), h.as_ref()))
+        }
+        (Expr::Call(f, cargs), AccKind::Concat)
+            if f == "str_cat" && cargs.len() == 2 && is_self_call(&cargs[1], &ar.name, n) =>
+        {
+            Some((&cargs[1], &cargs[0]))
         }
         _ => None,
     }
@@ -3574,9 +3621,10 @@ fn emit_body(
                         };
                         s.push_str(&format!("__acc = {fold}; "));
                     }
-                    // collect the heads IN SOURCE ORDER; the list is rebuilt from its end at
-                    // the base case, so the result is identical to the recursion's.
-                    AccKind::Cons => s.push_str("__cons.push(__ae); "),
+                    // collect the heads / pieces IN SOURCE ORDER; the list is rebuilt (or
+                    // concatenated) from its END at the base case, so the result is identical
+                    // to the recursion's — and each step stays O(|piece|), never O(|acc|).
+                    AccKind::Cons | AccKind::Concat => s.push_str("__cons.push(__ae); "),
                 }
                 for (i, p) in ar.params.iter().enumerate() {
                     s.push_str(&format!("{} = __ac{i}; ", local(p)));
@@ -3611,6 +3659,17 @@ fn emit_body(
                         out.push_str(&format!(
                             "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
                              __acc = Rc::new(LstI::Cons(__e, __acc)); }} return __acc; }}\n",
+                            indent(depth)
+                        ));
+                    }
+                    AccKind::Concat => {
+                        // concatenate from the END onto the base string. Walking the pieces
+                        // in REVERSE keeps every `str_cat` walking only its own piece — the
+                        // whole point: a forward fold would re-walk the growing accumulator
+                        // and turn a linear `join` into a quadratic one.
+                        out.push_str(&format!(
+                            "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
+                             __acc = __lll_str_cat(__e, __acc); }} return __acc; }}\n",
                             indent(depth)
                         ));
                     }
@@ -4197,7 +4256,7 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already
         // gcd-reduced at parse; `Rat::new` re-normalizes idempotently so the runtime
         // form is byte-identical to the Z3 `Real` value (model≡binary, DEC-LLL-020).
-        Expr::RatLit(n, d) => format!("Rat::new({n}i64, {d}i64)"),
+        Expr::RatLit(n, d) => format!("Rat::new(LllInt::S({n}i64), LllInt::S({d}i64))"),
         Expr::BoolLit(v) => format!("{v}"),
         // conditional expression → native Rust `if` (itself an expression). `res` flows
         // into BOTH branches (they share the `if`'s position); the condition is a plain
@@ -4643,36 +4702,63 @@ fn __map_values<K: Ord, V: Clone>(m: &std::rc::Rc<std::collections::BTreeMap<K, 
     acc
 }
 
-// Exact rational number `Rational` (REQ-LLL-054, DEC-LLL-051/042): a Copy i64 pair
-// kept in CANONICAL form — gcd-reduced with `den > 0` — so equality is structural
-// (`derive(PartialEq)`) and agrees exactly with Z3's `Real` value equality (the
-// model≡binary invariant, DEC-LLL-020). `Ord`/`PartialOrd` are intentionally NOT
-// derived: lexicographic (num,den) order is NOT the value order, and comparisons are
-// a later slice. Arithmetic uses plain `+ - *`, so it fail-stops on i64 overflow
-// under the same `overflow-checks` discipline as Int (DEC-LLL-026) — never wraps.
-fn __lll_gcd(mut a: u64, mut b: u64) -> u64 {
-    while b != 0 { let t = b; b = a % b; a = t; }
-    a
+// Exact rational number `Rational` (REQ-LLL-054, DEC-LLL-051/042, DEC-LLL-077) — a fraction
+// kept in CANONICAL form (gcd-reduced, `den > 0`), so equality is structural and agrees
+// exactly with Z3's `Real` value equality (the model≡binary invariant, DEC-LLL-020).
+//
+// num/den are EXACT integers (`LllInt`), not `i64` (REQ-LLL-157 C2, the second half of
+// DEC-LLL-077). They used to be `i64`, and the cross-products of `a/b + c/d = (a·d + c·b)/(b·d)`
+// OVERFLOWED — fail-stop, so sound, but BOUNDED. That was the same lie `Int` told, and worse:
+// the SMT model of a `Rational` is Z3's `Real`, which is exact and UNBOUNDED, so Z3 happily
+// proved theorems over ℚ that the binary could not compute. And denominators are not exotic:
+// they EXPLODE — summing fractions over distinct primes multiplies the denominator at every
+// term, and (1/2)^64 already exceeds `i64`. A `Rational` exists precisely to be EXACT (it is
+// the refusal of the float trap, DEC-LLL-051); one that fail-stops on a large denominator
+// betrays its only reason to exist.
+//
+// `Ord`/`PartialOrd` are intentionally NOT derived: lexicographic (num,den) order is NOT the
+// value order, and comparisons are a later slice.
+fn __lll_gcd(a: LllInt, b: LllInt) -> LllInt {
+    let abs = |x: LllInt| if x < LllInt::S(0) { -x } else { x };
+    let (mut a, mut b) = (abs(a), abs(b));
+    while !b.is_zero() {
+        let t = b.clone();
+        b = LllInt::rem_euclid(a, b);
+        a = t;
+    }
+    // gcd(0, 0) = 1 keeps the reduction total (it is never reached: den != 0 by construction)
+    if a.is_zero() { LllInt::S(1) } else { a }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rat { pub num: i64, pub den: i64 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rat { pub num: LllInt, pub den: LllInt }
 impl Rat {
     // Reduce to canonical form. Mirrors `ast::reduce_rat` in the compiler EXACTLY so a
-    // literal and its runtime value coincide; `den` is non-zero by construction.
-    pub fn new(num: i64, den: i64) -> Rat {
+    // literal and its runtime value coincide; `den` is non-zero by construction. The
+    // divisions are EXACT (g divides both), so euclidean and truncating division agree.
+    pub fn new(num: LllInt, den: LllInt) -> Rat {
         let (mut n, mut d) = (num, den);
-        if d < 0 { n = -n; d = -d; }
-        let g = __lll_gcd(n.unsigned_abs(), d.unsigned_abs()).max(1) as i64;
-        Rat { num: n / g, den: d / g }
+        if d < LllInt::S(0) { n = -n; d = -d; }
+        let g = __lll_gcd(n.clone(), d.clone());
+        Rat { num: LllInt::div_euclid(n, g.clone()), den: LllInt::div_euclid(d, g) }
     }
 }
 impl std::ops::Add for Rat {
     type Output = Rat;
-    fn add(self, o: Rat) -> Rat { Rat::new(self.num * o.den + o.num * self.den, self.den * o.den) }
+    fn add(self, o: Rat) -> Rat {
+        Rat::new(
+            self.num * o.den.clone() + o.num * self.den.clone(),
+            self.den * o.den,
+        )
+    }
 }
 impl std::ops::Sub for Rat {
     type Output = Rat;
-    fn sub(self, o: Rat) -> Rat { Rat::new(self.num * o.den - o.num * self.den, self.den * o.den) }
+    fn sub(self, o: Rat) -> Rat {
+        Rat::new(
+            self.num * o.den.clone() - o.num * self.den.clone(),
+            self.den * o.den,
+        )
+    }
 }
 impl std::ops::Mul for Rat {
     type Output = Rat;

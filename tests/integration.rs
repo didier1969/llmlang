@@ -39,3 +39,7 @@ mod bignum;
 mod fastpath;
 #[path = "integration/accfold.rs"]
 mod accfold;
+#[path = "integration/concatfold.rs"]
+mod concatfold;
+#[path = "integration/rational_exact.rs"]
+mod rational_exact;
