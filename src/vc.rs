@@ -1843,6 +1843,21 @@ impl<'a> Emit<'a> {
                 self.tr(&args[0], env, None)?
             }
             Expr::Call(name, args)
+                if (name == "str_of" || name == "str_cat")
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                // interpolation builtins (REQ-LLL-067): translate the arguments so
+                // any obligation inside `{…}` is still collected (e.g. a divide),
+                // then HAVOC the resulting string — opaque to the pure-core proof
+                // (a built string is never compared in a contract).
+                for a in args {
+                    self.tr(a, env, None)?;
+                }
+                self.fresh(&smt_ty(&Ty::list(Ty::Int)))
+            }
+            Expr::Call(name, args)
                 if is_array_builtin(name)
                     && !env.contains_key(name)
                     && !self.cm.index.contains_key(name)

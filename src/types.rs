@@ -4301,6 +4301,44 @@ fn check_expr(
             to
         }
         Expr::Call(name, args)
+            if (name == "str_of" || name == "str_cat")
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            // String-interpolation builtins (REQ-LLL-067): `str_of(Int) -> List[Int]`
+            // (decimal codepoints — the `show` of an interpolant), `str_cat(List[Int],
+            // List[Int]) -> List[Int]` (concatenation). Both total; the interpolation
+            // sugar in `parse_module` desugars to exactly these calls.
+            let list_int = Ty::list(Ty::Int);
+            if name == "str_of" {
+                if args.len() != 1 {
+                    return Err(format!("part `{}`: `str_of` takes 1 argument", ctx.part.name));
+                }
+                let ta = check_expr(ctx, &args[0], Some(&Ty::Int))?;
+                if ta != Ty::Int {
+                    return Err(format!(
+                        "part `{}`: `str_of` needs an Int, got {ta} — string interpolation `{{…}}` is Int-only in v1",
+                        ctx.part.name
+                    ));
+                }
+                list_int
+            } else {
+                if args.len() != 2 {
+                    return Err(format!("part `{}`: `str_cat` takes 2 arguments", ctx.part.name));
+                }
+                let a = check_expr(ctx, &args[0], Some(&list_int))?;
+                let b = check_expr(ctx, &args[1], Some(&list_int))?;
+                if a != list_int || b != list_int {
+                    return Err(format!(
+                        "part `{}`: `str_cat` needs two List[Int], got {a} and {b}",
+                        ctx.part.name
+                    ));
+                }
+                list_int
+            }
+        }
+        Expr::Call(name, args)
             if is_array_builtin(name)
                 && !ctx.ctors.contains_key(name)
                 && !ctx.index.contains_key(name)

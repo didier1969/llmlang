@@ -73,6 +73,11 @@ Surface conveniences (all desugar to the kernel above — identical content-hash
   escapes `\n \t \r \0 \\ \' \"`). Works in BOTH expression and pattern position —
   write `match c: '+' -> …` instead of `match c: 43 -> …`. Text is `List[Int]`, so a
   string literal is a list of these codepoints.
+- **String interpolation** `"count = {n}"` — a `{expr}` inside a string literal is
+  substituted with the decimal text of an **Int** expression (`str_of`), the whole
+  string built by `str_cat`. `{{`/`}}` are literal braces. Interpolants are Int-only
+  in v1 (a non-Int is a type error); an interpolant may not contain a `"`. Pure sugar:
+  `"a{x}b"` has the SAME content-hash as `str_cat(str_cat("a", str_of(x)), "b")`.
 
 Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
 algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):

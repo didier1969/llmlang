@@ -280,6 +280,103 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
     })
 }
 
+/// Desugar a string literal, expanding `{expr}` interpolations (REQ-LLL-067).
+/// A brace-free string → `ListLit` of codepoints (IDENTITY UNCHANGED). An
+/// interpolated string desugars to nested `str_cat`/`str_of` calls — pure
+/// PARSE-TIME sugar that hashes IDENTICALLY to the hand-written form (DEC-LLL-020),
+/// NOT a new AST node. `{{`/`}}` are literal braces. Interpolants are Int-only in
+/// v1 (`str_of : Int -> List[Int]`); a non-Int is a clean type error downstream.
+/// (A string literal cannot contain `"`, so an interpolant cannot nest a string —
+/// the outer lexer already closed the literal at the first inner `"`.)
+fn desugar_str_lit(s: &str) -> Result<Expr, String> {
+    let codepoints = |txt: &[char]| -> Expr {
+        Expr::ListLit(txt.iter().map(|c| Expr::IntLit(*c as i64)).collect())
+    };
+    // Fast path: no braces at all → plain codepoint list (byte-identical to the
+    // pre-interpolation behavior, so every existing string keeps its content-hash).
+    if !s.contains('{') && !s.contains('}') {
+        let chars: Vec<char> = s.chars().collect();
+        return Ok(codepoints(&chars));
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut pieces: Vec<Expr> = Vec::new();
+    let mut lit: Vec<char> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if i + 1 < chars.len() && chars[i + 1] == '{' => {
+                lit.push('{');
+                i += 2;
+            }
+            '}' if i + 1 < chars.len() && chars[i + 1] == '}' => {
+                lit.push('}');
+                i += 2;
+            }
+            '}' => {
+                return Err(format!(
+                    "string interpolation: stray `}}` in \"{s}\" (write `}}}}` for a literal brace)"
+                ));
+            }
+            '{' => {
+                if !lit.is_empty() {
+                    pieces.push(codepoints(&std::mem::take(&mut lit)));
+                }
+                let mut j = i + 1;
+                let mut inner = String::new();
+                let mut closed = false;
+                while j < chars.len() {
+                    if chars[j] == '}' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(chars[j]);
+                    j += 1;
+                }
+                if !closed {
+                    return Err(format!(
+                        "string interpolation: unterminated `{{` in \"{s}\" (write `{{{{` for a literal brace)"
+                    ));
+                }
+                let e = parse_interpolant(inner.trim())?;
+                pieces.push(Expr::Call("str_of".into(), vec![e]));
+                i = j + 1;
+            }
+            c => {
+                lit.push(c);
+                i += 1;
+            }
+        }
+    }
+    if !lit.is_empty() {
+        pieces.push(codepoints(&lit));
+    }
+    // Left-fold the pieces with `str_cat` (deterministic, so the hash is canonical).
+    let mut it = pieces.into_iter();
+    let first = it.next().unwrap_or_else(|| Expr::ListLit(Vec::new()));
+    Ok(it.fold(first, |acc, p| Expr::Call("str_cat".into(), vec![acc, p])))
+}
+
+/// Parse a single interpolation expression `{ … }` in isolation (REQ-LLL-067):
+/// lex the fragment, strip layout tokens (a bare expression has no block
+/// structure), and parse exactly one expression that consumes the whole fragment.
+fn parse_interpolant(inner: &str) -> Result<Expr, String> {
+    if inner.is_empty() {
+        return Err("string interpolation: empty `{}` — put an expression inside".to_string());
+    }
+    let toks: Vec<Sp> = lex(inner)?
+        .into_iter()
+        .filter(|s| !matches!(s.tok, Tok::Indent | Tok::Dedent | Tok::Newline))
+        .collect();
+    let mut p = Parser { toks, pos: 0, fresh: 0 };
+    let e = p.expr()?;
+    if !p.at_end() {
+        return Err(format!(
+            "string interpolation: unexpected trailing content in `{{{inner}}}`"
+        ));
+    }
+    Ok(e)
+}
+
 impl Parser {
     fn peek(&self) -> &Tok {
         self.toks.get(self.pos).map(|s| &s.tok).unwrap_or(&Tok::Newline)
@@ -1946,10 +2043,9 @@ impl Parser {
             // DEC-LLL-030: String modeled as List[Char], Char = Int scalar). This
             // reuses the verified List machinery directly — a string contract is a
             // contract over a cons-list of bounded Ints, already in the fragment.
-            Tok::Str(s) => {
-                let items = s.chars().map(|c| Expr::IntLit(c as i64)).collect();
-                Ok(Expr::ListLit(items))
-            }
+            // `{expr}` interpolations desugar to `str_cat`/`str_of` calls (REQ-LLL-067),
+            // hashing IDENTICALLY to that hand-written form (parse-time sugar, DEC-LLL-020).
+            Tok::Str(s) => desugar_str_lit(&s),
             // lambda `\(x: T, y: U) -> expr` (REQ-LLL-009)
             Tok::Backslash => {
                 self.eat(Tok::LParen)?;

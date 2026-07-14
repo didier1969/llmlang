@@ -3478,6 +3478,25 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 format!("{{ let __v = {x}; i64::try_from(__v).unwrap_or_else(|_| panic!(\"to_int: Big value {{}} exceeds i64 range\", __v)) }}")
             }
         }
+        // REQ-LLL-067: string-interpolation builtins. `str_of(n)` = decimal codepoints
+        // of an Int; `str_cat(a, b)` = List[Int] concatenation. Name-based (no import),
+        // matched only when NOT shadowed by a user part/ctor of the same name.
+        Expr::Call(name, args)
+            if (name == "str_of" || name == "str_cat")
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            if name == "str_of" {
+                format!("__lll_str_of_int({})", expr(&args[0], cx, res)?)
+            } else {
+                format!(
+                    "__lll_str_cat({}, {})",
+                    expr(&args[0], cx, res)?,
+                    expr(&args[1], cx, res)?
+                )
+            }
+        }
         Expr::Call(name, args)
             if is_array_builtin(name)
                 && !cx.parts.contains(name)
@@ -3776,6 +3795,38 @@ impl std::ops::Neg for Rat {
 // Rust `String`/`&str`. Return (Rust→llmlang) is total. The param path fail-stops on
 // a non-scalar codepoint — a boundary backstop, provably dead when the input is a real
 // string (literal or FFI-returned), mirroring verified array bounds under FFI.
+// REQ-LLL-067 string interpolation: decimal codepoints of an Int (leading '-' for
+// negatives). i64::MIN-safe via i128. Total.
+fn __lll_str_of_int(n: i64) -> Lst<i64> {
+    let neg = n < 0;
+    let mut m: u128 = (n as i128).unsigned_abs();
+    let mut acc: Lst<i64> = Rc::new(LstI::Nil);
+    if m == 0 {
+        acc = Rc::new(LstI::Cons('0' as i64, acc));
+    }
+    while m > 0 {
+        acc = Rc::new(LstI::Cons(('0' as i64) + (m % 10) as i64, acc));
+        m /= 10;
+    }
+    if neg {
+        acc = Rc::new(LstI::Cons('-' as i64, acc));
+    }
+    acc
+}
+// REQ-LLL-067: List[Int] concatenation `a ++ b`. Total.
+fn __lll_str_cat(a: Lst<i64>, b: Lst<i64>) -> Lst<i64> {
+    let mut elems: Vec<i64> = Vec::new();
+    let mut cur = a;
+    while let LstI::Cons(h, t) = &*cur {
+        elems.push(*h);
+        cur = t.clone();
+    }
+    let mut acc = b;
+    for e in elems.into_iter().rev() {
+        acc = Rc::new(LstI::Cons(e, acc));
+    }
+    acc
+}
 fn __lll_str_to_rust(xs: &Lst<i64>) -> String {
     let mut s = String::new();
     let mut cur = xs.clone();
