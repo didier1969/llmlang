@@ -35,17 +35,27 @@ build_lll() { $LLL build "$1" >/dev/null 2>&1
 
 echo "# C-speed bench (min of 5 runs; rustc -O vs gcc -O2)"
 
-# REQ-LLL-162 — ARITHMETIC-BOUND regime. The kernel whose loop body is nothing but
-# arithmetic, so it isolates the cost of the `Int` REPRESENTATION with nothing to hide
-# behind. This is where the exact `Int` (DEC-LLL-077) hurts most, and it is in the
-# harness precisely because the old README claim ("~10x faster than gcc -O2 C") was
-# measured here back when `Int` was a raw `i64` — and then drifted, unmeasured, into
-# being false. A headline perf claim must have a script behind it.
+# REQ-LLL-162 — ARITHMETIC-BOUND regime. The loop body is nothing but arithmetic, so it
+# isolates the cost of the `Int` REPRESENTATION with nothing to hide behind.
+#
+# TWO Rust references, and the difference between them is a FINDING, not pedantry.
+# LLVM sees that `and 0x7fffffff` makes this exact arithmetic mod 2^31 — a ring where five
+# composed affine maps collapse into one — and FUSES five LCG steps into a single imul.
+# `rust-i64` therefore runs only 20M iterations, not 100M (hence its otherwise-impossible
+# 0.02s). Measuring llmlang's 100M steps against that inflates the tax ~7x.
+#   rust-i64        = what LLVM really produces (the ceiling llmlang USED to reach — this
+#                     fusion is exactly where the old "10x faster than gcc -O2 C" claim
+#                     came from, back when `Int` was a raw `i64`)
+#   rust-i64-eqwork = the same arithmetic, fusion blocked → SAME 100M steps as llmlang.
+#                     This is the honest PER-OPERATION boxing tax.
+# Boxing costs twice: per-op overhead AND the loss of rewrites the optimizer can no longer
+# see through. Both are real; only together do they explain the headline ratio.
 build_lll bench/cspeed/lcg.lll lcg_lll
 rustc -O -C overflow-checks=on --edition 2021 bench/cspeed/lcg_ref.rs -o build/cspeed/lcg_ref 2>/dev/null
+rustc -O -C overflow-checks=on --edition 2021 bench/cspeed/lcg_nofuse_ref.rs -o build/cspeed/lcg_nofuse 2>/dev/null
 gcc -O2 bench/cspeed/lcg.c -o build/cspeed/lcg_c
-printf "lcg      llmlang=%ss  rust-i64=%ss  C=%ss  (ARITHMETIC-bound — the exact-Int tax, REQ-LLL-162)\n" \
-  "$(best build/cspeed/lcg_lll)" "$(best build/cspeed/lcg_ref)" "$(best build/cspeed/lcg_c)"
+printf "lcg      llmlang=%ss  rust-i64-eqwork=%ss  rust-i64(LLVM-fused 5:1)=%ss  C=%ss  (ARITHMETIC-bound — the exact-Int tax, REQ-LLL-162)\n" \
+  "$(best build/cspeed/lcg_lll)" "$(best build/cspeed/lcg_nofuse)" "$(best build/cspeed/lcg_ref)" "$(best build/cspeed/lcg_c)"
 
 build_lll bench/cspeed/fib.lll fib_lll
 rustc -O -C overflow-checks=on --edition 2021 bench/cspeed/fib_ref.rs -o build/cspeed/fib_ref 2>/dev/null
