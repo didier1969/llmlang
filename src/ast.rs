@@ -663,6 +663,23 @@ pub enum Expr {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         witness: Option<Box<Expr>>,
     },
+    /// List comprehension `[body for var in iter]` (REQ-LLL-067). A NATIVE code
+    /// construct — NOT desugared to the kernel — so, like [`Expr::If`]/[`Expr::Lambda`]/
+    /// the quantifiers, it has its OWN content-hash (α-normalized on `var`); it does NOT
+    /// collide with the hand-written tail recursion it computes. This is a CONSCIOUS
+    /// identity extension (DEC-LLL-020), consistent with the existing `if`-expression
+    /// precedent. CODE-ONLY: illegal inside a contract (requires/ensures/measure). `iter`
+    /// must be a `List[T]`; `var : T` scopes over `body : U`; the result is `List[U]`.
+    /// It lowers to a native Rust fold over the finite `iter` — no `measure` obligation
+    /// (structural, terminates by construction) — but the body's OWN obligations (a
+    /// divide, an array access) ARE discharged under a FRESH arbitrary element `var`, so
+    /// `[10 div x for x in xs]` is correctly REJECTED (x ≠ 0 unprovable). Map/filter
+    /// variants and numeric-range iteration are deliberate follow-ups.
+    Compr {
+        var: String,
+        iter: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 /// The finite domain a [`Expr::Forall`] binder ranges over (REQ-LLL-087). Each domain

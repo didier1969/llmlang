@@ -2148,9 +2148,10 @@ fn live_expr(
             s.extend(b);
             s
         }
-        Expr::Forall { .. } | Expr::Exists { .. } => {
-            // contract-only (erased at codegen) — unreachable in a term body, but stay safe:
-            // union every variable used, record no moves.
+        Expr::Forall { .. } | Expr::Exists { .. } | Expr::Compr { .. } => {
+            // Quantifiers are contract-only (erased at codegen); a comprehension lowers to a
+            // fold that CLONES every value it reads (no moves out). Both cases: union every
+            // variable used, record no moves — conservative and always safe (REQ-LLL-067).
             let mut s = live_out.clone();
             e.walk(&mut |x| {
                 if let Expr::Var(n) = x {
@@ -3403,6 +3404,28 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         // so codegen needs no per-node types; the getter returns an owned clone (via a
         // `&self` irrefutable match), so the result is owned regardless of `res`.
         Expr::Field(e, name) => format!("({}).__f_{name}()", expr(e, cx, res)?),
+        Expr::Compr { var, iter, body } => {
+            // List comprehension `[body for var in iter]` (REQ-LLL-067): fold over the
+            // finite `iter` cons-list, binding each element to `var`, collecting `body`
+            // into a fresh list. The `loop { match &*cur }` shape (not `while let`) mirrors
+            // the proven `__lll_str_to_rust` walk so the in-loop reassignment `__csrc =
+            // __ct.clone()` borrow-checks. Values are cloned uniformly (the liveness pass
+            // records no moves for a comprehension). Names are `__c*`-prefixed; a nested
+            // comprehension shadows them in its own block.
+            let it = expr(iter, cx, false)?;
+            let bd = expr(body, cx, false)?;
+            format!(
+                "{{ let mut __csrc = {it}; let mut __cout = ::std::vec::Vec::new(); \
+                 loop {{ match &*__csrc {{ \
+                 LstI::Nil => break, \
+                 LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); __cout.push({bd}); __csrc = __ct.clone(); }} \
+                 }} }} \
+                 let mut __cacc = Rc::new(LstI::Nil); \
+                 for __ce in __cout.into_iter().rev() {{ __cacc = Rc::new(LstI::Cons(__ce, __cacc)); }} \
+                 __cacc }}",
+                v = local(var)
+            )
+        }
         Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),
         Expr::Not(a) => format!("(!{})", expr(a, cx, res)?),
         Expr::Bin(op, a, b) => {

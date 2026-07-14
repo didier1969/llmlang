@@ -78,6 +78,13 @@ Surface conveniences (all desugar to the kernel above — identical content-hash
   string built by `str_cat`. `{{`/`}}` are literal braces. Interpolants are Int-only
   in v1 (a non-Int is a type error); an interpolant may not contain a `"`. Pure sugar:
   `"a{x}b"` has the SAME content-hash as `str_cat(str_cat("a", str_of(x)), "b")`.
+- **List comprehension** `[body for x in xs]` — maps `body` over each element `x` of a
+  `List`, giving a new `List` (e.g. `[n * 2 for n in xs]`). It is verified in place, so
+  the body may read enclosing names directly, and it needs NO `measure` (it terminates
+  by construction). The body must be TOTAL for an arbitrary element — `[10 div x for x
+  in xs]` is REJECTED (x ≠ 0 is unprovable), so guard the divisor or extract a
+  contracted helper part. Comprehensions are CODE-ONLY (not allowed in a contract). v1
+  is map-only (no `if`-filter, no numeric `lo..hi` range — iterate a `List`).
 
 Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
 algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):

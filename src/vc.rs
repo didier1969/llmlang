@@ -628,6 +628,11 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
                 .map(|a| inline_methods(a, class, inst))
                 .collect::<Result<_, _>>()?,
         ),
+        Expr::Compr { var, iter, body } => Expr::Compr {
+            var: var.clone(),
+            iter: Box::new(inline_methods(iter, class, inst)?),
+            body: Box::new(inline_methods(body, class, inst)?),
+        },
         Expr::Forall { var, domain, body } => Expr::Forall {
             var: var.clone(),
             domain: inline_domain(domain, class, inst)?,
@@ -708,6 +713,19 @@ pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
                 Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
         }
+        Expr::Compr { var, iter, body } => {
+            // `iter` is OUTSIDE the binder scope; `body` is INSIDE, so `var` shadows a
+            // same-named entry in `map` (capture avoidance, like Lambda/Forall). REQ-LLL-067.
+            let iter = Box::new(subst_vars(iter, map));
+            let body = if map.contains_key(var.as_str()) {
+                let mut inner = map.clone();
+                inner.remove(var.as_str());
+                Box::new(subst_vars(body, &inner))
+            } else {
+                Box::new(subst_vars(body, map))
+            };
+            Expr::Compr { var: var.clone(), iter, body }
+        }
         Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             // the DOMAIN (range bounds or the Map/Set collection) is OUTSIDE the binder's
             // scope; the body is INSIDE, so the binder `var` shadows a same-named entry in
@@ -737,6 +755,15 @@ pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
             }
         }
     }
+}
+
+/// The ELEMENT sort of a list sort string: `(Lst E)` → `E` (REQ-LLL-067, for the
+/// comprehension's fresh-element binder). Returns `None` for a non-list sort. Handles
+/// a nested element (`(Lst (Lst Int))` → `(Lst Int)`) since `strip_suffix(')')` drops
+/// only the outermost close paren.
+fn list_elem_sort(sort: &str) -> Option<String> {
+    let inner = sort.trim().strip_prefix("(Lst ")?.strip_suffix(')')?;
+    Some(inner.trim().to_string())
 }
 
 /// SMT-LIB sort for a type (REQ-LLL-007, DEC-LLL-028). A type variable becomes a
@@ -1856,6 +1883,43 @@ impl<'a> Emit<'a> {
                     self.tr(a, env, None)?;
                 }
                 self.fresh(&smt_ty(&Ty::list(Ty::Int)))
+            }
+            Expr::Compr { var, iter, body } => {
+                // List comprehension (REQ-LLL-067). Native code construct: the RESULT is
+                // OPAQUE to the pure-core proof (havoc), but the body's OWN obligations MUST
+                // be discharged under a FRESH, ARBITRARY element `var` — so a partial body
+                // (`[10 div x for x in xs]`) is correctly REJECTED (x ≠ 0 unprovable over an
+                // arbitrary element). The checker forbids a comprehension inside a contract,
+                // so this only ever runs while collecting a body's obligations.
+                self.tr(iter, env, None)?;
+                let list_sort = self.sort_of(iter, env).ok_or_else(|| {
+                    format!(
+                        "part `{}`: cannot determine the element type of the comprehension's \
+                         list — bind it to a `let` of a concrete List first",
+                        self.part.name
+                    )
+                })?;
+                let elem_sort = list_elem_sort(&list_sort).ok_or_else(|| {
+                    format!(
+                        "part `{}`: a comprehension iterates a non-list ({list_sort})",
+                        self.part.name
+                    )
+                })?;
+                let felt = self.fresh(&elem_sort);
+                self.sorts.insert(felt.clone(), elem_sort.clone());
+                let mut env2 = env.clone();
+                env2.insert(var.clone(), felt);
+                self.tr(body, &env2, None)?;
+                // result: a `List` of the body's sort — opaque (havoc). Prefer the expected
+                // sort (a typed yield/arg); else derive from the body under the binder.
+                let res_sort = match expected {
+                    Some(t) => smt_ty(t),
+                    None => format!(
+                        "(Lst {})",
+                        self.sort_of(body, &env2).unwrap_or_else(|| smt_ty(&Ty::Int))
+                    ),
+                };
+                self.fresh(&res_sort)
             }
             Expr::Call(name, args)
                 if is_array_builtin(name)

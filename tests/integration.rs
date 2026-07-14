@@ -31,3 +31,5 @@ mod spec_predicates;
 mod lsp;
 #[path = "integration/text_io.rs"]
 mod text_io;
+#[path = "integration/comprehensions.rs"]
+mod comprehensions;

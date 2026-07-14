@@ -624,6 +624,19 @@ impl<'a> Norm<'a> {
                 };
                 format!("(call {target} {})", xs.join(" "))
             }
+            Expr::Compr { var, iter, body } => {
+                // list comprehension (REQ-LLL-067). A NATIVE node with its OWN canonical
+                // form — a CONSCIOUS identity extension (DEC-LLL-020), like If/Lambda/the
+                // quantifiers: it does NOT collide with the hand-written recursion it
+                // computes. `iter` is OUTSIDE the binder scope; the binder `var` is de-
+                // Bruijn'd in `body` so α-equivalent comprehensions (`[x*2 for x in xs]` vs
+                // `[y*2 for y in xs]`) converge to the SAME content-hash.
+                let iter_h = self.expr(iter);
+                self.env.push(var.clone());
+                let body_h = self.expr(body);
+                self.env.pop();
+                format!("(compr (in {iter_h}) {body_h})")
+            }
             Expr::Forall { var, domain, body } => {
                 // a bounded quantifier (REQ-LLL-087). The DOMAIN (range bounds or the
                 // Map/Set collection) is OUTSIDE the binder scope; the binder `v` is

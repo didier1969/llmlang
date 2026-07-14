@@ -184,6 +184,13 @@ fn inline(e: &Expr, defs: &SpecDefs) -> Result<Expr, String> {
             Box::new(inline(b, defs)?),
         )),
         Expr::Lambda(ps, body) => Ok(Expr::Lambda(ps.clone(), Box::new(inline(body, defs)?))),
+        // A comprehension is code-only (the checker forbids it in a contract/spec), so this
+        // is defensive — recurse into both children uniformly (REQ-LLL-067).
+        Expr::Compr { var, iter, body } => Ok(Expr::Compr {
+            var: var.clone(),
+            iter: Box::new(inline(iter, defs)?),
+            body: Box::new(inline(body, defs)?),
+        }),
         Expr::Forall { var, domain, body } => Ok(Expr::Forall {
             var: var.clone(),
             domain: inline_domain(domain, defs)?,
@@ -263,6 +270,15 @@ fn alpha_fresh(e: &Expr, counter: &mut usize, ren: &HashMap<String, String>) -> 
                 })
                 .collect();
             Expr::Lambda(ps2, Box::new(alpha_fresh(body, counter, &inner)))
+        }
+        Expr::Compr { var, iter, body } => {
+            // `iter` is in the OUTER scope; `var` binds a fresh name over `body` (code-only,
+            // defensive — a comprehension never reaches a contract). REQ-LLL-067.
+            let iter = Box::new(recur(iter, counter));
+            let f = fresh_name(counter);
+            let mut inner = ren.clone();
+            inner.insert(var.clone(), f.clone());
+            Expr::Compr { var: f, iter, body: Box::new(alpha_fresh(body, counter, &inner)) }
         }
         Expr::Forall { var, domain, body } => {
             let domain = alpha_fresh_domain(domain, counter, ren); // outer scope

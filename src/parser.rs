@@ -257,6 +257,11 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
             Box::new(desugar_expr(*a, recs)?),
             Box::new(desugar_expr(*b, recs)?),
         ),
+        Expr::Compr { var, iter, body } => Expr::Compr {
+            var,
+            iter: Box::new(desugar_expr(*iter, recs)?),
+            body: Box::new(desugar_expr(*body, recs)?),
+        },
         Expr::Forall { var, domain, body } => Expr::Forall {
             var,
             domain: desugar_domain(domain, recs)?,
@@ -2090,16 +2095,32 @@ impl Parser {
                 Ok(e)
             }
             Tok::LBracket => {
-                let mut items = Vec::new();
-                if self.peek() != &Tok::RBracket {
-                    items.push(self.expr()?);
-                    while self.peek() == &Tok::Comma {
-                        self.pos += 1;
-                        items.push(self.expr()?);
+                if self.peek() == &Tok::RBracket {
+                    self.pos += 1;
+                    Ok(Expr::ListLit(Vec::new()))
+                } else {
+                    let first = self.expr()?;
+                    // list comprehension `[body for x in iter]` (REQ-LLL-067). `for` is
+                    // detected CONTEXTUALLY (only right after the first bracket expr), so it
+                    // stays usable as an ordinary identifier everywhere else — no new keyword.
+                    if matches!(self.peek(), Tok::Ident(k) if k == "for") {
+                        self.pos += 1; // eat `for`
+                        let var = self.ident()?;
+                        self.eat(Tok::In)?;
+                        let iter = self.expr()?;
+                        self.eat(Tok::RBracket)?;
+                        Ok(Expr::Compr { var, iter: Box::new(iter), body: Box::new(first) })
+                    } else {
+                        // plain list literal `[a, b, c]`
+                        let mut items = vec![first];
+                        while self.peek() == &Tok::Comma {
+                            self.pos += 1;
+                            items.push(self.expr()?);
+                        }
+                        self.eat(Tok::RBracket)?;
+                        Ok(Expr::ListLit(items))
                     }
                 }
-                self.eat(Tok::RBracket)?;
-                Ok(Expr::ListLit(items))
             }
             Tok::Dotted(name) => {
                 // effect call: IO.print(...), IO.read()

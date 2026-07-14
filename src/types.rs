@@ -105,6 +105,14 @@ pub fn render_contract_clause(e: &Expr) -> String {
             render_contract_clause(a),
             render_contract_clause(b)
         ),
+        Expr::Compr { var, iter, body } => {
+            // code-only (never a contract clause) — defensive render for exhaustiveness.
+            format!(
+                "[{} for {var} in {}]",
+                render_contract_clause(body),
+                render_contract_clause(iter)
+            )
+        }
         Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             let kw = if matches!(e, Expr::Exists { .. }) { "exists" } else { "forall" };
             let dom = match domain {
@@ -236,6 +244,14 @@ fn collect_free_vars(e: &Expr, acc: &mut HashSet<String>) {
             for (_, fe) in fields {
                 collect_free_vars(fe, acc);
             }
+        }
+        Expr::Compr { var, iter, body } => {
+            // `iter` is free; the binder `var` shadows in `body` (REQ-LLL-067).
+            collect_free_vars(iter, acc);
+            let mut inner: HashSet<String> = HashSet::new();
+            collect_free_vars(body, &mut inner);
+            inner.remove(var);
+            acc.extend(inner);
         }
         Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             // Contract-only in practice (a quantifier never reaches a `let` RHS / arm
@@ -2567,6 +2583,10 @@ fn collect_part_refs(
                 }
             }
             Expr::Lambda(_, b) => ex(b, true, is_part, strong, weak),
+            Expr::Compr { iter, body, .. } => {
+                ex(iter, in_lambda, is_part, strong, weak);
+                ex(body, in_lambda, is_part, strong, weak);
+            }
             Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
                 ex(a, in_lambda, is_part, strong, weak);
                 ex(b, in_lambda, is_part, strong, weak);
@@ -2954,6 +2974,13 @@ fn type_of_pure(
         // contract is rejected here — the same term-only stance as `Hole` above — so
         // `contract_hash` never contains an `if` and the trusted contract surface is
         // unchanged (advisor scope call; contract-if is a separate, unmapped need).
+        Expr::Compr { .. } => {
+            return Err(
+                "a list comprehension `[… for … in …]` is code-only — not allowed in a \
+                 contract (requires/ensures/measure) (REQ-LLL-067)"
+                    .into(),
+            )
+        }
         Expr::If(..) => {
             return Err(
                 "if-expressions are not allowed in a contract (requires/ensures/measure) — \
@@ -4961,6 +4988,32 @@ fn check_expr(
             }
             check_given_satisfied(ctx.part, ctx.module, name, &callee_given, &subst)?;
             subst_ty(&callee_ret, &subst)
+        }
+        Expr::Compr { var, iter, body } => {
+            // List comprehension `[body for var in iter]` (REQ-LLL-067). `iter` must be a
+            // `List[T]`; `var : T` scopes over `body : U`; the result is `List[U]`. Checked
+            // in-place (env extended with the binder) — no lambda-lifting, so captures of
+            // enclosing locals are automatic. Terminates by construction (fold over a finite
+            // list), so it carries NO `measure` obligation.
+            let it_ty = check_expr(ctx, iter, None)?;
+            let elem = match &it_ty {
+                Ty::List(inner) => (**inner).clone(),
+                other => {
+                    return Err(format!(
+                        "part `{}`: a list comprehension iterates a List, got {other}",
+                        ctx.part.name
+                    ))
+                }
+            };
+            let saved_facts = ctx.path_facts.clone();
+            ctx.vars.push(std::iter::once((var.clone(), elem)).collect());
+            ctx.smaller.push(HashMap::new());
+            shadow_path_facts(&mut ctx.path_facts, var);
+            let body_ty = check_expr(ctx, body, None)?;
+            ctx.smaller.pop();
+            ctx.vars.pop();
+            ctx.path_facts = saved_facts;
+            Ty::list(body_ty)
         }
         Expr::Lambda(params, body) => {
             // a lambda parameter's type annotation must name a declared type at its
