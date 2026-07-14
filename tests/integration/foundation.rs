@@ -494,3 +494,17 @@ fn pure_cannot_call_effectful() {
     let m = parser::parse_module(src).unwrap();
     assert!(types::check_module(m).unwrap_err().contains("via IO"));
 }
+
+#[test]
+fn parse_error_reports_the_exact_column_req160() {
+    // REQ-LLL-160: a parse error points at the precise COLUMN (indentation counted), not just
+    // the line — so an LSP can squiggle the exact token. Line 2 = "  part f() -> Int [via IO]:";
+    // the `[` is at column 19 (2 indent + "part f() -> Int " = 16 + one space at 18 → `[` at 19).
+    // Pins the column against an off-by-one in the lexer's `offset + i + 1`.
+    let src = "module M:\n  part f() -> Int [via IO]:\n    yield 0\n";
+    let err = parser::parse_module(src).expect_err("the `[` is a parse error");
+    assert!(
+        err.contains("line 2 col 19:"),
+        "parse error must point at the exact column of `[` (line 2 col 19), got: {err}"
+    );
+}

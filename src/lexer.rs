@@ -96,6 +96,10 @@ pub enum Tok {
 pub struct Sp {
     pub tok: Tok,
     pub line: usize,
+    /// 1-based source COLUMN of the token's first byte (indentation counted). A DIAGNOSTIC
+    /// position only — like `line`, it never reaches the content-hash (hashing walks the AST,
+    /// not tokens). Byte-based, which equals the column for the ASCII-dominant surface.
+    pub col: usize,
 }
 
 /// Byte index at which a line comment starts, i.e. the first `#` that is NOT
@@ -152,34 +156,39 @@ pub fn lex(src: &str) -> Result<Vec<Sp>, String> {
         let cur = *indents.last().unwrap();
         if indent > cur {
             indents.push(indent);
-            out.push(Sp { tok: Tok::Indent, line });
+            out.push(Sp { tok: Tok::Indent, line, col: indent + 1 });
         } else if indent < cur {
             while *indents.last().unwrap() > indent {
                 indents.pop();
-                out.push(Sp { tok: Tok::Dedent, line });
+                out.push(Sp { tok: Tok::Dedent, line, col: indent + 1 });
             }
             if *indents.last().unwrap() != indent {
                 return Err(format!("line {line}: inconsistent dedent"));
             }
         }
-        lex_line(code.trim_start_matches(' '), line, &mut out)?;
-        out.push(Sp { tok: Tok::Newline, line });
+        lex_line(code.trim_start_matches(' '), line, indent, &mut out)?;
+        out.push(Sp { tok: Tok::Newline, line, col: code.len() + 1 });
     }
     while indents.len() > 1 {
         indents.pop();
         out.push(Sp {
             tok: Tok::Dedent,
             line: src.lines().count() + 1,
+            col: 1,
         });
     }
     Ok(out)
 }
 
-fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
+fn lex_line(s: &str, line: usize, offset: usize, out: &mut Vec<Sp>) -> Result<(), String> {
     let b = s.as_bytes();
     let mut i = 0;
-    let push = |out: &mut Vec<Sp>, tok: Tok| out.push(Sp { tok, line });
+    // Token COLUMN (1-based, indentation counted), refreshed at the top of each iteration so
+    // every `push` records where its token STARTS — no per-call-site threading (REQ-LLL-160).
+    let tok_col = std::cell::Cell::new(0usize);
+    let push = |out: &mut Vec<Sp>, tok: Tok| out.push(Sp { tok, line, col: tok_col.get() });
     while i < b.len() {
+        tok_col.set(offset + i + 1);
         let c = b[i] as char;
         match c {
             ' ' => i += 1,
@@ -423,14 +432,14 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
             '_' => {
                 // bare underscore = wildcard; _foo = identifier
                 if i + 1 < b.len() && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_') {
-                    i = lex_word(s, i, line, out)?;
+                    i = lex_word(s, i, line, offset, out)?;
                 } else {
                     push(out, Tok::Underscore);
                     i += 1;
                 }
             }
             c if c.is_ascii_alphabetic() => {
-                i = lex_word(s, i, line, out)?;
+                i = lex_word(s, i, line, offset, out)?;
             }
             other => return Err(format!("line {line}: unexpected character '{other}'")),
         }
@@ -438,7 +447,7 @@ fn lex_line(s: &str, line: usize, out: &mut Vec<Sp>) -> Result<(), String> {
     Ok(())
 }
 
-fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usize, String> {
+fn lex_word(s: &str, start: usize, line: usize, offset: usize, out: &mut Vec<Sp>) -> Result<usize, String> {
     let b = s.as_bytes();
     let mut i = start;
     let mut dotted = false;
@@ -503,6 +512,6 @@ fn lex_word(s: &str, start: usize, line: usize, out: &mut Vec<Sp>) -> Result<usi
         _ if dotted => Tok::Dotted(w.to_string()),
         _ => Tok::Ident(w.to_string()),
     };
-    out.push(Sp { tok, line });
+    out.push(Sp { tok, line, col: offset + start + 1 });
     Ok(i)
 }

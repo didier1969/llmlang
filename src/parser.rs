@@ -287,6 +287,11 @@ impl Parser {
     fn line(&self) -> usize {
         self.toks.get(self.pos).map(|s| s.line).unwrap_or(0)
     }
+    /// 1-based COLUMN of the current token — the precise spot a parse error points at
+    /// (REQ-LLL-160). Diagnostic only; never in the content-hash.
+    fn col(&self) -> usize {
+        self.toks.get(self.pos).map(|s| s.col).unwrap_or(0)
+    }
     fn at_end(&self) -> bool {
         self.pos >= self.toks.len()
     }
@@ -304,7 +309,7 @@ impl Parser {
         }
     }
     fn err(&self, msg: &str) -> String {
-        format!("line {}: {}", self.line(), msg)
+        format!("line {} col {}: {}", self.line(), self.col(), msg)
     }
     fn skip_newlines(&mut self) {
         while !self.at_end() && self.peek() == &Tok::Newline {
