@@ -1476,3 +1476,68 @@ fn cse_does_not_merge_empties_of_different_types() {
         "the non-empty list-of-lists must match the cons arm"
     );
 }
+
+// ---- REQ-LLL-158 slice-1: assume-side `forall` over Map KEYS (haskey-triggered) ----
+// The assume-side `forall x in s` over a Set already ground-instantiates at `member(s, e)`
+// (REQ-087). A `forall k in m` over a Map's keys is registered identically but was NOT
+// instantiated at a `haskey(m, e)` fact — `lookup`/`get`/`member` triggered it, `haskey`
+// did not. This closes that asymmetry: `haskey` triggers the SAME membership-guarded ground
+// instance, still never `assert forall`. Sound-by-mirror of `lookup`; the must-NOT-prove
+// twin pins over-instantiation (the exact failure the fence prevents).
+
+#[test]
+fn forall_over_map_keys_instantiates_at_haskey_req158() {
+    // `haskey(m, e)` asserts e ∈ keys(m); instantiating `forall k in m: k > 0` at k := e
+    // soundly yields `e > 0`. Must PROVE.
+    let src = "module M:\n\n  part g(m: Map[Int, Int], e: Int) -> Int:\n    requires forall k in m: k > 0\n    requires haskey(m, e)\n    ensures result > 0\n    yield e\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`forall k in m: k>0` + `haskey(m,e)` must prove `e>0` — haskey triggers instantiation"
+    );
+}
+
+#[test]
+fn forall_over_map_keys_needs_the_haskey_fact_req158() {
+    // MUST-NOT-PROVE discriminator: without a `haskey` membership fact, `e` may not be a key,
+    // so `forall k in m: k>0` must NOT prove `e>0`. If this ever verifies, the instantiation
+    // is unsound (assuming more than granted — the failure mode the fence exists to prevent).
+    let src = "module M:\n\n  part g(m: Map[Int, Int], e: Int) -> Int:\n    requires forall k in m: k > 0\n    ensures result > 0\n    yield e\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        !vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "without a `haskey` fact, `e>0` must NOT be provable (no over-instantiation)"
+    );
+}
+
+#[test]
+fn forall_over_map_keys_binds_the_witness_not_another_element_req158() {
+    // THE discriminating adverse case: `haskey(m, a)` fires instantiation at key `a`, but the
+    // goal is about a DIFFERENT element `b` not known to be a key. This MUST NOT verify — if it
+    // did, the instance would be dropping its membership guard or binding to the wrong term (a
+    // real unsoundness the no-trigger adverse test cannot catch). The instance is
+    // `guard(k) => body(k)`, so only the k actually shown present (here `a`) is usable.
+    let src = "module M:\n\n  part g(m: Map[Int, Int], a: Int, b: Int) -> Int:\n    requires forall k in m: k > 0\n    requires haskey(m, a)\n    ensures result > 0\n    yield b\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        !vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "instantiation at key `a` must NOT prove a goal about a different element `b`"
+    );
+}
+
+#[test]
+fn forall_over_map_values_via_get_instantiates_at_haskey_req158() {
+    // Coverage of the VALUE-indexing path: `forall k in m: lookup(m, k) > 0` + `haskey(m, e)`
+    // ⇒ `lookup(m, e) > 0`. Must PROVE (haskey fires the instance; the value access via the
+    // Map's `lookup` is the proven fact — `get` is Array-only, Maps use `lookup`).
+    let src = "module M:\n\n  part g(m: Map[Int, Int], e: Int) -> Int:\n    requires forall k in m: lookup(m, k) > 0\n    requires haskey(m, e)\n    ensures result > 0\n    yield lookup(m, e)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`forall k in m: get(m,k)>0` + `haskey(m,e)` must prove `get(m,e)>0`"
+    );
+}

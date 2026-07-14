@@ -2030,6 +2030,16 @@ impl<'a> Emit<'a> {
                     "haskey" => {
                         let m = self.tr(&args[0], env, None)?;
                         let k = self.tr(&args[1], env, None)?;
+                        // A `haskey(m, e)` fact asserts `e ∈ keys(m)`: GROUND-INSTANTIATE any
+                        // quantified `forall over m` at THIS key — the assume-side mirror of the
+                        // `lookup`/`get`/`member` arms (REQ-LLL-158). Skipped while STATING a
+                        // proven `forall` (`instantiating`) so the ground pass stays a single
+                        // finite step. Still never `assert forall`; the instance is
+                        // membership-guarded (`guard(k) => body(k)`), so a `haskey` that is only
+                        // TESTED (not asserted) contributes a harmless guarded fact.
+                        if !self.instantiating {
+                            self.instantiate_forall_at(&m, &k)?;
+                        }
                         format!("(not (= (select {m} {k}) none))")
                     }
                     // REQ-LLL-150: `keys`/`values` are CODE-ONLY (not spec terms) and not
