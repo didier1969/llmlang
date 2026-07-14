@@ -156,6 +156,30 @@ fn a_deep_tail_recursion_does_not_grow_the_stack() {
     );
 }
 
+/// La TCE ne s'applique PAS qu'aux scalaires : elle se déclenche pour toute partie sans
+/// paramètre EMPRUNTÉ — ce qui inclut un accumulateur TAS POSSÉDÉ (un `Array` que la
+/// passe d'ownership a basculé en owned parce qu'il est mis à jour). C'est justement le
+/// cas qui débordait DÉJÀ la pile avant ce travail (`Rc` porte du drop glue), donc le
+/// plus large de la réécriture. Ce test l'exerce à l'EXÉCUTION, en profondeur, et vérifie
+/// que le déplacement-dans-la-boucle + `Rc::make_mut` ne corrompt pas le contenu.
+#[test]
+fn a_deep_tail_recursion_with_an_owned_heap_accumulator_runs_and_stays_correct() {
+    // `ensures length(result) == length(acc) + n` : l'invariant de longueur se prouve par
+    // récurrence, et il donne au site d'appel la borne dont `get(a, 0)` a besoin.
+    let src = "module M:\n\n  part build(acc: Array[Int], n: Int) -> Array[Int]:\n    requires n >= 0\n    ensures  length(result) == length(acc) + n\n    measure n\n    match n:\n      0 -> yield acc\n      _ -> yield build(push(acc, n), n - 1)\n\n  part main() -> Int via IO:\n    let a = build(array(7), 200000)\n    let len = IO.print(length(a))\n    yield IO.print(get(a, 0))\n";
+    assert!(verify_src(src).ok(), "heap-accumulator loop must verify");
+    let out = build_run(src);
+    assert!(
+        out.contains("200001"),
+        "200k tail iterations over an OWNED Array must run in constant stack and keep every \
+         element (1 seed + 200000 pushed), got: {out:?}"
+    );
+    assert!(
+        out.contains("7"),
+        "the seed element must survive the move-in-loop + make_mut, got: {out:?}"
+    );
+}
+
 /// LE piège de la réécriture : les arguments doivent être évalués AVANT que le moindre
 /// paramètre ne soit réassigné. Ici `swap(a, b) -> swap(b, a)` : une mise à jour
 /// SÉQUENTIELLE (`a = b; b = a;`) rendrait les deux égaux et donnerait 7 ; la mise à jour
