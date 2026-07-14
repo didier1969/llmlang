@@ -82,9 +82,33 @@ some input, caught only by the trap battery. `isqrt` is the locked race subject.
 4. **Paired protocol** — same task, fresh agent per arm, verbatim, N bounded trials, labelled
    preliminary.
 
+## Race execution — attempted, hit a real difficulty/latency wall (honest)
+
+Running the automated within-agent race on `isqrt` was attempted and blocked by a genuine
+wall, not a bug:
+- **`claude -p` is too slow for `isqrt`.** The frontier model reasons > 5 min; probes
+  repeatedly hit the 300–320 s timeout (`exit 124`, empty output). An automated multi-arm
+  race driven by `claude -p` on hard tasks is impractical without async / long-budget infra
+  (the Agent SDK, or background jobs with 10 min+ budgets).
+- **`isqrt` is above a fast agent's ceiling.** Pivoting to `gpt-4o` via API (fast, cheap,
+  policy-compliant), the verify↔repair LOOP was run to 5 rounds: gpt-4o never converges
+  (1087 completion tokens, still failing). The Z3 counterexample says *what* breaks; it does
+  not hand a model the *re-derived loop invariant* it lacks. So a fast agent cannot substitute.
+- **Difficulty mismatch is the crux.** The task that trips the strong agent (`isqrt`) is too
+  slow (claude -p) or too hard (gpt-4o); the tasks a fast agent can actually repair are the
+  single-function `z3cases`, already measured in the ablation (41 % → 78 %) — not "big-project".
+
+**Honest ceiling finding (a real result):** the verify↔repair loop is powerful *when the fix
+is within the model's reach* (ablation ladder), but on a task above the model's reasoning
+ceiling (the `isqrt` invariant), even five counterexample rounds do not converge. A stronger,
+honest statement of the limit than the single-round `reduce_div` tie.
+
 ## Status
 
-PREPARED. Subject built + verified; cheap calibration shows a viable Goldilocks band; the
-Claude-logic calibration + Rust control + trap battery + token harness are the greenlit build.
-**Not executed** — an unsupervised multi-hour race whose "correct" needs operator-level
-judgement is exactly what must not run blind. Awaiting greenlight.
+Hardening DONE (isqrt trips Claude, frozen evidence). Automated race BLOCKED by claude -p
+latency + agent/task difficulty mismatch — needs a dedicated harness (async claude -p / Agent
+SDK, long budgets) to run a within-Claude race. Meanwhile the big-project differential is
+already well-evidenced: context 96 % (`../context/`), verify↔repair ladder 41→78 %
+(`../llm_gen/.../RESULTS_ablation.md`), and latent-bug escape 0 % vs 33 %
+(`../llm_gen/differential/RESULTS.md`). The within-Claude cost-of-trust race is the dedicated
+next build, not a blind autonomous run.
