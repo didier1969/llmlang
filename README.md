@@ -46,14 +46,19 @@ module Demo.Core:
 
   | kernel | llmlang | hand-written Rust `i64` | C `gcc -O2` |
   |---|---|---|---|
-  | lcg, 100M iters (arithmetic-bound) | 0.88s | 0.02s | 0.27s |
-  | fib(40) (call-heavy) | 2.31s | 0.41s | 0.27s |
-  | listsum (list fold) | 0.39s | — | 0.08s |
-  | map (associative read) | 0.47s | — | 0.35s |
+  | lcg, 100M iters (arithmetic-bound) | 0.82s | 0.02s | 0.26s |
+  | fib(40) (call-heavy) | 2.33s | 0.68s | 0.33s |
+  | listsum (list fold) | 0.41s | — | 0.08s |
+  | map (associative read) | 0.59s | — | 0.38s |
 
-  So the tax is **broad (~5x vs Rust, ~5-9x vs C)** and, in a tight arithmetic inner
-  loop with nothing to hide behind, **catastrophic (~44x vs Rust; 3.3x SLOWER than
-  C, where it used to be 10x faster)**. Associative reads stay C-competitive (1.3x).
+  (llmlang **and** the Rust references are compiled with `-C overflow-checks=on`, the
+  posture `lll build` ships — comparing a checked binary to a wrapping one would measure
+  the safety setting, not the language.)
+
+  So the tax is **broad (~3.4x vs Rust on call-heavy code, ~5x vs C on a list fold)**
+  and, in a tight arithmetic inner loop with nothing to hide behind, **catastrophic
+  (~41x vs Rust; 3.2x SLOWER than C, where it used to be 10x faster)**. Associative
+  reads stay closest to C (1.6x) — their cost is the data structure, not the integer.
 
   The cost is not the arithmetic — the small-int path is one `checked_*` op — but the
   BOXING: an exact `Int` is a 16-byte non-`Copy` value with drop glue, so it cannot

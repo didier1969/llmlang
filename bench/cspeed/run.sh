@@ -25,9 +25,13 @@ best() { local b= t; for _ in 1 2 3 4 5; do
   [ -z "$b" ] && b=$t
   awk "BEGIN{exit !($t<$b)}" && b=$t
 done; echo "${b:-?}"; }
+# `-C overflow-checks=on` MIRRORS what `lll build` actually passes (main.rs). Without it
+# the harness measured a binary the product never ships, and quietly under-represented it.
+# The Rust references below carry the SAME flag: comparing a checked llmlang binary against
+# a wrapping Rust one would be measuring the safety posture, not the language.
 build_lll() { $LLL build "$1" >/dev/null 2>&1
   local rs; rs=$(ls -t build/*.rs | grep -i "$(basename "$1" .lll)" | head -1)
-  rustc -O --edition 2021 "$rs" -o "build/cspeed/$2" 2>/dev/null; }
+  rustc -O -C overflow-checks=on --edition 2021 "$rs" -o "build/cspeed/$2" 2>/dev/null; }
 
 echo "# C-speed bench (min of 5 runs; rustc -O vs gcc -O2)"
 
@@ -44,7 +48,7 @@ printf "lcg      llmlang=%ss  rust-i64=%ss  C=%ss  (ARITHMETIC-bound — the exa
   "$(best build/cspeed/lcg_lll)" "$(best build/cspeed/lcg_ref)" "$(best build/cspeed/lcg_c)"
 
 build_lll bench/cspeed/fib.lll fib_lll
-rustc -O --edition 2021 bench/cspeed/fib_ref.rs -o build/cspeed/fib_ref 2>/dev/null
+rustc -O -C overflow-checks=on --edition 2021 bench/cspeed/fib_ref.rs -o build/cspeed/fib_ref 2>/dev/null
 gcc -O2 bench/cspeed/fib.c -o build/cspeed/fib_c
 printf "fib      llmlang=%ss  rust-ref=%ss  C=%ss\n" "$(best build/cspeed/fib_lll)" "$(best build/cspeed/fib_ref)" "$(best build/cspeed/fib_c)"
 
