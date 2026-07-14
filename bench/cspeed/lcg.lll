@@ -1,0 +1,23 @@
+module Bench.Lcg:
+
+  # ARITHMETIC-BOUND kernel (REQ-LLL-162): an LCG iterated tail-recursively. The loop
+  # body is nothing BUT arithmetic — no allocation, no call overhead to hide behind —
+  # so it isolates the cost of the `Int` representation itself.
+  #
+  # This is the regime the exact `Int` (DEC-LLL-077) hurts most, and the one the old
+  # README claim ("~10x faster than gcc -O2 C") was measured on back when `Int` was a
+  # raw `i64`. It is in the harness so that claim can never again drift unmeasured.
+  #
+  # It is also the regime proof-guided unboxing (REQ-LLL-162) should fully recover:
+  # `mod 2147483648` bounds the seed trivially, so the verifier already knows every
+  # value here fits an i64.
+  part lcg(seed: Int, n: Int) -> Int:
+    requires seed >= 0, n >= 0
+    ensures  result >= 0
+    measure n
+    match n:
+      0 -> yield seed
+      _ -> yield lcg((seed * 1103515245 + 12345) mod 2147483648, n - 1)
+
+  part main() -> Int via IO:
+    yield IO.print(lcg(42, 100000000))

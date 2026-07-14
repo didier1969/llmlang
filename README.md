@@ -38,19 +38,34 @@ module Demo.Core:
   model exactly. **Guaranteed tail-call elimination**: a self tail-call is
   emitted as a loop, so an unbounded loop runs in constant stack for ANY
   parameter type — not left to whether LLVM feels like it.
-- **The cost of exactness, measured, not hidden**: an arithmetic-bound loop now
-  pays for arbitrary precision. On the LCG kernel (100M iterations) llmlang runs
-  in **0.91s vs 0.03s** for the same loop in hand-written `i64` Rust — ~30x, and
-  the earlier "10x faster than gcc -O2 C" claim for that kernel no longer holds:
-  it was measured when `Int` was a raw `i64`. The cost is not the arithmetic (the
-  small-int path is a `checked_*` op) but the BOXING: an exact `Int` is a 16-byte
-  non-`Copy` value with drop glue, so it does not stay in registers across a hot
-  loop. Call-heavy and allocation-bound code is far less affected. The principled
-  fix — let the PROOF pay for the speed, emitting raw `i64` wherever the verifier
-  already proves an expression stays in range — is specified and not yet built
-  (REQ-LLL-162). Exactness is the default because a wrong answer is worse than a
-  slow one (DEC-LLL-071 Option A, DEC-LLL-077); this bullet exists so nobody
-  discovers the trade-off in production.
+- **The cost of exactness, measured, not hidden.** Making `Int` exact (DEC-LLL-077)
+  cost real speed. This README used to claim *"≤5% overhead vs hand-written Rust on
+  call-heavy fib(40)"* and *"~10x faster than gcc -O2 C on the LCG kernel"*. **Both
+  are retracted**: they were measured when `Int` was a raw `i64`. Reproduce the
+  current numbers with `bench/cspeed/run.sh` (user CPU, min of 5):
+
+  | kernel | llmlang | hand-written Rust `i64` | C `gcc -O2` |
+  |---|---|---|---|
+  | lcg, 100M iters (arithmetic-bound) | 0.88s | 0.02s | 0.27s |
+  | fib(40) (call-heavy) | 2.31s | 0.41s | 0.27s |
+  | listsum (list fold) | 0.39s | — | 0.08s |
+  | map (associative read) | 0.47s | — | 0.35s |
+
+  So the tax is **broad (~5x vs Rust, ~5-9x vs C)** and, in a tight arithmetic inner
+  loop with nothing to hide behind, **catastrophic (~44x vs Rust; 3.3x SLOWER than
+  C, where it used to be 10x faster)**. Associative reads stay C-competitive (1.3x).
+
+  The cost is not the arithmetic — the small-int path is one `checked_*` op — but the
+  BOXING: an exact `Int` is a 16-byte non-`Copy` value with drop glue, so it cannot
+  live in registers. Real call overhead partly amortizes it (fib); a pure arithmetic
+  loop is nothing but it (lcg).
+
+  The principled fix is specified and not yet built (REQ-LLL-162): **let the PROOF
+  pay for the speed** — emit a raw `i64` wherever the verifier already proves the
+  expression stays in range (the lcg's `mod 2^31` bounds its seed trivially). Until
+  then exactness is the default, because a wrong answer is worse than a slow one
+  (DEC-LLL-071 Option A, DEC-LLL-077). This table exists so that nobody discovers the
+  trade-off in production — and so the claim can never drift unmeasured again.
 - **Exact `Int`, no overflow**: the verifier reasons over mathematical `Int` (ℤ),
   and so does the runtime — `Int` is an arbitrary-precision integer with an `i64`
   fast path (DEC-LLL-077). `25!` and `2^100` compute to their exact values, a

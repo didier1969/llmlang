@@ -1,5 +1,36 @@
 # C-speed benchmark (REQ-LLL-015, REQ-LLL-140) — measured truth
 
+> ## ⚠ SUPERSEDED for every `Int`-carrying kernel — re-measured 2026-07-14 (REQ-LLL-162)
+>
+> `Int` became an EXACT arbitrary-precision integer (DEC-LLL-077, REQ-LLL-157). Every
+> number below that involves `Int` was measured when `Int` was a raw `i64`, and is now
+> **wrong**. In particular the fib finding — *"as fast as idiomatic hand-written Rust,
+> zero overhead"* — **no longer holds**. Current numbers (`bash bench/cspeed/run.sh`,
+> USER CPU, min of 5):
+>
+> | kernel | llmlang | Rust `i64` | C `gcc -O2` | vs before |
+> |---|---|---|---|---|
+> | `lcg` 100M (arithmetic-bound) | 0.88s | 0.02s | 0.27s | ~44x Rust; **3.3x SLOWER than C** (was ~10x faster) |
+> | `fib(40)` (call-heavy) | 2.31s | 0.41s | 0.27s | **~5.6x Rust** (was 0.96x — "no overhead") |
+> | `listsum` | 0.39s | — | 0.08s | ~4.9x C (was 0.9x) |
+> | `map` (associative read) | 0.47s | — | 0.35s | 1.3x — **still C-competitive** |
+>
+> **The tax is the BOXING, not the arithmetic**: an exact `Int` is a 16-byte non-`Copy`
+> value with drop glue, so it never lives in registers. It is therefore *broad* (~5x
+> wherever `Int`s flow) and *catastrophic* (~44x) where arithmetic is ALL there is. Only
+> `map` — dominated by the data structure, not by `Int` — is untouched. Way out:
+> **REQ-LLL-162** (proof-guided unboxing: emit a raw `i64` wherever the verifier already
+> proves the expression stays in range).
+>
+> Two method bugs were fixed at the same time, because they had been quietly corrupting
+> this file: the harness measured WALL time (which measures the machine, not the program)
+> and had **no sanity filter**, so the negative `%e` that `/usr/bin/time` intermittently
+> reports on WSL always won the min-of-5 (observed: `llmlang=-2.26s`). It now measures
+> USER CPU and discards garbage samples.
+>
+> The `aset` / `map` analysis below (REQ-LLL-140, the write/associative regime) does NOT
+> depend on the `Int` representation and still stands.
+
 Method: min of 3–5 runs; `rustc -O` (edition 2021) for llmlang/Rust, `gcc -O2` for C.
 Reproduce: `bash bench/cspeed/run.sh`. Env: WSL2, Rust 1.93 (sub-second times are noisy
 on WSL — treat ±2× under 0.5s as ties; the load-bearing result below is 4 orders of
@@ -11,22 +42,34 @@ WRITE / ASSOCIATIVE side (aset/map), because the audit flagged the "as fast as C
 functional `set`, no reuse analysis. Verdict at the bottom is now split by regime.
 
 ## fib(40) — pure Int fragment (recursive, contracts erased at runtime)
+
+> **❌ HISTORICAL — these numbers are from `Int` = `i64` (before DEC-LLL-077). Superseded
+> by the banner at the top: llmlang is now 2.31s, i.e. ~5.6× the Rust reference, NOT
+> 0.96×. Kept only to show what the exact-`Int` boxing tax cost us on this kernel.**
+
 | binary                | time  | note |
 |-----------------------|-------|------|
-| llmlang → Rust        | 0.25s | —    |
-| hand-written Rust ref | 0.26s | **llmlang = 0.96x** — no measurable overhead |
+| llmlang → Rust        | 0.25s | ❌ superseded → **2.31s** today |
+| hand-written Rust ref | 0.26s | ❌ **llmlang = 0.96x** — the "no measurable overhead" finding NO LONGER HOLDS (now ~5.6×) |
 | C (gcc -O2)           | 0.17s | rust-ref/C = **1.53x** |
 
-**Finding:** llmlang generates code **as fast as idiomatic hand-written Rust**
-(zero overhead on the Int fragment). The ~1.5x residual gap to C is entirely a
-`rustc`-vs-`gcc` backend difference on naive recursive fib — a known codegen
-artifact, NOT a llmlang design cost.
+**Finding (SUPERSEDED 2026-07-14):** it *used to be* true that llmlang generated code as
+fast as idiomatic hand-written Rust, with zero overhead on the Int fragment, and that the
+~1.5× residual gap to C was purely a `rustc`-vs-`gcc` artifact rather than a llmlang design
+cost. **The exact `Int` (DEC-LLL-077) changed that**: the gap to Rust is now ~5.6× and it IS
+a llmlang design cost — the boxing of an arbitrary-precision integer. Recovering it is
+REQ-LLL-162 (proof-guided unboxing), not a backend tweak.
 
 ## listsum — immutable Rc cons-list vs C raw-pointer list (30000×2000 node visits)
+
+> **❌ HISTORICAL — measured with `Int` = `i64`. Today: 0.39s (~4.9× C), because the list
+> ELEMENTS are `Int`s and now carry the boxing tax. The REQ-LLL-017 borrow finding below
+> is still correct about the *pointer* traversal; what regressed is the per-element cost.**
+
 | binary                        | time  | note |
 |-------------------------------|-------|------|
 | llmlang before REQ-017 (Rc)   | 0.24s | owned params → refcount inc/dec per node → **4.0x** C |
-| llmlang after REQ-017 (borrow)| 0.07s | **llmlang/C = 0.9x** — C-competitive, refcount-free |
+| llmlang after REQ-017 (borrow)| 0.07s | ❌ **llmlang/C = 0.9x** — superseded → **0.39s (~4.9× C)** with the exact `Int` |
 | C (raw pointers)              | 0.08s | baseline |
 
 **Finding:** the ~4x gap was entirely the per-node reference-count on a read-only
@@ -145,16 +188,22 @@ the array O(N) per snapshot (`memcpy`). So that shape is O(N) in BOTH languages 
 a gap; it is the intrinsic cost of persistence, paid equally. The gap above is specifically
 the EPHEMERAL/linear case, where C is O(1) and llmlang is needlessly O(N).
 
-## Verdict (VIS-LLL-001 "as fast as C", now MEASURED per regime — REQ-LLL-140/146)
+## Verdict (VIS-LLL-001 "as fast as C", MEASURED per regime — REQ-LLL-140/146, RE-MEASURED 2026-07-14 for REQ-LLL-162)
 | regime | kernel | llmlang vs C | status |
 |--------|--------|--------------|--------|
-| Int / compute      | fib     | 0.96× Rust, 1.5× C (rustc↔gcc) | **C-competitive** |
-| read traversal     | listsum | 0.9× C (post REQ-017 borrow)   | **C-competitive** |
-| associative read   | map     | ~1.1× C ordered bsearch        | **C-competitive** |
-| optimizer          | cse     | 1.97× its own `--no-opt`       | LLVM-invisible win |
+| **arithmetic-bound** | **lcg** | **3.3× C** (0.88s vs 0.27s); 44× Rust `i64` | **⚠ WORST regime — was ~10× FASTER than C when `Int` was `i64`. REQ-LLL-162** |
+| Int / compute      | fib     | **8.6× C** (2.31s vs 0.27s); **5.6× Rust** | **⚠ was 0.96× Rust ("no overhead") — the exact-`Int` boxing tax. REQ-LLL-162** |
+| read traversal     | listsum | **4.9× C** (0.39s vs 0.08s)    | **⚠ was 0.9× C — same boxing tax (the list carries `Int`s)** |
+| associative read   | map     | **1.3× C** ordered bsearch     | **C-competitive** — the only regime the exact `Int` did NOT cost (dominated by the BTreeMap, not by `Int`) |
+| optimizer          | cse     | 1.8× its own `--no-opt`        | LLVM-invisible win, unaffected |
 | **functional UPDATE** | **aset** | **O(1)/op, ×2 scaling — was O(N)/op** | **⚠ REQ-146 fixed the asymptote; write-parity OPEN — measured: needs Option B (drop `Rc`), not REQ-148 (`ceiling/`)** |
 
-- **Reads are as fast as C across the board** (compute, list traversal, associative).
+- **The "reads are as fast as C across the board" finding is RETRACTED.** It held when
+  `Int` was an `i64`. With the exact `Int` (DEC-LLL-077), every kernel through which `Int`s
+  flow pays the boxing tax — compute, arithmetic and list traversal alike. Only the
+  associative read survives, because its cost is the data structure rather than the integer.
+  This is not a reason to un-do exactness (a wrong answer is worse than a slow one,
+  DEC-LLL-071 A); it is the reason **REQ-LLL-162 (proof-guided unboxing) is now P1**.
 - **Functional UPDATE-in-a-loop**: REQ-LLL-146 (DEC-LLL-071 A) closed the per-`set`/`push`/
   `insert`/`add` **asymptotic** gap — ≥O(N)/op → **O(1)/op** by owning the updated param and
   MOVING it into `Rc::make_mut` at its last use (159× at N=2000, ×2 scaling, listsum reads
