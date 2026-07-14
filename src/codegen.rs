@@ -3416,6 +3416,8 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         Expr::EffCall(name, args) => match name.as_str() {
             "IO.print" => format!("__lll_io_print({})", expr(&args[0], cx, res)?),
             "IO.read" => "__lll_io_read()".to_string(),
+            "IO.puts" => format!("__lll_io_puts({}, false)", expr(&args[0], cx, res)?),
+            "IO.putln" => format!("__lll_io_puts({}, true)", expr(&args[0], cx, res)?),
             // builtin State (REQ-LLL-025): read/write the `&mut i64` cell evidence.
             "State.get" => {
                 let ev = cx.state_ev.clone().unwrap_or_else(|| "__st".to_string());
@@ -3956,6 +3958,31 @@ pub fn __lll_io_print(v: i64) -> i64 {
     println!("{v}");
     trace_write("IO.print", v);
     v
+}
+
+pub fn __lll_io_puts(s: Lst<i64>, newline: bool) -> i64 {
+    use std::io::Write as _;
+    let text = __lll_str_to_rust(&s);
+    let n = text.chars().count() as i64;
+    let recorded = replay_next("IO.puts");
+    if newline {
+        println!("{text}");
+    } else {
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    }
+    match recorded {
+        Some(r) => {
+            if r != n {
+                panic!("replay divergence: IO.puts recomputed len {n}, trace has {r}");
+            }
+            n
+        }
+        None => {
+            trace_write("IO.puts", n);
+            n
+        }
+    }
 }
 
 pub fn __lll_io_read() -> i64 {

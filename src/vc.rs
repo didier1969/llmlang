@@ -1796,6 +1796,12 @@ impl<'a> Emit<'a> {
                 } else if name == "IO.read" {
                     // IO.read: arbitrary Int from the world — havoc
                     self.fresh("Int")
+                } else if name == "IO.puts" || name == "IO.putln" {
+                    // string output: opaque Int result (codepoint count) — havoc.
+                    // Still translate the argument so its subterms are validated
+                    // (a divide-by-zero building the string would still be caught).
+                    self.tr(&args[0], env, None)?;
+                    self.fresh("Int")
                 } else if name == "State.get" || name == "State.put" || name == "Reader.ask" {
                     // builtin State/Reader (REQ-LLL-025): opaque at the boundary — the
                     // cell / environment value is invisible to the pure-core proof, so

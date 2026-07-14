@@ -29,7 +29,10 @@ Rules:
 - Types: `Int`, `Bool`, `List[Int]`. Operators: `+ - * div mod < <= > >= == != and or not`.
   `div`/`mod` are Euclidean; **the divisor must be provably non-zero**.
 - Pure parts cannot call `IO.*` nor `via IO` parts. Effects: `IO.print(Int) -> Int`
-  (returns its argument), `IO.read() -> Int`.
+  (returns its argument), `IO.read() -> Int`. To print TEXT (not a stream of Ints),
+  use `IO.puts(List[Int]) -> Int` / `IO.putln(List[Int]) -> Int` — they print a string
+  AS TEXT (`putln` adds a newline) and return the codepoint count. A string literal is a
+  `List[Int]`, so `IO.putln("done")` just works.
 - Recursion on a list tail (`h :: t` then recurse on `t`) is accepted as-is;
   any other recursion needs a `measure` that is provably `>= 0` and strictly
   decreasing at each recursive call. The measure may be a LEXICOGRAPHIC tuple

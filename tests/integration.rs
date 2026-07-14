@@ -29,3 +29,5 @@ mod refactor;
 mod spec_predicates;
 #[path = "integration/lsp.rs"]
 mod lsp;
+#[path = "integration/text_io.rs"]
+mod text_io;

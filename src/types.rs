@@ -513,6 +513,11 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     let mut effect_ops: HashMap<String, (String, Vec<Ty>, Ty)> = HashMap::new();
     effect_ops.insert("IO.print".into(), ("IO".into(), vec![Ty::Int], Ty::Int));
     effect_ops.insert("IO.read".into(), ("IO".into(), vec![], Ty::Int));
+    // String output (REQ-LLL-067 texte first-class): print a `List[Int]` AS TEXT
+    // (codepoints → chars), not as a stream of Ints. `putln` appends a newline.
+    // Both return the number of codepoints printed (a deterministic Int).
+    effect_ops.insert("IO.puts".into(), ("IO".into(), vec![Ty::list(Ty::Int)], Ty::Int));
+    effect_ops.insert("IO.putln".into(), ("IO".into(), vec![Ty::list(Ty::Int)], Ty::Int));
     // State is a builtin tail-resumptive effect with a canonical cell handler
     // (REQ-LLL-025): `get` reads the cell, `put` writes it and returns the value.
     effect_names.insert("State".to_string());
