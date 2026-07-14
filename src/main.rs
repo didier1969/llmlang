@@ -407,7 +407,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
         .to_string()
 }
 
@@ -711,6 +711,41 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 build_cargo_project(&cm.module, &rust, unchecked)?
             };
             println!("✔ built {}", bin.display());
+            Ok(())
+        }
+        // REQ-LLL-168 — `lll fmt <f>`: format the source, safely.
+        //
+        // A whitespace normaliser guarded by an IDENTITY CHECK: it re-parses its own output
+        // and REFUSES to write if the parsed AST changed at all (`fmt::format_checked`). The
+        // `.lll` text is the source of truth (DEC-LLL-020), so the worst allowed outcome is
+        // "fmt declined to change this file", never a corrupted definition. `--check` writes
+        // nothing and exits non-zero when the file is not already formatted (for CI).
+        ["fmt", rest @ ..] => {
+            let mut check = false;
+            let mut file: Option<&str> = None;
+            for &t in rest {
+                match t {
+                    "--check" => check = true,
+                    f if !f.starts_with("--") => file = Some(f),
+                    _ => return Err(usage()),
+                }
+            }
+            let file = file.ok_or_else(usage)?;
+            let src = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+            let formatted = fmt::format_checked(&src)?;
+            if check {
+                if formatted != src {
+                    return Err(format!("{file} is not formatted (run `lll fmt {file}`)"));
+                }
+                println!("{file} is formatted");
+                return Ok(());
+            }
+            if formatted == src {
+                println!("{file} already formatted");
+            } else {
+                std::fs::write(file, &formatted).map_err(|e| format!("{file}: {e}"))?;
+                println!("✔ formatted {file}");
+            }
             Ok(())
         }
         // REQ-LLL-167 — `lll new <dir>`: scaffold a project.

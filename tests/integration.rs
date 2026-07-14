@@ -49,3 +49,5 @@ mod compr_filter;
 mod compr_range;
 #[path = "integration/cli_test_cmd.rs"]
 mod cli_test_cmd;
+#[path = "integration/cli_fmt.rs"]
+mod cli_fmt;

@@ -101,6 +101,7 @@ module Demo.Core:
 
 ```
 lll new    <dir>                scaffold a project (lll.toml + a verified src/main.lll)
+lll fmt    <f.lll> [--check]     format (whitespace; identity-guarded, --check for CI)
 lll check  <f.lll>              verify (proof cache in .lll-cache/)
 lll build  <f.lll>              verify + emit Rust + rustc -O3 (build/)
 lll test   <f.lll>              verify, then RUN the `example` clauses (model≡binary)

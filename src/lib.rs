@@ -11,6 +11,7 @@ pub mod codegen;
 pub mod context;
 pub mod diag;
 pub mod explain;
+pub mod fmt;
 pub mod hash;
 pub mod lexer;
 /// The `Int` runtime (REQ-LLL-157). `lllc` itself never calls it: the module exists
