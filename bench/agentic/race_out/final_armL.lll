@@ -1,0 +1,29 @@
+module Isqrt:
+
+  part bisect(n: Int, lo: Int, hi: Int) -> Int:
+    requires n >= 0
+    requires lo >= 1
+    requires lo <= hi
+    requires lo*lo <= n
+    requires (hi+1)*(hi+1) > n
+    ensures result >= 0
+    ensures result*result <= n
+    ensures (result+1)*(result+1) > n
+    measure hi - lo
+    match hi - lo:
+      0 -> yield lo
+      _ ->
+        let mid = lo + (hi - lo + 1) div 2
+        let q = n div mid
+        match mid - q:
+          d when d <= 0 -> yield bisect(n, mid, hi)
+          _             -> yield bisect(n, lo, mid - 1)
+
+  part isqrt(n: Int) -> Int:
+    requires n >= 0
+    ensures result >= 0
+    ensures result*result <= n
+    ensures (result+1)*(result+1) > n
+    match n:
+      0 -> yield 0
+      _ -> yield bisect(n, 1, n)

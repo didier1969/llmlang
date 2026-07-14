@@ -26,3 +26,7 @@ bench/**/.lll-cache/
 bench/llm_gen/differential/repair/ablation_auto/
 bench/llm_gen/differential/repair/ablation.log
 bench/llm_gen/differential/repair/ablation_scaled.log
+bench/agentic/race_out/*_bin
+bench/agentic/race_out/*.log
+bench/agentic/race_out/armL.lll
+bench/agentic/race_out/armR.rs

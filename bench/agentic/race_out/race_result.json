@@ -1,0 +1,18 @@
+{
+  "model": "anthropic/claude-opus-4.8",
+  "proved": true,
+  "rounds": 4,
+  "L": [
+    18506,
+    2085,
+    0.144655
+  ],
+  "R": [
+    358,
+    2211,
+    0.057065000000000005
+  ],
+  "escaped": 0,
+  "battery": 22,
+  "total_cost": 0.20172
+}

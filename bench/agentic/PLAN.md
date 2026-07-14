@@ -105,9 +105,12 @@ honest statement of the limit than the single-round `reduce_div` tie.
 
 ## Status
 
-Hardening DONE (isqrt trips Claude, frozen evidence). Automated race BLOCKED by claude -p
-latency + agent/task difficulty mismatch — needs a dedicated harness (async claude -p / Agent
-SDK, long budgets) to run a within-Claude race. Meanwhile the big-project differential is
+Hardening DONE (isqrt trips Claude). Automated race via `claude -p` BLOCKED by latency, so
+**pivoted to opus-4.8 via OpenRouter API** (fast, exact cost) and **EXECUTED** — see
+`RESULTS_race.md`. One trial: llmlang reaches a machine PROOF in 4 verify↔repair rounds
+($0.14) vs Rust compiles+tested ($0.06), 0 escapes. Honest headline: llmlang buys a PROOF at a
+token premium, not a token saving (the token win lives in the context bench). The claude -p
+route still needs async/SDK infra for a within-Max race. Meanwhile the big-project differential is
 already well-evidenced: context 96 % (`../context/`), verify↔repair ladder 41→78 %
 (`../llm_gen/.../RESULTS_ablation.md`), and latent-bug escape 0 % vs 33 %
 (`../llm_gen/differential/RESULTS.md`). The within-Claude cost-of-trust race is the dedicated
