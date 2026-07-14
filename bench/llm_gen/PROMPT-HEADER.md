@@ -47,7 +47,8 @@ Rules:
   `[]` and `::`, and recurse over it.
 - A guard is written `pattern when <Bool> -> …` as a full match arm (the `when` sits between
   the pattern and `->`); `when` never appears on its own line or outside a `match`.
-- Contracts (`requires`/`ensures`/`measure`) may not contain calls.
+- Contracts (`requires`/`ensures`/`measure`) may NOT call ordinary parts, but MAY call
+  `spec` predicates (see below) and the spec-term builtins `length`/`get`/`lookup`/`member`/`haskey`.
 - Every `ensures` must be provable by an SMT solver from the requires + body.
 
 Surface conveniences (all desugar to the kernel above — identical content-hash):
@@ -96,6 +97,16 @@ still holds (contracts, Euclidean `div`/`mod`, exhaustive `match`, `measure`).
   - `requires exists i in <lo> .. <hi>: <Bool over get(a, i)>`
   - A quantified `ensures` does NOT bound the length — to index the result at a
     call site you must ALSO `ensures length(result) == <n>` (or `>= 1`).
+- **Quantifiers over Set/Map keys** (assume-side, in `requires`): `requires forall x in s: <Bool over x>`
+  for a `Set`, `requires forall k in m: <Bool over k>` for a `Map`'s keys. The quantified
+  hypothesis is USED by pairing it with a membership fact — `requires member(s, e)` (Set) or
+  `requires haskey(m, e)` (Map) — which lets the checker conclude the predicate at that element:
+  e.g. `forall k in m: k > 0` together with `haskey(m, e)` proves `e > 0`. (Sound: assumed only
+  at keys you have shown present; without the membership fact nothing is concluded.)
+- **Named `spec` predicates** — declare a pure `Bool` property ONCE and reuse it in contracts:
+  `spec sorted(xs: Array[Int]) -> Bool: yield forall i in 0 .. length(xs) - 1: get(xs, i) <= get(xs, i + 1)`,
+  then `requires sorted(xs)`. Inlined before verification (identical proof to writing the body
+  out); non-recursive; may itself use quantifiers and the spec-term builtins.
 - **User ADTs & parametric ADTs**: `type Cmd = Inc | Dec | Set(Int)`;
   `type Handle[h] = Handle(Int)`. `Option[a]`/`Result[a, e]` via
   `import "std/option.lll"` / `"std/result.lll"` (`Some`/`None`/`Ok`/`Err`,
