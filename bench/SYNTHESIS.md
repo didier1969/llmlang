@@ -71,15 +71,32 @@ la réparation », pas un universel « double partout ».
 
 ---
 
-## Prochain palier (préparé, à valider par l'opérateur)
+## 4. Gros-projet agentique — course exécutée (opus-4.8, llmlang vs Rust)
 
-**Le gros-projet agentique** : même agent Claude, deux langages (llmlang vs Rust), une tâche
-entière, on compte les tokens jusqu'au correct + les bugs échappés. Prérequis construit :
-un **grand livre vérifié** (`examples/ledger.lll`, invariant « pas de découvert » + loi de
-conservation prouvés par Z3). ⚠ Le piège (leçon du petit banc) : une tâche trop facile → l'IA
-réussit dans les deux langages → résultat nul avec une facture. Donc **calibrer d'abord** que
-la tâche est en zone Goldilocks (l'agent doit réellement se tromper) avant toute dépense. À
-lancer sur ratification.
+Même agent (Claude opus-4.8 via API), deux langages, tâche entière. Durcissement calibré :
+`isqrt` O(log n) fait trébucher **même opus** sur une vraie obligation Z3 (là où gpt-4o ne
+répare jamais). Deux différentiels mesurés :
+
+**(a) Preuve vs test — coût-de-la-confiance.** La boucle verify↔repair mène opus de son bug
+subtil à une **preuve machine** (correct pour *tout* i64) en 4 tours (**0,14 $**) ; le Rust
+d'opus compile + testé en **0,06 $**, 0 bug échappé/22. **Honnête : llmlang coûte ~2,5× PLUS**
+ici — il achète une *preuve* (garantie totale) contre une prime de tokens ; Rust est moins
+cher mais seulement *testé*. Le win *token* reste porté par le banc contexte (#1), pas par la
+course.
+
+**(b) Sûreté — overflow silencieux (spectaculaire).** `sum_of_squares([3037000500])` (carré
+au-delà de i64) : le Rust **idiomatique naturel d'opus** (`.map(|x| x*x).sum()`, aucune garde)
+rend **`-9223372036709301616`** — une somme de carrés **négative**, silencieusement fausse,
+sans erreur. La même tâche en llmlang **prouve `result ≥ 0`** et **fail-stop** au runtime :
+jamais une valeur fausse en silence. Même un modèle de pointe ship le bug latent en Rust ;
+llmlang le rend impossible. **C'est le cœur de la sûreté gros-projet.**
+
+## Reste préparé (build dédié)
+
+Une vraie course *within-Claude sur Max* (pas API payante) demande un harnais async / Agent
+SDK — `claude -p` est trop lent (>5 min/appel, timeouts) pour un pilotage automatisé. Sweep
+multi-essais/multi-tâches = ~0,20 $/essai, affordable mais pas encore lancé. Détails :
+`bench/agentic/PLAN.md`, `RESULTS_race.md`, `overflow/RESULTS.md`.
 
 ## Reproduire
 
