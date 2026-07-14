@@ -13,7 +13,7 @@ fn generated_rust_compiles_and_runs() {
     let bin = dir.join("t_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -48,7 +48,7 @@ fn algebraic_effect_abort_verifies_and_runs() {
     let bin = dir.join("eff_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -86,7 +86,7 @@ fn generics_prove_once_and_run_at_multiple_instantiations() {
     let bin = dir.join("g_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -120,7 +120,7 @@ fn string_literal_is_a_verified_codepoint_list() {
     let bin = dir.join("s_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -298,7 +298,7 @@ fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
     let rust = codegen::emit_rust(&cm).expect("codegen");
     // the `upd(arr, 0)` frontier must MOVE `arr` (interproc flipped driver.arr to owned).
     assert!(
-        rust.contains("lll_upd(u_arr, 0i64)"),
+        rust.contains("lll_upd(u_arr, LllInt::S(0i64))"),
         "REQ-148: driver.arr fed to upd's owned param must be MOVED (interproc flip):\n{rust}"
     );
     assert!(
@@ -311,7 +311,7 @@ fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
     let bin = dir.join("r148ip_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -639,13 +639,18 @@ fn typeclass_codegen_compiles_and_runs() {
     let (cm, _) = full(src);
     let rust = codegen::emit_rust(&cm).expect("codegen");
     assert!(rust.contains("pub trait Eq"), "expected an emitted `Eq` trait, got:\n{rust}");
-    assert!(rust.contains("impl Eq for i64"), "expected `impl Eq for i64`, got:\n{rust}");
+    // `instance Eq[Int]` → an impl on the runtime repr of `Int`, which is the EXACT
+    // integer `LllInt` (REQ-LLL-157), not `i64`. NOTE the shadowing hazard this test
+    // pins: the user's `class Eq` defines a trait named `Eq` at the crate root, so the
+    // prelude's own `impl std::cmp::Eq for LllInt` MUST be fully qualified or it would
+    // resolve to the USER's trait and collide (E0119).
+    assert!(rust.contains("impl Eq for LllInt"), "expected `impl Eq for LllInt`, got:\n{rust}");
     let dir = tempdir();
     let rs = dir.join("tc.rs");
     let bin = dir.join("tc_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -856,7 +861,7 @@ fn typeclass_class_method_list_signature_verifies_and_runs() {
     let bin = dir.join("wrap_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -933,7 +938,7 @@ fn typeclass_class_methods_tuple_unit_user_signatures_verify_and_run() {
     let bin = dir.join("describe_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1125,7 +1130,7 @@ fn ackermann_terminates_by_lexicographic_measure() {
     let bin = dir.join("ack_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1156,7 +1161,7 @@ fn generic_type_changing_map_verifies_and_runs() {
     let bin = dir.join("gm_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1188,7 +1193,7 @@ fn a_part_can_be_passed_as_a_first_class_value() {
     let bin = dir.join("pv_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1225,7 +1230,7 @@ fn higher_order_functions_verify_and_run_with_lambdas() {
     let bin = dir.join("hof_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1262,7 +1267,7 @@ fn user_adts_verify_exhaustively_and_run() {
     let bin = dir.join("adt_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1293,7 +1298,7 @@ fn recursive_adt_tree_verifies_and_runs() {
     let bin = dir.join("tree_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1326,7 +1331,7 @@ fn cross_type_adt_composition_verifies_and_runs() {
     let bin = dir.join("xt_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1491,7 +1496,7 @@ fn algebraic_effect_state_verifies_and_runs() {
     let bin = dir.join("st_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1526,7 +1531,7 @@ fn algebraic_effect_reader_and_combos_verify_and_run() {
         let bin = dir.join("e_bin");
         std::fs::write(&rs, rust).unwrap();
         let st = std::process::Command::new("rustc")
-            .args(["-O", "--edition", "2021", "-o"])
+            .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
             .arg(&bin)
             .arg(&rs)
             .output()
@@ -1586,7 +1591,7 @@ fn std_str_algorithms_verify_and_run_on_literals() {
     let bin = dir.join("sd_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1618,7 +1623,7 @@ fn generic_stdlib_reused_across_element_types() {
     let bin = dir.join("gs_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1657,7 +1662,7 @@ fn erp_ledger_value_objects_verify_and_run() {
     let bin = dir.join("erp_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1704,7 +1709,7 @@ fn aps3d_maintenance_rule_kernel_verifies_and_runs() {
     let bin = dir.join("aps3d_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1847,7 +1852,7 @@ fn witness_project_verifies_and_runs() {
     let bin = dir.join("w_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1873,10 +1878,18 @@ fn euclidean_semantics_match_between_smt_and_rust() {
 
 
 #[test]
-fn overflow_traps_instead_of_silently_breaking_contracts() {
-    // pow-style blowup: 2^63 overflows i64. The verifier reasons over
-    // mathematical Int (documented v1 gap); the DEFAULT build closes the
-    // soundness hole by trapping (fail-stop) instead of wrapping.
+fn int_is_exact_at_2_pow_63_neither_wrapping_nor_trapping_dec077() {
+    // THE SOUNDNESS PROPERTY THIS TEST HAS ALWAYS DEFENDED: a proven contract is never
+    // silently violated by wrap-around. What CHANGED (DEC-LLL-077 / REQ-LLL-157) is HOW
+    // it is defended. It used to be defended by TRAPPING at the i64 ceiling — correct,
+    // but it meant a Z3-proved program could still die at runtime ("partial correctness
+    // modulo trap"). `Int` is now the EXACT integer, the same unbounded ℤ the verifier
+    // already reasoned over, so 2^63 simply COMPUTES. The proof and the binary now agree
+    // everywhere, and there is no ceiling left to trap at.
+    //
+    // The old failure modes are BOTH still excluded, and asserted below:
+    //   wrap  → -9223372036854775808   (the silent contract violation; never)
+    //   trap  → non-zero exit          (the honest-but-fatal old behaviour; no longer needed)
     let src = "module T:\n\n  part blow(n: Int) -> Int:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 1\n      _ -> yield 2 * blow(n - 1)\n\n  part main() -> Int via IO:\n    let x = IO.print(blow(63))\n    yield x\n";
     let (cm, _) = full(src);
     let rust = codegen::emit_rust(&cm).expect("codegen");
@@ -1893,11 +1906,19 @@ fn overflow_traps_instead_of_silently_breaking_contracts() {
     assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
     let out = std::process::Command::new(&bin).output().unwrap();
     assert!(
-        !out.status.success(),
-        "2^63 must trap under the default fail-stop build, not wrap"
+        out.status.success(),
+        "2^63 must now COMPUTE (exact Int), not trap: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("overflow"), "expected overflow panic, got: {err}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("9223372036854775808"),
+        "2^63 must print exactly, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("-9223372036854775808"),
+        "a WRAPPED 2^63 (i64::MIN) is the silent contract violation this has always forbidden: {stdout}"
+    );
 }
 
 
@@ -1930,7 +1951,7 @@ fn functional_update_moves_owned_param_not_clone_req146() {
     let bin = dir.join("aset146_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()

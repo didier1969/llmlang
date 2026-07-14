@@ -834,7 +834,7 @@ fn exists_witness_contract_is_erased_and_program_runs_req089() {
     let bin = dir.join("wit_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1385,7 +1385,7 @@ fn stdlib_breadth_essentials_verify_and_run() {
     let bin = dir.join("breadth_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1423,7 +1423,7 @@ fn honest_search_find_lookup_option_verify_and_run() {
     let bin = dir.join("find_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1460,7 +1460,7 @@ fn cse_does_not_merge_empties_of_different_types() {
     let bin = dir.join("cse_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()

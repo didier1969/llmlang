@@ -423,9 +423,17 @@ fn lex_line(s: &str, line: usize, offset: usize, out: &mut Vec<Sp>) -> Result<()
                     let (rn, rd) = crate::ast::reduce_rat(num, den);
                     push(out, Tok::Dec(rn, rd));
                 } else {
-                    let n: i64 = s[start..i]
-                        .parse()
-                        .map_err(|_| format!("line {line}: integer literal out of range"))?;
+                    // `Int` VALUES are exact and unbounded (REQ-LLL-157/DEC-LLL-077), but a
+                    // source LITERAL still has to fit i64 — the AST (and therefore the
+                    // content-hash, DEC-LLL-020) carries it as one. Say so, and say the fix:
+                    // big values are COMPUTED, never typed out.
+                    let n: i64 = s[start..i].parse().map_err(|_| {
+                        format!(
+                            "line {line}: integer literal out of range (a LITERAL must fit 64 bits; \
+                             `Int` VALUES are unbounded — compute a big constant instead, e.g. a \
+                             `pow`/`fact` part, rather than writing its digits)"
+                        )
+                    })?;
                     push(out, Tok::Int(n));
                 }
             }

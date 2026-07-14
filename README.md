@@ -35,17 +35,29 @@ module Demo.Core:
 - **Incremental proofs**: editing a body re-verifies that part only; editing a
   contract re-verifies the part and its direct callers only.
 - **Rust backend**: contracts erased, Euclidean `div`/`mod` matching the SMT
-  model exactly. Benchmarks (see `bench/`): ≤5% overhead vs hand-written Rust
-  on call-heavy fib(40); **10x faster than gcc -O2 C** on the LCG arithmetic
-  kernel (100M iters, 0.02s vs 0.21s — Euclidean `mod 2^n` lets LLVM emit
-  AND + SIMD where C's truncated `%` needs sign fixups). Same performance
-  class as C in both directions; the deltas are backend artifacts, not
-  pipeline overhead.
-- **Fail-stop overflow**: the verifier reasons over mathematical `Int`, the
-  runtime over `i64`. Default builds trap on overflow (`-C overflow-checks=on`,
-  free on vectorized kernels, ~+80% on call-heavy fib) so a proven contract
-  is **never silently violated by wrap-around**; `lll build --unchecked`
-  opts out for measured hot paths.
+  model exactly. **Guaranteed tail-call elimination**: a self tail-call is
+  emitted as a loop, so an unbounded loop runs in constant stack for ANY
+  parameter type — not left to whether LLVM feels like it.
+- **The cost of exactness, measured, not hidden**: an arithmetic-bound loop now
+  pays for arbitrary precision. On the LCG kernel (100M iterations) llmlang runs
+  in **0.91s vs 0.03s** for the same loop in hand-written `i64` Rust — ~30x, and
+  the earlier "10x faster than gcc -O2 C" claim for that kernel no longer holds:
+  it was measured when `Int` was a raw `i64`. The cost is not the arithmetic (the
+  small-int path is a `checked_*` op) but the BOXING: an exact `Int` is a 16-byte
+  non-`Copy` value with drop glue, so it does not stay in registers across a hot
+  loop. Call-heavy and allocation-bound code is far less affected. The principled
+  fix — let the PROOF pay for the speed, emitting raw `i64` wherever the verifier
+  already proves an expression stays in range — is specified and not yet built
+  (REQ-LLL-162). Exactness is the default because a wrong answer is worse than a
+  slow one (DEC-LLL-071 Option A, DEC-LLL-077); this bullet exists so nobody
+  discovers the trade-off in production.
+- **Exact `Int`, no overflow**: the verifier reasons over mathematical `Int` (ℤ),
+  and so does the runtime — `Int` is an arbitrary-precision integer with an `i64`
+  fast path (DEC-LLL-077). `25!` and `2^100` compute to their exact values, a
+  proven contract is **never silently violated by wrap-around**, and a proven
+  program can no longer die on an overflow trap. The bound has not vanished, it
+  has MOVED: a value crossing into a foreign `i64` (FFI, effect runtimes, a JSON
+  number) fail-stops if it is out of range — loudly, never truncated.
 - **Explicability channel**: per-hash rationale sidecars that auto-detach when
   a body changes; effect traces with verified deterministic replay; a
   read-only `lll audit` REPL.
@@ -177,7 +189,7 @@ cache marks mutual calls so dissolving a cycle re-verifies the survivors.
 Int/Bool/List[Int]; `measure` over Int params only (mutual recursion:
 Int-measure cross-decrease, no lexicographic tuples yet); no calls inside
 contracts; no higher-order functions yet; cross-file rename lands with
-workspace resolution (wave 4); overflow is fail-stop at runtime, not
-statically excluded; no proof hints yet (a failed obligation means rewrite,
-not annotate). See `bench/llm_gen/` for the LLM generation-success harness
-(CPT-LLL-011).
+workspace resolution (wave 4); an `Int` LITERAL must fit 64 bits (values are
+unbounded — a big constant is COMPUTED, not typed out); no proof hints yet (a
+failed obligation means rewrite, not annotate). See `bench/llm_gen/` for the LLM
+generation-success harness (CPT-LLL-011).

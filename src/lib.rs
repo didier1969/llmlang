@@ -13,6 +13,11 @@ pub mod diag;
 pub mod explain;
 pub mod hash;
 pub mod lexer;
+/// The `Int` runtime (REQ-LLL-157). `lllc` itself never calls it: the module exists
+/// so that the text `codegen` injects into every generated program's prelude is
+/// compiled and property-tested by THIS crate's suite (`include_str!("lllint.rs")`).
+#[allow(dead_code)]
+pub mod lllint;
 pub mod loader;
 pub mod lsp;
 pub mod mcp;

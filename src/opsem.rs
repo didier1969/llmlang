@@ -82,9 +82,12 @@ pub fn form(op: BinOp) -> OpForm {
         Add => (IntArith, false, SmtSym::Bin("+"), RustSym::Infix("+")),
         Sub => (IntArith, false, SmtSym::Bin("-"), RustSym::Infix("-")),
         Mul => (IntArith, false, SmtSym::Bin("*"), RustSym::Infix("*")),
-        // euclidean: SMT `div`/`mod` ↔ Rust `div_euclid`/`rem_euclid` (DEC-LLL-026)
-        Div => (IntArith, true, SmtSym::Bin("div"), RustSym::Call("i64::div_euclid")),
-        Mod => (IntArith, true, SmtSym::Bin("mod"), RustSym::Call("i64::rem_euclid")),
+        // euclidean: SMT `div`/`mod` ↔ the runtime's `div_euclid`/`rem_euclid`
+        // (DEC-LLL-026). The Rust side is `LllInt`, the EXACT integer (REQ-LLL-157,
+        // DEC-LLL-077) — same unbounded ℤ the SMT side models, so the pairing is now
+        // total: no i64 trap can make the binary diverge from the proof.
+        Div => (IntArith, true, SmtSym::Bin("div"), RustSym::Call("LllInt::div_euclid")),
+        Mod => (IntArith, true, SmtSym::Bin("mod"), RustSym::Call("LllInt::rem_euclid")),
         Lt => (IntCmp, false, SmtSym::Bin("<"), RustSym::Infix("<")),
         Le => (IntCmp, false, SmtSym::Bin("<="), RustSym::Infix("<=")),
         Gt => (IntCmp, false, SmtSym::Bin(">"), RustSym::Infix(">")),
@@ -108,13 +111,17 @@ mod tests {
     use crate::ast::BinOp::*;
 
     /// The euclidean pairing is the one place proof↔binary can silently diverge.
-    /// Lock it: SMT `div`/`mod` MUST pair with Rust `div_euclid`/`rem_euclid`.
+    /// Lock it: SMT `div`/`mod` MUST pair with the runtime's `div_euclid`/`rem_euclid`
+    /// — and the runtime side MUST be `LllInt` (exact ℤ, REQ-LLL-157), not `i64`:
+    /// pairing unbounded SMT `div` with a TRAPPING i64 divide is precisely the
+    /// divergence DEC-LLL-026 forbids. `lllint::tests::prop_div_euclid_matches_i128`
+    /// proves the runtime side actually IS euclidean.
     #[test]
     fn div_mod_are_euclidean_on_both_backends() {
         assert_eq!(form(Div).smt("a", "b"), "(div a b)");
-        assert_eq!(form(Div).rust("a", "b"), "i64::div_euclid(a, b)");
+        assert_eq!(form(Div).rust("a", "b"), "LllInt::div_euclid(a, b)");
         assert_eq!(form(Mod).smt("a", "b"), "(mod a b)");
-        assert_eq!(form(Mod).rust("a", "b"), "i64::rem_euclid(a, b)");
+        assert_eq!(form(Mod).rust("a", "b"), "LllInt::rem_euclid(a, b)");
         assert!(form(Div).nonzero_divisor && form(Mod).nonzero_divisor);
     }
 

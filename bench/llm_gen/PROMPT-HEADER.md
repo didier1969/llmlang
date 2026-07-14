@@ -28,6 +28,13 @@ Rules:
   not `-> Int [via IO]:`.
 - Types: `Int`, `Bool`, `List[Int]`. Operators: `+ - * div mod < <= > >= == != and or not`.
   `div`/`mod` are Euclidean; **the divisor must be provably non-zero**.
+- **`Int` is an EXACT integer of ARBITRARY PRECISION** — there is no overflow, no wrap,
+  no 64-bit ceiling. `25!` and `2^100` compute to their exact values. Do NOT write
+  overflow guards, do NOT reach for a "big integer" type, and do NOT contort an
+  algorithm to keep intermediates small: `(lo + hi) div 2` is now perfectly safe, and
+  `mid * mid <= n` needs no rewriting. (Two limits: a source LITERAL must fit in 64 bits
+  — write big values as computations; and a value handed to a foreign `extern` function,
+  which really is 64-bit, fails STOP if it is out of range, never truncates.)
 - Pure parts cannot call `IO.*` nor `via IO` parts. Effects: `IO.print(Int) -> Int`
   (returns its argument), `IO.read() -> Int`. To print TEXT (not a stream of Ints),
   use `IO.puts(List[Int]) -> Int` / `IO.putln(List[Int]) -> Int` — they print a string
@@ -93,13 +100,14 @@ algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can)
 - Terminate with a `measure` that HALVES, not one that counts by ones — a
   bisection with `measure hi - lo` is O(log) depth; a `measure` that drops by 1
   per call is O(n).
-- Take a midpoint OVERFLOW-SAFELY as `lo + (hi - lo) div 2`, never `(lo + hi) div 2`.
-- To test a squared/product condition without the product overflowing at runtime,
-  divide instead: compare `mid <= n div mid` rather than `mid * mid <= n`
-  (Euclidean `div` makes them equivalent for `mid >= 1`).
+- Write the DIRECT expression: `(lo + hi) div 2`, `mid * mid <= n`. `Int` is exact, so
+  the classic C/Java overflow dodges (`lo + (hi - lo) div 2`, dividing instead of
+  multiplying) buy nothing here — they only cost you clarity and tokens.
+- A self TAIL-call is compiled to a LOOP (constant stack, guaranteed), so an accumulator
+  loop may iterate billions of times safely. Write the natural tail-recursive
+  accumulator; do not hand-unroll or bound it out of fear of the stack.
 - Contracts are ERASED at runtime, so products in `requires`/`ensures`
-  (`lo*lo`, `(result+1)*(result+1)`) cost nothing and never overflow — only
-  expressions in the BODY execute.
+  (`lo*lo`, `(result+1)*(result+1)`) cost nothing — only the BODY executes.
 
 ## Surface beyond the v1 kernel (post-2026-07-02 — needed for tasks t16+)
 

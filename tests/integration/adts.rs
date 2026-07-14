@@ -294,7 +294,7 @@ fn parametric_nullary_ctor_cse_stays_type_safe() {
     let bin = dir.join("cse_none_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()

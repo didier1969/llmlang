@@ -33,3 +33,5 @@ mod lsp;
 mod text_io;
 #[path = "integration/comprehensions.rs"]
 mod comprehensions;
+#[path = "integration/bignum.rs"]
+mod bignum;

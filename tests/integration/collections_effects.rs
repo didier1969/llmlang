@@ -52,7 +52,7 @@ fn stdlib_demo_runs_correctly() {
     let bin = dir.join("std_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -398,7 +398,7 @@ fn run_pure_std(entry: &std::path::Path, dir: &std::path::Path, stem: &str) -> S
     let bin = dir.join(format!("{stem}_bin"));
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -566,7 +566,7 @@ fn verified_sys_bytes_roundtrip_req152() {
     let bin = dir.join("b_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -690,7 +690,7 @@ fn verified_http_get_body_req151() {
     let bin = dir.join("h_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -834,7 +834,7 @@ fn verified_sys_file_roundtrip_req152() {
     let bin = dir.join("sys_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -874,7 +874,7 @@ fn verified_set_stdlib_compositions_run_req156() {
     let bin = dir.join("s_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -1682,7 +1682,7 @@ fn adt_ctors_named_ok_err_do_not_clash_with_rust_result() {
     let bin = dir.join("okerr_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()

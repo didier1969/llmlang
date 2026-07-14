@@ -347,7 +347,7 @@ fn ffi_extern_effect_verifies_and_runs() {
     let bin = dir.join("f_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -468,7 +468,7 @@ fn unit_type_verifies_and_runs() {
     let bin = dir.join("u_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()

@@ -1003,7 +1003,7 @@ fn optimizer_cse_shares_pure_alloc_subterm_and_preserves_semantics() {
         let bin = dir.join(format!("f_{tag}"));
         std::fs::write(&rs, rust).unwrap();
         let st = std::process::Command::new("rustc")
-            .args(["-O", "--edition", "2021", "-o"])
+            .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
             .arg(&bin)
             .arg(&rs)
             .output()

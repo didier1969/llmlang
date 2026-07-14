@@ -78,7 +78,7 @@ pub fn build_run(src: &str) -> String {
     let bin = dir.join("t_bin");
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()
@@ -150,7 +150,7 @@ pub fn verify_codegen_run(path: &str, tag: &str) -> String {
     let bin = dir.join(format!("{tag}_bin"));
     std::fs::write(&rs, rust).unwrap();
     let st = std::process::Command::new("rustc")
-        .args(["-O", "--edition", "2021", "-o"])
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
         .arg(&bin)
         .arg(&rs)
         .output()

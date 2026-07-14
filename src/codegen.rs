@@ -64,8 +64,11 @@ fn emit_actor_runtime(out: &mut String, msg_ty: &Ty) {
             // `Rc` is a temporary borrowed for the call (moves `m`, used once as FnOnce).
             "&std::rc::Rc::new(m)".to_string(),
         ),
-        // an `Int` message keeps the identity path — no `Rc`, no unwrap/re-wrap.
-        _ => ("i64".to_string(), "i64".to_string(), "msg".to_string(), "m".to_string()),
+        // an `Int` message keeps the identity path — no `Rc`, no unwrap/re-wrap. The
+        // actor runtime is an EFFECT BOUNDARY (tokio), so like every foreign surface it
+        // speaks `i64` (DEC-LLL-077): the FFI shim narrows on the way in (fail-stop out
+        // of range) and widens on the way out; `actor_loop` converts around `lll_step`.
+        _ => ("i64".to_string(), "i64".to_string(), "msg".to_string(), "super::LllInt::from(m)".to_string()),
     };
     out.push_str(&format!(
         r#"
@@ -100,8 +103,11 @@ mod lll_actor_runtime {{
             match msg {{
                 ActorMsg::Step(m) => {{
                     super::trace_delivery(pid, &m);
+                    // the state crosses the boundary as `i64`; `lll_step` speaks the exact
+                    // `Int` (REQ-LLL-157). A state that outgrows i64 FAIL-STOPS here (loud,
+                    // never truncated) — the same boundary discipline as every FFI param.
                     let outcome = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| super::lll_step(state, {unwrap_step})));
+                        std::panic::AssertUnwindSafe(|| super::lll_step(super::LllInt::from(state), {unwrap_step}).to_i64()));
                     match outcome {{
                         Ok(new_state) => state = new_state,
                         Err(_) => {{
@@ -865,32 +871,71 @@ fn ffi_shim(dotted_op: &str) -> String {
     format!("__lll_ffi_{}", dotted_op.replace('.', "_"))
 }
 
+/// THE BOUNDARY (DEC-LLL-077). A foreign Rust function speaks `i64`; llmlang's `Int`
+/// is exact (REQ-LLL-157). This is where the fail-stop of DEC-LLL-026 WENT when pure
+/// arithmetic stopped trapping: crossing OUT, a value too big for the foreign `i64`
+/// parameter aborts loudly (`to_i64`) — it never truncates. Crossing IN, an `i64`
+/// always fits, so the widening is total.
+///
+/// `true` when this llmlang type is carried by an `i64` on the Rust side.
+fn is_i64_carried(t: &Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Big)
+}
+
 /// Marshal the i-th shim argument from its llmlang value `__a{i}` to the foreign Rust
 /// type (REQ-LLL-042, DEC-LLL-045): a `List[Int]` codepoint list becomes an owned
-/// `String` (or a borrowed `&str`); `Int`/`Bool` (or no `as` clause) pass through.
-fn marshal_arg(i: usize, f: Option<&Foreign>) -> String {
+/// `String` (or a borrowed `&str`); an `Int` NARROWS to `i64` with a fail-stop; `Bool`
+/// passes through.
+fn marshal_arg(i: usize, f: Option<&Foreign>, t: &Ty) -> String {
     match f {
         Some(Foreign::RString) => format!("__lll_str_to_rust(&__a{i})"),
         Some(Foreign::RStr) => format!("&__lll_str_to_rust(&__a{i})"),
         Some(Foreign::Bytes) => format!("__lll_bytes_to_rust(&__a{i})"),
+        // `as i64` declared, or NO `as` clause at all over an `Int` — both mean the
+        // foreign signature is `i64`. Fail-stop out of range (DEC-LLL-077).
+        Some(Foreign::I64) => format!("__a{i}.to_i64()"),
+        None if is_i64_carried(t) => format!("__a{i}.to_i64()"),
         _ => format!("__a{i}"),
     }
 }
 
 /// Marshal a foreign Rust return value `val` OUT to its llmlang form (REQ-LLL-042/045):
-/// a `String` becomes a codepoint list, a tuple is projected component-by-component;
-/// `i64`/`bool` pass through. Used for the return, a `Result` Ok payload, and each tuple
-/// component (recursively).
-fn marshal_out(f: &Foreign, val: &str) -> String {
+/// a `String` becomes a codepoint list, a tuple is projected component-by-component, an
+/// `i64` WIDENS to the exact `Int` (total); `bool` passes through. Used for the return,
+/// a `Result` Ok payload, and each tuple component (recursively). `t` is the llmlang
+/// type at this position, so a bare `i64` (no `as` clause) still widens correctly.
+fn marshal_out(f: &Foreign, val: &str, t: &Ty) -> String {
     match f {
         Foreign::RString => format!("__lll_str_of_rust(&{val})"),
         Foreign::Bytes => format!("__lll_bytes_of_rust(&{val})"),
+        Foreign::I64 => format!("LllInt::from({val})"),
         Foreign::Tuple(fs) => {
-            let cs: Vec<String> =
-                fs.iter().enumerate().map(|(i, c)| marshal_out(c, &format!("{val}.{i}"))).collect();
+            // component types come from the llmlang tuple the checker paired with it
+            let cts: Vec<Ty> = match t {
+                Ty::Tuple(cs) => cs.clone(),
+                _ => vec![Ty::Int; fs.len()],
+            };
+            let cs: Vec<String> = fs
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    marshal_out(c, &format!("{val}.{i}"), cts.get(i).unwrap_or(&Ty::Int))
+                })
+                .collect();
             format!("({})", cs.join(", "))
         }
+        _ if is_i64_carried(t) => format!("LllInt::from({val})"),
         _ => val.to_string(),
+    }
+}
+
+/// The shim's RETURN when there is no `as` clause on it: an `Int` result still comes
+/// back from an `i64`-typed Rust function, so it widens (total).
+fn marshal_out_bare(t: &Ty, val: &str) -> String {
+    if is_i64_carried(t) {
+        format!("LllInt::from({val})")
+    } else {
+        val.to_string()
     }
 }
 
@@ -925,10 +970,12 @@ fn json_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str, types: &[TypeDecl
         "String" => {
             format!("{path}::String(__s) => Rc::new({ei}::{ctor}(__lll_str_of_rust(&__s))), ")
         }
+        // a JSON Number is bounded by the JSON model (`i64`), so it WIDENS totally into the
+        // exact `Int` (REQ-LLL-157). A non-integer Number still fail-stops (no Float, DEC-LLL-051).
         "Number" => format!(
-            "{path}::Number(__n) => Rc::new({ei}::{ctor}(__n.as_i64().unwrap_or_else(|| \
+            "{path}::Number(__n) => Rc::new({ei}::{ctor}(LllInt::from(__n.as_i64().unwrap_or_else(|| \
              panic!(\"FFI boundary: serde_json Number `{{__n}}` is not an integer (Float is \
-             unsupported in v1 — DEC-LLL-051)\")))), "
+             unsupported in v1 — DEC-LLL-051)\"))))), "
         ),
         // Array (REQ-LLL-060): each element recurses through the enclosing `__json_out`
         // local fn, building a `List[Self]` in source order (cons the reversed Vec).
@@ -968,7 +1015,9 @@ fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str, types: &[TypeDecl]
         "Null" => format!("{ei}::{ctor} => {path}::Null, "),
         "Bool" => format!("{ei}::{ctor}(__b) => {path}::Bool(*__b), "),
         "String" => format!("{ei}::{ctor}(__s) => {path}::String(__lll_str_to_rust(__s)), "),
-        "Number" => format!("{ei}::{ctor}(__x) => {path}::from(*__x), "),
+        // OUT to JSON: a JSON number IS an i64, so an `Int` too big for it FAILS STOP at
+        // the boundary (DEC-LLL-077) — it is never silently clipped into the document.
+        "Number" => format!("{ei}::{ctor}(__x) => {path}::from(__x.to_i64()), "),
         // Array (REQ-LLL-060): walk the `List[Self]`, recursing each element through the
         // enclosing `__json_in` local fn, collecting into a `Vec<Value>` in source order.
         "Array" => format!(
@@ -1006,43 +1055,68 @@ fn json_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str, types: &[TypeDecl]
 
 /// One arm of a GENERAL foreign enum (REQ-LLL-052), OUT direction (foreign Rust enum →
 /// llmlang ADT), mapped BY NAME. Nullary: `{path}::{rustv} => Rc::new({ei}::{ctor})`.
-/// Single scalar payload (tranche-2a, Int/Bool): binds the field and passes it through —
-/// i64↔Int and bool↔Bool are IDENTITY in the generated repr, so no marshalling call.
-fn enum_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str, has_payload: bool) -> String {
-    if has_payload {
-        format!("{path}::{rustv}(__x) => Rc::new({ei}::{ctor}(__x)), ")
-    } else {
-        format!("{path}::{rustv} => Rc::new({ei}::{ctor}), ")
+/// Single scalar payload (tranche-2a, Int/Bool): binds the field; an `i64` WIDENS to the
+/// exact `Int` (total, REQ-LLL-157), a `bool` passes through.
+fn enum_out_arm(path: &str, rustv: &str, ei: &str, ctor: &str, payload: Option<&Ty>) -> String {
+    match payload {
+        Some(t) if is_i64_carried(t) => {
+            format!("{path}::{rustv}(__x) => Rc::new({ei}::{ctor}(LllInt::from(__x))), ")
+        }
+        Some(_) => format!("{path}::{rustv}(__x) => Rc::new({ei}::{ctor}(__x)), "),
+        None => format!("{path}::{rustv} => Rc::new({ei}::{ctor}), "),
     }
 }
 
 /// One arm of a GENERAL foreign enum (REQ-LLL-052), IN direction (llmlang ADT → foreign
 /// Rust enum), mapped BY NAME. The checker proved the ADT's ctors are fully covered, so
-/// the enclosing match is exhaustive with no `_` arm. A single scalar payload (tranche-2a)
-/// is dereferenced out of the boxed llmlang enum (`*__x`), identity-marshalled.
-fn enum_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str, has_payload: bool) -> String {
-    if has_payload {
-        format!("{ei}::{ctor}(__x) => {path}::{rustv}(*__x), ")
-    } else {
-        format!("{ei}::{ctor} => {path}::{rustv}, ")
+/// the enclosing match is exhaustive with no `_` arm. A single scalar payload is read out
+/// of the boxed llmlang enum: an `Int` NARROWS to the foreign `i64` and FAILS STOP out of
+/// range (DEC-LLL-077); a `bool` is copied.
+fn enum_in_arm(path: &str, rustv: &str, ei: &str, ctor: &str, payload: Option<&Ty>) -> String {
+    match payload {
+        Some(t) if is_i64_carried(t) => {
+            format!("{ei}::{ctor}(__x) => {path}::{rustv}(__x.to_i64()), ")
+        }
+        Some(_) => format!("{ei}::{ctor}(__x) => {path}::{rustv}(*__x), "),
+        None => format!("{ei}::{ctor} => {path}::{rustv}, "),
     }
 }
 
-/// Whether the named ctor of the named ADT carries a payload (REQ-LLL-052 tranche-2a: the
-/// checker restricts a general foreign-enum ctor to nullary OR a single Int/Bool field, so
-/// "non-empty" ⟹ exactly one scalar field). Drives the payload-binding arm form above.
-fn ctor_has_payload(types: &[TypeDecl], adt: &str, ctor: &str) -> bool {
+/// The payload type of the named ctor of the named ADT, if any (REQ-LLL-052 tranche-2a:
+/// the checker restricts a general foreign-enum ctor to nullary OR a single Int/Bool
+/// field). Drives the payload-marshalling arm form above.
+fn ctor_payload_ty(types: &[TypeDecl], adt: &str, ctor: &str) -> Option<Ty> {
     types
         .iter()
         .find(|t| t.name == adt)
         .and_then(|t| t.ctors.iter().find(|(cn, _)| cn == ctor))
-        .map(|(_, f)| !f.is_empty())
-        .unwrap_or(false)
+        .and_then(|(_, f)| f.first().cloned())
+}
+
+/// The exact-integer runtime (REQ-LLL-157), injected VERBATIM into every generated
+/// program. It is a real module of this crate (`src/lllint.rs`), so the code that ships
+/// inside user binaries is exactly the code `cargo test --lib` property-tests — and it
+/// needs no crate dependency, which would have forced every program off the single-`rustc`
+/// path onto a Cargo build.
+const LLLINT_RS: &str = include_str!("lllint.rs");
+
+/// The part of `lllint.rs` that SHIPS: everything before its `#[cfg(test)] mod tests`.
+/// The tests must NOT ride along — a generated program that carries `example` clauses is
+/// compiled with `rustc --test` (REQ-LLL-049), which turns `cfg(test)` ON, and the
+/// hitch-hiking `mod tests` would then collide with the emitted example harness. Cutting
+/// at the single `#[cfg(test)]` marker keeps the shipped text an exact prefix of the
+/// tested text — the property tests still cover every line that reaches a user binary.
+fn lllint_runtime() -> &'static str {
+    match LLLINT_RS.find("#[cfg(test)]") {
+        Some(i) => &LLLINT_RS[..i],
+        None => LLLINT_RS,
+    }
 }
 
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
+    out.push_str(lllint_runtime());
     // user ADTs → Rust enums (REQ-LLL-011); constructor names are globally unique
     // so `use Name::*` lets variants be referenced bare (as in the .lll source).
     let ctors: std::collections::HashSet<String> = cm.ctors.keys().cloned().collect();
@@ -1239,14 +1313,14 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                                 let marms: String = arms
                                     .iter()
                                     .map(|(r, c)| {
-                                        let hp = ctor_has_payload(&cm.module.types, &n, c);
-                                        enum_in_arm(path, r, &ei, c, hp)
+                                        let hp = ctor_payload_ty(&cm.module.types, &n, c);
+                                        enum_in_arm(path, r, &ei, c, hp.as_ref())
                                     })
                                     .collect();
                                 format!("match &*__a{i} {{ {marms}}}")
                             }
                         }
-                        other => marshal_arg(i, other),
+                        other => marshal_arg(i, other, &op.params[i]),
                     })
                     .collect();
                 let call = format!("{path}({})", args.join(", "));
@@ -1258,10 +1332,20 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                     // a structured foreign tuple → a llmlang native tuple, projected
                     // component-by-component (REQ-LLL-026); bind the call once.
                     Some(Foreign::Tuple(fs)) => {
+                        let cts: Vec<Ty> = match &op.ret {
+                            Ty::Tuple(cs) => cs.clone(),
+                            _ => vec![Ty::Int; fs.len()],
+                        };
                         let cs: Vec<String> = fs
                             .iter()
                             .enumerate()
-                            .map(|(i, c)| marshal_out(c, &format!("__r.{i}")))
+                            .map(|(i, c)| {
+                                marshal_out(
+                                    c,
+                                    &format!("__r.{i}"),
+                                    cts.get(i).unwrap_or(&Ty::Int),
+                                )
+                            })
                             .collect();
                         format!("{{ let __r = {call}; ({}) }}", cs.join(", "))
                     }
@@ -1282,14 +1366,23 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                         // SPREAD across the ctor's fields (`Got(t.0, t.1)`); a scalar/String
                         // fills its single field. The Err message is the error's
                         // `to_string()` as a codepoint list.
+                        // the success ctor's declared field types drive the widening of
+                        // any `i64` component back to the exact `Int` (DEC-LLL-077)
+                        let okf = &td.ctors[0].1;
                         let ok = match &**ft {
                             Foreign::Tuple(fs) => fs
                                 .iter()
                                 .enumerate()
-                                .map(|(i, c)| marshal_out(c, &format!("__ok.{i}")))
+                                .map(|(i, c)| {
+                                    marshal_out(
+                                        c,
+                                        &format!("__ok.{i}"),
+                                        okf.get(i).unwrap_or(&Ty::Int),
+                                    )
+                                })
                                 .collect::<Vec<_>>()
                                 .join(", "),
-                            _ => marshal_out(ft, "__ok"),
+                            _ => marshal_out(ft, "__ok", okf.first().unwrap_or(&Ty::Int)),
                         };
                         format!(
                             "match {call} {{ \
@@ -1332,13 +1425,17 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                             let marms: String = arms
                                 .iter()
                                 .map(|(r, c)| {
-                                    let hp = ctor_has_payload(&cm.module.types, &n, c);
-                                    enum_out_arm(path, r, &ei, c, hp)
+                                    let hp = ctor_payload_ty(&cm.module.types, &n, c);
+                                    enum_out_arm(path, r, &ei, c, hp.as_ref())
                                 })
                                 .collect();
                             format!("match {call} {{ {marms}}}")
                         }
                     }
+                    // `as i64` declared, or no `as` clause at all: an `Int` result comes
+                    // back from an i64-typed Rust fn and WIDENS to the exact `Int`.
+                    Some(Foreign::I64) => marshal_out_bare(&op.ret, &call),
+                    None => marshal_out_bare(&op.ret, &call),
                     _ => call,
                 };
                 let key = format!("{}.{}", ed.name, op.name);
@@ -1351,10 +1448,12 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
                 // (i64) trace format; a bool/String result is not yet recorded (a later
                 // slice of the explicability layer, REQ-LLL-002). Kept on ONE line so the
                 // frontier diagnostic (REQ-LLL-041) still re-anchors a build error here.
-                let wrapped = if ret_ty == "i64" {
+                // The trace value is now an exact `Int` (REQ-LLL-157) — recorded as a
+                // decimal, so a big result round-trips through `--replay` losslessly.
+                let wrapped = if ret_ty == "LllInt" {
                     format!(
                         "if let Some(__r) = replay_next(\"{key}\") {{ return __r; }} \
-                         let __r = {body}; trace_write(\"{key}\", __r); __r"
+                         let __r = {body}; trace_write(\"{key}\", &__r); __r"
                     )
                 } else {
                     body
@@ -1563,8 +1662,11 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
 
 fn rs_ty(t: &Ty) -> String {
     match t {
-        Ty::Int => "i64".to_string(),
-        Ty::Big => "i128".to_string(),
+        // `Int` is the EXACT integer (REQ-LLL-157, DEC-LLL-077): `LllInt` = an i64 fast
+        // path that promotes to the heap. It matches the SMT `Int` sort (unbounded ℤ)
+        // exactly, so a proved program can no longer trap on overflow. `Big` (the i128
+        // half-step, REQ-LLL-157a) is SUBSUMED — same repr, `big`/`to_int` are identity.
+        Ty::Int | Ty::Big => "LllInt".to_string(),
         Ty::Bool => "bool".to_string(),
         // exact rational → the runtime `Rat` i64-pair (REQ-LLL-054): a Copy value
         // type (by-value like Int/Bool, not heap), so borrow/clone handling is uniform.
@@ -1683,8 +1785,7 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
             let inner: Vec<String> = cs.iter().map(|c| rs_ty_self(c, self_var)).collect();
             format!("({})", inner.join(", "))
         }
-        Ty::Int => "i64".to_string(),
-        Ty::Big => "i128".to_string(),
+        Ty::Int | Ty::Big => "LllInt".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Rational => "Rat".to_string(),
     }
@@ -1794,6 +1895,8 @@ fn emit_instance_impl(
             row_ev: Vec::new(),
             row_abort: false,
             row: Vec::new(),
+        // no self-recursion loop here (see `Cx::tail_self`)
+        tail_self: None,
         };
         out.push_str(&format!(
             "    fn {mn}({}) -> {} {{ {} }}\n",
@@ -2264,10 +2367,10 @@ fn rho_evidence_param_types(
 ) -> Vec<String> {
     let mut v = Vec::new();
     if rho.iter().any(|e| e == "State") {
-        v.push("&mut i64".to_string());
+        v.push("&mut LllInt".to_string());
     }
     if rho.iter().any(|e| e == "Reader") {
-        v.push("&i64".to_string());
+        v.push("&LllInt".to_string());
     }
     for (_, ptys, cret) in caps_of(rho, user_tail_ops) {
         let ps: Vec<String> = ptys.iter().map(rs_ty).collect();
@@ -2411,6 +2514,11 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     // seed `refs`.
     let mask = g.borrow_mask.get(&part.name);
     let mut refs: Names = std::collections::HashSet::new();
+    // REQ-LLL-146: update nodes whose collection variable is at its last use → movable.
+    let res_pre = g.abort.contains(&part.name);
+    // guaranteed tail-call elimination (see `Cx::tail_self`): when the part loops back
+    // into itself, its parameters become the loop's induction variables, hence `mut`.
+    let tail_self = tail_self_of(part, mask, res_pre);
     let mut params: Vec<String> = part
         .params
         .iter()
@@ -2419,6 +2527,8 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
             if mask.and_then(|m| m.get(i)).copied().unwrap_or(false) {
                 refs.insert(n.clone());
                 format!("{}: &{}", local(n), rs_ty(t))
+            } else if tail_self.is_some() {
+                format!("mut {}: {}", local(n), rs_ty(t))
             } else {
                 format!("{}: {}", local(n), rs_ty(t))
             }
@@ -2436,10 +2546,10 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     let is_state = g.stateful.contains(&part.name);
     let is_reader = g.readerful.contains(&part.name);
     if is_state {
-        params.push("__st: &mut i64".to_string());
+        params.push("__st: &mut LllInt".to_string());
     }
     if is_reader {
-        params.push("__env: &i64".to_string());
+        params.push("__env: &LllInt".to_string());
     }
     // user tail-resumptive capabilities (DEC-LLL-037): one `fn(P…) -> R` evidence
     // param per op of each user-tail effect in the row, AFTER State/Reader, in the
@@ -2459,7 +2569,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         .map(|(d, _, _)| (d.clone(), cap_name(d)))
         .collect();
     let ret_ty = if res {
-        format!("Result<{}, i64>", rs_ty(&part.ret))
+        format!("Result<{}, LllInt>", rs_ty(&part.ret))
     } else {
         rs_ty(&part.ret)
     };
@@ -2507,9 +2617,23 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         row_ev: Vec::new(),
         row_abort: false,
         row: Vec::new(),
+        tail_self: tail_self.clone(),
     };
-    emit_body(out, &part.body, 1, &cx, res)?;
-    out.push_str("}\n");
+    // The loop is LABELLED: a comprehension lowers to its own `loop`, so an unlabelled
+    // `continue` in a tail call nested inside one would bind to the WRONG loop.
+    // The loop never `break`s (every tail position `return`s or `continue`s), so it has
+    // type `!` and coerces to the part's return type with no trailing expression.
+    match &tail_self {
+        Some(_) => {
+            out.push_str("    '__tail: loop {\n");
+            emit_body(out, &part.body, 2, &cx, res)?;
+            out.push_str("    }\n}\n");
+        }
+        None => {
+            emit_body(out, &part.body, 1, &cx, res)?;
+            out.push_str("}\n");
+        }
+    }
     // DYNAMIC half of REQ-LLL-049: a native `#[test]` per example, reusing the
     // SAME `cx` built above for this part's own body — sound because every
     // example call target is checked pure (types.rs::check_examples), so the
@@ -2580,7 +2704,7 @@ fn emit_specialized_part(
                 let mut ats: Vec<String> = argtys.iter().map(rs_ty).collect();
                 ats.extend(rho_evidence_param_types(rho, g.user_tail_ops));
                 let r = if has_abort {
-                    format!("Result<{}, i64>", rs_ty(ret0))
+                    format!("Result<{}, LllInt>", rs_ty(ret0))
                 } else {
                     rs_ty(ret0)
                 };
@@ -2598,11 +2722,11 @@ fn emit_specialized_part(
     // the part's own evidence params for the row (forwarded to f / nested generics)
     let mut row_ev: Vec<String> = Vec::new();
     if is_state {
-        params.push("__st: &mut i64".to_string());
+        params.push("__st: &mut LllInt".to_string());
         row_ev.push("__st".to_string());
     }
     if is_reader {
-        params.push("__env: &i64".to_string());
+        params.push("__env: &LllInt".to_string());
         row_ev.push("__env".to_string());
     }
     let mut caps_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2614,7 +2738,7 @@ fn emit_specialized_part(
         row_ev.push(cn);
     }
     let ret_ty = if has_abort {
-        format!("Result<{}, i64>", rs_ty(&part.ret))
+        format!("Result<{}, LllInt>", rs_ty(&part.ret))
     } else {
         rs_ty(&part.ret)
     };
@@ -2661,6 +2785,9 @@ fn emit_specialized_part(
         row_ev,
         row_abort: has_abort,
         row: rho.to_vec(),
+        // a SPECIALIZED (effect-monomorphized) body: its self-calls resolve through the
+        // row-mangled name, so the loop rewrite does not apply — conservative, not silent.
+        tail_self: None,
     };
     emit_body(out, &part.body, 1, &cx, has_abort)?;
     out.push_str("}\n");
@@ -2791,6 +2918,137 @@ struct Cx<'a> {
     /// this specialization's concrete row (only meaningful when `row_fn` is set) —
     /// used to name/forward when calling another generic part at the same row.
     row: Vec<String>,
+    /// GUARANTEED tail-call elimination (REQ-LLL-157 follow-up). In a purely functional
+    /// language a LOOP *is* a tail recursion, so an unbounded loop must not consume
+    /// stack. This used to work only by ACCIDENT: `Int` was `i64`, which has no `Drop`
+    /// glue, so LLVM's `tailcallelim` happened to fire. The moment a parameter needs
+    /// dropping — an exact `Int` (`Arc`), or any `List`/ADT accumulator (`Rc`) — LLVM
+    /// must keep the frame alive to run the drop, the call stops being a jump, and a
+    /// long loop blows the stack. Relying on that was never sound.
+    ///
+    /// So the loop is now emitted, not hoped for: when set, a tail `yield` of a DIRECT
+    /// self-call lowers to "rebind the parameters, `continue`" inside a `'__tail: loop`,
+    /// which is a jump for ANY parameter type. Set ONLY where that rewrite is provably
+    /// faithful (`tail_self_of`), and cleared inside handler closures, where a `continue`
+    /// could not even compile.
+    tail_self: Option<TailSelf>,
+}
+
+/// The self-recursion a part's body can loop back into (see `Cx::tail_self`).
+#[derive(Clone)]
+struct TailSelf {
+    /// the part's own name, as written — a tail call to it is the loop's back-edge
+    name: String,
+    /// its parameter names, in signature order: the loop's induction variables
+    params: Vec<String>,
+}
+
+/// Decide whether `part`'s self-recursion may be lowered to a loop, conservatively.
+/// A `None` here costs nothing but a real call; a wrong `Some` would be a miscompile,
+/// so every condition below is a REASON THE REWRITE STAYS FAITHFUL:
+///
+/// * **no parameter is borrowed** — a by-reference parameter (`&Rc<…>`) cannot be
+///   rebound to a value computed inside the iteration: the new value would be a
+///   reference to a temporary that dies at the end of the iteration. (This is why a
+///   `List` accumulator does not loop yet — tracked as a follow-up, not silently
+///   mis-lowered.)
+/// * **no abort row** (`res`) — the part returns `Result`, and `?`-propagation inside
+///   the argument expressions would change which frame the `Err` escapes from.
+/// * **there IS a self-call in tail position** — otherwise `mut` params and a `loop`
+///   would be dead weight.
+///
+/// Evidence parameters (State cell, Reader env, capabilities) are deliberately NOT
+/// rebound: a self-call forwards exactly the evidence already in scope, so leaving
+/// them alone is precisely what the call would have done.
+fn tail_self_of(part: &Part, mask: Option<&Vec<bool>>, res: bool) -> Option<TailSelf> {
+    if res || part.params.is_empty() {
+        return None;
+    }
+    if mask.is_some_and(|m| m.iter().any(|b| *b)) {
+        return None;
+    }
+    let names: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
+    let ts = TailSelf { name: part.name.clone(), params: names };
+    if body_has_self_tail_call(&part.body, &ts) {
+        Some(ts)
+    } else {
+        None
+    }
+}
+
+/// Is there a tail `yield` of a direct self-call anywhere in this body? Mirrors exactly
+/// the positions `emit_body`/`emit_match` will rewrite — `Handle` is skipped on both
+/// sides (a `handle`'s operation clauses become closures).
+fn body_has_self_tail_call(body: &[Stmt], ts: &TailSelf) -> bool {
+    body.iter().any(|s| match s {
+        Stmt::Yield(e) => tail_expr_has_self_call(e, ts),
+        Stmt::Match(_, arms) => arms.iter().any(|a| body_has_self_tail_call(&a.body, ts)),
+        Stmt::Let(..) | Stmt::Handle(_) => false,
+    })
+}
+
+/// A tail expression loops back iff it IS the self-call, or it is an `if` one of whose
+/// branches is (the branches of a tail `if` are themselves tail positions).
+fn tail_expr_has_self_call(e: &Expr, ts: &TailSelf) -> bool {
+    match e {
+        Expr::Call(n, args) => n == &ts.name && args.len() == ts.params.len(),
+        Expr::If(_, a, b) => tail_expr_has_self_call(a, ts) || tail_expr_has_self_call(b, ts),
+        _ => false,
+    }
+}
+
+/// Lower a tail expression that loops back into the part (see `Cx::tail_self`).
+///
+/// The back-edge is `rebind the parameters, continue` — but the ARGUMENTS must be fully
+/// evaluated BEFORE any parameter is rebound, because they read the parameters they are
+/// about to overwrite (`lcg(f(seed), n - 1)` reads `seed` AND `n`). Binding every
+/// argument to a temporary first makes the update simultaneous, exactly as a real call's
+/// argument evaluation would be. Getting this wrong would be a silent miscompile, which
+/// is why `simultaneous_rebind_is_not_sequential_dec077` pins it with a program whose
+/// answer differs under a sequential update.
+fn emit_tail(
+    out: &mut String,
+    e: &Expr,
+    depth: usize,
+    cx: &Cx,
+    res: bool,
+    ts: &TailSelf,
+) -> Result<(), String> {
+    match e {
+        Expr::If(c, a, b) => {
+            // a tail `if`: both branches are themselves tail positions
+            out.push_str(&format!("{}if {} {{\n", indent(depth), expr(c, cx, false)?));
+            emit_tail(out, a, depth + 1, cx, res, ts)?;
+            out.push_str(&format!("{}}} else {{\n", indent(depth)));
+            emit_tail(out, b, depth + 1, cx, res, ts)?;
+            out.push_str(&format!("{}}}\n", indent(depth)));
+            Ok(())
+        }
+        Expr::Call(n, args) if n == &ts.name && args.len() == ts.params.len() => {
+            // reuse the REAL call's argument lowering (borrow mask, move-on-last-use), so
+            // the loop and the call agree on ownership; then rebind simultaneously.
+            let xs = part_call_args(n, args, cx, res)?;
+            let mut s = format!("{}{{ ", indent(depth));
+            for (i, x) in xs.iter().take(ts.params.len()).enumerate() {
+                s.push_str(&format!("let __tc{i} = {x}; "));
+            }
+            for (i, p) in ts.params.iter().enumerate() {
+                s.push_str(&format!("{} = __tc{i}; ", local(p)));
+            }
+            s.push_str("continue '__tail; }\n");
+            out.push_str(&s);
+            Ok(())
+        }
+        // a branch of a tail `if` that is NOT the self-call: an ordinary return
+        _ if res => {
+            out.push_str(&format!("{}return Ok({});\n", indent(depth), expr(e, cx, res)?));
+            Ok(())
+        }
+        _ => {
+            out.push_str(&format!("{}return {};\n", indent(depth), expr(e, cx, res)?));
+            Ok(())
+        }
+    }
 }
 
 fn emit_body(
@@ -2809,6 +3067,14 @@ fn emit_body(
                     local(name),
                     expr(e, cx, res)?
                 ));
+            }
+            Stmt::Yield(e) if cx.tail_self.is_some() && {
+                let ts = cx.tail_self.clone().expect("guarded");
+                tail_expr_has_self_call(e, &ts)
+            } =>
+            {
+                let ts = cx.tail_self.clone().expect("guarded");
+                emit_tail(out, e, depth, cx, res, &ts)?;
             }
             Stmt::Yield(e) => {
                 if matches!(e, Expr::EffCall(n, _) if cx.abort_ops.contains(n)) {
@@ -2851,13 +3117,13 @@ fn emit_body(
                 if h.effect == "State" {
                     let cell = format!("__cell_{depth}");
                     let stv = format!("__st_{depth}");
-                    out.push_str(&format!("{}let mut {cell}: i64 = {init};\n", indent(depth)));
+                    out.push_str(&format!("{}let mut {cell}: LllInt = {init};\n", indent(depth)));
                     out.push_str(&format!("{}let {stv} = &mut {cell};\n", indent(depth)));
                     ev_state = Some(stv);
                 } else {
                     let envval = format!("__envval_{depth}");
                     let env = format!("__env_{depth}");
-                    out.push_str(&format!("{}let {envval}: i64 = {init};\n", indent(depth)));
+                    out.push_str(&format!("{}let {envval}: LllInt = {init};\n", indent(depth)));
                     out.push_str(&format!("{}let {env} = &{envval};\n", indent(depth)));
                     ev_reader = Some(env);
                 }
@@ -2891,6 +3157,8 @@ fn emit_body(
                     row_ev: cx.row_ev.clone(),
                     row_abort: cx.row_abort,
                     row: cx.row.clone(),
+                    // inside a `handle`: never loop back from here (see `Cx::tail_self`)
+                    tail_self: None,
                 };
                 let ret_clause = h
                     .clauses
@@ -2970,6 +3238,9 @@ fn emit_body(
                         row_ev: Vec::new(),
                         row_abort: false,
                         row: Vec::new(),
+                        // a handler clause becomes a CLOSURE — a `continue` out of it
+                        // would not even compile. Never loop back from here.
+                        tail_self: None,
                     };
                     emit_body(out, &c.body, depth + 1, &clause_cx, false)?;
                     out.push_str(&format!("{}}};\n", indent(depth)));
@@ -3005,6 +3276,8 @@ fn emit_body(
                     row_ev: cx.row_ev.clone(),
                     row_abort: cx.row_abort,
                     row: cx.row.clone(),
+                    // inside a `handle`: never loop back from here (see `Cx::tail_self`)
+                    tail_self: None,
                 };
                 let call = expr(&h.call, &cx2, res)?;
                 let ret_clause = h
@@ -3097,7 +3370,9 @@ fn emit_match(
             }
         }
         let pat = match &arm.pattern {
-            Pattern::IntLit(v) => format!("{v}"),
+            // an Int pattern matches the small variant: normalization guarantees any
+            // i64-range value IS `S` (REQ-LLL-157), so this can never miss.
+            Pattern::IntLit(v) => format!("LllInt::S({v}i64)"),
             Pattern::BoolLit(v) => format!("{v}"),
             Pattern::Wildcard => "_".into(),
             Pattern::Var(v) => local(v),
@@ -3350,7 +3625,9 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 .into())
         }
         Expr::Unit => "()".to_string(),
-        Expr::IntLit(v) => format!("{v}i64"),
+        // An `Int` literal is always in i64 range (the lexer rejects a bigger one — big
+        // values are COMPUTED, REQ-LLL-157), so it lands directly on the small variant.
+        Expr::IntLit(v) => format!("LllInt::S({v}i64)"),
         // exact rational literal → canonical `Rat` (REQ-LLL-054). The pair is already
         // gcd-reduced at parse; `Rat::new` re-normalizes idempotently so the runtime
         // form is byte-identical to the Z3 `Real` value (model≡binary, DEC-LLL-020).
@@ -3441,19 +3718,24 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             "IO.read" => "__lll_io_read()".to_string(),
             "IO.puts" => format!("__lll_io_puts({}, false)", expr(&args[0], cx, res)?),
             "IO.putln" => format!("__lll_io_puts({}, true)", expr(&args[0], cx, res)?),
-            // builtin State (REQ-LLL-025): read/write the `&mut i64` cell evidence.
+            // builtin State (REQ-LLL-025): read/write the `&mut LllInt` cell evidence.
+            // `Int` is no longer `Copy` (REQ-LLL-157), so a read CLONES out of the cell
+            // and a write clones INTO it — the value semantics are unchanged.
             "State.get" => {
                 let ev = cx.state_ev.clone().unwrap_or_else(|| "__st".to_string());
-                format!("(*{ev})")
+                format!("(*{ev}).clone()")
             }
             "State.put" => {
                 let ev = cx.state_ev.clone().unwrap_or_else(|| "__st".to_string());
-                format!("{{ let __pv = {}; *{ev} = __pv; __pv }}", expr(&args[0], cx, res)?)
+                format!(
+                    "{{ let __pv = {}; *{ev} = __pv.clone(); __pv }}",
+                    expr(&args[0], cx, res)?
+                )
             }
-            // builtin Reader (REQ-LLL-025 slice 3): read the immutable `&i64` env.
+            // builtin Reader (REQ-LLL-025 slice 3): read the immutable `&LllInt` env.
             "Reader.ask" => {
                 let ev = cx.reader_ev.clone().unwrap_or_else(|| "__env".to_string());
-                format!("(*{ev})")
+                format!("(*{ev}).clone()")
             }
             // a user effect op: an FFI-bound op (`= extern "rust::path"`) lowers to
             // a call of that Rust function — reusing Cargo/std at the effect
@@ -3476,30 +3758,24 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 } else {
                     let payload = match args.first() {
                         Some(a) => expr(a, cx, res)?,
-                        None => "0".to_string(),
+                        None => "LllInt::S(0)".to_string(),
                     };
                     format!("return Err({payload})")
                 }
             }
         },
-        // REQ-LLL-157a: `big(x)` widens `Int` (i64) → `Big` (i128), lossless. `to_int(x)`
-        // narrows i128 → i64 and FAIL-STOPS if the value overflows (DEC-LLL-026: abort
-        // loudly, never truncate silently).
+        // `big(x)` / `to_int(x)` (REQ-LLL-157a) are now IDENTITY at runtime: since
+        // DEC-LLL-077 made `Int` exact, `Big` is the SAME type (`LllInt`) — the bridges
+        // survive as surface compatibility, and the narrowing fail-stop `to_int` used to
+        // carry has moved to the FFI boundary, where an `i64` really is bounded. They
+        // were already identity IN THE PROOF (same SMT sort), so model≡binary holds.
         Expr::Call(name, args)
             if (name == "big" || name == "to_int")
                 && !cx.parts.contains(name)
                 && !cx.ctors.contains(name)
                 && !cx.fns.contains(name) =>
         {
-            let x = expr(&args[0], cx, res)?;
-            if name == "big" {
-                format!("i128::from({x})")
-            } else {
-                // bind ONCE — the argument may be a call that consumes a non-Copy value,
-                // and emitting it twice would move it twice (rustc E0382). i128 is Copy,
-                // so reusing `__v` in the panic is free.
-                format!("{{ let __v = {x}; i64::try_from(__v).unwrap_or_else(|_| panic!(\"to_int: Big value {{}} exceeds i64 range\", __v)) }}")
-            }
+            format!("({})", expr(&args[0], cx, res)?)
         }
         // REQ-LLL-067: string-interpolation builtins. `str_of(n)` = decimal codepoints
         // of an Int; `str_cat(a, b)` = List[Int] concatenation. Name-based (no import),
@@ -3538,11 +3814,13 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     }
                     format!("Rc::new(vec![{}])", xs.join(", "))
                 }
-                "length" => format!("((**{}).len() as i64)", borrowed(&args[0], cx, res)?),
+                "length" => {
+                    format!("LllInt::from_usize((**{}).len())", borrowed(&args[0], cx, res)?)
+                }
                 "get" => {
                     let a = borrowed(&args[0], cx, res)?;
                     let i = expr(&args[1], cx, res)?;
-                    format!("(**{a})[({i}) as usize].clone()")
+                    format!("(**{a})[({i}).to_usize()].clone()")
                 }
                 "set" => {
                     // functional update (REQ-LLL-146): MOVE the array in when it is uniquely
@@ -3554,7 +3832,7 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     let i = expr(&args[1], cx, res)?;
                     let v = expr(&args[2], cx, res)?;
                     format!(
-                        "{{ let __i = ({i}) as usize; let __v = {v}; let mut __aset = {a}; Rc::make_mut(&mut __aset)[__i] = __v; __aset }}"
+                        "{{ let __i = ({i}).to_usize(); let __v = {v}; let mut __aset = {a}; Rc::make_mut(&mut __aset)[__i] = __v; __aset }}"
                     )
                 }
                 "push" => {
@@ -3818,30 +4096,18 @@ impl std::ops::Neg for Rat {
 // Rust `String`/`&str`. Return (Rust→llmlang) is total. The param path fail-stops on
 // a non-scalar codepoint — a boundary backstop, provably dead when the input is a real
 // string (literal or FFI-returned), mirroring verified array bounds under FFI.
-// REQ-LLL-067 string interpolation: decimal codepoints of an Int (leading '-' for
-// negatives). i64::MIN-safe via i128. Total.
-fn __lll_str_of_int(n: i64) -> Lst<i64> {
-    let neg = n < 0;
-    let mut m: u128 = (n as i128).unsigned_abs();
-    let mut acc: Lst<i64> = Rc::new(LstI::Nil);
-    if m == 0 {
-        acc = Rc::new(LstI::Cons('0' as i64, acc));
-    }
-    while m > 0 {
-        acc = Rc::new(LstI::Cons(('0' as i64) + (m % 10) as i64, acc));
-        m /= 10;
-    }
-    if neg {
-        acc = Rc::new(LstI::Cons('-' as i64, acc));
-    }
-    acc
+// REQ-LLL-067 string interpolation: decimal codepoints of an Int. Now EXACT for any
+// magnitude (REQ-LLL-157) — `Display` on LllInt is the arbitrary-precision decimal, so
+// `"{n}"` renders a 30-digit result as its 30 digits. Total.
+fn __lll_str_of_int(n: LllInt) -> Lst<LllInt> {
+    __lll_str_of_rust(&n.to_string())
 }
 // REQ-LLL-067: List[Int] concatenation `a ++ b`. Total.
-fn __lll_str_cat(a: Lst<i64>, b: Lst<i64>) -> Lst<i64> {
-    let mut elems: Vec<i64> = Vec::new();
+fn __lll_str_cat(a: Lst<LllInt>, b: Lst<LllInt>) -> Lst<LllInt> {
+    let mut elems: Vec<LllInt> = Vec::new();
     let mut cur = a;
     while let LstI::Cons(h, t) = &*cur {
-        elems.push(*h);
+        elems.push(h.clone());
         cur = t.clone();
     }
     let mut acc = b;
@@ -3850,14 +4116,14 @@ fn __lll_str_cat(a: Lst<i64>, b: Lst<i64>) -> Lst<i64> {
     }
     acc
 }
-fn __lll_str_to_rust(xs: &Lst<i64>) -> String {
+fn __lll_str_to_rust(xs: &Lst<LllInt>) -> String {
     let mut s = String::new();
     let mut cur = xs.clone();
     loop {
         match &*cur {
             LstI::Nil => break,
             LstI::Cons(c, t) => {
-                s.push(char::from_u32(*c as u32)
+                s.push(u32::try_from(c.to_i64()).ok().and_then(char::from_u32)
                     .expect("FFI boundary: List[Int]->String has a non-Unicode-scalar codepoint"));
                 cur = t.clone();
             }
@@ -3865,10 +4131,10 @@ fn __lll_str_to_rust(xs: &Lst<i64>) -> String {
     }
     s
 }
-fn __lll_str_of_rust(s: &str) -> Lst<i64> {
-    let mut acc: Lst<i64> = Rc::new(LstI::Nil);
+fn __lll_str_of_rust(s: &str) -> Lst<LllInt> {
+    let mut acc: Lst<LllInt> = Rc::new(LstI::Nil);
     for c in s.chars().rev() {
-        acc = Rc::new(LstI::Cons(c as i64, acc));
+        acc = Rc::new(LstI::Cons(LllInt::S(c as i64), acc));
     }
     acc
 }
@@ -3880,14 +4146,14 @@ fn __lll_str_of_rust(s: &str) -> Lst<i64> {
 // path FAIL-STOPS on an out-of-range element (never wraps/truncates via `as
 // u8`, DEC-LLL-045) — a boundary backstop, provably dead for any input built
 // from real bytes (FFI-returned or an in-range literal list).
-fn __lll_bytes_to_rust(xs: &Lst<i64>) -> Vec<u8> {
+fn __lll_bytes_to_rust(xs: &Lst<LllInt>) -> Vec<u8> {
     let mut v = Vec::new();
     let mut cur = xs.clone();
     loop {
         match &*cur {
             LstI::Nil => break,
             LstI::Cons(c, t) => {
-                v.push(u8::try_from(*c).unwrap_or_else(|_| {
+                v.push(u8::try_from(c.to_i64()).unwrap_or_else(|_| {
                     panic!("FFI boundary: List[Int]->Vec<u8> has an out-of-range byte {c} (must be 0..=255)")
                 }));
                 cur = t.clone();
@@ -3896,10 +4162,10 @@ fn __lll_bytes_to_rust(xs: &Lst<i64>) -> Vec<u8> {
     }
     v
 }
-fn __lll_bytes_of_rust(b: &[u8]) -> Lst<i64> {
-    let mut acc: Lst<i64> = Rc::new(LstI::Nil);
+fn __lll_bytes_of_rust(b: &[u8]) -> Lst<LllInt> {
+    let mut acc: Lst<LllInt> = Rc::new(LstI::Nil);
     for x in b.iter().rev() {
-        acc = Rc::new(LstI::Cons(*x as i64, acc));
+        acc = Rc::new(LstI::Cons(LllInt::S(*x as i64), acc));
     }
     acc
 }
@@ -3925,8 +4191,11 @@ use std::sync::Mutex;
 // to reach from multiple threads. Lazy-init under the lock on first access
 // (no separate `Once`: re-checking `is_none()` when there's truly no
 // $LLL_TRACE/$LLL_REPLAY is a harmless redundant env lookup, not a bug).
+// REQ-LLL-157: the traced value is an EXACT `Int`, recorded as an unbounded decimal and
+// re-parsed with `LllInt::from_str` — a 30-digit result round-trips through `--replay`
+// losslessly (a JSON `i64` would have silently clipped it).
 static TRACE: Mutex<Option<std::fs::File>> = Mutex::new(None);
-static REPLAY: Mutex<Option<Vec<(String, i64)>>> = Mutex::new(None);
+static REPLAY: Mutex<Option<Vec<(String, LllInt)>>> = Mutex::new(None);
 // REQ-LLL-036 W4: a global, monotonic delivery sequence — stamped the moment
 // an actor actually APPLIES a message (see `emit_actor_runtime`'s
 // `trace_delivery`), recording the real order messages were delivered in this
@@ -3946,7 +4215,7 @@ fn trace_file() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
     g
 }
 
-fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, i64)>>> {
+fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, LllInt)>>> {
     let mut g = REPLAY.lock().unwrap();
     if g.is_none() {
         *g = std::env::var("LLL_REPLAY").ok().map(|p| match std::fs::File::open(&p) {
@@ -3960,7 +4229,7 @@ fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, i64)>>
                 .map(|l| {
                     let eff =
                         l.split("\"eff\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
-                    let v: i64 =
+                    let v: LllInt =
                         l.split("\"v\":").nth(1).unwrap().trim_end_matches('}').trim().parse().unwrap();
                     (eff, v)
                 })
@@ -3983,7 +4252,7 @@ pub fn __lll_trace_init() {
     drop(trace_file());
 }
 
-fn trace_write(eff: &str, v: i64) {
+fn trace_write(eff: &str, v: &LllInt) {
     let mut g = trace_file();
     if let Some(f) = g.as_mut() {
         writeln!(f, "{{\"eff\":\"{eff}\",\"v\":{v}}}").unwrap();
@@ -4008,7 +4277,7 @@ fn trace_delivery<M: std::fmt::Debug>(pid: i64, msg: M) {
     }
 }
 
-fn replay_next(expected_eff: &str) -> Option<i64> {
+fn replay_next(expected_eff: &str) -> Option<LllInt> {
     let mut g = replay_entries();
     match g.as_mut() {
         None => None,
@@ -4021,7 +4290,7 @@ fn replay_next(expected_eff: &str) -> Option<i64> {
     }
 }
 
-pub fn __lll_io_print(v: i64) -> i64 {
+pub fn __lll_io_print(v: LllInt) -> LllInt {
     if let Some(recorded) = replay_next("IO.print") {
         if recorded != v {
             panic!("replay divergence: IO.print recomputed {v}, trace has {recorded}");
@@ -4030,14 +4299,14 @@ pub fn __lll_io_print(v: i64) -> i64 {
         return v;
     }
     println!("{v}");
-    trace_write("IO.print", v);
+    trace_write("IO.print", &v);
     v
 }
 
-pub fn __lll_io_puts(s: Lst<i64>, newline: bool) -> i64 {
+pub fn __lll_io_puts(s: Lst<LllInt>, newline: bool) -> LllInt {
     use std::io::Write as _;
     let text = __lll_str_to_rust(&s);
-    let n = text.chars().count() as i64;
+    let n = LllInt::from_usize(text.chars().count());
     let recorded = replay_next("IO.puts");
     if newline {
         println!("{text}");
@@ -4053,21 +4322,22 @@ pub fn __lll_io_puts(s: Lst<i64>, newline: bool) -> i64 {
             n
         }
         None => {
-            trace_write("IO.puts", n);
+            trace_write("IO.puts", &n);
             n
         }
     }
 }
 
-pub fn __lll_io_read() -> i64 {
+pub fn __lll_io_read() -> LllInt {
     if let Some(recorded) = replay_next("IO.read") {
         println!("[replay: IO.read -> {recorded}]");
         return recorded;
     }
     let mut s = String::new();
     std::io::stdin().read_line(&mut s).expect("IO.read");
-    let v: i64 = s.trim().parse().expect("IO.read: expected an integer");
-    trace_write("IO.read", v);
+    // exact: a 30-digit line reads back as a 30-digit `Int` (REQ-LLL-157)
+    let v: LllInt = s.trim().parse().expect("IO.read: expected an integer");
+    trace_write("IO.read", &v);
     v
 }
 
