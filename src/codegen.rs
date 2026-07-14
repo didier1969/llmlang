@@ -1905,6 +1905,7 @@ fn emit_instance_impl(
         // no self-recursion loop here (see `Cx::tail_self`)
         tail_self: None,
         fast: false,
+        acc_rec: None,
         };
         out.push_str(&format!(
             "    fn {mn}({}) -> {} {{ {} }}\n",
@@ -2519,11 +2520,13 @@ fn fast_ty(t: &Ty) -> &'static str {
 /// only because the part is PURE: re-running it has no observable effect (DEC-LLL-003).
 fn emit_fast_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     let tail_self = tail_self_of(part, None, false);
+    let acc_rec = acc_rec_of(part, None, false);
+    let looping = tail_self.is_some() || acc_rec.is_some();
     let params: Vec<String> = part
         .params
         .iter()
         .map(|(n, t)| {
-            let m = if tail_self.is_some() { "mut " } else { "" };
+            let m = if looping { "mut " } else { "" };
             format!("{m}{}: {}", local(n), fast_ty(t))
         })
         .collect();
@@ -2569,17 +2572,21 @@ fn emit_fast_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), Stri
         row: Vec::new(),
         fast: true,
         tail_self: tail_self.clone(),
+        acc_rec: acc_rec.clone(),
     };
-    match &tail_self {
-        Some(_) => {
-            out.push_str("    '__tail: loop {\n");
-            emit_body(out, &part.body, 2, &cx, false)?;
-            out.push_str("    }\n}\n");
+    if looping {
+        if let Some(ar) = &acc_rec {
+            out.push_str(&match ar.kind {
+                AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, true)),
+                AccKind::Cons => "    let mut __cons = ::std::vec::Vec::new();\n".to_string(),
+            });
         }
-        None => {
-            emit_body(out, &part.body, 1, &cx, false)?;
-            out.push_str("}\n");
-        }
+        out.push_str("    '__tail: loop {\n");
+        emit_body(out, &part.body, 2, &cx, false)?;
+        out.push_str("    }\n}\n");
+    } else {
+        emit_body(out, &part.body, 1, &cx, false)?;
+        out.push_str("}\n");
     }
     Ok(())
 }
@@ -2652,6 +2659,9 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     // guaranteed tail-call elimination (see `Cx::tail_self`): when the part loops back
     // into itself, its parameters become the loop's induction variables, hence `mut`.
     let tail_self = tail_self_of(part, mask, res_pre);
+    // REQ-LLL-163: the accumulator fold (`h + sum(t)`) — also a loop, also `mut` params.
+    let acc_rec = acc_rec_of(part, mask, res_pre);
+    let looping = tail_self.is_some() || acc_rec.is_some();
     let mut params: Vec<String> = part
         .params
         .iter()
@@ -2659,8 +2669,11 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         .map(|(i, (n, t))| {
             if mask.and_then(|m| m.get(i)).copied().unwrap_or(false) {
                 refs.insert(n.clone());
-                format!("{}: &{}", local(n), rs_ty(t))
-            } else if tail_self.is_some() {
+                // a BORROWED param is rebound too under an accumulator fold (the list tail
+                // binder is a reference of the same lifetime), so it also needs `mut`.
+                let m = if acc_rec.is_some() { "mut " } else { "" };
+                format!("{m}{}: &{}", local(n), rs_ty(t))
+            } else if looping {
                 format!("mut {}: {}", local(n), rs_ty(t))
             } else {
                 format!("{}: {}", local(n), rs_ty(t))
@@ -2752,6 +2765,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         row: Vec::new(),
         tail_self: tail_self.clone(),
         fast: false,
+        acc_rec: acc_rec.clone(),
     };
     // REQ-LLL-162: try the speculative raw-i64 twin FIRST. It sits before the exact body —
     // including before its `'__tail: loop` — so a bail-out simply falls through into the
@@ -2763,16 +2777,19 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     // `continue` in a tail call nested inside one would bind to the WRONG loop.
     // The loop never `break`s (every tail position `return`s or `continue`s), so it has
     // type `!` and coerces to the part's return type with no trailing expression.
-    match &tail_self {
-        Some(_) => {
-            out.push_str("    '__tail: loop {\n");
-            emit_body(out, &part.body, 2, &cx, res)?;
-            out.push_str("    }\n}\n");
+    if looping {
+        if let Some(ar) = &acc_rec {
+            out.push_str(&match ar.kind {
+                AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, false)),
+                AccKind::Cons => "    let mut __cons = ::std::vec::Vec::new();\n".to_string(),
+            });
         }
-        None => {
-            emit_body(out, &part.body, 1, &cx, res)?;
-            out.push_str("}\n");
-        }
+        out.push_str("    '__tail: loop {\n");
+        emit_body(out, &part.body, 2, &cx, res)?;
+        out.push_str("    }\n}\n");
+    } else {
+        emit_body(out, &part.body, 1, &cx, res)?;
+        out.push_str("}\n");
     }
     // DYNAMIC half of REQ-LLL-049: a native `#[test]` per example, reusing the
     // SAME `cx` built above for this part's own body — sound because every
@@ -2929,6 +2946,7 @@ fn emit_specialized_part(
         // row-mangled name, so the loop rewrite does not apply — conservative, not silent.
         tail_self: None,
         fast: false,
+        acc_rec: None,
     };
     emit_body(out, &part.body, 1, &cx, has_abort)?;
     out.push_str("}\n");
@@ -3068,6 +3086,10 @@ struct Cx<'a> {
     /// same control flow — which is why the two paths cannot disagree except by
     /// overflowing, and overflowing is exactly what makes the fast one give up.
     fast: bool,
+    /// REQ-LLL-163 — the accumulator recursion this body folds into a loop (see `AccRec`).
+    /// When set, a tail `E ⊕ self(args')` becomes "accumulate E, rebind, continue", and a
+    /// base case returns `acc ⊕ base`. Constant stack, and the fold LLVM would not do.
+    acc_rec: Option<AccRec>,
     /// GUARANTEED tail-call elimination (REQ-LLL-157 follow-up). In a purely functional
     /// language a LOOP *is* a tail recursion, so an unbounded loop must not consume
     /// stack. This used to work only by ACCIDENT: `Int` was `i64`, which has no `Drop`
@@ -3216,6 +3238,174 @@ fn mangle_fast(name: &str) -> String {
     format!("{}_fast", mangle(name))
 }
 
+/// REQ-LLL-163 — an ACCUMULATOR recursion: `f(xs) = base | E ⊕ f(xs')`, folded into a loop.
+///
+/// `h + sum(t)` is NOT a tail call — the addition waits for the return — so it costs one
+/// stack frame PER ELEMENT, and a verified program summing a long list simply CRASHED.
+/// `sum` is the archetypal function of a functional language; it cannot be allowed to.
+///
+/// GCC already does this to C (its `sum()` compiles to a bare loop, zero recursive calls);
+/// LLVM does not, which is the whole of llmlang's list-fold gap — measurement ruled out the
+/// `Int` boxing, the `Rc` header AND cache pressure as causes.
+///
+/// AND WE ARE BETTER PLACED THAN EITHER: `+` here is over EXACT ℤ (DEC-LLL-077), so its
+/// associativity is a THEOREM — not the "unless it's floating point" caveat that keeps a C
+/// compiler from reassociating freely.
+#[derive(Clone)]
+struct AccRec {
+    name: String,
+    params: Vec<String>,
+    kind: AccKind,
+}
+
+/// The two shapes a non-tail self-recursion can still be looped into.
+#[derive(Clone, Copy, PartialEq)]
+enum AccKind {
+    /// `E ⊕ f(x')` with ⊕ ASSOCIATIVE — accumulate into a scalar.
+    Op(BinOp),
+    /// `E :: f(x')` — the list-PRODUCING recursion (`build`, `map`). Just as fatal to the
+    /// stack as the fold: the `cons` wraps the call, so it is not a tail call either, and
+    /// `build(1_000_000)` crashed exactly like `sum` did. Collect the heads in order, then
+    /// rebuild the list from its end — the same shape the comprehension lowering already
+    /// uses (REQ-LLL-067), and sound for the same reason: the language is pure, so the
+    /// order of construction is unobservable, only the resulting list is.
+    Cons,
+}
+
+/// The operator's identity element, which seeds the accumulator.
+fn acc_identity(op: BinOp, fast: bool) -> String {
+    match (op, fast) {
+        (BinOp::Add, true) => "0i64".into(),
+        (BinOp::Add, false) => "LllInt::S(0)".into(),
+        (BinOp::Mul, true) => "1i64".into(),
+        (BinOp::Mul, false) => "LllInt::S(1)".into(),
+        (BinOp::And, _) => "true".into(),
+        (BinOp::Or, _) => "false".into(),
+        _ => unreachable!("acc_identity is only reached for an associative operator"),
+    }
+}
+
+/// May this operator be folded into an accumulator?
+///
+/// THE SOUNDNESS GATE. Only ASSOCIATIVE operators may — and these four are also COMMUTATIVE,
+/// so the direction the accumulator grows in cannot matter either. `-` and `div` are NOT
+/// associative: folding `h - alt(t)` would turn `10 - (3 - (1 - 0)) = 8` into `((0-10)-3)-1
+/// = -14`. A wrong answer inside a program the verifier called correct — the one thing this
+/// language exists to prevent.
+fn is_associative(op: BinOp) -> bool {
+    matches!(op, BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or)
+}
+
+/// Detect the accumulator recursion a part can be folded into. Conservative: a `None` costs
+/// only speed (and the old stack behaviour); a wrong `Some` would be a miscompile.
+///
+/// * **PURE only.** Reassociating an effectful body would reorder its OBSERVABLE effects.
+/// * one side of the associative operator is the self-call, the other contains NO self-call
+///   (otherwise the fold is not a fold).
+/// * a BORROWED parameter may only be rebound from a plain variable (a pattern binder such
+///   as a list tail, which is a reference of the same lifetime). Rebinding it from a
+///   computed value would try to store a reference to a temporary.
+fn acc_rec_of(part: &Part, mask: Option<&Vec<bool>>, res: bool) -> Option<AccRec> {
+    if res || !part.effects.is_empty() || part.params.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
+    let mut found: Option<AccKind> = None;
+    let mut ok = true;
+    scan_tail_yields(&part.body, &mut |e| {
+        let (kind, rec, other) = match e {
+            Expr::Bin(op, a, b) if is_associative(*op) => {
+                match (
+                    is_self_call(a, &part.name, names.len()),
+                    is_self_call(b, &part.name, names.len()),
+                ) {
+                    (true, false) => (AccKind::Op(*op), a.as_ref(), b.as_ref()),
+                    (false, true) => (AccKind::Op(*op), b.as_ref(), a.as_ref()),
+                    _ => return, // neither side, or BOTH — not a fold
+                }
+            }
+            // `E :: self(args')` — the list-producing recursion
+            Expr::Cons(h, t) if is_self_call(t, &part.name, names.len()) => {
+                (AccKind::Cons, t.as_ref(), h.as_ref())
+            }
+            _ => return,
+        };
+        if contains_self_call(other, &part.name) {
+            ok = false;
+            return;
+        }
+        // a borrowed param can only be rebound from a variable (the list tail binder)
+        if let Expr::Call(_, args) = rec {
+            for (i, arg) in args.iter().enumerate() {
+                let borrowed = mask.and_then(|m| m.get(i)).copied().unwrap_or(false);
+                if borrowed && !matches!(arg, Expr::Var(_)) {
+                    ok = false;
+                    return;
+                }
+            }
+        }
+        match found {
+            None => found = Some(kind),
+            Some(prev) if prev == kind => {}
+            Some(_) => ok = false, // two different folds in one part — refuse
+        }
+    });
+    if !ok {
+        return None;
+    }
+    found.map(|kind| AccRec { name: part.name.clone(), params: names, kind })
+}
+
+/// If this tail expression IS the accumulator's recursive shape, return `(self_call, other)`.
+fn acc_rec_arm<'e>(e: &'e Expr, ar: &AccRec) -> Option<(&'e Expr, &'e Expr)> {
+    let n = ar.params.len();
+    match (e, ar.kind) {
+        (Expr::Bin(op, a, b), AccKind::Op(want)) if *op == want => {
+            if is_self_call(a, &ar.name, n) {
+                Some((a.as_ref(), b.as_ref()))
+            } else if is_self_call(b, &ar.name, n) {
+                Some((b.as_ref(), a.as_ref()))
+            } else {
+                None
+            }
+        }
+        (Expr::Cons(h, t), AccKind::Cons) if is_self_call(t, &ar.name, n) => {
+            Some((t.as_ref(), h.as_ref()))
+        }
+        _ => None,
+    }
+}
+
+fn is_self_call(e: &Expr, name: &str, arity: usize) -> bool {
+    matches!(e, Expr::Call(n, args) if n == name && args.len() == arity)
+}
+
+fn contains_self_call(e: &Expr, name: &str) -> bool {
+    let mut hit = false;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Call(n, _) if n == name) {
+            hit = true;
+        }
+    });
+    hit
+}
+
+/// Visit every expression in TAIL position (the `yield`s), skipping `handle` — exactly the
+/// positions `emit_body` will rewrite.
+fn scan_tail_yields(body: &[Stmt], f: &mut dyn FnMut(&Expr)) {
+    for s in body {
+        match s {
+            Stmt::Yield(e) => f(e),
+            Stmt::Match(_, arms) => {
+                for a in arms {
+                    scan_tail_yields(&a.body, f);
+                }
+            }
+            Stmt::Let(..) | Stmt::Handle(_) => {}
+        }
+    }
+}
+
 /// The self-recursion a part's body can loop back into (see `Cx::tail_self`).
 #[derive(Clone)]
 struct TailSelf {
@@ -3358,6 +3548,74 @@ fn emit_body(
                     expr(e, cx, res)?
                 ));
             }
+            // REQ-LLL-163 — `E ⊕ self(args')` in tail position: ACCUMULATE and loop instead
+            // of recursing. The operands are bound to temporaries FIRST, because the
+            // recursive arguments read the very parameters they are about to overwrite (and
+            // `E` reads them too); accumulating before rebinding keeps the update
+            // simultaneous, exactly as the real call's argument evaluation was.
+            Stmt::Yield(e) if cx.acc_rec.as_ref().is_some_and(|ar| acc_rec_arm(e, ar).is_some()) => {
+                let ar = cx.acc_rec.clone().expect("guarded");
+                let (rec, other) = acc_rec_arm(e, &ar).expect("guarded");
+                let args = match rec {
+                    Expr::Call(_, args) => args,
+                    _ => unreachable!("is_self_call proved this is a Call"),
+                };
+                let xs = part_call_args(&ar.name, args, cx, res)?;
+                let mut s = format!("{}{{ let __ae = {}; ", indent(depth), expr(other, cx, false)?);
+                for (i, x) in xs.iter().take(ar.params.len()).enumerate() {
+                    s.push_str(&format!("let __ac{i} = {x}; "));
+                }
+                match ar.kind {
+                    AccKind::Op(op) => {
+                        let fold = if cx.fast {
+                            crate::opsem::form(op).rust_fast("__acc", "__ae")
+                        } else {
+                            crate::opsem::form(op).rust("__acc", "__ae")
+                        };
+                        s.push_str(&format!("__acc = {fold}; "));
+                    }
+                    // collect the heads IN SOURCE ORDER; the list is rebuilt from its end at
+                    // the base case, so the result is identical to the recursion's.
+                    AccKind::Cons => s.push_str("__cons.push(__ae); "),
+                }
+                for (i, p) in ar.params.iter().enumerate() {
+                    s.push_str(&format!("{} = __ac{i}; ", local(p)));
+                }
+                s.push_str("continue '__tail; }\n");
+                out.push_str(&s);
+            }
+            // the BASE case of an accumulator fold: the answer is what we accumulated,
+            // combined with the base value (`acc + 0`, `acc * 1`, …).
+            Stmt::Yield(e) if cx.acc_rec.is_some() && !cx.tail_self.as_ref().is_some_and(|ts| tail_expr_has_self_call(e, ts)) => {
+                let ar = cx.acc_rec.clone().expect("guarded");
+                let v = expr(e, cx, res)?;
+                match ar.kind {
+                    AccKind::Op(op) => {
+                        let fold = if cx.fast {
+                            crate::opsem::form(op).rust_fast("__acc", &v)
+                        } else {
+                            crate::opsem::form(op).rust("__acc", &v)
+                        };
+                        if cx.fast {
+                            out.push_str(&format!(
+                                "{}return ::core::option::Option::Some({fold});\n",
+                                indent(depth)
+                            ));
+                        } else {
+                            out.push_str(&format!("{}return {fold};\n", indent(depth)));
+                        }
+                    }
+                    AccKind::Cons => {
+                        // rebuild from the END onto the base list: consing the collected
+                        // heads in reverse restores exactly the recursion's result.
+                        out.push_str(&format!(
+                            "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
+                             __acc = Rc::new(LstI::Cons(__e, __acc)); }} return __acc; }}\n",
+                            indent(depth)
+                        ));
+                    }
+                }
+            }
             Stmt::Yield(e) if cx.tail_self.is_some() && {
                 let ts = cx.tail_self.clone().expect("guarded");
                 tail_expr_has_self_call(e, &ts)
@@ -3458,6 +3716,7 @@ fn emit_body(
                     // inside a `handle`: never loop back from here (see `Cx::tail_self`)
                     tail_self: None,
         fast: false,
+        acc_rec: None,
                 };
                 let ret_clause = h
                     .clauses
@@ -3541,6 +3800,7 @@ fn emit_body(
                         // would not even compile. Never loop back from here.
                         tail_self: None,
         fast: false,
+        acc_rec: None,
                     };
                     emit_body(out, &c.body, depth + 1, &clause_cx, false)?;
                     out.push_str(&format!("{}}};\n", indent(depth)));
@@ -3579,6 +3839,7 @@ fn emit_body(
                     // inside a `handle`: never loop back from here (see `Cx::tail_self`)
                     tail_self: None,
         fast: false,
+        acc_rec: None,
                 };
                 let call = expr(&h.call, &cx2, res)?;
                 let ret_clause = h

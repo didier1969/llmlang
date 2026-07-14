@@ -13,12 +13,18 @@
 >    of consequence **because the language is pure** — there is no effect to replay. Sound
 >    by construction: the fallback IS the exact semantics.
 >
-> | kernel | llmlang (boxed only) | **llmlang (speculating)** | Rust `i64` | C `gcc -O2` |
-> |---|---|---|---|---|
-> | `lcg` 100M (arithmetic-bound) | 0.79s | **0.03s** | 0.02s | 0.28s |
-> | `fib(40)` (call-heavy) | 2.32s | **0.96s** | 0.68s | 0.32s |
-> | `listsum` (list fold) | 0.41s | **0.41s** — unchanged | — | 0.07s |
-> | `map` (associative read) | 0.65s | **0.52s** | — | 0.36s |
+> | kernel | boxed `Int` | + speculation (REQ-162) | **+ loop-folded (REQ-163)** | Rust `i64` | C `gcc -O2` |
+> |---|---|---|---|---|---|
+> | `lcg` 100M (arithmetic-bound) | 0.79s | 0.03s | **0.03s** | 0.03s | 0.27s |
+> | `fib(40)` (TREE recursion — no fold exists) | 2.32s | 0.96s | **1.00s** | 0.71s | 0.38s |
+> | `listsum` (list fold) | 0.41s | 0.41s | **0.12s** | — | 0.07s |
+> | `map` (associative read) | 0.65s | 0.52s | **0.61s** | — | 0.37s |
+>
+> **`listsum`: 5.9x C → 1.7x C, and a CRASH fixed.** `h + sum(t)` is not a tail call, so it
+> cost one stack frame per element and a *verified* program summing a 1M-element list simply
+> **overflowed the stack**. Both non-tail shapes now compile to loops (REQ-LLL-163):
+> `E ⊕ f(x')` for associative `⊕`, and `E :: f(x')` (the list BUILDER, which crashed too).
+> gcc already did this to C; LLVM did not — and that turned out to be the ENTIRE gap.
 >
 > **`lcg` is back to ~10x faster than gcc -O2 C — and we finally know WHY.** Raw `i64` lets
 > LLVM see that `mod 2^31` makes the recurrence exact arithmetic in a ring where five
@@ -38,13 +44,26 @@
 > `llmlang=-2.26s`); and it compared an overflow-checked llmlang binary against a *wrapping*
 > Rust reference, which measured the safety posture rather than the language.
 >
-> **What is still slow, honestly: `listsum` at ~5x C.** It was at PARITY (0.9x) when `Int`
-> was an `i64`. The whole gap is the boxing of list ELEMENTS: a `List[Int]` is a cons-list
-> of 16-byte `LllInt`s, halving cache density and adding a clone/drop branch per node.
-> Speculation is signature-directed, so a list-carrying part does not qualify. **This is the
-> next frontier**, and the levers are known: proof-guided bounds-check elimination (every
-> `get` is ALREADY proven in-range by Z3, so the runtime check is provably dead code),
-> unboxed collections when the contract bounds the elements, and an 8-byte tagged `LllInt`.
+> **How the `listsum` cause was found — three hypotheses, all WRONG, killed by measurement.**
+> The gap was ~5x C and the obvious suspect was the boxing. It was not:
+>   * *`Int` boxing?* Unboxing the elements buys only 1.2x (0.30s → 0.25s) — and even the
+>     absolute CEILING, a list of raw `i64`, is still 3.6x C. Not the cause.
+>   * *the `Rc` header?* `Rc` (32B nodes) and `Box` (16B nodes, exactly C's layout) both
+>     clock 0.18s. Identical. Not the cause.
+>   * *cache pressure?* A discriminating run with 200-node lists (both L1-resident, same
+>     total node visits) leaves the ratio UNCHANGED (2.3x vs 2.1x). Not the cause — and the
+>     loaded machine was not distorting it either.
+>   * **the real cause, proved in the disassembly:** gcc's `sum()` contains **ZERO recursive
+>     calls** — it is a loop (`add %rdx,%rax; jne`). rustc's contains **22 `call`s**. gcc
+>     applies accumulator-recursion elimination; LLVM does not. Fixed at the SOURCE level in
+>     REQ-LLL-163, where llmlang is better placed than either: `+` is over exact ℤ, so its
+>     associativity is a theorem, not the floating-point caveat that stops a C compiler.
+>
+> **What is still open:** `fib` (2.6x C) is a TREE recursion — two self-calls, no fold
+> exists; the residual is the known rustc-vs-gcc artifact. `aset`'s write-parity (REQ-148).
+> Levers not yet pulled: proof-guided bounds-check elimination (every `get` is ALREADY
+> proven in-range by Z3, so the runtime check is provably dead code), and an 8-byte tagged
+> `LllInt`.
 >
 > The `aset` / `map` analysis below (REQ-LLL-140, the write/associative regime) does not
 > depend on the `Int` representation and still stands.

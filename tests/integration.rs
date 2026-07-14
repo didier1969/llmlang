@@ -37,3 +37,5 @@ mod comprehensions;
 mod bignum;
 #[path = "integration/fastpath.rs"]
 mod fastpath;
+#[path = "integration/accfold.rs"]
+mod accfold;

@@ -53,10 +53,10 @@ module Demo.Core:
 
   | kernel | llmlang | hand-written Rust `i64` | C `gcc -O2` |
   |---|---|---|---|
-  | lcg, 100M iters (arithmetic-bound) | **0.03s** | 0.02s | 0.28s |
-  | fib(40) (call-heavy) | 0.96s | 0.68s | 0.32s |
-  | listsum (list fold) | 0.41s | — | 0.07s |
-  | map (associative read) | 0.52s | — | 0.36s |
+  | lcg, 100M iters (arithmetic-bound) | **0.03s** | 0.03s | 0.27s |
+  | fib(40) (tree recursion) | 1.00s | 0.71s | 0.38s |
+  | listsum (list fold) | **0.12s** | — | 0.07s |
+  | map (associative read) | 0.61s | — | 0.37s |
 
   On the arithmetic kernel llmlang is back to **10x faster than gcc -O2 C** — and we now
   know exactly why, which the old README did not: raw `i64` lets LLVM see that `mod 2^31`
@@ -66,11 +66,25 @@ module Demo.Core:
   arithmetic it can rewrite" — and boxing had taken that away. `fib` is within **1.4x** of
   hand-written Rust (it was 3.6x when boxed).
 
-  **What still costs, honestly.** A `List[Int]` is a cons-list of BOXED elements, so a list
-  fold stays ~5x C (it was at parity when `Int` was an `i64`): the speculation is
-  signature-directed and a list-carrying part does not qualify. That is the next frontier,
-  not a solved problem. And a computation that really does exceed `i64` pays a failed fast
-  attempt before the exact recompute — cheap and rare, but real.
+  A computation that really does exceed `i64` pays a failed fast attempt before the exact
+  recompute — cheap and rare, but real.
+
+- **Folds and list-builders are LOOPS, not recursion (REQ-LLL-163).** `h + sum(t)` is not a
+  tail call — the addition waits for the return — so it cost one stack frame per element,
+  and a *verified* program summing a million-element list simply **crashed**. `sum` is the
+  archetypal function of a functional language; it cannot be allowed to. Both non-tail
+  shapes are now folded into loops: `E ⊕ f(x')` for an ASSOCIATIVE `⊕` (accumulator), and
+  `E :: f(x')` (collect, then rebuild). Constant stack, and **listsum went 0.41s → 0.12s**
+  — from ~5x C to **1.7x**.
+
+  gcc already does this to C (its `sum()` compiles to a bare loop with zero recursive
+  calls); LLVM does not — which, once measured, turned out to be the *entire* list-fold
+  gap. The `Int` boxing, the `Rc` header and cache pressure were each hypothesised and each
+  **ruled out by measurement** before the real cause was found. And here llmlang is better
+  placed than either compiler: `+` is over exact ℤ, so its associativity is a **theorem**,
+  not the "unless it's floating point" caveat that stops a C compiler from reassociating.
+  Non-associative operators (`-`, `div`) and effectful bodies are excluded — folding them
+  would change the answer, or the order of the effects.
 
 - **Exact `Int`, no overflow**: the verifier reasons over mathematical `Int` (ℤ),
   and so does the runtime — `Int` is an arbitrary-precision integer with an `i64`
