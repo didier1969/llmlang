@@ -630,7 +630,13 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         ),
         Expr::Compr { var, iter, guard, body } => Expr::Compr {
             var: var.clone(),
-            iter: Box::new(inline_methods(iter, class, inst)?),
+            iter: match iter {
+                ComprIter::List(xs) => ComprIter::List(Box::new(inline_methods(xs, class, inst)?)),
+                ComprIter::Range(lo, hi) => ComprIter::Range(
+                    Box::new(inline_methods(lo, class, inst)?),
+                    Box::new(inline_methods(hi, class, inst)?),
+                ),
+            },
             guard: match guard {
                 Some(g) => Some(Box::new(inline_methods(g, class, inst)?)),
                 None => None,
@@ -667,6 +673,16 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
         | Expr::Hole(_) => e.clone(),
         Expr::RecordLit(..) => unreachable!("RecordLit is desugared in parse_module (REQ-LLL-077)"),
     })
+}
+
+
+/// Map a function over a comprehension's iteration source (REQ-LLL-166). Both forms live
+/// OUTSIDE the binder, so every traversal treats them identically.
+fn map_compr_iter<F: FnMut(&Expr) -> Expr>(it: &ComprIter, mut f: F) -> ComprIter {
+    match it {
+        ComprIter::List(xs) => ComprIter::List(Box::new(f(xs))),
+        ComprIter::Range(lo, hi) => ComprIter::Range(Box::new(f(lo)), Box::new(f(hi))),
+    }
 }
 
 /// Substitute every free occurrence of `name` in `e` with `val` (capture-avoiding
@@ -721,7 +737,7 @@ pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
             // `iter` is OUTSIDE the binder scope; the GUARD and the `body` are both INSIDE,
             // so `var` shadows a same-named entry in `map` in both (capture avoidance, like
             // Lambda/Forall). REQ-LLL-067 / REQ-LLL-165.
-            let iter = Box::new(subst_vars(iter, map));
+            let iter = map_compr_iter(iter, |e| subst_vars(e, map));
             let mut inner = map.clone();
             inner.remove(var.as_str());
             let scoped = if map.contains_key(var.as_str()) { &inner } else { map };
@@ -1904,25 +1920,44 @@ impl<'a> Emit<'a> {
                 // The GUARD'S OWN obligations are collected BEFORE it is assumed — it is
                 // evaluated at EVERY element, guarded by nothing. Assuming a guard while
                 // proving that same guard total would be circular, and unsound.
-                self.tr(iter, env, None)?;
-                let list_sort = self.sort_of(iter, env).ok_or_else(|| {
-                    format!(
-                        "part `{}`: cannot determine the element type of the comprehension's \
-                         list — bind it to a `let` of a concrete List first",
-                        self.part.name
-                    )
-                })?;
-                let elem_sort = list_elem_sort(&list_sort).ok_or_else(|| {
-                    format!(
-                        "part `{}`: a comprehension iterates a non-list ({list_sort})",
-                        self.part.name
-                    )
-                })?;
+                // The binder's sort, and — for a RANGE — the bounds fact the element enjoys.
+                // A range hands the verifier `lo <= i && i < hi` as a HYPOTHESIS, exactly like
+                // a filter guard: sound for exactly the same reason (the body only ever runs
+                // at elements the loop actually produces). So `[10 div i for i in 1 .. n]`
+                // verifies with no guard at all — the bound IS the proof.
+                let (elem_sort, range_fact) = match iter {
+                    ComprIter::List(xs) => {
+                        self.tr(xs, env, None)?;
+                        let list_sort = self.sort_of(xs, env).ok_or_else(|| {
+                            format!(
+                                "part `{}`: cannot determine the element type of the \
+                                 comprehension's list — bind it to a `let` of a concrete List first",
+                                self.part.name
+                            )
+                        })?;
+                        let es = list_elem_sort(&list_sort).ok_or_else(|| {
+                            format!(
+                                "part `{}`: a comprehension iterates a non-list ({list_sort})",
+                                self.part.name
+                            )
+                        })?;
+                        (es, None)
+                    }
+                    ComprIter::Range(lo, hi) => {
+                        let lo_s = self.tr(lo, env, Some(&Ty::Int))?;
+                        let hi_s = self.tr(hi, env, Some(&Ty::Int))?;
+                        (smt_ty(&Ty::Int), Some((lo_s, hi_s)))
+                    }
+                };
                 let felt = self.fresh(&elem_sort);
                 self.sorts.insert(felt.clone(), elem_sort.clone());
                 let mut env2 = env.clone();
-                env2.insert(var.clone(), felt);
+                env2.insert(var.clone(), felt.clone());
                 let saved = self.hyps.len();
+                if let Some((lo_s, hi_s)) = range_fact {
+                    self.hyps
+                        .push(format!("(and (<= {lo_s} {felt}) (< {felt} {hi_s}))"));
+                }
                 if let Some(g) = guard {
                     let gc = self.tr(g, &env2, Some(&Ty::Bool))?; // its OWN obligations: UNGUARDED
                     self.hyps.push(gc); // ... and only NOW does the body get to assume it

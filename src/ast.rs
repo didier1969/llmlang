@@ -683,10 +683,25 @@ pub enum Expr {
     /// guard's OWN obligations are discharged UNGUARDED (it is evaluated at every element).
     Compr {
         var: String,
-        iter: Box<Expr>,
+        iter: ComprIter,
         guard: Option<Box<Expr>>,
         body: Box<Expr>,
     },
+}
+
+/// What a [`Expr::Compr`] binder iterates (REQ-LLL-067 / REQ-LLL-166).
+///
+/// Both forms are FINITE by construction, so a comprehension never needs a `measure`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ComprIter {
+    /// `for x in xs` — the elements of a `List[T]`, in order.
+    List(Box<Expr>),
+    /// `for i in lo .. hi` — the half-open `Int` range `[lo, hi)`, ascending; EMPTY when
+    /// `hi <= lo` (no error, no infinite loop). It saves writing a recursive `build` part
+    /// just to have something to map over — but the real gain is on the PROOF side: the
+    /// bounds are handed to the verifier as a HYPOTHESIS (`lo <= i && i < hi`), exactly
+    /// like a filter guard, so `[10 div i for i in 1 .. n]` verifies with no guard at all.
+    Range(Box<Expr>, Box<Expr>),
 }
 
 /// The finite domain a [`Expr::Forall`] binder ranges over (REQ-LLL-087). Each domain

@@ -4322,7 +4322,6 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             // The old `__csrc = __ct.clone()` cost a refcount increment — and a matching
             // decrement on drop — PER ELEMENT, pure overhead on a read-only traversal. The
             // source list is bound to `__csrc` first so it OUTLIVES the borrow that walks it.
-            let it = expr(iter, cx, false)?;
             let bd = expr(body, cx, false)?;
             // the FILTER (REQ-LLL-165): the element is only pushed when the guard holds — and
             // the BODY is only EVALUATED then, which is exactly why the verifier is entitled
@@ -4331,17 +4330,33 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 Some(g) => format!("if {} {{ __cout.push({bd}); }}", expr(g, cx, false)?),
                 None => format!("__cout.push({bd});"),
             };
+            // the ITERATION, one shape per source. The collected elements are consed back in
+            // reverse, so both sources yield the list in ASCENDING/source order.
+            let walk = match iter {
+                ComprIter::List(xs) => format!(
+                    "let __csrc = {}; let mut __ccur = &__csrc; \
+                     loop {{ match &**__ccur {{ \
+                     LstI::Nil => break, \
+                     LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); {push} __ccur = __ct; }} \
+                     }} }}",
+                    expr(xs, cx, false)?,
+                    v = local(var)
+                ),
+                // `lo .. hi` (REQ-LLL-166): the half-open Int range, ASCENDING, EMPTY when
+                // `hi <= lo` — the `while` guard makes that total, no error, no infinite loop.
+                ComprIter::Range(lo, hi) => format!(
+                    "let __chi = {}; let mut {v} = {}; \
+                     while {v} < __chi {{ {push} {v} = {v} + LllInt::S(1); }}",
+                    expr(hi, cx, false)?,
+                    expr(lo, cx, false)?,
+                    v = local(var)
+                ),
+            };
             format!(
-                "{{ let __csrc = {it}; let mut __ccur = &__csrc; \
-                 let mut __cout = ::std::vec::Vec::new(); \
-                 loop {{ match &**__ccur {{ \
-                 LstI::Nil => break, \
-                 LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); {push} __ccur = __ct; }} \
-                 }} }} \
+                "{{ let mut __cout = ::std::vec::Vec::new(); {walk} \
                  let mut __cacc = Rc::new(LstI::Nil); \
                  for __ce in __cout.into_iter().rev() {{ __cacc = Rc::new(LstI::Cons(__ce, __cacc)); }} \
-                 __cacc }}",
-                v = local(var)
+                 __cacc }}"
             )
         }
         Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),

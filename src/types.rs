@@ -111,11 +111,15 @@ pub fn render_contract_clause(e: &Expr) -> String {
                 .as_ref()
                 .map(|g| format!(" if {}", render_contract_clause(g)))
                 .unwrap_or_default();
-            format!(
-                "[{} for {var} in {}{g}]",
-                render_contract_clause(body),
-                render_contract_clause(iter)
-            )
+            let src = match iter {
+                ComprIter::List(xs) => render_contract_clause(xs),
+                ComprIter::Range(lo, hi) => format!(
+                    "{} .. {}",
+                    render_contract_clause(lo),
+                    render_contract_clause(hi)
+                ),
+            };
+            format!("[{} for {var} in {src}{g}]", render_contract_clause(body))
         }
         Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             let kw = if matches!(e, Expr::Exists { .. }) { "exists" } else { "forall" };
@@ -250,9 +254,15 @@ fn collect_free_vars(e: &Expr, acc: &mut HashSet<String>) {
             }
         }
         Expr::Compr { var, iter, guard, body } => {
-            // `iter` is free; the binder `var` shadows in the GUARD and in `body`
-            // (REQ-LLL-067 / REQ-LLL-165).
-            collect_free_vars(iter, acc);
+            // the iteration source is free; the binder `var` shadows in the GUARD and in
+            // `body` (REQ-LLL-067 / REQ-LLL-165 / REQ-LLL-166).
+            match iter {
+                ComprIter::List(xs) => collect_free_vars(xs, acc),
+                ComprIter::Range(lo, hi) => {
+                    collect_free_vars(lo, acc);
+                    collect_free_vars(hi, acc);
+                }
+            }
             let mut inner: HashSet<String> = HashSet::new();
             if let Some(g) = guard {
                 collect_free_vars(g, &mut inner);
@@ -2591,8 +2601,17 @@ fn collect_part_refs(
                 }
             }
             Expr::Lambda(_, b) => ex(b, true, is_part, strong, weak),
-            Expr::Compr { iter, body, .. } => {
-                ex(iter, in_lambda, is_part, strong, weak);
+            Expr::Compr { iter, guard, body, .. } => {
+                match iter {
+                    ComprIter::List(xs) => ex(xs, in_lambda, is_part, strong, weak),
+                    ComprIter::Range(lo, hi) => {
+                        ex(lo, in_lambda, is_part, strong, weak);
+                        ex(hi, in_lambda, is_part, strong, weak);
+                    }
+                }
+                if let Some(g) = guard {
+                    ex(g, in_lambda, is_part, strong, weak);
+                }
                 ex(body, in_lambda, is_part, strong, weak);
             }
             Expr::Bin(_, a, b) | Expr::Cons(a, b) => {
@@ -5005,14 +5024,31 @@ fn check_expr(
             // in the guard exactly as in the body. Terminates by construction (a fold over a
             // finite list), so it carries NO `measure` obligation — filtering cannot make a
             // finite list infinite.
-            let it_ty = check_expr(ctx, iter, None)?;
-            let elem = match &it_ty {
-                Ty::List(inner) => (**inner).clone(),
-                other => {
-                    return Err(format!(
-                        "part `{}`: a list comprehension iterates a List, got {other}",
-                        ctx.part.name
-                    ))
+            let elem = match iter {
+                ComprIter::List(xs) => {
+                    let it_ty = check_expr(ctx, xs, None)?;
+                    match &it_ty {
+                        Ty::List(inner) => (**inner).clone(),
+                        other => {
+                            return Err(format!(
+                                "part `{}`: a comprehension iterates a List or an Int range, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    }
+                }
+                // a numeric range binds an `Int` (REQ-LLL-166); both bounds must BE Ints.
+                ComprIter::Range(lo, hi) => {
+                    for (b, which) in [(lo, "lower"), (hi, "upper")] {
+                        let t = check_expr(ctx, b, Some(&Ty::Int))?;
+                        if t != Ty::Int {
+                            return Err(format!(
+                                "part `{}`: the {which} bound of a comprehension range must be an Int, got {t}",
+                                ctx.part.name
+                            ));
+                        }
+                    }
+                    Ty::Int
                 }
             };
             let saved_facts = ctx.path_facts.clone();

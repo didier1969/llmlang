@@ -638,12 +638,20 @@ impl<'a> Norm<'a> {
                 // the other while preserving the hash. But an UNGUARDED comprehension keeps
                 // its OLD canonical form exactly (no `(if …)` clause is emitted), so adding
                 // the filter surface does not re-hash a single line of existing code.
-                let iter_h = self.expr(iter);
+                // The iteration source is OUTSIDE the binder. A `List` source keeps the OLD
+                // canonical form `(in …)` byte-for-byte, so adding the range surface re-hashes
+                // nothing; a range gets its own `(range …)` tag, and the two can never collide.
+                let iter_h = match iter {
+                    ComprIter::List(xs) => format!("(in {})", self.expr(xs)),
+                    ComprIter::Range(lo, hi) => {
+                        format!("(range {} {})", self.expr(lo), self.expr(hi))
+                    }
+                };
                 self.env.push(var.clone());
                 let guard_h = guard.as_ref().map(|g| format!("(if {}) ", self.expr(g)));
                 let body_h = self.expr(body);
                 self.env.pop();
-                format!("(compr (in {iter_h}) {}{body_h})", guard_h.unwrap_or_default())
+                format!("(compr {iter_h} {}{body_h})", guard_h.unwrap_or_default())
             }
             Expr::Forall { var, domain, body } => {
                 // a bounded quantifier (REQ-LLL-087). The DOMAIN (range bounds or the

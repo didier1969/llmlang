@@ -95,7 +95,14 @@ Surface conveniences (all desugar to the kernel above — identical content-hash
   body.** So `[10 div x for x in xs]` is REJECTED (nothing proves `x ≠ 0`), but
   `[10 div x for x in xs if x != 0]` VERIFIES. Use a guard to make a partial body total;
   the guard must actually establish what the body needs (`if x > 0 - 5` does NOT exclude
-  zero, and is correctly rejected). No numeric `lo..hi` range yet — iterate a `List`.
+  zero, and is correctly rejected).
+- **A comprehension may also iterate a numeric RANGE**: `[body for i in lo .. hi]` — the
+  half-open, ascending `Int` range `[lo, hi)`, EMPTY when `hi <= lo` (no error, no hang).
+  Bounds are arbitrary `Int` expressions. **Do NOT write a recursive `build` part just to
+  have a list to map over.** And the bounds are ALSO handed to the verifier as a
+  hypothesis, so `[100 div i for i in 1 .. n]` verifies with no guard at all — the bound
+  IS the proof. (`0 .. n` admits `i == 0` and is correctly rejected.) Range and filter
+  compose: `[i for i in 1 .. 11 if i mod 2 == 0]`.
 
 Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
 algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):

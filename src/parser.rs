@@ -259,7 +259,13 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
         ),
         Expr::Compr { var, iter, guard, body } => Expr::Compr {
             var,
-            iter: Box::new(desugar_expr(*iter, recs)?),
+            iter: match iter {
+                ComprIter::List(xs) => ComprIter::List(Box::new(desugar_expr(*xs, recs)?)),
+                ComprIter::Range(lo, hi) => ComprIter::Range(
+                    Box::new(desugar_expr(*lo, recs)?),
+                    Box::new(desugar_expr(*hi, recs)?),
+                ),
+            },
             guard: match guard {
                 Some(g) => Some(Box::new(desugar_expr(*g, recs)?)),
                 None => None,
@@ -2122,7 +2128,15 @@ impl Parser {
                         self.pos += 1; // eat `for`
                         let var = self.ident()?;
                         self.eat(Tok::In)?;
-                        let iter = self.expr()?;
+                        // the source is either a LIST or a numeric RANGE `lo .. hi`
+                        // (REQ-LLL-166) — the same `..` separator the bounded quantifiers use.
+                        let lo_or_list = self.expr()?;
+                        let iter = if self.peek() == &Tok::DotDot {
+                            self.pos += 1;
+                            ComprIter::Range(Box::new(lo_or_list), Box::new(self.expr()?))
+                        } else {
+                            ComprIter::List(Box::new(lo_or_list))
+                        };
                         // optional FILTER `if <guard>` (REQ-LLL-165). `if` cannot CONTINUE an
                         // expression (it only ever starts one), so `self.expr()` above stops
                         // cleanly at it and no lookahead trickery is needed.
@@ -2133,12 +2147,7 @@ impl Parser {
                             None
                         };
                         self.eat(Tok::RBracket)?;
-                        Ok(Expr::Compr {
-                            var,
-                            iter: Box::new(iter),
-                            guard,
-                            body: Box::new(first),
-                        })
+                        Ok(Expr::Compr { var, iter, guard, body: Box::new(first) })
                     } else {
                         // plain list literal `[a, b, c]`
                         let mut items = vec![first];

@@ -45,3 +45,5 @@ mod concatfold;
 mod rational_exact;
 #[path = "integration/compr_filter.rs"]
 mod compr_filter;
+#[path = "integration/compr_range.rs"]
+mod compr_range;

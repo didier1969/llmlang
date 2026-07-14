@@ -23,7 +23,9 @@
 //!      (typing to `Bool`, quantifier-position) and `tr_contract` (no `if`), which now see the
 //!      inlined body.
 
-use crate::ast::{is_array_spec_term, is_map_spec_term, is_set_spec_term, Expr, Module, Stmt, Ty};
+use crate::ast::{
+    is_array_spec_term, is_map_spec_term, is_set_spec_term, ComprIter, Expr, Module, Stmt, Ty,
+};
 use crate::vc::subst_vars;
 use std::collections::{HashMap, HashSet};
 
@@ -188,7 +190,12 @@ fn inline(e: &Expr, defs: &SpecDefs) -> Result<Expr, String> {
         // is defensive — recurse into both children uniformly (REQ-LLL-067).
         Expr::Compr { var, iter, guard, body } => Ok(Expr::Compr {
             var: var.clone(),
-            iter: Box::new(inline(iter, defs)?),
+            iter: match iter {
+                ComprIter::List(xs) => ComprIter::List(Box::new(inline(xs, defs)?)),
+                ComprIter::Range(lo, hi) => {
+                    ComprIter::Range(Box::new(inline(lo, defs)?), Box::new(inline(hi, defs)?))
+                }
+            },
             guard: match guard {
                 Some(g) => Some(Box::new(inline(g, defs)?)),
                 None => None,
@@ -279,7 +286,12 @@ fn alpha_fresh(e: &Expr, counter: &mut usize, ren: &HashMap<String, String>) -> 
             // `iter` is in the OUTER scope; `var` binds a fresh name over the GUARD and the
             // `body` alike (code-only, defensive — a comprehension never reaches a contract).
             // REQ-LLL-067 / REQ-LLL-165.
-            let iter = Box::new(recur(iter, counter));
+            let iter = match iter {
+                ComprIter::List(xs) => ComprIter::List(Box::new(recur(xs, counter))),
+                ComprIter::Range(lo, hi) => {
+                    ComprIter::Range(Box::new(recur(lo, counter)), Box::new(recur(hi, counter)))
+                }
+            };
             let f = fresh_name(counter);
             let mut inner = ren.clone();
             inner.insert(var.clone(), f.clone());
