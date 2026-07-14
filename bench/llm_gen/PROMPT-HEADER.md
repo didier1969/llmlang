@@ -39,6 +39,14 @@ Rules:
   ITSELF by value to a higher-order part, or via a self-call inside a lambda, is
   rejected — express recursion as a direct call.)
 - Every `match` must be provably exhaustive (add `_ ->` when in doubt).
+- A `match` is a STATEMENT in the last position of a part or arm — NOT an expression. You
+  cannot write `let x = match …`. To choose a value inside an expression use
+  `if c then a else b`; to branch the whole result, make `match` the last statement.
+- `..` (a range) appears ONLY inside a bounded quantifier over an `Array`
+  (`forall i in 0 .. length(a)`). There are no list/range literals — build a `List` with
+  `[]` and `::`, and recurse over it.
+- A guard is written `pattern when <Bool> -> …` as a full match arm (the `when` sits between
+  the pattern and `->`); `when` never appears on its own line or outside a `match`.
 - Contracts (`requires`/`ensures`/`measure`) may not contain calls.
 - Every `ensures` must be provable by an SMT solver from the requires + body.
 
