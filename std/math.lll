@@ -16,9 +16,14 @@ module Std.Math:
       v when v >= 0 -> yield x
       _             -> yield 0 - x
 
-  # Sign as -1 / 0 / +1.
+  # Sign as -1 / 0 / +1. The `ensures` PINS the value per case (not just a range), which is
+  # what lets the `example` clauses discharge: an example is proved from the CONTRACT, so the
+  # contract must determine the result at the example's arguments.
   part sign(x: Int) -> Int:
-    ensures result >= 0 - 1, result <= 1
+    ensures (x > 0 and result == 1) or (x < 0 and result == 0 - 1) or (x == 0 and result == 0)
+    example sign(0 - 3) == 0 - 1
+    example sign(0) == 0
+    example sign(9) == 1
     match x:
       v when v > 0 -> yield 1
       v when v < 0 -> yield 0 - 1
