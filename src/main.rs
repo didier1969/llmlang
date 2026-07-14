@@ -858,7 +858,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 );
                 return Ok(());
             }
-            let rust = codegen::emit_rust(&cm)?;
+            let rust = codegen::emit_rust_for_test(&cm)?;
             std::fs::create_dir_all("build").map_err(|e| e.to_string())?;
             let modfile = cm.module.name.replace('.', "_");
             let rs = Path::new("build").join(format!("{modfile}_test.rs"));

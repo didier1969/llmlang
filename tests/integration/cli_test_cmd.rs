@@ -85,6 +85,20 @@ fn lll_new_scaffolds_a_project_whose_printed_next_steps_all_work() {
     assert!(!again.status.success(), "lll new must REFUSE to overwrite an existing directory");
 }
 
+/// `lll test` teste une BIBLIOTHÈQUE — un module d'`example` SANS `part main`. Le harnais
+/// `--test` fournit son propre `main`, donc exiger un point d'entrée était un défaut (trouvé
+/// en pointant le filet sur `std/money.lll`). C'est précisément le cas d'usage d'une lib.
+#[test]
+fn lll_test_runs_examples_in_a_library_module_without_main() {
+    let src = "module Lib:\n\n  part triple(x: Int) -> Int:\n    ensures result == x + x + x\n    example triple(4) == 12\n    yield 3 * x\n";
+    let (code, out, err) = run_lll_cmd("tcmd_lib", src, &["test"]);
+    assert_eq!(code, Some(0), "a library module with examples must be testable:\n{out}\n{err}");
+    assert!(
+        out.contains("1 passed") || out.contains("test result: ok"),
+        "the library's example must have run, got: {out}"
+    );
+}
+
 /// `lll test` refuse un module qui ne VÉRIFIE pas — on ne teste jamais du code non prouvé
 /// (DEC-LLL-015 : pas de repli runtime).
 #[test]

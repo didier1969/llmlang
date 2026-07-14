@@ -1113,7 +1113,19 @@ fn lllint_runtime() -> &'static str {
     }
 }
 
+/// Emit a runnable program — requires `part main() -> Int` (build/run).
 pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
+    emit_rust_inner(cm, true)
+}
+
+/// Emit for the `--test` harness (REQ-LLL-167): the `example` clauses become `#[test]`s and
+/// libtest supplies its own `main`, so a LIBRARY module (no `part main`, e.g. `std/money.lll`)
+/// is perfectly testable. Everything else is identical to `emit_rust`.
+pub fn emit_rust_for_test(cm: &CheckedModule) -> Result<String, String> {
+    emit_rust_inner(cm, false)
+}
+
+fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(RUNTIME);
     out.push_str(lllint_runtime());
@@ -1653,7 +1665,9 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         let part = &cm.module.parts[cm.index[pname]];
         emit_specialized_part(&mut out, part, rho, &g)?;
     }
-    // entry point
+    // entry point. A runnable build needs `part main() -> Int`; a `--test` build does not
+    // (libtest provides its own `main`), so a library module of `example`-bearing parts is
+    // testable as-is (REQ-LLL-167).
     if let Some(main) = cm.module.parts.iter().find(|p| p.name == "main") {
         if !main.params.is_empty() || main.ret != Ty::Int {
             return Err("`main` must be `part main() -> Int` (optionally via IO)".into());
@@ -1661,7 +1675,7 @@ pub fn emit_rust(cm: &CheckedModule) -> Result<String, String> {
         out.push_str(
             "\nfn main() {\n    __lll_trace_init();\n    let r = lll_main();\n    println!(\"=> {}\", r);\n    __lll_replay_finish();\n}\n",
         );
-    } else {
+    } else if require_main {
         return Err("no `part main() -> Int` found — required by `lll build` in v1".into());
     }
     Ok(out)
