@@ -186,9 +186,13 @@ fn inline(e: &Expr, defs: &SpecDefs) -> Result<Expr, String> {
         Expr::Lambda(ps, body) => Ok(Expr::Lambda(ps.clone(), Box::new(inline(body, defs)?))),
         // A comprehension is code-only (the checker forbids it in a contract/spec), so this
         // is defensive — recurse into both children uniformly (REQ-LLL-067).
-        Expr::Compr { var, iter, body } => Ok(Expr::Compr {
+        Expr::Compr { var, iter, guard, body } => Ok(Expr::Compr {
             var: var.clone(),
             iter: Box::new(inline(iter, defs)?),
+            guard: match guard {
+                Some(g) => Some(Box::new(inline(g, defs)?)),
+                None => None,
+            },
             body: Box::new(inline(body, defs)?),
         }),
         Expr::Forall { var, domain, body } => Ok(Expr::Forall {
@@ -271,14 +275,20 @@ fn alpha_fresh(e: &Expr, counter: &mut usize, ren: &HashMap<String, String>) -> 
                 .collect();
             Expr::Lambda(ps2, Box::new(alpha_fresh(body, counter, &inner)))
         }
-        Expr::Compr { var, iter, body } => {
-            // `iter` is in the OUTER scope; `var` binds a fresh name over `body` (code-only,
-            // defensive — a comprehension never reaches a contract). REQ-LLL-067.
+        Expr::Compr { var, iter, guard, body } => {
+            // `iter` is in the OUTER scope; `var` binds a fresh name over the GUARD and the
+            // `body` alike (code-only, defensive — a comprehension never reaches a contract).
+            // REQ-LLL-067 / REQ-LLL-165.
             let iter = Box::new(recur(iter, counter));
             let f = fresh_name(counter);
             let mut inner = ren.clone();
             inner.insert(var.clone(), f.clone());
-            Expr::Compr { var: f, iter, body: Box::new(alpha_fresh(body, counter, &inner)) }
+            Expr::Compr {
+                var: f,
+                iter,
+                guard: guard.as_ref().map(|g| Box::new(alpha_fresh(g, counter, &inner))),
+                body: Box::new(alpha_fresh(body, counter, &inner)),
+            }
         }
         Expr::Forall { var, domain, body } => {
             let domain = alpha_fresh_domain(domain, counter, ren); // outer scope

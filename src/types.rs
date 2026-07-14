@@ -105,10 +105,14 @@ pub fn render_contract_clause(e: &Expr) -> String {
             render_contract_clause(a),
             render_contract_clause(b)
         ),
-        Expr::Compr { var, iter, body } => {
+        Expr::Compr { var, iter, guard, body } => {
             // code-only (never a contract clause) — defensive render for exhaustiveness.
+            let g = guard
+                .as_ref()
+                .map(|g| format!(" if {}", render_contract_clause(g)))
+                .unwrap_or_default();
             format!(
-                "[{} for {var} in {}]",
+                "[{} for {var} in {}{g}]",
                 render_contract_clause(body),
                 render_contract_clause(iter)
             )
@@ -245,10 +249,14 @@ fn collect_free_vars(e: &Expr, acc: &mut HashSet<String>) {
                 collect_free_vars(fe, acc);
             }
         }
-        Expr::Compr { var, iter, body } => {
-            // `iter` is free; the binder `var` shadows in `body` (REQ-LLL-067).
+        Expr::Compr { var, iter, guard, body } => {
+            // `iter` is free; the binder `var` shadows in the GUARD and in `body`
+            // (REQ-LLL-067 / REQ-LLL-165).
             collect_free_vars(iter, acc);
             let mut inner: HashSet<String> = HashSet::new();
+            if let Some(g) = guard {
+                collect_free_vars(g, &mut inner);
+            }
             collect_free_vars(body, &mut inner);
             inner.remove(var);
             acc.extend(inner);
@@ -4989,12 +4997,14 @@ fn check_expr(
             check_given_satisfied(ctx.part, ctx.module, name, &callee_given, &subst)?;
             subst_ty(&callee_ret, &subst)
         }
-        Expr::Compr { var, iter, body } => {
-            // List comprehension `[body for var in iter]` (REQ-LLL-067). `iter` must be a
-            // `List[T]`; `var : T` scopes over `body : U`; the result is `List[U]`. Checked
-            // in-place (env extended with the binder) — no lambda-lifting, so captures of
-            // enclosing locals are automatic. Terminates by construction (fold over a finite
-            // list), so it carries NO `measure` obligation.
+        Expr::Compr { var, iter, guard, body } => {
+            // List comprehension `[body for var in iter if guard]` (REQ-LLL-067/165). `iter`
+            // must be a `List[T]`; `var : T` scopes over the GUARD (which must be `Bool`) and
+            // over `body : U`; the result is `List[U]`. Checked in-place (env extended with
+            // the binder) — no lambda-lifting, so captures of enclosing locals are automatic,
+            // in the guard exactly as in the body. Terminates by construction (a fold over a
+            // finite list), so it carries NO `measure` obligation — filtering cannot make a
+            // finite list infinite.
             let it_ty = check_expr(ctx, iter, None)?;
             let elem = match &it_ty {
                 Ty::List(inner) => (**inner).clone(),
@@ -5009,6 +5019,18 @@ fn check_expr(
             ctx.vars.push(std::iter::once((var.clone(), elem)).collect());
             ctx.smaller.push(HashMap::new());
             shadow_path_facts(&mut ctx.path_facts, var);
+            if let Some(g) = guard {
+                let g_ty = check_expr(ctx, g, Some(&Ty::Bool))?;
+                if g_ty != Ty::Bool {
+                    ctx.vars.pop();
+                    ctx.smaller.pop();
+                    ctx.path_facts = saved_facts;
+                    return Err(format!(
+                        "part `{}`: a comprehension filter must be a Bool, got {g_ty}",
+                        ctx.part.name
+                    ));
+                }
+            }
             let body_ty = check_expr(ctx, body, None)?;
             ctx.smaller.pop();
             ctx.vars.pop();

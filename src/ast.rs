@@ -672,12 +672,19 @@ pub enum Expr {
     /// must be a `List[T]`; `var : T` scopes over `body : U`; the result is `List[U]`.
     /// It lowers to a native Rust fold over the finite `iter` — no `measure` obligation
     /// (structural, terminates by construction) — but the body's OWN obligations (a
-    /// divide, an array access) ARE discharged under a FRESH arbitrary element `var`, so
-    /// `[10 div x for x in xs]` is correctly REJECTED (x ≠ 0 unprovable). Map/filter
-    /// variants and numeric-range iteration are deliberate follow-ups.
+    /// divide, an array access) ARE discharged under a FRESH arbitrary element `var`.
+    ///
+    /// `guard` is the optional `if` FILTER (REQ-LLL-165), and it is not merely a runtime
+    /// test: the verifier ASSUMES it while discharging the body's obligations. So
+    /// `[10 div x for x in xs]` is still (correctly) REJECTED — nothing proves `x ≠ 0` —
+    /// while `[10 div x for x in xs if x != 0]` VERIFIES. That is a REFINEMENT, not a
+    /// relaxation: without a guard the body had to be total for EVERY element; with one it
+    /// need only be total where the guard holds, which is exactly where it runs. The
+    /// guard's OWN obligations are discharged UNGUARDED (it is evaluated at every element).
     Compr {
         var: String,
         iter: Box<Expr>,
+        guard: Option<Box<Expr>>,
         body: Box<Expr>,
     },
 }

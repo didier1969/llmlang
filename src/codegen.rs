@@ -4312,7 +4312,7 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         // so codegen needs no per-node types; the getter returns an owned clone (via a
         // `&self` irrefutable match), so the result is owned regardless of `res`.
         Expr::Field(e, name) => format!("({}).__f_{name}()", expr(e, cx, res)?),
-        Expr::Compr { var, iter, body } => {
+        Expr::Compr { var, iter, guard, body } => {
             // List comprehension `[body for var in iter]` (REQ-LLL-067): fold over the
             // finite `iter` cons-list, binding each element to `var`, collecting `body`
             // into a fresh list. Names are `__c*`-prefixed; a nested comprehension shadows
@@ -4324,12 +4324,19 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             // source list is bound to `__csrc` first so it OUTLIVES the borrow that walks it.
             let it = expr(iter, cx, false)?;
             let bd = expr(body, cx, false)?;
+            // the FILTER (REQ-LLL-165): the element is only pushed when the guard holds — and
+            // the BODY is only EVALUATED then, which is exactly why the verifier is entitled
+            // to discharge the body's obligations under the guard (see `vc.rs`).
+            let push = match guard {
+                Some(g) => format!("if {} {{ __cout.push({bd}); }}", expr(g, cx, false)?),
+                None => format!("__cout.push({bd});"),
+            };
             format!(
                 "{{ let __csrc = {it}; let mut __ccur = &__csrc; \
                  let mut __cout = ::std::vec::Vec::new(); \
                  loop {{ match &**__ccur {{ \
                  LstI::Nil => break, \
-                 LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); __cout.push({bd}); __ccur = __ct; }} \
+                 LstI::Cons(__ch, __ct) => {{ let {v} = __ch.clone(); {push} __ccur = __ct; }} \
                  }} }} \
                  let mut __cacc = Rc::new(LstI::Nil); \
                  for __ce in __cout.into_iter().rev() {{ __cacc = Rc::new(LstI::Cons(__ce, __cacc)); }} \

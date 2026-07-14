@@ -257,9 +257,13 @@ fn desugar_expr(e: Expr, recs: &Recs) -> Result<Expr, String> {
             Box::new(desugar_expr(*a, recs)?),
             Box::new(desugar_expr(*b, recs)?),
         ),
-        Expr::Compr { var, iter, body } => Expr::Compr {
+        Expr::Compr { var, iter, guard, body } => Expr::Compr {
             var,
             iter: Box::new(desugar_expr(*iter, recs)?),
+            guard: match guard {
+                Some(g) => Some(Box::new(desugar_expr(*g, recs)?)),
+                None => None,
+            },
             body: Box::new(desugar_expr(*body, recs)?),
         },
         Expr::Forall { var, domain, body } => Expr::Forall {
@@ -2119,8 +2123,22 @@ impl Parser {
                         let var = self.ident()?;
                         self.eat(Tok::In)?;
                         let iter = self.expr()?;
+                        // optional FILTER `if <guard>` (REQ-LLL-165). `if` cannot CONTINUE an
+                        // expression (it only ever starts one), so `self.expr()` above stops
+                        // cleanly at it and no lookahead trickery is needed.
+                        let guard = if self.peek() == &Tok::If {
+                            self.pos += 1;
+                            Some(Box::new(self.expr()?))
+                        } else {
+                            None
+                        };
                         self.eat(Tok::RBracket)?;
-                        Ok(Expr::Compr { var, iter: Box::new(iter), body: Box::new(first) })
+                        Ok(Expr::Compr {
+                            var,
+                            iter: Box::new(iter),
+                            guard,
+                            body: Box::new(first),
+                        })
                     } else {
                         // plain list literal `[a, b, c]`
                         let mut items = vec![first];

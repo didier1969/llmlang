@@ -628,9 +628,13 @@ fn inline_methods(e: &Expr, class: &Class, inst: &Instance) -> Result<Expr, Stri
                 .map(|a| inline_methods(a, class, inst))
                 .collect::<Result<_, _>>()?,
         ),
-        Expr::Compr { var, iter, body } => Expr::Compr {
+        Expr::Compr { var, iter, guard, body } => Expr::Compr {
             var: var.clone(),
             iter: Box::new(inline_methods(iter, class, inst)?),
+            guard: match guard {
+                Some(g) => Some(Box::new(inline_methods(g, class, inst)?)),
+                None => None,
+            },
             body: Box::new(inline_methods(body, class, inst)?),
         },
         Expr::Forall { var, domain, body } => Expr::Forall {
@@ -713,18 +717,17 @@ pub(crate) fn subst_vars(e: &Expr, map: &HashMap<&str, &Expr>) -> Expr {
                 Expr::Lambda(ps.clone(), Box::new(subst_vars(body, map)))
             }
         }
-        Expr::Compr { var, iter, body } => {
-            // `iter` is OUTSIDE the binder scope; `body` is INSIDE, so `var` shadows a
-            // same-named entry in `map` (capture avoidance, like Lambda/Forall). REQ-LLL-067.
+        Expr::Compr { var, iter, guard, body } => {
+            // `iter` is OUTSIDE the binder scope; the GUARD and the `body` are both INSIDE,
+            // so `var` shadows a same-named entry in `map` in both (capture avoidance, like
+            // Lambda/Forall). REQ-LLL-067 / REQ-LLL-165.
             let iter = Box::new(subst_vars(iter, map));
-            let body = if map.contains_key(var.as_str()) {
-                let mut inner = map.clone();
-                inner.remove(var.as_str());
-                Box::new(subst_vars(body, &inner))
-            } else {
-                Box::new(subst_vars(body, map))
-            };
-            Expr::Compr { var: var.clone(), iter, body }
+            let mut inner = map.clone();
+            inner.remove(var.as_str());
+            let scoped = if map.contains_key(var.as_str()) { &inner } else { map };
+            let guard = guard.as_ref().map(|g| Box::new(subst_vars(g, scoped)));
+            let body = Box::new(subst_vars(body, scoped));
+            Expr::Compr { var: var.clone(), iter, guard, body }
         }
         Expr::Forall { var, domain, body, .. } | Expr::Exists { var, domain, body, .. } => {
             // the DOMAIN (range bounds or the Map/Set collection) is OUTSIDE the binder's
@@ -1884,13 +1887,23 @@ impl<'a> Emit<'a> {
                 }
                 self.fresh(&smt_ty(&Ty::list(Ty::Int)))
             }
-            Expr::Compr { var, iter, body } => {
+            Expr::Compr { var, iter, guard, body } => {
                 // List comprehension (REQ-LLL-067). Native code construct: the RESULT is
                 // OPAQUE to the pure-core proof (havoc), but the body's OWN obligations MUST
                 // be discharged under a FRESH, ARBITRARY element `var` — so a partial body
                 // (`[10 div x for x in xs]`) is correctly REJECTED (x ≠ 0 unprovable over an
                 // arbitrary element). The checker forbids a comprehension inside a contract,
                 // so this only ever runs while collecting a body's obligations.
+                //
+                // THE FILTER (REQ-LLL-165) is where the proof gets STRONGER, not weaker. The
+                // guard is pushed as a HYPOTHESIS while the body is translated, so the body's
+                // obligations are discharged under `guard(x)` — and `[10 div x for x in xs if
+                // x != 0]` verifies. That is sound because the body only ever RUNS where the
+                // guard held: assuming it is assuming exactly what the runtime guarantees.
+                //
+                // The GUARD'S OWN obligations are collected BEFORE it is assumed — it is
+                // evaluated at EVERY element, guarded by nothing. Assuming a guard while
+                // proving that same guard total would be circular, and unsound.
                 self.tr(iter, env, None)?;
                 let list_sort = self.sort_of(iter, env).ok_or_else(|| {
                     format!(
@@ -1909,7 +1922,13 @@ impl<'a> Emit<'a> {
                 self.sorts.insert(felt.clone(), elem_sort.clone());
                 let mut env2 = env.clone();
                 env2.insert(var.clone(), felt);
+                let saved = self.hyps.len();
+                if let Some(g) = guard {
+                    let gc = self.tr(g, &env2, Some(&Ty::Bool))?; // its OWN obligations: UNGUARDED
+                    self.hyps.push(gc); // ... and only NOW does the body get to assume it
+                }
                 self.tr(body, &env2, None)?;
+                self.hyps.truncate(saved);
                 // result: a `List` of the body's sort — opaque (havoc). Prefer the expected
                 // sort (a typed yield/arg); else derive from the body under the binder.
                 let res_sort = match expected {

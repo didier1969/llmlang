@@ -624,18 +624,26 @@ impl<'a> Norm<'a> {
                 };
                 format!("(call {target} {})", xs.join(" "))
             }
-            Expr::Compr { var, iter, body } => {
+            Expr::Compr { var, iter, guard, body } => {
                 // list comprehension (REQ-LLL-067). A NATIVE node with its OWN canonical
                 // form — a CONSCIOUS identity extension (DEC-LLL-020), like If/Lambda/the
                 // quantifiers: it does NOT collide with the hand-written recursion it
                 // computes. `iter` is OUTSIDE the binder scope; the binder `var` is de-
-                // Bruijn'd in `body` so α-equivalent comprehensions (`[x*2 for x in xs]` vs
-                // `[y*2 for y in xs]`) converge to the SAME content-hash.
+                // Bruijn'd in `body` (and in the GUARD, which is inside the binder too) so
+                // α-equivalent comprehensions (`[x*2 for x in xs]` vs `[y*2 for y in ys]`)
+                // converge to the SAME content-hash.
+                //
+                // The guard is PART OF THE DEFINITION — two comprehensions differing only by
+                // their filter are different definitions, else a refactor could swap one for
+                // the other while preserving the hash. But an UNGUARDED comprehension keeps
+                // its OLD canonical form exactly (no `(if …)` clause is emitted), so adding
+                // the filter surface does not re-hash a single line of existing code.
                 let iter_h = self.expr(iter);
                 self.env.push(var.clone());
+                let guard_h = guard.as_ref().map(|g| format!("(if {}) ", self.expr(g)));
                 let body_h = self.expr(body);
                 self.env.pop();
-                format!("(compr (in {iter_h}) {body_h})")
+                format!("(compr (in {iter_h}) {}{body_h})", guard_h.unwrap_or_default())
             }
             Expr::Forall { var, domain, body } => {
                 // a bounded quantifier (REQ-LLL-087). The DOMAIN (range bounds or the

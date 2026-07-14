@@ -84,14 +84,18 @@ Surface conveniences (all desugar to the kernel above — identical content-hash
   substituted with the decimal text of an **Int** expression (`str_of`), the whole
   string built by `str_cat`. `{{`/`}}` are literal braces. Interpolants are Int-only
   in v1 (a non-Int is a type error); an interpolant may not contain a `"`. Pure sugar:
-  `"a{x}b"` has the SAME content-hash as `str_cat(str_cat("a", str_of(x)), "b")`.
-- **List comprehension** `[body for x in xs]` — maps `body` over each element `x` of a
-  `List`, giving a new `List` (e.g. `[n * 2 for n in xs]`). It is verified in place, so
-  the body may read enclosing names directly, and it needs NO `measure` (it terminates
-  by construction). The body must be TOTAL for an arbitrary element — `[10 div x for x
-  in xs]` is REJECTED (x ≠ 0 is unprovable), so guard the divisor or extract a
-  contracted helper part. Comprehensions are CODE-ONLY (not allowed in a contract). v1
-  is map-only (no `if`-filter, no numeric `lo..hi` range — iterate a `List`).
+  `"a{x}b"` has the SAME content-hash as `str_cat("a", str_cat(str_of(x), "b"))` (the
+  pieces fold RIGHT, which keeps concatenation linear rather than quadratic).
+- **List comprehension** `[body for x in xs]`, with an optional **filter**
+  `[body for x in xs if guard]` — maps `body` over each element `x` of a `List`, keeping
+  only those satisfying `guard`, giving a new `List` (e.g. `[n * 2 for n in xs if n > 0]`).
+  Verified in place, so the body AND the guard may read enclosing names directly; needs NO
+  `measure` (it terminates by construction). CODE-ONLY (not allowed in a contract).
+  **The filter is not just a runtime test — the verifier ASSUMES it while checking the
+  body.** So `[10 div x for x in xs]` is REJECTED (nothing proves `x ≠ 0`), but
+  `[10 div x for x in xs if x != 0]` VERIFIES. Use a guard to make a partial body total;
+  the guard must actually establish what the body needs (`if x > 0 - 5` does NOT exclude
+  zero, and is correctly rejected). No numeric `lo..hi` range yet — iterate a `List`.
 
 Writing EFFICIENT verified recursion (a proof obligation does NOT force a slow
 algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can):
@@ -103,9 +107,14 @@ algorithm — prefer O(log n) divide-and-conquer over an O(n) scan when you can)
 - Write the DIRECT expression: `(lo + hi) div 2`, `mid * mid <= n`. `Int` is exact, so
   the classic C/Java overflow dodges (`lo + (hi - lo) div 2`, dividing instead of
   multiplying) buy nothing here — they only cost you clarity and tokens.
-- A self TAIL-call is compiled to a LOOP (constant stack, guaranteed), so an accumulator
-  loop may iterate billions of times safely. Write the natural tail-recursive
-  accumulator; do not hand-unroll or bound it out of fear of the stack.
+- **Recursion does not cost stack.** Three shapes are compiled to LOOPS, guaranteed:
+  a self TAIL-call (`f(x')`); an ASSOCIATIVE fold (`h + f(t)`, `h * f(t)`, `and`, `or`);
+  and a list BUILDER or CONCATENATION (`h :: f(t)`, `str_cat(h, f(t))`). So `sum`, `map`,
+  `build` and `join` all run in constant stack over a list of millions. Write the natural
+  recursion — do NOT hand-roll an accumulator, unroll, or cap the input out of fear of
+  overflowing the stack. (A NON-associative fold like `h - f(t)`, and a tree recursion
+  like `fib(n-1) + fib(n-2)`, stay real recursions — correctly, since neither can be
+  turned into a loop.)
 - Contracts are ERASED at runtime, so products in `requires`/`ensures`
   (`lo*lo`, `(result+1)*(result+1)`) cost nothing — only the BODY executes.
 

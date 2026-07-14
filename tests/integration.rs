@@ -43,3 +43,5 @@ mod accfold;
 mod concatfold;
 #[path = "integration/rational_exact.rs"]
 mod rational_exact;
+#[path = "integration/compr_filter.rs"]
+mod compr_filter;
