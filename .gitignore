@@ -30,3 +30,4 @@ bench/agentic/race_out/*_bin
 bench/agentic/race_out/*.log
 bench/agentic/race_out/armL.lll
 bench/agentic/race_out/armR.rs
+bench/agentic/race_out/sweep/*.log

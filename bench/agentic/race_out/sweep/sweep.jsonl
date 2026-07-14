@@ -1,0 +1,54 @@
+{
+  "model": "anthropic/claude-opus-4.8",
+  "proved": true,
+  "rounds": 1,
+  "L": [
+    3569,
+    325,
+    0.02597
+  ],
+  "R": [
+    376,
+    2229,
+    0.057604999999999996
+  ],
+  "escaped": 0,
+  "battery": 22,
+  "total_cost": 0.083575
+}
+{
+  "model": "anthropic/claude-opus-4.8",
+  "proved": true,
+  "rounds": 1,
+  "L": [
+    3569,
+    331,
+    0.02612
+  ],
+  "R": [
+    334,
+    2187,
+    0.05634499999999999
+  ],
+  "escaped": 0,
+  "battery": 22,
+  "total_cost": 0.082465
+}
+{
+  "model": "anthropic/claude-opus-4.8",
+  "proved": true,
+  "rounds": 1,
+  "L": [
+    3569,
+    329,
+    0.02607
+  ],
+  "R": [
+    334,
+    2187,
+    0.05634499999999999
+  ],
+  "escaped": 0,
+  "battery": 22,
+  "total_cost": 0.08241499999999999
+}

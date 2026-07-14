@@ -77,12 +77,14 @@ Même agent (Claude opus-4.8 via API), deux langages, tâche entière. Durcissem
 `isqrt` O(log n) fait trébucher **même opus** sur une vraie obligation Z3 (là où gpt-4o ne
 répare jamais). Deux différentiels mesurés :
 
-**(a) Preuve vs test — coût-de-la-confiance.** La boucle verify↔repair mène opus de son bug
-subtil à une **preuve machine** (correct pour *tout* i64) en 4 tours (**0,14 $**) ; le Rust
-d'opus compile + testé en **0,06 $**, 0 bug échappé/22. **Honnête : llmlang coûte ~2,5× PLUS**
-ici — il achète une *preuve* (garantie totale) contre une prime de tokens ; Rust est moins
-cher mais seulement *testé*. Le win *token* reste porté par le banc contexte (#1), pas par la
-course.
+**(a) Preuve vs test — coût-de-la-confiance (4 essais).** Sur 3 essais/4, opus écrit un isqrt
+correct du 1ᵉʳ coup : `lll check` le **prouve** (tout i64) pour **~0,026 $**. Pour atteindre une
+assurance comparable en Rust, il faut *écrire une batterie de tests* (~2200 tokens) → **~0,056 $**.
+Donc **atteindre une PREUVE en llmlang coûte moins de la MOITIÉ d'atteindre une simple
+confiance TESTÉE en Rust** — et une preuve ≫ des tests. (Le 4ᵉ essai : opus a ship le bug
+subtil, la boucle l'a réparé jusqu'à la preuve en 4 tours, 0,14 $ — outlier, toujours prouvé.)
+Le win *token* pur reste le banc contexte (#1) ; ici c'est le **coût-de-la-confiance** qui
+penche pour llmlang.
 
 **(b) Sûreté — overflow silencieux (spectaculaire).** `sum_of_squares([3037000500])` (carré
 au-delà de i64) : le Rust **idiomatique naturel d'opus** (`.map(|x| x*x).sum()`, aucune garde)

@@ -7,15 +7,13 @@ fn isqrt(n: i64) -> i64 {
     }
     let mut lo: i64 = 1;
     let mut hi: i64 = 3_037_000_499;
-    let mut ans: i64 = 1;
-    while lo <= hi {
-        let mid = lo + (hi - lo) / 2;
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
         if mid <= n / mid {
-            ans = mid;
-            lo = mid + 1;
+            lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    ans
+    lo
 }
