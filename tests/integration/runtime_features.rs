@@ -59,6 +59,23 @@ fn effect_generic_pure_lambda_argument() {
     assert!(build_run(src).contains("=> 105"), "pure lambda argument wrong");
 }
 
+/// REQ-LLL-177 — KNOWN VC SOUNDNESS HOLE, not yet fixed (kept `#[ignore]` until the fix
+/// lands, per operator/advisor gate on prove-fork changes). The `Ty::Fun` branch of the
+/// `Expr::Call` arm (src/vc.rs ~2390) binds a fresh UF for a function-valued parameter but
+/// NEVER translates the argument expression, so a lambda's body obligations are dropped:
+/// `\(y) -> 10 div y` is never proved `y != 0`. This program therefore VERIFIES today and
+/// would crash at runtime (`10 div 0`). When the fix emits lambda-argument obligations,
+/// verification MUST fail here — remove the `#[ignore]` at that point.
+#[test]
+#[ignore = "REQ-LLL-177: known false-proof (lambda-arg body obligations dropped) — un-ignore when the VC fix lands"]
+fn lambda_argument_body_obligations_must_be_discharged_req177() {
+    let src = "module M:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n\n  part main() -> Int via IO:\n    yield IO.print(apply(\\(y: Int) -> 10 div y, 0))\n";
+    assert!(
+        !verify_src(src).ok(),
+        "a lambda whose body divides by its own parameter must NOT verify unguarded (REQ-177)"
+    );
+}
+
 
 #[test]
 fn user_effect_multi_op_handler_runs() {

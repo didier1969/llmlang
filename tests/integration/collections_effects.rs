@@ -63,6 +63,26 @@ fn all_pure_stdlib_modules_verify() {
     }
 }
 
+/// REQ-LLL-178: a polymorphic EMPTY builtin (`map()`/`emptyset()`/`array()`) takes its type
+/// from context, so two occurrences at DIFFERENT monomorphic types are byte-identical ASTs.
+/// The optimizer must NOT hashcons/CSE-share them — before the fix it emitted a single
+/// `__lll_cse_0` used at two types, so codegen produced ill-typed Rust (rustc E0308) on a
+/// VALID program. Here `useII` wants `Map[Int,Int]` and `useIB` wants `Map[Int,Bool]`.
+#[test]
+fn empty_polymorphic_builtins_are_not_shared_across_types_req178() {
+    let src = "module M:\n\n  part useII(m: Map[Int, Int]) -> Bool:\n    yield haskey(m, 1)\n\n  \
+               part useIB(m: Map[Int, Bool]) -> Bool:\n    yield haskey(m, 1)\n\n  \
+               part f() -> Bool:\n    yield useII(map()) and useIB(map())\n\n  \
+               part main() -> Int via IO:\n    match f():\n      true -> yield IO.print(1)\n      \
+               _    -> yield IO.print(0)\n";
+    // both maps are empty → `false and false` → prints 0; the point is that it COMPILES.
+    let out = build_run(src);
+    assert!(
+        out.contains("=> 0"),
+        "two empty maps of different types must build (no shared ill-typed CSE) and run, got: {out:?}"
+    );
+}
+
 
 #[test]
 fn stdlib_math_verifies_and_computes_exactly() {

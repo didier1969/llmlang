@@ -214,6 +214,18 @@ impl EGraph {
                 let cs: Vec<Id> = xs.iter().map(|x| self.add(x)).collect();
                 self.mk(Node::Tuple(cs))
             }
+            // REQ-LLL-178: a polymorphic EMPTY builtin constructor — `map()` / `emptyset()`
+            // / `array()` — takes its key/value/element type from CONTEXT, not from args, so
+            // two occurrences at DIFFERENT monomorphic types have byte-identical ASTs. Left in
+            // the hashconsing arm below they share ONE `Node::Call(name, [])` and CSE emits a
+            // single ill-typed Rust binding (e.g. a `Map<_, bool>` used where a `Map<_, LllInt>`
+            // is expected). This is the SAME hazard the empty-list-literal case above guards
+            // against; keep each empty UNIQUE per occurrence (zero-cost, so no sharing is lost).
+            Expr::Call(name, args)
+                if args.is_empty() && matches!(name.as_str(), "map" | "emptyset" | "array") =>
+            {
+                self.opaque_of(e)
+            }
             Expr::Call(name, args) if self.is_pure_call(name) => {
                 let cs: Vec<Id> = args.iter().map(|a| self.add(a)).collect();
                 self.mk(Node::Call(name.clone(), cs))
