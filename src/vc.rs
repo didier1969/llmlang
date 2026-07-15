@@ -27,7 +27,15 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub const VCGEN_VERSION: &str = "lll-vcgen-2";
+/// The verifier EPOCH folded into every proof-cache key (DEC-LLL-025:
+/// `blake3(version_vcgen | proof_hash | env_hash)`). It MUST be bumped whenever a
+/// soundness-affecting change to obligation generation alters *what verifies* — otherwise a
+/// program cached `proved` under the OLD, unsound checker keeps a stale `proved (cache hit)`
+/// after the fix (observed: a HOF partial-lambda cached before REQ-LLL-177, still "proved"
+/// post-fix until this bump). Bumped to `-3` for the REQ-LLL-177 obligation-emission fix. Making
+/// this bump UN-FORGETTABLE (auto-derive from the VC source, or a differential cache-cold/warm CI
+/// gate) is the standing follow-up REQ-LLL-179 — this manual constant is the interim mechanism.
+pub const VCGEN_VERSION: &str = "lll-vcgen-3";
 const Z3_TIMEOUT_MS: u32 = 4000;
 
 #[derive(Debug, Clone)]
