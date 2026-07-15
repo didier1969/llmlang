@@ -1477,6 +1477,70 @@ fn export_ist_emits_axon_extraction_result() {
     );
 }
 
+#[test]
+fn export_ist_emits_cyclomatic_complexity() {
+    // REQ-LLL-172 (cross-repo REQ-AXO-902185): `export-ist` carries a McCabe
+    // cyclomatic complexity per part in `properties["cyclomatic_complexity"]`
+    // (a STRING, same key as Axon's 13 other language parsers) so the .lll
+    // ecosystem joins the Structural-Health-Index "god-objects" dimension.
+    // Convention (aligned with axon parser/rust.rs::count_branches): base 1 +1
+    // per `if`, per loop (comprehension), and per `match` arm; `&&`/`||` are
+    // NOT counted.
+    let dir = tempdir();
+    let path = dir.join("cc.lll");
+    std::fs::write(
+        &path,
+        "module CC:\n\n\
+         \x20 part flat(x: Int) -> Int:\n\
+         \x20   yield x + 1\n\n\
+         \x20 part cond(x: Int) -> Int:\n\
+         \x20   yield if x > 0 then 1 else 0\n\n\
+         \x20 part classify(x: Int) -> Int:\n\
+         \x20   match x:\n\
+         \x20     0 -> yield 0\n\
+         \x20     _ -> yield 1\n\n\
+         \x20 part mapped(xs: List[Int]) -> List[Int]:\n\
+         \x20   yield [x + x for x in xs]\n\n\
+         \x20 part andcond(x: Int) -> Int:\n\
+         \x20   yield if x > 0 and x < 10 then 1 else 0\n\n\
+         \x20 part clamp(xs: List[Int]) -> List[Int]:\n\
+         \x20   yield [if x > 0 then x else 0 for x in xs]\n\n\
+         \x20 part main() -> Int via IO:\n\
+         \x20   yield IO.print(flat(3))\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["export-ist", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "export-ist failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let syms = v["symbols"].as_array().unwrap();
+    let cc = |name: &str| -> String {
+        syms
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("{name} symbol"))["properties"]["cyclomatic_complexity"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} cyclomatic_complexity is a string"))
+            .to_string()
+    };
+    // a straight-line body has the base complexity of 1
+    assert_eq!(cc("flat"), "1");
+    assert_eq!(cc("main"), "1");
+    // one `if`-expression → +1
+    assert_eq!(cc("cond"), "2");
+    // a `match` with two arms → +2
+    assert_eq!(cc("classify"), "3");
+    // one comprehension (a loop) → +1
+    assert_eq!(cc("mapped"), "2");
+    // `&&` is NOT a counted decision point (first-pass parity with Axon): the
+    // single `if` gives 2, the `and` adds nothing.
+    assert_eq!(cc("andcond"), "2");
+    // a comprehension (+1) whose body nests an `if` (+1) → 3.
+    assert_eq!(cc("clamp"), "3");
+}
+
 
 #[test]
 fn algebraic_effect_state_verifies_and_runs() {

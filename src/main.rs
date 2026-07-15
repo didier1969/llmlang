@@ -367,6 +367,9 @@ fn export_ist(file: &str) -> Result<String, String> {
                     "requires={},ensures={},measure={}",
                     p.requires.len(), p.ensures.len(), p.measure.len()
                 ),
+                // REQ-LLL-172 (cross-repo REQ-AXO-902185): McCabe complexity as a
+                // string, same key/convention as Axon's 13 other language parsers.
+                "cyclomatic_complexity": cyclomatic_complexity(&p.body).to_string(),
             },
         }));
         let mut deps: Vec<String> = Vec::new();
