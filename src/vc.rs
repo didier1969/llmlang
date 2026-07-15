@@ -2412,6 +2412,39 @@ impl<'a> Emit<'a> {
                                 }
                                 self.tr(lbody, &lenv, Some(ret.as_ref()))?;
                                 self.hyps = saved_hyps;
+                            } else if let Expr::Var(vname) = a {
+                                // REQ-LLL-177 twin (part-NAME form): a part passed by name as a
+                                // TOTAL function value must itself be total — its `requires` must
+                                // hold for EVERY input. A part self-checks UNDER its requires, which
+                                // does NOT prove totality, so a partial part (`p(y) requires y != 0`)
+                                // would be applied to any argument with its precondition dropped
+                                // (the same false proof as the lambda form, reached differently).
+                                // Emit each `requires` under FRESH constants for the part's params;
+                                // an undischarged one rejects the partial part. A function-valued
+                                // LOCAL (a bound param — not in the part index) was already proven
+                                // total at its own binding site, so it is skipped.
+                                if let Some(&pidx) = self.cm.index.get(vname.as_str()) {
+                                    let preqs = self.cm.module.parts[pidx].requires.clone();
+                                    let pparams = self.cm.module.parts[pidx].params.clone();
+                                    let mut penv = env.clone();
+                                    for (ppn, ppt) in &pparams {
+                                        let c = self.fresh(&smt_ty(ppt));
+                                        penv.insert(ppn.clone(), c);
+                                    }
+                                    for req in &preqs {
+                                        let goal = self.tr_contract(req, &penv)?;
+                                        self.obls.push(Obligation {
+                                            part: self.part.name.clone(),
+                                            descr: format!(
+                                                "part `{vname}` used as a total function value: its \
+                                                 `requires` must hold for every input (REQ-LLL-177)"
+                                            ),
+                                            decls: self.decls.clone(),
+                                            hyps: self.hyps.clone(),
+                                            goal,
+                                        });
+                                    }
+                                }
                             }
                         }
                         _ => {

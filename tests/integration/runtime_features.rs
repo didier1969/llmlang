@@ -81,6 +81,14 @@ fn lambda_argument_body_obligations_must_be_discharged_req177() {
     // (d) a TOTAL lambda body still verifies — no completeness regression.
     let ok = "module M:\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main() -> Int via IO:\n    yield IO.print(apply(\\(y: Int) -> y + 1, 41))\n";
     assert!(verify_src(ok).ok(), "a total lambda body must still verify (REQ-177 completeness)");
+    // (e) THE TWIN: a PARTIAL part (a load-bearing `requires`) passed by NAME as a total
+    // function value must be rejected — self-checking under its requires does not prove it
+    // total, so applying it drops the precondition (the same false proof, part-name form).
+    let partial = "module M:\n  part p(y: Int) -> Int:\n    requires y != 0\n    yield 10 div y\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main() -> Int via IO:\n    yield IO.print(apply(p, 0))\n";
+    assert!(!verify_src(partial).ok(), "a partial part passed by name as a total function must NOT verify");
+    // (f) a TOTAL part (no requires) passed by name still verifies.
+    let total = "module M:\n  part inc(y: Int) -> Int:\n    yield y + 1\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main() -> Int via IO:\n    yield IO.print(apply(inc, 41))\n";
+    assert!(verify_src(total).ok(), "a total part passed by name must still verify (REQ-177 completeness)");
 }
 
 
