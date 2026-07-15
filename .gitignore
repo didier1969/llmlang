@@ -3,6 +3,8 @@
 *.zip
 .lll-cache/
 /build
+# generated build dirs from `lll build/run/test` invoked in any directory (sweeps, examples/)
+build/
 # lsp buffer temp (REQ-LLL-160) — sibling of the edited file, normally auto-removed
 .lll-lsp-*
 
