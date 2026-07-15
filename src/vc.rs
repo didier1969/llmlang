@@ -28,14 +28,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The verifier EPOCH folded into every proof-cache key (DEC-LLL-025:
-/// `blake3(version_vcgen | proof_hash | env_hash)`). It MUST be bumped whenever a
-/// soundness-affecting change to obligation generation alters *what verifies* — otherwise a
-/// program cached `proved` under the OLD, unsound checker keeps a stale `proved (cache hit)`
-/// after the fix (observed: a HOF partial-lambda cached before REQ-LLL-177, still "proved"
-/// post-fix until this bump). Bumped to `-3` for the REQ-LLL-177 obligation-emission fix. Making
-/// this bump UN-FORGETTABLE (auto-derive from the VC source, or a differential cache-cold/warm CI
-/// gate) is the standing follow-up REQ-LLL-179 — this manual constant is the interim mechanism.
-pub const VCGEN_VERSION: &str = "lll-vcgen-3";
+/// `blake3(VCGEN_VERSION | proof_hash | env_hash)`). It MUST change whenever a soundness-affecting
+/// change to obligation generation alters *what verifies* — otherwise a program cached `proved`
+/// under the OLD, unsound checker keeps a stale `proved (cache hit)` after the fix (observed: a
+/// HOF partial-lambda cached before REQ-LLL-177 stayed "proved" post-fix until a manual bump).
+///
+/// REQ-LLL-179: this is now AUTO-DERIVED by `build.rs` — a blake3 of the verdict-determining
+/// sources (`vc.rs`/`opsem.rs`/`hash.rs`) — so any edit to them moves the epoch automatically and
+/// the manual bump can never be forgotten. `env!` reads the value `build.rs` emits.
+pub const VCGEN_VERSION: &str = env!("VCGEN_VERSION");
 const Z3_TIMEOUT_MS: u32 = 4000;
 
 #[derive(Debug, Clone)]
