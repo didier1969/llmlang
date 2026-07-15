@@ -2392,6 +2392,27 @@ impl<'a> Emit<'a> {
                             let f = self.fresh_fun(&sorts, &smt_ty(ret));
                             cenv.insert(pn.clone(), f);
                             memoizable = false;
+                            // REQ-LLL-177: a lambda ARGUMENT is not a part — its body
+                            // obligations (a divide, an array bound, a callee `requires`) are
+                            // discharged NOWHERE ELSE, so a partial lambda would slip through as
+                            // total (a false proof: `apply(\(y) -> 10 div y, 0)` verified, then
+                            // crashed). Emit them here under FRESH constants for the lambda's
+                            // params — universal generalization: the lambda must be total for ANY
+                            // input, exactly like a part. Lambdas are capture-free (DEC-LLL-037),
+                            // so the body mentions only its own (fresh) params; a `Var` argument
+                            // names a part, which self-checks, so only a literal lambda needs
+                            // this. Snapshot `hyps` so an `ensures` the body assumes (about the
+                            // fresh params) cannot leak into the enclosing part's later obligations.
+                            if let Expr::Lambda(lparams, lbody) = a {
+                                let saved_hyps = self.hyps.clone();
+                                let mut lenv = env.clone();
+                                for (lpn, lpt) in lparams {
+                                    let c = self.fresh(&smt_ty(lpt));
+                                    lenv.insert(lpn.clone(), c);
+                                }
+                                self.tr(lbody, &lenv, Some(ret.as_ref()))?;
+                                self.hyps = saved_hyps;
+                            }
                         }
                         _ => {
                             // thread the parameter type so an empty `array()` passed

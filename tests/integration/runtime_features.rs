@@ -59,21 +59,28 @@ fn effect_generic_pure_lambda_argument() {
     assert!(build_run(src).contains("=> 105"), "pure lambda argument wrong");
 }
 
-/// REQ-LLL-177 — KNOWN VC SOUNDNESS HOLE, not yet fixed (kept `#[ignore]` until the fix
-/// lands, per operator/advisor gate on prove-fork changes). The `Ty::Fun` branch of the
-/// `Expr::Call` arm (src/vc.rs ~2390) binds a fresh UF for a function-valued parameter but
-/// NEVER translates the argument expression, so a lambda's body obligations are dropped:
-/// `\(y) -> 10 div y` is never proved `y != 0`. This program therefore VERIFIES today and
-/// would crash at runtime (`10 div 0`). When the fix emits lambda-argument obligations,
-/// verification MUST fail here — remove the `#[ignore]` at that point.
+/// REQ-LLL-177 (FIXED): a lambda ARGUMENT's body obligations must be discharged. The
+/// `Ty::Fun` branch of the `Expr::Call` arm (src/vc.rs) bound a fresh UF for the parameter
+/// but never translated the argument, so a lambda's body obligations were dropped and a
+/// PARTIAL lambda passed as total — `\(y) -> 10 div y` verified without proving `y != 0`,
+/// then crashed at runtime. The fix emits the body obligations under fresh constants for the
+/// lambda's params (universal generalization, like a part). This must hold across EVERY
+/// Fun-consuming path — a one-branch patch to a multi-path hole reads as fixed but isn't — so
+/// all three routings are exercised, plus a total-body case to guard against over-rejection.
 #[test]
-#[ignore = "REQ-LLL-177: known false-proof (lambda-arg body obligations dropped) — un-ignore when the VC fix lands"]
 fn lambda_argument_body_obligations_must_be_discharged_req177() {
-    let src = "module M:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n\n  part main() -> Int via IO:\n    yield IO.print(apply(\\(y: Int) -> 10 div y, 0))\n";
-    assert!(
-        !verify_src(src).ok(),
-        "a lambda whose body divides by its own parameter must NOT verify unguarded (REQ-177)"
-    );
+    // (a) a direct part call with a function parameter
+    let apply = "module M:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n\n  part main() -> Int via IO:\n    yield IO.print(apply(\\(y: Int) -> 10 div y, 0))\n";
+    assert!(!verify_src(apply).ok(), "div-by-param lambda via a direct HOF call must NOT verify");
+    // (b) a RECURSIVE user `map` — the common, real-world case
+    let mapd = "module M:\n\n  part map1(f: (Int) -> Int, xs: List[Int]) -> List[Int]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield f(h) :: map1(f, t)\n\n  part main() -> Int via IO:\n    match map1(\\(x: Int) -> 10 div x, 0 :: []):\n      []     -> yield IO.print(0)\n      h :: t -> yield IO.print(h)\n";
+    assert!(!verify_src(mapd).ok(), "div-by-param lambda via a recursive map must NOT verify");
+    // (c) the EFFECT-GENERIC HOF path (`via e`)
+    let effd = "module M:\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n  part main() -> Int:\n    yield apply(\\(y: Int) -> 10 div y, 0)\n";
+    assert!(!verify_src(effd).ok(), "div-by-param lambda via an effect-generic HOF must NOT verify");
+    // (d) a TOTAL lambda body still verifies — no completeness regression.
+    let ok = "module M:\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main() -> Int via IO:\n    yield IO.print(apply(\\(y: Int) -> y + 1, 41))\n";
+    assert!(verify_src(ok).ok(), "a total lambda body must still verify (REQ-177 completeness)");
 }
 
 
