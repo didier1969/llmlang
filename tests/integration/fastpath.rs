@@ -38,6 +38,22 @@ fn a_computation_that_overflows_i64_falls_back_and_stays_exact() {
     );
 }
 
+/// REQ-LLL-176: unary negation is a fast-path arithmetic op too — and it was the ONE that
+/// bypassed the checked/bail machinery (`Bin` routes through opsem `rust_fast`, `Neg` used a
+/// raw `-x`). `negate(i64::MIN)` therefore VERIFIED then PANICKED ("attempt to negate with
+/// overflow") — a verified, total program crashing = model≢binary. The fast twin must bail to
+/// the exact path (which represents +2^63 exactly), exactly like the checked binary ops.
+#[test]
+fn unary_negation_overflow_falls_back_and_stays_exact() {
+    // `0 - i64::MAX - 1` == i64::MIN — built without an out-of-range positive literal.
+    let src = "module M:\n\n  part negate(x: Int) -> Int:\n    yield -x\n\n  part main() -> Int via IO:\n    yield IO.print(negate(0 - 9223372036854775807 - 1))\n";
+    let out = build_run(src);
+    assert!(
+        out.contains("9223372036854775808"),
+        "negate(i64::MIN) must fall back to exact and give +2^63, got: {out:?}"
+    );
+}
+
 /// Le pendant : le chemin rapide doit être RÉELLEMENT émis et emprunté (sinon la feature
 /// est un no-op qui passerait tous les tests de justesse en silence).
 #[test]

@@ -4373,7 +4373,18 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                  __cacc }}"
             )
         }
-        Expr::Neg(a) => format!("(-{})", expr(a, cx, res)?),
+        Expr::Neg(a) => {
+            let inner = expr(a, cx, res)?;
+            if cx.fast {
+                // REQ-LLL-176: on the speculative i64 twin, unary negation must BAIL on
+                // overflow (negating i64::MIN) via `?`, exactly like `Bin`'s checked ops
+                // (opsem `rust_fast`). A raw `-x` would wrap or panic instead of falling
+                // back to the exact path, breaking model≡binary (DEC-LLL-020/026).
+                format!("({inner}).checked_neg()?")
+            } else {
+                format!("(-{inner})")
+            }
+        }
         Expr::Not(a) => format!("(!{})", expr(a, cx, res)?),
         Expr::Bin(op, a, b) => {
             // Rust rendering comes from the single operator-semantics source
