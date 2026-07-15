@@ -38,6 +38,31 @@ fn stdlib_fully_verifies() {
     assert!(r.ok(), "stdlib must verify: {:?}", failures(&r));
 }
 
+/// REQ-LLL-175: a net against silent stdlib rot. Every PURE std module must stay
+/// verifiable over Z3 — each is loaded through the import-resolving loader
+/// (std imports are relative paths, so no `$LLL_STD` is needed) and verified.
+/// FFI-backed modules (http/httpx/db*/sys) are excluded: they need their external
+/// crates to `build`, and are exercised by their own effect/FFI tests.
+#[test]
+fn all_pure_stdlib_modules_verify() {
+    let modules = [
+        "math", "list", "option", "result", "str", "set", "map", "codec", "csv", "json", "toml",
+        "msgpack", "money", "date",
+    ];
+    for m in modules {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("std")
+            .join(format!("{m}.lll"));
+        let (_, module) = loader::load_program(path.to_str().unwrap())
+            .unwrap_or_else(|e| panic!("load std/{m}.lll: {e}"));
+        let cm = types::check_module(module).unwrap_or_else(|e| panic!("check std/{m}.lll: {e}"));
+        let hm = hash::hash_module(&cm).unwrap_or_else(|e| panic!("hash std/{m}.lll: {e}"));
+        let dir = tempdir();
+        let r = vc::verify(&cm, &hm, &dir, false).unwrap_or_else(|e| panic!("verify std/{m}.lll: {e}"));
+        assert!(r.ok(), "std/{m}.lll must verify: {:?}", failures(&r));
+    }
+}
+
 
 #[test]
 fn stdlib_math_verifies_and_computes_exactly() {
