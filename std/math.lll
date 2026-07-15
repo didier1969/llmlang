@@ -55,3 +55,48 @@ module Std.Math:
     match n:
       0 -> yield 1
       _ -> yield n * factorial(n - 1)
+
+  # Clamp `x` into the inclusive interval `[lo, hi]`. The `ensures` PINS the result
+  # per case (like `sign`), so the `example` clauses discharge from the contract.
+  part clamp(x: Int, lo: Int, hi: Int) -> Int:
+    requires lo <= hi
+    ensures result >= lo and result <= hi
+    ensures (x < lo and result == lo) or (x > hi and result == hi) or (lo <= x and x <= hi and result == x)
+    example clamp(5, 0, 10) == 5
+    example clamp(0 - 3, 0, 10) == 0
+    example clamp(42, 0, 10) == 10
+    match x:
+      v when v < lo -> yield lo
+      v when v > hi -> yield hi
+      _             -> yield x
+
+  # Even / odd predicates. Euclidean `mod` (DEC-LLL-026) puts `n mod 2` in {0, 1},
+  # so the `_` arm is exactly the complementary case — the contract determines `result`.
+  part even(n: Int) -> Bool:
+    ensures result == (n mod 2 == 0)
+    example even(4)
+    example even(3) == false
+    match n mod 2:
+      0 -> yield true
+      _ -> yield false
+
+  part odd(n: Int) -> Bool:
+    ensures result == (n mod 2 == 1)
+    example odd(3)
+    example odd(0) == false
+    match n mod 2:
+      0 -> yield false
+      _ -> yield true
+
+  # Euclidean quotient and remainder together (DEC-LLL-026). `requires b > 0` makes
+  # the pair UNIQUE (`0 <= r < b`), so the reconstruction `a == b*q + r` holds and the
+  # `example` clauses pin exact values — including for a negative dividend.
+  part divmod(a: Int, b: Int) -> (Int, Int):
+    requires b > 0
+    ensures a == b * result.0 + result.1
+    ensures result.1 >= 0 and result.1 < b
+    example divmod(17, 5).0 == 3
+    example divmod(17, 5).1 == 2
+    example divmod(0 - 17, 5).0 == 0 - 4
+    example divmod(0 - 17, 5).1 == 3
+    yield (a div b, a mod b)

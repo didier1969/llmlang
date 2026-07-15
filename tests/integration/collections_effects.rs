@@ -77,6 +77,19 @@ fn stdlib_math_verifies_and_computes_exactly() {
         got.contains("15511210043330985984000000"),
         "factorial(25) must be EXACT (1680× past i64::MAX), got: {got}"
     );
+
+    // REQ-LLL-174: every `example` clause (incl. clamp/even/odd/divmod) also runs at
+    // RUNTIME via `lll test`, pinning model≡binary for each part (DEC-LLL-020) — not
+    // just the static Z3 verdict above.
+    let te = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["test", math.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        te.status.success(),
+        "lll test std/math.lll failed: {}",
+        String::from_utf8_lossy(&te.stderr)
+    );
 }
 
 #[test]
