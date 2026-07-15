@@ -89,6 +89,13 @@ fn lambda_argument_body_obligations_must_be_discharged_req177() {
     // (f) a TOTAL part (no requires) passed by name still verifies.
     let total = "module M:\n  part inc(y: Int) -> Int:\n    yield y + 1\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main() -> Int via IO:\n    yield IO.print(apply(inc, 41))\n";
     assert!(verify_src(total).ok(), "a total part passed by name must still verify (REQ-177 completeness)");
+    // (g) a function value FLOWS through forms, not just the syntactic argument slot: a
+    // conditional `if c then <partial> else <total>` must be rejected (the partial branch).
+    let ifp = "module M:\n  part p(y: Int) -> Int:\n    requires y != 0\n    yield 10 div y\n  part q(y: Int) -> Int:\n    yield y + 1\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main(c: Bool) -> Int via IO:\n    yield IO.print(apply(if c then p else q, 0))\n";
+    assert!(!verify_src(ifp).ok(), "a conditional function value with a partial branch must NOT verify");
+    // (h) a conditional between two TOTAL parts still verifies.
+    let ifok = "module M:\n  part inc(y: Int) -> Int:\n    yield y + 1\n  part dbl(y: Int) -> Int:\n    yield y + y\n  part apply(f: (Int) -> Int, x: Int) -> Int:\n    yield f(x)\n  part main(c: Bool) -> Int via IO:\n    yield IO.print(apply(if c then inc else dbl, 5))\n";
+    assert!(verify_src(ifok).ok(), "a conditional between two total functions must still verify");
 }
 
 

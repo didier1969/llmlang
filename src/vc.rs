@@ -991,6 +991,72 @@ impl<'a> Emit<'a> {
         });
     }
 
+    /// REQ-LLL-177: a function VALUE passed as a `Ty::Fun` argument must be TOTAL — the callee
+    /// treats it as an arbitrary (UF) total function and applies it to inputs it does not
+    /// constrain, so a PARTIAL function (a lambda that divides by its param, or a part with a
+    /// load-bearing `requires`) slipping through as total is a false proof. This emits the
+    /// obligations that establish totality, recursing through every form a function value can
+    /// take in v1. A literal lambda contributes its body obligations under FRESH params
+    /// (universal generalization — total for ANY input, exactly like a part); it is capture-free
+    /// (DEC-LLL-037), so no call-site hypothesis can wrongly discharge it. A bare part NAME
+    /// contributes the part's `requires` under fresh params (a partial part is rejected); a bare
+    /// `Var` that is NOT a part is a function-valued LOCAL (a bound param, already proven total at
+    /// its own binding site — `let f = p` is rejected by the checker, so a `let`-bound function
+    /// never reaches here). A conditional `if c then g else h` contributes `c`'s own obligations
+    /// and then BOTH branches, recursively. Any OTHER form fails loudly rather than silently drop
+    /// the obligation (DEC-LLL-015 fail-stop).
+    fn emit_fn_arg_totality(
+        &mut self,
+        a: &Expr,
+        ret: &Ty,
+        env: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        match a {
+            Expr::Lambda(lparams, lbody) => {
+                let mut lenv = env.clone();
+                for (lpn, lpt) in lparams {
+                    let c = self.fresh(&smt_ty(lpt));
+                    lenv.insert(lpn.clone(), c);
+                }
+                self.tr(lbody, &lenv, Some(ret))?;
+            }
+            Expr::Var(vname) => {
+                if let Some(&pidx) = self.cm.index.get(vname.as_str()) {
+                    let preqs = self.cm.module.parts[pidx].requires.clone();
+                    let pparams = self.cm.module.parts[pidx].params.clone();
+                    let mut penv = env.clone();
+                    for (ppn, ppt) in &pparams {
+                        let c = self.fresh(&smt_ty(ppt));
+                        penv.insert(ppn.clone(), c);
+                    }
+                    for req in &preqs {
+                        let goal = self.tr_contract(req, &penv)?;
+                        self.oblige(
+                            format!(
+                                "part `{vname}` used as a total function value: its `requires` \
+                                 must hold for every input (REQ-LLL-177)"
+                            ),
+                            goal,
+                        );
+                    }
+                }
+            }
+            Expr::If(c, then_, else_) => {
+                self.tr(c, env, Some(&Ty::Bool))?;
+                self.emit_fn_arg_totality(then_, ret, env)?;
+                self.emit_fn_arg_totality(else_, ret, env)?;
+            }
+            _ => {
+                return Err(
+                    "vcgen: a function value of an unsupported form cannot be checked total as a \
+                     function argument — refusing to drop its obligation (REQ-LLL-177, fail-stop)"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The SOUND domain guard for a `forall` binder set to concrete term `idx`, under `env`
     /// (REQ-LLL-087). `Range(lo, hi)` → `lo <= idx && idx < hi`; `In(coll)` →
     /// `select(coll, idx) != none` — the SAME membership test `haskey`/`member` emit. This
@@ -2403,49 +2469,12 @@ impl<'a> Emit<'a> {
                             // names a part, which self-checks, so only a literal lambda needs
                             // this. Snapshot `hyps` so an `ensures` the body assumes (about the
                             // fresh params) cannot leak into the enclosing part's later obligations.
-                            if let Expr::Lambda(lparams, lbody) = a {
-                                let saved_hyps = self.hyps.clone();
-                                let mut lenv = env.clone();
-                                for (lpn, lpt) in lparams {
-                                    let c = self.fresh(&smt_ty(lpt));
-                                    lenv.insert(lpn.clone(), c);
-                                }
-                                self.tr(lbody, &lenv, Some(ret.as_ref()))?;
-                                self.hyps = saved_hyps;
-                            } else if let Expr::Var(vname) = a {
-                                // REQ-LLL-177 twin (part-NAME form): a part passed by name as a
-                                // TOTAL function value must itself be total — its `requires` must
-                                // hold for EVERY input. A part self-checks UNDER its requires, which
-                                // does NOT prove totality, so a partial part (`p(y) requires y != 0`)
-                                // would be applied to any argument with its precondition dropped
-                                // (the same false proof as the lambda form, reached differently).
-                                // Emit each `requires` under FRESH constants for the part's params;
-                                // an undischarged one rejects the partial part. A function-valued
-                                // LOCAL (a bound param — not in the part index) was already proven
-                                // total at its own binding site, so it is skipped.
-                                if let Some(&pidx) = self.cm.index.get(vname.as_str()) {
-                                    let preqs = self.cm.module.parts[pidx].requires.clone();
-                                    let pparams = self.cm.module.parts[pidx].params.clone();
-                                    let mut penv = env.clone();
-                                    for (ppn, ppt) in &pparams {
-                                        let c = self.fresh(&smt_ty(ppt));
-                                        penv.insert(ppn.clone(), c);
-                                    }
-                                    for req in &preqs {
-                                        let goal = self.tr_contract(req, &penv)?;
-                                        self.obls.push(Obligation {
-                                            part: self.part.name.clone(),
-                                            descr: format!(
-                                                "part `{vname}` used as a total function value: its \
-                                                 `requires` must hold for every input (REQ-LLL-177)"
-                                            ),
-                                            decls: self.decls.clone(),
-                                            hyps: self.hyps.clone(),
-                                            goal,
-                                        });
-                                    }
-                                }
-                            }
+                            // REQ-LLL-177: the concrete function VALUE must be total — the callee
+                            // applies it (as a UF) to inputs it does not constrain. Emit that
+                            // obligation, recursing through every form a function value can take.
+                            let saved_hyps = self.hyps.clone();
+                            self.emit_fn_arg_totality(a, ret.as_ref(), env)?;
+                            self.hyps = saved_hyps;
                         }
                         _ => {
                             // thread the parameter type so an empty `array()` passed
