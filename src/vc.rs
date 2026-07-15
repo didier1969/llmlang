@@ -33,9 +33,10 @@ use std::process::{Command, Stdio};
 /// under the OLD, unsound checker keeps a stale `proved (cache hit)` after the fix (observed: a
 /// HOF partial-lambda cached before REQ-LLL-177 stayed "proved" post-fix until a manual bump).
 ///
-/// REQ-LLL-179: this is now AUTO-DERIVED by `build.rs` — a blake3 of the verdict-determining
-/// sources (`vc.rs`/`opsem.rs`/`hash.rs`) — so any edit to them moves the epoch automatically and
-/// the manual bump can never be forgotten. `env!` reads the value `build.rs` emits.
+/// REQ-LLL-179: this is now AUTO-DERIVED by `build.rs` — a blake3 of the ENTIRE `src/` surface
+/// (not a forgettable allowlist: the checker `types.rs` is a primary locus of soundness fixes and
+/// must count too) — so any edit that could change a verdict moves the epoch automatically and the
+/// manual bump can never be forgotten. `env!` reads the value `build.rs` emits.
 pub const VCGEN_VERSION: &str = env!("VCGEN_VERSION");
 const Z3_TIMEOUT_MS: u32 = 4000;
 
