@@ -81,15 +81,20 @@ the numbers as a floor, not a fresh reading.
 
 | Axis | Score | Basis (date) |
 |---|---|---|
-| Soundness | **92 / 100** | 35 adversarial attacks, 0 breakage; core parse→type→vc→codegen proven sound via Z3 negative controls (2026-07-09) |
+| Soundness | **UN-SCORED** — the 92/100 (2026-07-09) was falsified; re-score due | The old score claimed "35 adversarial attacks, 0 breakage, core proven sound (2026-07-09)". The **first real multi-agent adversarial pass (2026-07-15)** found **3 genuine soundness bugs it missed** — REQ-LLL-176 (unary negation un-checked on the i64 fast-path → a verified program panics), REQ-LLL-177 (obligations of a lambda/part passed to a HOF were dropped → a division-by-zero verified then crashed), REQ-LLL-178 (polymorphic empties CSE-shared → ill-typed Rust). **All fixed + pushed**, so the core is sound *today*, but "0 breakage / proven sound" was premature. Treat as UN-scored until a fresh adversarial pass by family. |
 | Vision coverage | **~73 %** | pillar/requirement coverage vs `VIS-LLL-001` (2026-07-09) |
 | Ergonomics | **~78 / 100** | LLM-authoring friction audit (2026-07-09); bench: zero contract-semantics failures on the new surface (2026-07-10, REQ-097) |
 | Performance — **spéculation i64** (REQ-162) + **folds compilés en BOUCLES** (REQ-163) | Harnais `bench/cspeed/run.sh` (CPU utilisateur, min/5) : `lcg` **0,03 s** vs 0,27 s C → **~9× plus RAPIDE que gcc -O2 C** · `listsum` **0,12 s** vs 0,07 s C (**1,7×** ; était 5,9× avant le fold) · `fib(40)` 1,00 s vs 0,71 s Rust (1,4×) · `map` 0,61 s vs 0,37 s C. **BUG CORRIGÉ au passage** : `h + sum(t)` n'est pas un appel terminal → une frame de pile PAR ÉLÉMENT → un programme VÉRIFIÉ sommant 1 M d'éléments **DÉBORDAIT LA PILE**. Les deux formes non-terminales (`E ⊕ f(x')` associatif ; `E :: f(x')`) sont désormais des boucles. Sain : `-`/`div` (non associatifs) et les parties effectful sont EXCLUS. | `bench/cspeed/run.sh` · `tests/integration/accfold.rs` · `tests/integration/fastpath.rs` |
 
 ## Not done / gated (honest boundary)
 
-The language core is complete and proven sound; every open item is **gated on
-operator/external input**, not on unwritten engineering (`CPT-LLL-012`, 2026-07-10):
+The language core is complete; every FEATURE item below is **gated on operator/external
+input**. ⚠ **Correction (2026-07-15):** the earlier claim "proven sound, every open item
+gated on operator input, not unwritten engineering" was FALSIFIED by the multi-agent audit —
+REQ-LLL-173 (traversal completeness), REQ-LLL-179 (auto-derived proof-cache epoch) and the 3
+soundness bugs above were **unwritten engineering**, not operator-gated (all delivered this
+session). The honest boundary is: the *feature* backlog is gated; *soundness completeness* is
+an ongoing, per-family adversarial obligation, not a finished state.
 
 | Item | Gate |
 |---|---|
