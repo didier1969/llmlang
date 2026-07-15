@@ -765,6 +765,27 @@ impl Expr {
                     w.walk(f);
                 }
             }
+            // REQ-LLL-173: a comprehension carries real sub-expressions (its iterable, its
+            // optional guard, and its body) that EVERY walk-based pass must see — before this
+            // arm, `Compr` fell into `_ => {}` and 7 collectors went blind inside a
+            // comprehension (dep-hash ordering + spec-purity/example/shadow well-formedness
+            // gates). Adding it here restores the def_hash TRANSITIVITY invariant for a part
+            // referenced only inside a comprehension (`[helper(x) for x in xs]`): a CONSCIOUS
+            // content-hash change (DEC-LLL-020) for that class of program — proof_hash and
+            // contract_hash are unaffected (they normalise Compr on their own path).
+            Expr::Compr { iter, guard, body, .. } => {
+                match iter {
+                    ComprIter::List(xs) => xs.walk(f),
+                    ComprIter::Range(lo, hi) => {
+                        lo.walk(f);
+                        hi.walk(f);
+                    }
+                }
+                if let Some(g) = guard {
+                    g.walk(f);
+                }
+                body.walk(f);
+            }
             _ => {}
         }
     }

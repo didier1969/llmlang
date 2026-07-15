@@ -214,6 +214,36 @@ fn part_passed_by_value_folds_callee_def_hash_req129() {
 }
 
 
+#[test]
+fn part_called_only_inside_a_comprehension_folds_callee_def_hash_req173() {
+    // REQ-LLL-173: `Expr::walk` skipped `Compr`, so a part referenced ONLY inside a
+    // comprehension (`[helper(x) for x in xs]`) was invisible to the dep-hash ordering — the
+    // caller normalized `helper` to `!unresolved:helper` instead of folding its def-hash,
+    // silently breaking Unison transitivity for the idiomatic "map a part over a list" pattern.
+    // With the walk fix the comprehension-borne dependency behaves like any other Call.
+    let base = "module T:\n\n  part helper(x: Int) -> Int:\n    yield x + 1\n\n  part caller(xs: List[Int]) -> List[Int]:\n    yield [helper(x) for x in xs]\n";
+    let (_, h1) = full(base);
+
+    // (1) TRANSITIVITY: editing the comprehension-borne callee's body changes the caller's identity.
+    let body_edit = base.replace("yield x + 1", "yield x + 1 + 0");
+    let (_, h2) = full(&body_edit);
+    assert_ne!(h1.def_hash["helper"], h2.def_hash["helper"], "the callee body edit must change its own hash");
+    assert_ne!(
+        h1.def_hash["caller"], h2.def_hash["caller"],
+        "a callee referenced only inside a comprehension must propagate to the caller's identity (REQ-LLL-173 transitivity)"
+    );
+
+    // (2) RENAME-INVARIANCE: renaming the callee (+ its reference) preserves the caller's identity —
+    // the caller folds the callee's HASH, not its name.
+    let renamed = hash::rename_part_in_source(base, "helper", "bump").unwrap();
+    let (_, h3) = full(&renamed);
+    assert_eq!(
+        h1.def_hash["caller"], h3.def_hash["caller"],
+        "renaming a comprehension-borne callee must not change the caller's identity (REQ-LLL-173 rename-invariance)"
+    );
+}
+
+
 // ---- verification (target 1) ----
 
 #[test]
