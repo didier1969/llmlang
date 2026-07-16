@@ -244,6 +244,26 @@ fn part_called_only_inside_a_comprehension_folds_callee_def_hash_req173() {
 }
 
 
+#[test]
+fn requires_on_main_is_rejected_req180() {
+    // REQ-LLL-180 (SOUNDNESS): `main` is the executed entry point — no caller establishes a
+    // precondition. An assumed unsatisfiable `requires` on `main` verifies every body obligation
+    // vacuously, then crashes at runtime (observed: `requires 2==3` + `10 div 0` verified then
+    // panicked). Rejected at check time, with OR without params.
+    for src in [
+        "module M:\n\n  part main() -> Int via IO:\n    requires 2 == 3\n    yield IO.print(10 div 0)\n",
+        "module M:\n\n  part main(n: Int) -> Int via IO:\n    requires n != 0\n    yield IO.print(10 div n)\n",
+    ] {
+        let m = parser::parse_module(src).expect("parse");
+        let err = types::check_module(m).expect_err("a `requires` on main must be rejected (REQ-180)");
+        assert!(
+            err.contains("main") && err.contains("requires"),
+            "expected a REQ-180 entry-point error, got: {err}"
+        );
+    }
+}
+
+
 // ---- verification (target 1) ----
 
 #[test]

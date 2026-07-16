@@ -459,6 +459,23 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             return Err(format!("duplicate part `{}`", p.name));
         }
     }
+    // REQ-LLL-180 (SOUNDNESS): `main` is the program ENTRY POINT — executed by `lll run` with NO
+    // llmlang call site to establish a precondition. An assumed-but-undischarged `requires` on
+    // `main`, when unsatisfiable, injects `false` into its hypotheses → every body obligation is
+    // vacuously "proved" → a VERIFIED program then crashes (div-by-zero, index-out-of-bounds,
+    // observed). Forbid it: the precondition has no meaning at an uncalled entry. (The actor
+    // `step` entry is the same CLASS but entangled with runtime state-threading — REQ-LLL-182.)
+    if let Some(main) = module.parts.iter().find(|p| p.name == "main") {
+        if !main.requires.is_empty() {
+            return Err(
+                "part `main`: the program entry point has no caller to establish a `requires`, so \
+                 assuming one is unsound — a `requires false` verifies every body obligation \
+                 vacuously, then crashes at runtime (REQ-LLL-180). Move the check into the body \
+                 (an `if`/`match`), or drop the `requires`."
+                    .to_string(),
+            );
+        }
+    }
     // typeclasses are registered and their instances type-checked lower down, just
     // before CheckedModule is returned (REQ-LLL-048 slice A inc.2).
     // user ADTs (REQ-LLL-011): register types + constructors, then validate
@@ -591,6 +608,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         // per-effect op-kind flags → classification + homogeneity check
         let mut has_abort = false;
+        let mut abort_count = 0usize;
         let mut has_extern = false;
         let mut has_user_tail = false;
         for op in &ed.ops {
@@ -785,7 +803,10 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                         ed.name, op.name
                     ))
                 }
-                (true, false) => has_abort = true,
+                (true, false) => {
+                    has_abort = true;
+                    abort_count += 1;
+                }
                 (false, true) => has_extern = true,
                 (false, false) => has_user_tail = true,
             }
@@ -805,6 +826,22 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 "effect `{}`: a user-handled tail-resumptive effect must have ONLY value-returning \
                  non-extern operations — do not mix with abort (`-> Never`) or `= extern` ops \
                  (REQ-LLL-026, DEC-LLL-037)",
+                ed.name
+            ));
+        }
+        // REQ-LLL-180/181 (SOUNDNESS): an abort op lowers to a single `Result<T, Int>` whose `Err`
+        // channel carries ONLY the payload — NO operation discriminant. With TWO+ abort ops, the
+        // handler's distinct clauses become several `Err(_)` arms of which only the FIRST is
+        // reachable: a VERIFIED program then computes the WRONG result (the later clauses are dead
+        // code, observed 105105 vs 105205). Fail-closed until codegen carries an op tag; a single
+        // abort op (Exc:raise) round-trips correctly. (Codegen op-discriminant = follow-up.)
+        if abort_count > 1 {
+            return Err(format!(
+                "effect `{}`: a user abort effect (`-> Never` ops) may declare only ONE operation \
+                 in v1 — its compiled `Err` channel carries no operation tag, so a handler with \
+                 clauses for several abort ops would silently dispatch them ALL to the first \
+                 (a verified program computing the wrong result). Split into one-op effects \
+                 (REQ-LLL-181).",
                 ed.name
             ));
         }
@@ -3975,6 +4012,26 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                                  (DEC-LLL-037)",
                                 ctx.part.name, h.effect, opname
                             ));
+                        }
+                    }
+                } else {
+                    // REQ-LLL-181 (SOUNDNESS): an ABORT op (`-> Never`) must be interpreted by a
+                    // clause — an unhandled one leaves a non-exhaustive `Err(_)` in the generated
+                    // `match`, so `check` passes but the generated Rust does not compile (a VERIFIED
+                    // program that fails to build). This coverage was previously required for
+                    // user-tail-resumptive effects only. (Extern/ambient ops return values, not
+                    // `Never`, and are performed globally — they need no clause, so this skips them.)
+                    for (key, _, op_ret) in &ops_of_effect {
+                        if *op_ret == Ty::Never {
+                            let opname = key.rsplit('.').next().unwrap();
+                            if !seen_ops.contains(opname) {
+                                return Err(format!(
+                                    "part `{}`: `handle … with {}` does not interpret its abort \
+                                     operation `{}` (`-> Never`) — an unhandled abort op leaves a \
+                                     non-exhaustive match in generated code (REQ-LLL-181)",
+                                    ctx.part.name, h.effect, opname
+                                ));
+                            }
                         }
                     }
                 }

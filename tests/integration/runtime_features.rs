@@ -100,6 +100,28 @@ fn lambda_argument_body_obligations_must_be_discharged_req177() {
 
 
 #[test]
+fn abort_effect_multi_op_and_unhandled_op_are_rejected_req181() {
+    // REQ-LLL-181 (SOUNDNESS): an abort op lowers to a bare `Result<T, Int>` whose `Err` channel
+    // carries NO operation tag. A multi-op abort effect mis-dispatches (a verified program computing
+    // the WRONG result — observed 105105 vs 105205); an unhandled abort op leaves a non-exhaustive
+    // match (verified code that will not build). Both rejected at check; a single handled abort op is fine.
+    let multi = "module M:\n\n  effect Exc:\n    raise(Int) -> Never\n    fail(Int) -> Never\n\n  part f() -> Int via Exc:\n    yield Exc.fail(5)\n\n  part g() -> Int:\n    handle f() with Exc:\n      raise(m) -> yield 100 + m\n      fail(m)  -> yield 200 + m\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(g())\n";
+    let m = parser::parse_module(multi).expect("parse");
+    let err = types::check_module(m).expect_err("a multi-op abort effect must be rejected (REQ-181)");
+    assert!(err.contains("ONE operation"), "expected a multi-op-abort error, got: {err}");
+
+    let unhandled = "module M:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part f() -> Int via Exc:\n    yield Exc.raise(5)\n\n  part g() -> Int:\n    handle f() with Exc:\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(g())\n";
+    let m2 = parser::parse_module(unhandled).expect("parse");
+    let err2 = types::check_module(m2).expect_err("an unhandled abort op must be rejected (REQ-181)");
+    assert!(err2.contains("abort operation"), "expected an unhandled-abort-op error, got: {err2}");
+
+    // a single, handled abort op still verifies and runs (no over-rejection).
+    let ok = "module M:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  part f(x: Int) -> Int via Exc:\n    match x:\n      0 -> yield Exc.raise(42)\n      _ -> yield x\n\n  part g() -> Int:\n    handle f(0) with Exc:\n      raise(m) -> yield m\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(g())\n";
+    assert!(verify_src(ok).ok(), "a single handled abort op must still verify (REQ-181 completeness)");
+}
+
+
+#[test]
 fn user_effect_multi_op_handler_runs() {
     // a user tail-resumptive effect with TWO ops, both interpreted by the handler.
     let src = "module T:\n\n  effect Two:\n    one(Int) -> Int\n    two(Int) -> Int\n\n  part w() -> Int via Two:\n    yield Two.one(3) + Two.two(4)\n\n  part main() -> Int:\n    handle w() with Two:\n      one(n) -> yield n + 1\n      two(n) -> yield n * 10\n      return r -> yield r\n";
