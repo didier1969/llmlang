@@ -188,10 +188,29 @@ measures the SAME aset kernel at four points. The absolute ×C **wobbles** on a 
 
 | point | isolates | N=2000 | share of gap |
 |---|---|---|---|
-| current (REQ-146) | borrow + COW/round | ~9–11× C | — |
-| **Point A** ≡ REQ-148 | remove boundary clone, keep `Rc` | ~8× C | boundary clone = **~20–29%** |
-| **Point B** ≡ Option B | raw `Vec`, identical recursive kernel | **~0.5× C** | persistent-`Rc` tax = **~76–88%** |
+| current (REQ-146) | borrow + COW/round | ~9–13× C | — |
+| **Point A** ≡ REQ-148 | remove boundary clone, keep `Rc` | ~8–11× C | boundary clone = **~20–29%** |
+| **Point B** ≡ Option B | raw `Vec<i64>`, identical recursive kernel | **~0.5× C** | persistent-`Rc` tax = **~76–88%** |
+| **Point B′** ≡ REQ-148 layer-1 CEILING | raw `Vec<LllInt>` (bare set/push, zero Rc/make_mut), real `src/lllint.rs` included verbatim | **~16–18× C** | `LllInt`-element tax = **B′−B ≈ 0.051–0.055s, ~30× Point B** |
 | C | in-place loop | 1× | recursion (B−C) ≈ 0 |
+
+**Point B′ (measured 2026-07-16) — the REQ-148 layer-1 KILL-SWITCH, and it FIRES.** The
+"unique" twin of REQ-148 would emit exactly Point B′: the linearly-threaded array becomes a
+raw `Vec`, but its ELEMENTS stay the exact `LllInt` (DEC-LLL-077) — the speculation twin
+(REQ-162) unboxes scalars only, never aggregate elements. Measured (min-of-5, internal
+monotonic self-timing, two independent runs, CPU-bound `%U`≈wall): **B′ = 16.3–18.3× C at
+N=2000** (9.3–13.6× at N=1000, where the sub-3ms C denominator wobbles; the STABLE quantities
+are B′−B ≈ 0.051–0.055s and B′/B ≈ 30×, both ×2.2 under N-doubling ⇒ O(1)/element, the Vec
+itself is fine). Read that against the other points: **B′ is above Point A and above
+`current`** — on this kernel, dropping the entire persistent-`Rc` machinery while keeping
+`LllInt` elements buys *nothing*; the element representation (16-byte non-`Copy` enum,
+clone-on-read, branch-per-op exact add) single-handedly re-opens a bigger gap than the one
+being closed. **Consequence: layer 1 of REQ-148 is bounded at ~16× C, far above parity —
+its codegen must be re-scoped.** Write-parity needs the unique twin to ALSO unbox array
+elements to `Vec<i64>` (that is Point B, ~0.5× C) — i.e., extend REQ-162's twin discipline
+to aggregates (guarded by the same overflow-bail, sound for the same purity reason) — or an
+8-byte tagged `LllInt`. A raw-`Vec` conversion alone is not a perf feature; it is a
+prerequisite that only pays once the elements are unboxed.
 
 **Decision, now founded on measurement:** REQ-148 removes only the ~20–29% boundary-clone slice → it
 **CAPS at ~7–8× C, NOT write-parity**. The persistent-`Rc` machinery (refcount + `make_mut` +
@@ -200,7 +219,10 @@ indirection) is ~76–88% of the gap; a raw `Vec` on the identical recursive ker
 implicating the data structure. **Genuine write-parity (VIS-LLL-001) therefore requires DEC-071
 Option B**, not REQ-148. REQ-148 stays a real but BOUNDED win (its own design + non-regression gate:
 over-owning can shift clones to other call boundaries); it does not, alone, reach "as fast as C" on
-writes. This is an operator decision — see `ceiling/` for the reproducer.
+writes. This is an operator decision — see `ceiling/` for the reproducer. **And Point B′ sharpens
+the bound further**: Option B's parity (Point B) is conditional on `i64` ELEMENTS — with the exact
+`LllInt` elements the twin would actually carry, the same raw-`Vec` kernel measures ~16× C. The
+raw-`Vec` layer and element unboxing must land TOGETHER to reach parity.
 
 ## map — associative read: verified `Rc<BTreeMap>` vs C sorted-array bsearch (`mapbench.lll`)
 Build a map of `n` entries, then `r` rounds each counting `haskey` over keys `1..n`
@@ -233,7 +255,7 @@ the EPHEMERAL/linear case, where C is O(1) and llmlang is needlessly O(N).
 | read traversal     | listsum | **5.7× C** (0.40s vs 0.07s)    | **⚠ was 0.9× C — same boxing tax (the list carries `Int`s)** |
 | associative read   | map     | **1.7× C** ordered bsearch     | **C-competitive** — the only regime the exact `Int` did NOT cost (dominated by the BTreeMap, not by `Int`) |
 | optimizer          | cse     | 1.8× its own `--no-opt`        | LLVM-invisible win, unaffected |
-| **functional UPDATE** | **aset** | **O(1)/op, ×2 scaling — was O(N)/op** | **⚠ REQ-146 fixed the asymptote; write-parity OPEN — measured: needs Option B (drop `Rc`), not REQ-148 (`ceiling/`)** |
+| **functional UPDATE** | **aset** | **O(1)/op, ×2 scaling — was O(N)/op** | **⚠ REQ-146 fixed the asymptote; write-parity OPEN — measured: needs Option B (drop `Rc`) AND element unboxing — raw `Vec<LllInt>` alone caps at ~16× C (Point B′, `ceiling/`)** |
 
 - **The "reads are as fast as C across the board" finding is RETRACTED.** It held when
   `Int` was an `i64`. With the exact `Int` (DEC-LLL-077), every kernel through which `Int`s
