@@ -592,7 +592,14 @@ impl<'a> Linearizer<'a> {
                 && self.is_pure(rid)
                 && !self.cse.contains_key(&rid)
             {
-                let name = format!("__lll_cse_{}", *self.counter);
+                // REQ-LLL-184: the binding name carries a leading `%` — a character the
+                // surface lexer can NEVER produce in an identifier — so an optimizer-
+                // forged binder is unmistakable downstream and codegen's `local()` maps
+                // it into its own `c…` namespace, disjoint by construction from every
+                // user `u_…` name. Before this marker, a user variable literally named
+                // `__lll_cse_0` was silently CAPTURED by the hoisted binding (opt and
+                // --no-opt binaries computed different results — model≡binary broken).
+                let name = format!("%__lll_cse_{}", *self.counter);
                 *self.counter += 1;
                 self.cse.insert(rid, name);
             }

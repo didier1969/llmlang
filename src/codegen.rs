@@ -2363,7 +2363,18 @@ fn caps_of(
 /// param) with a `u_` prefix. This keeps valid llmlang names that happen to be
 /// Rust keywords (`final`, `move`, `ref`, …) from producing invalid Rust, and
 /// avoids clashes with generated helpers.
+///
+/// REQ-LLL-184: an optimizer-forged CSE binder arrives marked with a leading `%`
+/// (optimize.rs `plan_cse`) — a character the surface lexer can never produce in
+/// an identifier — and is emitted in its own `c…` namespace. The two namespaces
+/// (`u_…` for every user name, `c…` for codegen-internal binders) are disjoint BY
+/// CONSTRUCTION, so a user variable literally named `__lll_cse_0` can neither
+/// capture nor be captured by a hoisted CSE binding (the opt / --no-opt binaries
+/// used to diverge on exactly that program).
 fn local(name: &str) -> String {
+    if let Some(cse) = name.strip_prefix('%') {
+        return format!("c{cse}");
+    }
     format!("u_{name}")
 }
 

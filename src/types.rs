@@ -829,6 +829,22 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 ed.name
             ));
         }
+        // REQ-LLL-185 (SOUNDNESS): abort and extern are two INCOMPATIBLE lowerings for
+        // one effect — an abort op rides the `Result` error channel, an extern op is an
+        // ambient direct call. A mixed effect used to slip through classification as
+        // ambient (has_extern won), so a handler clause interpreting its abort op
+        // "verified" and then failed deep in rustc (E0308) — or worse. Homogeneity,
+        // exactly like the user-tail × abort/extern rejection above: one lowering per
+        // effect, fail-closed at check (DEC-LLL-015).
+        if has_abort && has_extern {
+            return Err(format!(
+                "effect `{}`: an abort operation (`-> Never`) cannot share an effect with \
+                 `= extern` operations — abort compiles to the `Result` error channel while \
+                 an extern op is an ambient FFI call, two incompatible lowerings for one \
+                 effect. Declare the abort op in its own effect (REQ-LLL-185)",
+                ed.name
+            ));
+        }
         // REQ-LLL-180/181 (SOUNDNESS): an abort op lowers to a single `Result<T, Int>` whose `Err`
         // channel carries ONLY the payload — NO operation discriminant. With TWO+ abort ops, the
         // handler's distinct clauses become several `Err(_)` arms of which only the FIRST is
@@ -847,8 +863,11 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         if has_user_tail {
             user_tail_effects.insert(ed.name.clone());
-        } else if has_extern {
-            // all-extern (no abort, no user-tail) → ambient, performed globally
+        } else if has_extern && !has_abort {
+            // all-extern (no abort, no user-tail) → ambient, performed globally.
+            // `!has_abort` is enforced by the REQ-LLL-185 homogeneity rejection above;
+            // kept explicit here so the classification NEVER silently turns a mixed
+            // effect ambient again if that rejection ever moves (code == comment).
             ambient_effects.insert(ed.name.clone());
         }
     }
@@ -887,6 +906,42 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                  marshaller — never a cryptic rustc error (DEC-LLL-015, REQ-LLL-036/DEC-LLL-059)",
                 step.params[1].1
             ));
+        }
+        // REQ-LLL-182 (SOUNDNESS): `step.requires` is an actor-state INVARIANT — step's
+        // own VC ASSUMES it, yet the hidden runtime loop calls `step(state, msg)` from
+        // sites the verifier never sees (each `send`). vc.rs discharges it INDUCTIVELY:
+        // INIT at every `spawn` (the argument establishes the invariant) + PRESERVATION
+        // once per module (`requires ∧ ensures ⇒ requires[state := result]`). That
+        // induction covers exactly the v1 forms where the invariant is a quantifier-free
+        // constraint over the STATE parameter alone; anything else is rejected here,
+        // fail-closed — never an unsound "verified" (DEC-LLL-015/017).
+        let (state_name, _) = &step.params[0];
+        let (msg_name, _) = &step.params[1];
+        for req in &step.requires {
+            if matches!(req, Expr::Forall { .. } | Expr::Exists { .. }) {
+                return Err(format!(
+                    "part `step`: a quantified `requires` on an actor behavior is not \
+                     covered by the v1 actor-state induction (INIT at `spawn` + \
+                     PRESERVATION per message) — write a quantifier-free constraint over \
+                     the state parameter `{state_name}` (REQ-LLL-182)"
+                ));
+            }
+            let mut mentions_msg = false;
+            req.walk(&mut |x| {
+                if matches!(x, Expr::Var(v) if v == msg_name) {
+                    mentions_msg = true;
+                }
+            });
+            if mentions_msg {
+                return Err(format!(
+                    "part `step`: `requires` on an actor behavior may constrain ONLY the \
+                     state parameter `{state_name}` — the message `{msg_name}` arrives from \
+                     arbitrary `send` sites, so a message precondition cannot be \
+                     established by the v1 actor-state induction (`spawn` seeds a state, \
+                     not a message). Move the constraint into a `match` on `{msg_name}` \
+                     inside the body (REQ-LLL-182)"
+                ));
+            }
         }
         // REQ-LLL-036 W2-t2: the emitted glue (`emit_actor_runtime`, codegen.rs)
         // unconditionally uses `tokio::{runtime, sync::{mpsc, oneshot}}` — real
@@ -1849,6 +1904,19 @@ fn foreign_marshal_ok(llt: &Ty, f: &Foreign) -> bool {
     }
 }
 
+/// The `spawn` member of [`ACTOR_RUNTIME_PATHS`] — the ONE site that seeds an actor's
+/// initial state, so vc.rs anchors the REQ-LLL-182 INIT obligation on it by this path.
+pub(crate) const ACTOR_RUNTIME_SPAWN_PATH: &str = "lll_actor_runtime::spawn";
+
+/// REQ-LLL-036 W2 (tracer-bullet slice): a fixed set of reserved paths under
+/// `lll_actor_runtime` name the ONLY built-in actor-runtime glue codegen emits
+/// (mailbox spawn/send/state, src/codegen.rs `emit_actor_runtime`). This is
+/// deliberately NOT a general "any runtime::path resolves" escape hatch — only
+/// these three exact paths are recognized; anything else under the root is
+/// rejected precisely so the surface stays narrow and intentional.
+pub(crate) const ACTOR_RUNTIME_PATHS: &[&str] =
+    &[ACTOR_RUNTIME_SPAWN_PATH, "lll_actor_runtime::send", "lll_actor_runtime::state"];
+
 /// v1 FFI resolution guard (REQ-LLL-027 gap 2). `lll build` compiles the generated
 /// Rust as a SINGLE file with `rustc` (no Cargo), so an `= extern "path"` resolves
 /// only if its root is std/core/alloc or a primitive type (`i64::pow`, `str::len`).
@@ -1880,17 +1948,6 @@ fn validate_extern_path(
         ));
     }
     let root = segs[0];
-    // REQ-LLL-036 W2 (tracer-bullet slice): a fixed set of reserved paths under
-    // `lll_actor_runtime` name the ONLY built-in actor-runtime glue codegen emits
-    // (mailbox spawn/send/state, src/codegen.rs `emit_actor_runtime`). This is
-    // deliberately NOT a general "any runtime::path resolves" escape hatch — only
-    // these three exact paths are recognized; anything else under the root is
-    // rejected precisely so the surface stays narrow and intentional.
-    const ACTOR_RUNTIME_PATHS: &[&str] = &[
-        "lll_actor_runtime::spawn",
-        "lll_actor_runtime::send",
-        "lll_actor_runtime::state",
-    ];
     if root == "lll_actor_runtime" {
         if ACTOR_RUNTIME_PATHS.contains(&p) {
             return Ok(());
@@ -3952,6 +4009,27 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
                             c.op,
                             c.params.len(),
                             params.len()
+                        ));
+                    }
+                    // REQ-LLL-185 guard (defense-in-depth): an `= extern` op is AMBIENT —
+                    // a perform compiles to a direct Rust call no handler intercepts, so a
+                    // clause "interpreting" it is dead code that reads as a semantics. The
+                    // mixed abort+extern effect is already rejected at declaration; this
+                    // keeps the handler surface honest for all-extern effects too.
+                    if ctx
+                        .module
+                        .effects
+                        .iter()
+                        .find(|ed| ed.name == h.effect)
+                        .and_then(|ed| ed.ops.iter().find(|o| o.name == c.op))
+                        .is_some_and(|o| o.extern_path.is_some())
+                    {
+                        return Err(format!(
+                            "part `{}`: `handle … with {}` interprets `{}`, but that \
+                             operation is bound `= extern` — an extern op is performed \
+                             ambiently (a direct Rust call), so a handler clause can never \
+                             intercept it; drop the clause or unbind the op (REQ-LLL-185)",
+                            ctx.part.name, h.effect, c.op
                         ));
                     }
                     seen_ops.insert(c.op.clone());

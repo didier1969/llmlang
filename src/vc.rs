@@ -440,7 +440,28 @@ fn setup_part_emit<'a>(
 pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Obligation>, String> {
     let (mut em, env) = setup_part_emit(cm, part)?;
     em.walk_body(&part.body, env)?;
+    // REQ-LLL-182 PRESERVATION (the second half of the actor-state induction; INIT
+    // is emitted at each `spawn` site in `tr`): `step.requires` is the actor-state
+    // INVARIANT that step's own VC assumes, yet the hidden runtime loop re-enters
+    // `step` with the PREVIOUS result as the new state. Prove once per module, over
+    // fresh constants, that the contract is inductive:
+    //   requires(state₀) ∧ ensures(state₀, msg₀, result₀) ⇒ requires[state := result₀].
+    if part.name == "step" && !part.requires.is_empty() && module_uses_actor_runtime(cm) {
+        em.emit_actor_step_preservation()?;
+    }
     Ok(em.obls)
+}
+
+/// True when the module binds any effect op to the built-in actor runtime
+/// (REQ-LLL-036) — the trigger for the REQ-LLL-182 actor-state induction.
+fn module_uses_actor_runtime(cm: &CheckedModule) -> bool {
+    cm.module.effects.iter().any(|ed| {
+        ed.ops.iter().any(|op| {
+            op.extern_path
+                .as_deref()
+                .is_some_and(|p| crate::types::ACTOR_RUNTIME_PATHS.contains(&p))
+        })
+    })
 }
 
 /// Ground obligations for `example` clauses (REQ-LLL-049 inc.3). Each example
@@ -999,6 +1020,58 @@ impl<'a> Emit<'a> {
             hyps: self.hyps.clone(),
             goal,
         });
+    }
+
+    /// REQ-LLL-182 PRESERVATION: prove `step`'s `requires` is an INDUCTIVE actor-state
+    /// invariant. Fresh constants `state₀`/`msg₀`/`result₀` stand for "any" turn of the
+    /// hidden runtime loop (universal generalization — never an `assert forall`,
+    /// DEC-LLL-015): assuming `requires(state₀)` and `ensures(state₀, msg₀, result₀)`,
+    /// the NEXT state `result₀` must satisfy `requires` again (substitution on the
+    /// state parameter `params[0]` — no name hardcoded). A quantified `ensures` is NOT
+    /// assumed (fewer hypotheses = sound, fail-closed); `check_module` already rejects
+    /// quantified or message-dependent `requires` on `step` up front. Called once per
+    /// module, on `step` itself, only when the module binds the actor runtime.
+    fn emit_actor_step_preservation(&mut self) -> Result<(), String> {
+        let step = self.part;
+        let state0 = self.fresh(&smt_ty(&step.params[0].1));
+        let msg0 = self.fresh(&smt_ty(&step.params[1].1));
+        let result0 = self.fresh(&smt_ty(&step.ret));
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert(step.params[0].0.clone(), state0);
+        env.insert(step.params[1].0.clone(), msg0);
+        let saved = self.hyps.len();
+        for req in &step.requires {
+            let t = self.tr_contract(req, &env)?;
+            self.hyps.push(t);
+        }
+        let mut ens_env = env.clone();
+        ens_env.insert("result".into(), result0.clone());
+        for ens in &step.ensures {
+            if !matches!(ens, Expr::Forall { .. } | Expr::Exists { .. }) {
+                let t = self.tr_contract(ens, &ens_env)?;
+                self.hyps.push(t);
+            }
+        }
+        let mut goal_env: HashMap<String, String> = HashMap::new();
+        goal_env.insert(step.params[0].0.clone(), result0);
+        let mut goals = Vec::with_capacity(step.requires.len());
+        for req in &step.requires {
+            goals.push(self.tr_contract(req, &goal_env)?);
+        }
+        let goal = if goals.len() == 1 {
+            goals.pop().expect("non-empty by gen_part_obligations guard")
+        } else {
+            format!("(and {})", goals.join(" "))
+        };
+        self.oblige(
+            "actor-state invariant is inductive: `requires` of `step` is preserved by \
+             every message — `ensures` must imply requires[state := result] \
+             (REQ-LLL-182 PRESERVATION)"
+                .into(),
+            goal,
+        );
+        self.hyps.truncate(saved);
+        Ok(())
     }
 
     /// REQ-LLL-177: a function VALUE passed as a `Ty::Fun` argument must be TOTAL — the callee
@@ -1944,8 +2017,43 @@ impl<'a> Emit<'a> {
                     }
                     // tail-resumptive: translate args (side-conditions), havoc result
                     let sort = smt_ty(&op.ret);
+                    let mut arg_terms = Vec::with_capacity(args.len());
                     for a in args {
-                        self.tr(a, env, None)?;
+                        arg_terms.push(self.tr(a, env, None)?);
+                    }
+                    // REQ-LLL-182 INIT: `spawn(init)` seeds the hidden actor loop that
+                    // calls `step(state, msg)` — its argument is the actor's INITIAL
+                    // state, so `step`'s `requires` must hold of it HERE, exactly like
+                    // an ordinary call site proves a callee's `requires`. The
+                    // PRESERVATION half (once per module, `gen_part_obligations`)
+                    // closes the induction: every reachable actor state satisfies the
+                    // invariant, so step's own VC may soundly assume it.
+                    if op.extern_path.as_deref()
+                        == Some(crate::types::ACTOR_RUNTIME_SPAWN_PATH)
+                    {
+                        let cm = self.cm;
+                        let step = cm
+                            .index
+                            .get("step")
+                            .map(|&i| &cm.module.parts[i])
+                            .ok_or_else(|| {
+                                "vcgen: `lll_actor_runtime::spawn` used but no part `step` \
+                                 exists — check_module guarantees it (REQ-LLL-036)"
+                                    .to_string()
+                            })?;
+                        let mut cenv: HashMap<String, String> = HashMap::new();
+                        cenv.insert(step.params[0].0.clone(), arg_terms[0].clone());
+                        for (i, req) in step.requires.iter().enumerate() {
+                            let goal = self.tr_contract(req, &cenv)?;
+                            self.oblige(
+                                format!(
+                                    "requires #{} of `step` holds for the actor's initial \
+                                     state at `spawn` (REQ-LLL-182 INIT)",
+                                    i + 1
+                                ),
+                                goal,
+                            );
+                        }
                     }
                     self.fresh(&sort)
                 } else {

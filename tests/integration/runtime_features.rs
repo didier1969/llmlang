@@ -751,6 +751,51 @@ fn actor_runtime_unrecognized_path_rejected() {
 }
 
 
+// ─── REQ-LLL-185 (SOUNDNESS): abort (`-> Never`) and `= extern` are two INCOMPATIBLE
+// lowerings (Result error channel vs ambient direct call). A mixed effect used to be
+// classified AMBIENT (has_extern won), so a handler clause interpreting its abort op
+// printed "all verified" and then failed deep inside rustc (E0308) — a verified
+// program that does not build. Homogeneity is now enforced at declaration, exactly
+// like the user-tail × abort/extern rejection (DEC-LLL-037), fail-closed (DEC-LLL-015).
+
+#[test]
+fn mixed_abort_extern_effect_is_rejected_req185() {
+    let src = "module M:\n\n  effect UT:\n    ask(Int) -> Int\n\n  effect Mix:\n    boom(Int) -> Never\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part inner() -> Int via UT:\n    yield UT.ask(1)\n\n  part driver() -> Int:\n    handle inner() with UT:\n      ask(n) -> yield Mix.boom(n)\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(driver())\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m)
+        .expect_err("an abort+extern mixed effect must be rejected at check (REQ-LLL-185)");
+    assert!(
+        err.contains("REQ-LLL-185") && err.contains("Mix"),
+        "the rejection must be pedagogical (name the effect and the two lowerings), got: {err}"
+    );
+}
+
+#[test]
+fn handler_clause_on_extern_op_is_rejected_req185() {
+    // Defense-in-depth half of REQ-LLL-185: an extern op is performed ambiently — a
+    // handler clause "interpreting" it can never intercept anything (dead code that
+    // reads as a semantics). Rejected with a clear message.
+    let src = "module M:\n\n  effect Amb:\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part inner() -> Int via Amb:\n    yield Amb.pick(1, 2)\n\n  part driver() -> Int:\n    handle inner() with Amb:\n      pick(a, b) -> yield a\n      return r -> yield r\n\n  part main() -> Int via IO:\n    yield IO.print(driver())\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m)
+        .expect_err("a handler clause on an `= extern` op must be rejected (REQ-LLL-185)");
+    assert!(
+        err.contains("= extern") && err.contains("pick"),
+        "the rejection must name the extern op, got: {err}"
+    );
+}
+
+#[test]
+fn homogeneous_abort_only_and_extern_only_effects_still_check_req185() {
+    // Non-regression: the two homogeneous classes on either side of the REQ-LLL-185
+    // wall keep working — one-op abort (Result channel, handled) and all-extern
+    // (ambient) in the SAME module, just never inside one effect.
+    let src = "module M:\n\n  effect Exc:\n    raise(Int) -> Never\n\n  effect Amb:\n    pick(Int, Int) -> Int = extern \"std::cmp::max\"\n\n  part risky(x: Int) -> Int via Exc:\n    match x >= 0:\n      true  -> yield x\n      false -> yield Exc.raise(x)\n\n  part driver() -> Int via Amb:\n    handle risky(0 - 5) with Exc:\n      raise(code) -> yield Amb.pick(code, 0)\n      return r -> yield r\n\n  part main() -> Int via Amb, IO:\n    yield IO.print(driver())\n";
+    let m = parser::parse_module(src).expect("parse");
+    types::check_module(m).expect("homogeneous abort-only + extern-only effects must still check");
+}
+
+
 // ---- REQ-LLL-056: named marshalling of serde_json::Value (4 simple variants) ----
 
 #[test]
@@ -1044,9 +1089,12 @@ fn optimizer_cse_shares_pure_alloc_subterm_and_preserves_semantics() {
 
     let base_rs = codegen::emit_rust(&cm).expect("codegen base");
     let opt_rs = codegen::emit_rust(&opt).expect("codegen opt");
-    // the pass FIRED only in the optimized output.
+    // the pass FIRED only in the optimized output. The binding lives in codegen's
+    // dedicated `c…` namespace (REQ-LLL-184) — never `u_…`, which is reserved for
+    // user names, so a user variable named `__lll_cse_0` cannot collide with it.
     assert!(!base_rs.contains("__lll_cse_"), "the --no-opt output must not introduce a CSE binding");
-    assert!(opt_rs.contains("__lll_cse_0 = lll_build("), "the optimizer must hoist build(n) to one shared let");
+    assert!(opt_rs.contains("let c__lll_cse_0 = lll_build("), "the optimizer must hoist build(n) to one shared let in the codegen-internal `c…` namespace");
+    assert!(!opt_rs.contains("u___lll_cse_"), "a CSE binding must never be emitted in the user `u_…` namespace (REQ-LLL-184)");
     // build(n) is emitted twice without opt, once with opt.
     assert_eq!(base_rs.matches("lll_build(").count(), opt_rs.matches("lll_build(").count() + 1);
     // the exec-fork rewrite does not touch the proof-fork view: same parts/signatures.
@@ -1079,6 +1127,51 @@ fn optimizer_cse_shares_pure_alloc_subterm_and_preserves_semantics() {
     assert_eq!(base_out, opt_out, "the optimizer changed the observable result");
     // hot(50) = sum(build 50) + len(build 50) = 1275 + 50.
     assert!(base_out.contains("1325"), "unexpected program result: {base_out:?}");
+}
+
+
+#[test]
+fn cse_binding_cannot_capture_user_variable_named_like_it_req184() {
+    // REQ-LLL-184 (SOUNDNESS, model≡binary DEC-LLL-020): the user squats the very name
+    // the optimizer used to forge (`__lll_cse_0`). The hoisted `let` was PREPENDED in
+    // front of `let a` — i.e. AFTER the user's own `let __lll_cse_0 = 5` — and both
+    // lowered into the same `u_…` Rust name, so the user's later read of their variable
+    // silently took the CSE value: `lll build` printed 34, `--no-opt` printed 31, on a
+    // VERIFIED program. The CSE binder now lives in codegen's own `c…` namespace
+    // (marked `%…` in the AST — unspellable from the surface), disjoint from `u_…` by
+    // construction.
+    let src = "module CseCollide:\n\n  part build(n: Int) -> Int:\n    yield n + 1\n\n  part main() -> Int via IO:\n    let __lll_cse_0 = 5\n    let b = __lll_cse_0 * 2\n    let a = build(7) + build(7)\n    yield IO.print(__lll_cse_0 + a + b)\n";
+    let m = parser::parse_module(src).expect("parse");
+    let cm = types::check_module(m).expect("check");
+    let opt = optimize::optimize(&cm);
+    let base_rs = codegen::emit_rust(&cm).expect("codegen base");
+    let opt_rs = codegen::emit_rust(&opt).expect("codegen opt");
+    assert!(
+        opt_rs.contains("let c__lll_cse_0 = lll_build("),
+        "the CSE pass must fire on build(7) + build(7) (cost over threshold) — otherwise \
+         this test no longer exercises the collision"
+    );
+    let run = |rust: &str, tag: &str| -> String {
+        let dir = tempdir();
+        let rs = dir.join("f.rs");
+        let bin = dir.join(format!("f_{tag}"));
+        std::fs::write(&rs, rust).unwrap();
+        let st = std::process::Command::new("rustc")
+            .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+            .arg(&bin)
+            .arg(&rs)
+            .output()
+            .expect("rustc");
+        assert!(st.status.success(), "{tag} codegen failed to compile:\n{}", String::from_utf8_lossy(&st.stderr));
+        String::from_utf8_lossy(&std::process::Command::new(&bin).output().unwrap().stdout)
+            .trim()
+            .to_string()
+    };
+    let base_out = run(&base_rs, "cse184_base");
+    let opt_out = run(&opt_rs, "cse184_opt");
+    assert_eq!(base_out, opt_out, "opt and --no-opt binaries diverged (name capture is back)");
+    // 5 + (8 + 8) + 10 — the user's `__lll_cse_0` must still read 5, never build(7)=8.
+    assert!(base_out.contains("31"), "unexpected program result: {base_out:?}");
 }
 
 

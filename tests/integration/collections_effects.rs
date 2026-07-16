@@ -1321,6 +1321,85 @@ fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
 }
 
 
+// ─── REQ-LLL-182 (SOUNDNESS): `step.requires` is an actor-state INVARIANT, discharged
+// INDUCTIVELY — INIT at every `spawn` (the argument must establish it) + PRESERVATION
+// once per module (`requires ∧ ensures ⇒ requires[state := result]`). Before the fix,
+// step's VC ASSUMED its `requires` while nothing ever established it at the runtime's
+// hidden call sites: `spawn(0)` against `requires state >= 1` printed "all verified",
+// then the compiled binary crashed (100 div 0). Undischarged = compile error, never a
+// runtime fallback (DEC-LLL-015/017).
+
+const ACTOR_182_EFFECT: &str = "  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n";
+
+#[test]
+fn actor_spawn_violating_step_requires_is_rejected_req182() {
+    // Candidate A (INIT): spawn(0) violates `requires state >= 1` — the spawn site
+    // must PROVE step's requires of the initial state, exactly like a call site.
+    let src = format!(
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqInit:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 1\n    ensures result >= 0\n    yield 100 div state\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, 7)\n    let s = Actor.state(pid)\n    yield IO.print(s)\n"
+    );
+    let r = verify_src(&src);
+    assert!(!r.ok(), "spawn(0) against `requires state >= 1` must NOT verify (REQ-LLL-182)");
+    let fs = failures(&r);
+    assert!(
+        fs.iter().any(|f| f.descr.contains("REQ-LLL-182 INIT")),
+        "the INIT obligation (spawn argument establishes step's requires) must be the \
+         failure, got: {fs:?}"
+    );
+}
+
+#[test]
+fn actor_non_inductive_step_contract_is_rejected_req182() {
+    // Candidate B (PRESERVATION): spawn(1) establishes `state >= 1`, but step can
+    // RETURN 0 (state - 1) and nothing implies the next turn's requires — the
+    // invariant is not inductive, so a later message divides by zero.
+    let src = format!(
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqInduct:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 1\n    match msg == 0:\n      true  -> yield 100 div state\n      false -> yield state - 1\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(1)\n    let _ = Actor.send(pid, 5)\n    let _ = Actor.send(pid, 0)\n    let s = Actor.state(pid)\n    yield IO.print(s)\n"
+    );
+    let r = verify_src(&src);
+    assert!(!r.ok(), "a non-inductive `step` contract must NOT verify (REQ-LLL-182)");
+    let fs = failures(&r);
+    assert!(
+        fs.iter().any(|f| f.descr.contains("REQ-LLL-182 PRESERVATION")),
+        "the PRESERVATION obligation (ensures ⇒ requires[state := result]) must be the \
+         failure, got: {fs:?}"
+    );
+}
+
+#[test]
+fn actor_step_requires_on_message_is_rejected_at_check_req182() {
+    // Fail-closed on the v1 form the induction does NOT cover: a `requires` over the
+    // MESSAGE parameter (messages come from arbitrary `send` sites; `spawn` seeds a
+    // state, not a message). Rejected pedagogically at check, before any VC.
+    let src = format!(
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqMsg:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires msg >= 1\n    yield state + msg\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    yield IO.print(Actor.state(pid))\n"
+    );
+    let m = parser::parse_module(&src).expect("parse");
+    let err = types::check_module(m)
+        .expect_err("a message-dependent `requires` on `step` must be rejected at check");
+    assert!(
+        err.contains("REQ-LLL-182") && err.contains("msg"),
+        "the rejection must be pedagogical (name the message parameter and the REQ), got: {err}"
+    );
+}
+
+#[test]
+fn actor_inductive_step_contract_still_verifies_req182() {
+    // Anti-over-reject guard: the canonical inductive shape (examples/actor_runtime.lll)
+    // — INIT holds at every spawn, `ensures result >= 0` implies the next `requires` —
+    // must keep verifying, now with 2 extra INIT obligations + 1 PRESERVATION.
+    let src = format!(
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorOk:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid1 = Actor.spawn(0)\n    let pid2 = Actor.spawn(100)\n    let _ = Actor.send(pid1, 5)\n    let s1 = Actor.state(pid1)\n    let s2 = Actor.state(pid2)\n    yield IO.print(s1 + s2)\n"
+    );
+    let r = verify_src(&src);
+    assert!(
+        r.ok(),
+        "the inductive actor contract must still verify (over-reject!): {:?}",
+        failures(&r)
+    );
+}
+
+
 #[test]
 fn depends_hyphenated_crate_name_parses_and_links() {
     // REQ-LLL-053 (4): a hyphenated crate name (common on crates.io, e.g.
