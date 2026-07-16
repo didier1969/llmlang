@@ -243,6 +243,37 @@ fn part_called_only_inside_a_comprehension_folds_callee_def_hash_req173() {
     );
 }
 
+#[test]
+fn part_called_only_inside_an_example_folds_callee_def_hash_req186() {
+    // REQ-LLL-186: `collect_dep_names` (dep-hash ordering) walked only `part.body`, not
+    // `part.examples` — yet examples are a contractual channel that MAY contain calls
+    // (REQ-LLL-049) and fold into the def-hash (`normalize_part`). A part referenced ONLY inside
+    // a caller's `example` was condensed AFTER the caller → the caller normalized it to
+    // `!unresolved:` instead of folding its def-hash: non-transitive AND sensitive to
+    // declaration order. Mirror of the REQ-LLL-173 comprehension fix for the examples channel.
+    let base = "module T:\n\n  part caller(x: Int) -> Int:\n    ensures result == x + 1\n    example helper(2) == 4\n    yield x + 1\n\n  part helper(y: Int) -> Int:\n    ensures result == y * 2\n    yield y * 2\n";
+    let (_, h1) = full(base);
+
+    // (1) TRANSITIVITY: editing the example-borne callee's body changes the caller's identity
+    // (`y + y` == `y * 2` at 2, so `example helper(2) == 4` still holds).
+    let body_edit = base.replace("yield y * 2", "yield y + y");
+    let (_, h2) = full(&body_edit);
+    assert_ne!(h1.def_hash["helper"], h2.def_hash["helper"], "the callee body edit must change its own hash");
+    assert_ne!(
+        h1.def_hash["caller"], h2.def_hash["caller"],
+        "a callee referenced only inside an example must propagate to the caller's identity (REQ-LLL-186 transitivity)"
+    );
+
+    // (2) DECLARATION-ORDER INSENSITIVITY: declaring the callee BEFORE the caller must not change
+    // the caller's identity — the canonical hash folds dependencies, not declaration order.
+    let swapped = "module T:\n\n  part helper(y: Int) -> Int:\n    ensures result == y * 2\n    yield y * 2\n\n  part caller(x: Int) -> Int:\n    ensures result == x + 1\n    example helper(2) == 4\n    yield x + 1\n";
+    let (_, h3) = full(swapped);
+    assert_eq!(
+        h1.def_hash["caller"], h3.def_hash["caller"],
+        "an example-borne dependency must make the caller's identity insensitive to declaration order (REQ-LLL-186)"
+    );
+}
+
 
 #[test]
 fn requires_on_main_is_rejected_req180() {

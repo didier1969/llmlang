@@ -159,6 +159,15 @@ fn condensed_order(cm: &CheckedModule) -> Vec<Vec<String>> {
             let part = &cm.module.parts[cm.index[m]];
             let mut deps = Vec::new();
             collect_dep_names(&part.body, &mut deps);
+            // REQ-LLL-186: `examples` are a contractual channel that MAY contain calls
+            // (REQ-LLL-049) and fold into the def-hash (`normalize_part`), so they must
+            // contribute dependency-ORDERING edges too. Otherwise a callee referenced only
+            // inside a caller's `example` is condensed AFTER its caller → the caller's
+            // def-hash resolves the callee to `!unresolved:` (non-transitive AND sensitive to
+            // declaration order). Mirror of the REQ-LLL-173 fix for the examples channel.
+            for ex in &part.examples {
+                collect_dep_expr(ex, &mut deps);
+            }
             for d in deps {
                 if let Some(did) = cm.scc_id.get(&d) {
                     if *did != cid {
