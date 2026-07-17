@@ -39,3 +39,7 @@ bench/agentic/race_out/maxp/armR_bin
 bench/agentic/race_out/maxp/armL.lll
 bench/agentic/race_out/maxp/armR.rs
 bench/agentic/race_out/mt_*.lll
+
+# Python bytecode (bench harnais)
+__pycache__/
+*.pyc
