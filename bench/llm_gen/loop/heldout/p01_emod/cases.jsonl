@@ -1,0 +1,10 @@
+{"args": [11, 4], "expect": 3}
+{"args": [-11, 4], "expect": 1}
+{"args": [-2, 2], "expect": 0}
+{"args": [13, 13], "expect": 0}
+{"args": [-13, 13], "expect": 0}
+{"args": [-1, 1000000007], "expect": 1000000006}
+{"args": [999999999999, 7], "expect": 0}
+{"args": [-999999999998, 7], "expect": 1}
+{"args": [-8, 5], "expect": 2}
+{"args": [17, 5], "expect": 2}

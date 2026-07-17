@@ -1,0 +1,17 @@
+{
+  "comment": "Pre-registered pair list (PROTOCOL.md, sample section). A pair is WIRED when pairs/<id>/spec.md + rust_oracle/<id>/cases.jsonl + heldout/<id>/cases.jsonl all exist. `loop_run.py run` refuses with fewer than 10 wired pairs; authoring the remaining pairs is non-gated infrastructure (zero model cost).",
+  "pairs": [
+    { "id": "p01_emod", "fn": "emod", "arity": 2, "spec": "Euclidean remainder emod(a,b), 0 <= r < b, any sign of a" },
+    { "id": "p02_isqrt", "fn": "isqrt", "arity": 1, "spec": "integer square root: largest r with r*r <= n" },
+    { "id": "p03_reduce_div", "fn": "reduce_div", "arity": 2, "spec": "fold a list by integer division with a non-zero guard" },
+    { "id": "p04_sum_mod", "fn": "sum_mod", "arity": 2, "spec": "sum of a list, reduced mod m > 0" },
+    { "id": "p05_sum_of_squares", "fn": "sum_of_squares", "arity": 1, "spec": "sum of squares of a list (overflow-latent-bug class)" },
+    { "id": "p06_clamp", "fn": "clamp", "arity": 3, "spec": "clamp x into [lo, hi], lo <= hi" },
+    { "id": "p07_gcd", "fn": "gcd", "arity": 2, "spec": "greatest common divisor (termination measure required)" },
+    { "id": "p08_binary_search", "fn": "binary_search", "arity": 2, "spec": "index of x in a sorted array, -1 if absent (bounds proofs)" },
+    { "id": "p09_running_max", "fn": "running_max", "arity": 1, "spec": "maximum of a non-empty list (ensures forall-bound)" },
+    { "id": "p10_digit_sum", "fn": "digit_sum", "arity": 1, "spec": "sum of decimal digits of n >= 0 (div/mod recursion)" },
+    { "id": "p11_interval_overlap", "fn": "interval_overlap", "arity": 4, "spec": "do [a1,b1] and [a2,b2] overlap (boolean contract algebra)" },
+    { "id": "p12_dedup_count", "fn": "dedup_count", "arity": 1, "spec": "count distinct adjacent-run values in a list" }
+  ]
+}
