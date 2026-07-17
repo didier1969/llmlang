@@ -12,6 +12,7 @@ DEC-LLL-001..027, session pointer `CPT-LLL-012`) — ne jamais dupliquer ici.
 | build + tests | `cargo build && cargo test --test integration` |
 | vérifier un module | `./target/debug/lll check <f.lll>` (`--no-cache` forcer · `--format=json` diagnostics LLM structurés) |
 | compiler/exécuter | `lll build [--unchecked] <f>` · `lll run <f> [--trace t\|--replay t]` |
+| paquets (REQ-155, vague A) | `lll fetch <f>` (matérialise deps git → `lll/store/`, SEULE commande réseau) · `lll lock <f>` (lll.lock : hashes modules + pins `[[package]]`) · `lll check --locked <f>` |
 | identité / refactor | `lll hash <f>` · `lll rename <f> <old> <new>` |
 | édition structurelle (par content-hash) | `lll dedup <f> [--merge]` · `lll move <f> <part> <dest>` |
 | pont Axon / FFI | `lll export-ist <f>` (IST → Axon) · `lll ffi-import <f.rs> <Eff> <prefix>` (bindings extern auto-gen) |

@@ -17,6 +17,13 @@ use crate::parser;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// The package subsystem (REQ-LLL-155 wave A: `[dependencies]` path+git sources,
+/// content-addressed store, lockfile pins). It lives in `src/pkg.rs` and is wired
+/// through THIS module — the loader is its single compiler-side consumer (packages
+/// are import roots, nothing more; zero soundness surface past the front-end).
+#[path = "pkg.rs"]
+pub mod pkg;
+
 /// The project `lll.toml` manifest (REQ-LLL-149). It maps a dotted-import root
 /// segment to a directory RELATIVE to the manifest, so `import std.list` with
 /// `std = "vendor/std"` resolves to `<manifest dir>/vendor/std/list.lll`. Roots are
@@ -41,6 +48,48 @@ struct Resolver {
     /// The bundled stdlib directory (`$LLL_STD`), backing the canonical `std.*`
     /// namespace when no manifest root shadows it. `None` = `$LLL_STD` unset.
     std_dir: Option<PathBuf>,
+    /// `[dependencies]` package roots (REQ-LLL-155): name → resolved package
+    /// directory (path deps manifest-relative, git deps from the content-
+    /// addressed store). Flat and program-wide — the single-version namespace
+    /// DEC-LLL-019 forces; diamond conflicts were already judged at build time.
+    packages: HashMap<String, PathBuf>,
+}
+
+/// Build the one-per-program name resolver from the ENTRY file: the project
+/// manifest (`[imports]` roots, REQ-LLL-149), the resolved `[dependencies]`
+/// packages (REQ-LLL-155 — includes diamond-conflict judgement), and `$LLL_STD`
+/// (REQ-LLL-144). A name that is BOTH an `[imports]` root and a package is a
+/// hard error here: one name, one meaning — never a silent shadowing.
+fn build_resolver(entry: &Path) -> Result<Resolver, String> {
+    let manifest_path = find_manifest_path(entry)?;
+    let manifest = match &manifest_path {
+        Some(p) => Some(parse_manifest(p)?),
+        None => None,
+    };
+    let packages: HashMap<String, PathBuf> = match &manifest_path {
+        Some(mp) => pkg::packages_for_manifest(mp)?
+            .into_iter()
+            .map(|(name, p)| (name, p.dir))
+            .collect(),
+        None => HashMap::new(),
+    };
+    if let (Some(m), Some(mp)) = (&manifest, &manifest_path) {
+        let mut clash: Vec<&String> =
+            packages.keys().filter(|k| m.roots.contains_key(*k)).collect();
+        clash.sort();
+        if let Some(k) = clash.first() {
+            return Err(format!(
+                "`{k}` is BOTH an `[imports]` root and a `[dependencies]` package \
+                 ({}) — one name, one meaning; rename or drop one",
+                mp.display()
+            ));
+        }
+    }
+    Ok(Resolver {
+        manifest,
+        std_dir: std::env::var_os("LLL_STD").map(PathBuf::from),
+        packages,
+    })
 }
 
 /// `<base>/<seg1>/<seg2>/…/<last>.lll` — build a module file path from a base
@@ -61,14 +110,15 @@ fn module_path(base: PathBuf, rest: &[String]) -> PathBuf {
 /// named import in the whole program, including those inside imported files
 /// (resolution always anchors to the root project manifest — a vendored dependency
 /// cannot shadow it). `None` = no manifest found: quoted-path imports still work,
-/// named imports error.
-fn find_manifest(entry: &Path) -> Result<Option<Manifest>, String> {
+/// named imports error. Public so the package subsystem (`lll fetch` / `lll lock`,
+/// REQ-LLL-155) anchors on the SAME manifest the loader resolves with.
+pub fn find_manifest_path(entry: &Path) -> Result<Option<PathBuf>, String> {
     let start = canon(entry)?;
     let mut cur = start.parent();
     while let Some(d) = cur {
         let cand = d.join("lll.toml");
         if cand.is_file() {
-            return Ok(Some(parse_manifest(&cand)?));
+            return Ok(Some(cand));
         }
         cur = d.parent();
     }
@@ -154,7 +204,13 @@ fn resolve_import(
                     return Ok(module_path(m.dir.join(base), rest));
                 }
             }
-            // 2. the built-in `std` root, backed by `$LLL_STD` (the bundled,
+            // 2. a `[dependencies]` package (REQ-LLL-155): the dep's directory is
+            //    the module root, so `import mathlib.core` = `<dep dir>/core.lll`.
+            //    ([imports]/[dependencies] name clashes were rejected at build time.)
+            if let Some(dir) = resolver.packages.get(root) {
+                return Ok(module_path(dir.clone(), rest));
+            }
+            // 3. the built-in `std` root, backed by `$LLL_STD` (the bundled,
             //    verified stdlib). Content-hash identity means a mis-pointed
             //    `$LLL_STD` diverges LOUDLY (different def-hash), never silently.
             if root == "std" {
@@ -168,12 +224,13 @@ fn resolve_import(
                 })?;
                 return Ok(module_path(std_dir.clone(), rest));
             }
-            // 3. unknown root.
+            // 4. unknown root.
             let mut avail: Vec<&str> = resolver
                 .manifest
                 .as_ref()
                 .map(|m| m.roots.keys().map(String::as_str).collect())
                 .unwrap_or_default();
+            avail.extend(resolver.packages.keys().map(String::as_str));
             avail.sort_unstable();
             Err(format!(
                 "named import `{}`: unknown import root `{}` (available roots in lll.toml: {}; \
@@ -193,12 +250,10 @@ fn resolve_import(
 pub fn load_program(path: &str) -> Result<(String, Module), String> {
     let root = PathBuf::from(path);
     // Build the name resolver ONCE from the entry file: the project manifest
-    // (REQ-LLL-149) plus the built-in `std` directory from `$LLL_STD`
-    // (REQ-LLL-144). Both anchor every named import in the whole program.
-    let resolver = Resolver {
-        manifest: find_manifest(&root)?,
-        std_dir: std::env::var_os("LLL_STD").map(PathBuf::from),
-    };
+    // (REQ-LLL-149), the `[dependencies]` packages (REQ-LLL-155) and the
+    // built-in `std` directory from `$LLL_STD` (REQ-LLL-144). All three anchor
+    // every named import in the whole program.
+    let resolver = build_resolver(&root)?;
     let mut in_stack: Vec<PathBuf> = Vec::new();
     let mut merged_names: HashMap<String, String> = HashMap::new(); // name -> blind form
     let mut parts: Vec<Part> = Vec::new();
@@ -266,10 +321,7 @@ fn canon(p: &Path) -> Result<PathBuf, String> {
 /// paths are returned so workspace-wide operations (e.g. `lll rename`,
 /// REQ-LLL-012) can rewrite each file in place.
 pub fn workspace_files(root: &str) -> Result<Vec<PathBuf>, String> {
-    let resolver = Resolver {
-        manifest: find_manifest(Path::new(root))?,
-        std_dir: std::env::var_os("LLL_STD").map(PathBuf::from),
-    };
+    let resolver = build_resolver(Path::new(root))?;
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     collect_files(Path::new(root), &resolver, &mut files, &mut seen)?;
@@ -411,6 +463,7 @@ mod tests {
         let r = Resolver {
             manifest: None,
             std_dir: Some(PathBuf::from("/opt/lll-std")),
+            packages: HashMap::new(),
         };
         let p = resolve_import(&name(&["std", "list"]), Path::new("."), &r).unwrap();
         assert_eq!(p, PathBuf::from("/opt/lll-std/list.lll"));
@@ -422,6 +475,7 @@ mod tests {
         let r = Resolver {
             manifest: None,
             std_dir: Some(PathBuf::from("/opt/lll-std")),
+            packages: HashMap::new(),
         };
         let p = resolve_import(&name(&["std", "collections", "map"]), Path::new("."), &r).unwrap();
         assert_eq!(p, PathBuf::from("/opt/lll-std/collections/map.lll"));
@@ -433,6 +487,7 @@ mod tests {
         let r = Resolver {
             manifest: Some(manifest("/proj", &[("std", "vendor/std")])),
             std_dir: Some(PathBuf::from("/opt/lll-std")),
+            packages: HashMap::new(),
         };
         let p = resolve_import(&name(&["std", "list"]), Path::new("."), &r).unwrap();
         assert_eq!(p, PathBuf::from("/proj/vendor/std/list.lll"));
@@ -444,8 +499,41 @@ mod tests {
         let r = Resolver {
             manifest: None,
             std_dir: None,
+            packages: HashMap::new(),
         };
         let err = resolve_import(&name(&["std", "list"]), Path::new("."), &r).unwrap_err();
         assert!(err.contains("LLL_STD"), "error must name LLL_STD: {err}");
+    }
+
+    // REQ-LLL-155: a `[dependencies]` package name is an import root — the dep's
+    // directory anchors `module_path`, exactly like a manifest `[imports]` root.
+    #[test]
+    fn package_root_resolves_through_packages_map() {
+        let r = Resolver {
+            manifest: None,
+            std_dir: None,
+            packages: HashMap::from([(
+                "mathlib".to_string(),
+                PathBuf::from("/deps/mathlib"),
+            )]),
+        };
+        let p = resolve_import(&name(&["mathlib", "core"]), Path::new("."), &r).unwrap();
+        assert_eq!(p, PathBuf::from("/deps/mathlib/core.lll"));
+    }
+
+    // REQ-LLL-155: an unknown root's error MENTIONS package roots — the LLM's
+    // repair menu must show every name that would have resolved.
+    #[test]
+    fn unknown_root_error_lists_package_roots() {
+        let r = Resolver {
+            manifest: None,
+            std_dir: None,
+            packages: HashMap::from([(
+                "mathlib".to_string(),
+                PathBuf::from("/deps/mathlib"),
+            )]),
+        };
+        let err = resolve_import(&name(&["nope", "core"]), Path::new("."), &r).unwrap_err();
+        assert!(err.contains("mathlib"), "must list package roots: {err}");
     }
 }

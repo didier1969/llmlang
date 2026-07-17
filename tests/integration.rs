@@ -53,3 +53,5 @@ mod cli_test_cmd;
 mod cli_fmt;
 #[path = "integration/examples_smoke.rs"]
 mod examples_smoke;
+#[path = "integration/pkg.rs"]
+mod pkg;

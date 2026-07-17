@@ -410,7 +410,7 @@ fn export_ist(file: &str) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll check --locked <file>       also verify every module + package pin against lll.lock (REQ-LLL-155)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fetch <file.lll>            materialize git [dependencies] into lll/store/ (the ONLY networked command)\n  lll lock <file.lll>             (re)generate lll.lock: module hashes + [[package]] pins (REQ-LLL-155)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
         .to_string()
 }
 
@@ -423,70 +423,6 @@ fn load(path: &str) -> Result<(String, types::CheckedModule, hash::HashedModule)
 
 fn cache_dir() -> PathBuf {
     PathBuf::from(".lll-cache")
-}
-
-/// REQ-LLL-155: the reproducibility-lockfile entries — every module reachable from
-/// `entry` (the resolved workspace), each paired with the blake3 of its SOURCE bytes (the
-/// text is the source of truth, DEC-LLL-020). Paths are recorded RELATIVE to the entry's
-/// directory where possible so the lockfile is portable; the list is sorted so the file
-/// is deterministic. This is the local-package core of a package system — versioned
-/// `[dependencies]` and a hosted registry build on top of it.
-fn lock_entries(entry: &str) -> Result<Vec<(String, String)>, String> {
-    let files = loader::workspace_files(entry)?;
-    let base = Path::new(entry).parent().unwrap_or_else(|| Path::new("."));
-    let mut out = Vec::new();
-    for f in &files {
-        let bytes = std::fs::read(f).map_err(|e| format!("{}: {e}", f.display()))?;
-        let hash = blake3::hash(&bytes).to_hex().to_string();
-        let rel = f.strip_prefix(base).unwrap_or(f).to_string_lossy().to_string();
-        out.push((rel, hash));
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// REQ-LLL-155: verify the program against its `lll.lock` — every resolved module's
-/// current source hash must equal the locked hash. A changed or missing dependency is a
-/// hard error (reproducibility violated), never a silent drift. Run `lll lock` to (re)generate.
-fn verify_lock(entry: &str) -> Result<(), String> {
-    let base = Path::new(entry).parent().unwrap_or_else(|| Path::new("."));
-    let lock_path = base.join("lll.lock");
-    let text = std::fs::read_to_string(&lock_path).map_err(|e| {
-        format!(
-            "--locked: cannot read {} ({e}) — run `lll lock {entry}` first",
-            lock_path.display()
-        )
-    })?;
-    let mut locked: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            locked.insert(
-                k.trim().trim_matches('"').to_string(),
-                v.trim().trim_matches('"').to_string(),
-            );
-        }
-    }
-    for (p, h) in lock_entries(entry)? {
-        match locked.get(&p) {
-            Some(lh) if *lh == h => {}
-            Some(_) => {
-                return Err(format!(
-                    "--locked: module `{p}` changed since lll.lock — reproducibility violated \
-                     (regenerate with `lll lock`)"
-                ))
-            }
-            None => {
-                return Err(format!(
-                    "--locked: module `{p}` is not in lll.lock — regenerate with `lll lock`"
-                ))
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Run the check pipeline and collect every failure as a structured diagnostic
@@ -565,9 +501,10 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                 }
             }
             let file = file.ok_or_else(usage)?;
-            // REQ-LLL-155: reproducibility gate — every resolved module must match lll.lock.
+            // REQ-LLL-155: reproducibility gate — every resolved module AND every
+            // [[package]] pin must match lll.lock (loader::pkg::verify_lock).
             if locked {
-                verify_lock(file)?;
+                loader::pkg::verify_lock(file)?;
             }
             if json {
                 // LLM channel: structured diagnostics on stdout. The exit-code MIRRORS the
@@ -930,20 +867,31 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         ["lock", file] => {
-            // REQ-LLL-155: (re)generate lll.lock — the content-hash of every resolved
-            // module — next to the entry. `lll check <f> --locked` then verifies it.
-            let entries = lock_entries(file)?;
-            let mut body = String::from(
-                "# lll.lock — generated by `lll lock`; do not edit. blake3 of each resolved\n\
-                 # module's source (DEC-LLL-020). `lll check <f> --locked` verifies reproducibility.\n",
+            // REQ-LLL-155: (re)generate lll.lock next to the entry — the blake3 of every
+            // resolved module (portable keys: `<pkg:name>/…`, `<std>/…` — never a
+            // machine-absolute path) plus one [[package]] pin (name/version/source/
+            // blake3) per [dependencies] package. `lll check <f> --locked` verifies it.
+            let (lock_path, n_mod, n_pkg) = loader::pkg::write_lock(file)?;
+            println!(
+                "✔ locked {n_mod} module(s), {n_pkg} package(s) → {}",
+                lock_path.display()
             );
-            for (p, h) in &entries {
-                body.push_str(&format!("{p:?} = {h:?}\n"));
+            Ok(())
+        }
+        ["fetch", file] => {
+            // REQ-LLL-155: the ONLY networked command — materialize every git
+            // [dependencies] source (rev-pinned, transitively) into the content-
+            // addressed store `lll/store/<blake3(url#rev)>/` via a git shell-out.
+            // `check`/`build` resolve from the store and NEVER touch the network.
+            let (fetched, store) = loader::pkg::fetch(file)?;
+            if fetched.is_empty() {
+                println!("✔ nothing to fetch — every [dependencies] package is already materialized");
+            } else {
+                for f in &fetched {
+                    println!("  fetched {f}");
+                }
+                println!("✔ {} package(s) → {}", fetched.len(), store.display());
             }
-            let base = Path::new(file).parent().unwrap_or_else(|| Path::new("."));
-            let lock_path = base.join("lll.lock");
-            std::fs::write(&lock_path, body).map_err(|e| e.to_string())?;
-            println!("✔ locked {} module(s) → {}", entries.len(), lock_path.display());
             Ok(())
         }
         ["export-ist", file] | ["mcp", "--export-ist", file] => {
