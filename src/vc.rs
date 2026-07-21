@@ -972,6 +972,13 @@ fn list_elem_sort(sort: &str) -> Option<String> {
     Some(inner.trim().to_string())
 }
 
+/// The ELEMENT sort of a verified-array sort string: `(Seq E)` → `E` (REQ-LLL-159b,
+/// for `s_from_array`'s element sort). Arrays proof-encode as Z3's `(Seq E)`.
+fn seq_elem_sort(sort: &str) -> Option<String> {
+    let inner = sort.trim().strip_prefix("(Seq ")?.strip_suffix(')')?;
+    Some(inner.trim().to_string())
+}
+
 /// SMT-LIB sort for a type (REQ-LLL-007, DEC-LLL-028). A type variable becomes a
 /// fresh uninterpreted sort `Tv_<name>` (declared once per script); `List[e]`
 /// becomes an instance `(Lst <e>)` of the parametric list datatype (LIST_DECL) —
@@ -1005,6 +1012,14 @@ fn smt_ty(t: &Ty) -> String {
         // functions are declared as uninterpreted functions (declare-fun), never
         // used as a first-order value sort (REQ-LLL-009, DEC-LLL-029).
         Ty::Fun(..) => unreachable!("function type has no value sort — UF-declared instead"),
+        // a fused sequence has NO proof sort (REQ-LLL-159b): it never enters a contract
+        // (rejected by `contains_seq`) and the vc's seq-pipeline handler collects the
+        // lambda-body obligations WITHOUT ever reifying a `Seq` term, so `smt_ty` is
+        // never asked for one. Reaching here is an internal invariant break.
+        Ty::Seq(..) => unreachable!(
+            "Seq has no SMT sort — it is second-class, never appears in a proof term \
+             (REQ-LLL-159b)"
+        ),
         // a user ADT is a Z3 datatype of the same name (REQ-LLL-011). A parametric
         // ADT applies its type arguments — `Option[Int]` → `(Option Int)` — exactly
         // like the parametric list `(Lst Int)` (REQ-LLL-068). The argument sort
@@ -1872,6 +1887,135 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// REQ-LLL-159b: collect the obligations of a `Seq` PRODUCER/COMBINATOR expression
+    /// (the upstream of a consumer). Producer bound-exprs are translated for their own
+    /// side-conditions; each combinator lambda body is discharged UNGUARDED under a fresh
+    /// element (see `tr_seq_lambda_obligations`); the recursion walks the whole chain.
+    /// No `Seq` term is ever reified — a `Seq` has no proof sort.
+    fn tr_seq_obligations(
+        &mut self,
+        e: &Expr,
+        env: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let (name, args) = match e {
+            Expr::Call(n, a) => (n.as_str(), a),
+            _ => {
+                return Err(
+                    "vcgen: a `Seq` pipeline stage must be a seq builtin call (REQ-LLL-159b)"
+                        .into(),
+                )
+            }
+        };
+        match name {
+            "s_from_list" | "s_from_array" => {
+                self.tr(&args[0], env, None)?;
+            }
+            "s_range" => {
+                self.tr(&args[0], env, Some(&Ty::Int))?;
+                self.tr(&args[1], env, Some(&Ty::Int))?;
+            }
+            "s_map" | "s_filter" => {
+                self.tr_seq_obligations(&args[0], env)?;
+                self.tr_seq_lambda_obligations(&args[1], env)?;
+            }
+            "s_take" => {
+                self.tr_seq_obligations(&args[0], env)?;
+                self.tr(&args[1], env, Some(&Ty::Int))?;
+            }
+            "s_zip" => {
+                self.tr_seq_obligations(&args[0], env)?;
+                self.tr_seq_obligations(&args[1], env)?;
+            }
+            other => {
+                return Err(format!(
+                    "vcgen: `{other}` is not a `Seq` producer/combinator (REQ-LLL-159b)"
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    /// REQ-LLL-159b: discharge a combinator/consumer LAMBDA's body obligations. Each
+    /// declared parameter is bound to a FRESH, UNCONSTRAINED constant of its sort, then
+    /// the body is translated with NO guard — so a `div`/`mod` in the body raises its
+    /// non-zero-divisor obligation over an arbitrary element and, absent a proof, the
+    /// part is REJECTED (the totality invariant, DEC-LLL-026). This is the exact mirror
+    /// of the comprehension-body path.
+    fn tr_seq_lambda_obligations(
+        &mut self,
+        lam: &Expr,
+        env: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        match lam {
+            Expr::Lambda(params, body) => {
+                let mut env2 = env.clone();
+                for (pn, pty) in params {
+                    let f = self.fresh(&smt_ty(pty));
+                    env2.insert(pn.clone(), f);
+                }
+                self.tr(body, &env2, None)?;
+                Ok(())
+            }
+            _ => Err(
+                "vcgen: a `Seq` combinator/consumer function must be a lambda (REQ-LLL-159b)"
+                    .into(),
+            ),
+        }
+    }
+
+    /// REQ-LLL-159b: the OUTPUT element sort of a `Seq` producer/combinator chain, used
+    /// only to size the havoc'd `s_collect` result when no expected type is available.
+    /// A pure read — the temporary binder recorded in `self.sorts` is a sort memo, never
+    /// an emitted declaration.
+    fn seq_out_elem_sort(
+        &mut self,
+        e: &Expr,
+        env: &HashMap<String, String>,
+    ) -> Result<String, String> {
+        let (name, args) = match e {
+            Expr::Call(n, a) => (n.as_str(), a),
+            _ => return Err("vcgen: seq pipeline stage is not a call (REQ-LLL-159b)".into()),
+        };
+        Ok(match name {
+            "s_from_list" => {
+                let s = self
+                    .sort_of(&args[0], env)
+                    .ok_or_else(|| "vcgen: `s_from_list` source sort unknown".to_string())?;
+                list_elem_sort(&s)
+                    .ok_or_else(|| "vcgen: `s_from_list` source is not a list".to_string())?
+            }
+            "s_from_array" => {
+                let s = self
+                    .sort_of(&args[0], env)
+                    .ok_or_else(|| "vcgen: `s_from_array` source sort unknown".to_string())?;
+                seq_elem_sort(&s)
+                    .ok_or_else(|| "vcgen: `s_from_array` source is not an array".to_string())?
+            }
+            "s_range" => "Int".to_string(),
+            "s_filter" | "s_take" => self.seq_out_elem_sort(&args[0], env)?,
+            "s_zip" => {
+                let a = self.seq_out_elem_sort(&args[0], env)?;
+                let b = self.seq_out_elem_sort(&args[1], env)?;
+                format!("(Tup2 {a} {b})")
+            }
+            "s_map" => match &args[1] {
+                Expr::Lambda(params, body) => {
+                    let mut env2 = env.clone();
+                    for (pn, pty) in params {
+                        let term = format!("__seqsort_{pn}");
+                        self.sorts.insert(term.clone(), smt_ty(pty));
+                        env2.insert(pn.clone(), term);
+                    }
+                    self.sort_of(body, &env2).ok_or_else(|| {
+                        "vcgen: cannot determine `s_map` output element sort".to_string()
+                    })?
+                }
+                _ => return Err("vcgen: `s_map` function must be a lambda".into()),
+            },
+            other => return Err(format!("vcgen: `{other}` is not a seq producer/combinator")),
+        })
+    }
+
     fn walk_body(&mut self, body: &[Stmt], mut env: HashMap<String, String>) -> Result<(), String> {
         for s in body {
             match s {
@@ -2542,6 +2686,63 @@ impl<'a> Emit<'a> {
                     ),
                 };
                 self.fresh(&res_sort)
+            }
+            // FUSED lazy sequences (REQ-LLL-159b). A `Seq` never appears in a CONTRACT
+            // (rejected at check), so this only runs while collecting a BODY's obligations.
+            // The RESULT is opaque to the pure-core proof (havoc), but every lambda body a
+            // combinator/consumer carries MUST have its OWN obligations discharged under a
+            // FRESH, ARBITRARY element — so a partial body (an unguarded `div` in an `s_map`)
+            // is correctly REJECTED, exactly like a comprehension body. There is NO filter
+            // propagation between stages: each lambda is proven total UNGUARDED (fail-closed;
+            // rejecting a filter-safe div is mere incompleteness, never unsoundness). The
+            // producer's finiteness is what discharges termination — no new obligation.
+            Expr::Call(name, args)
+                if is_seq_builtin(name)
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                match name.as_str() {
+                    // CONSUMERS return a real (non-Seq) value — havoc of the result sort.
+                    "s_fold" => {
+                        self.tr_seq_obligations(&args[0], env)?;
+                        self.tr(&args[1], env, None)?;
+                        self.tr_seq_lambda_obligations(&args[2], env)?;
+                        // accumulator sort = the fold lambda's FIRST declared parameter type
+                        // (the checker fixed it equal to the init type) — robust even when the
+                        // init is an empty literal whose sort `sort_of` cannot infer.
+                        let acc_sort = match &args[2] {
+                            Expr::Lambda(ps, _) if !ps.is_empty() => smt_ty(&ps[0].1),
+                            _ => self.sort_of(&args[1], env).ok_or_else(|| {
+                                "vcgen: cannot determine `s_fold` accumulator sort".to_string()
+                            })?,
+                        };
+                        self.fresh(&acc_sort)
+                    }
+                    "s_any" | "s_all" => {
+                        self.tr_seq_obligations(&args[0], env)?;
+                        self.tr_seq_lambda_obligations(&args[1], env)?;
+                        self.fresh("Bool")
+                    }
+                    "s_collect" => {
+                        self.tr_seq_obligations(&args[0], env)?;
+                        let sort = match expected {
+                            Some(t) => smt_ty(t),
+                            None => format!("(Lst {})", self.seq_out_elem_sort(&args[0], env)?),
+                        };
+                        self.fresh(&sort)
+                    }
+                    // A producer/combinator reaching TERM position means a `Seq` escaped its
+                    // pipeline — the checker's linear discipline (REQ-LLL-159b) guarantees this
+                    // cannot happen. Fail LOUD rather than invent a sort.
+                    other => {
+                        return Err(format!(
+                            "vcgen: seq producer/combinator `{other}` reached value position — a \
+                             `Seq` must be consumed by `s_fold`/`s_any`/`s_all`/`s_collect` in \
+                             place (REQ-LLL-159b; check_seq_usage is the guard)"
+                        ))
+                    }
+                }
             }
             Expr::Call(name, args)
                 if is_array_builtin(name)
@@ -3704,7 +3905,7 @@ fn collect_user_type_refs(t: &Ty, out: &mut std::collections::BTreeSet<String>) 
                 collect_user_type_refs(a, out);
             }
         }
-        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => collect_user_type_refs(e, out),
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) | Ty::Seq(e) => collect_user_type_refs(e, out),
         Ty::Map(k, v) => {
             collect_user_type_refs(k, out);
             collect_user_type_refs(v, out);

@@ -1808,6 +1808,16 @@ impl Parser {
                 self.eat(Tok::RBracket)?;
                 Ok(Ty::set(elem))
             }
+            Tok::Ident(s) if s == "Seq" => {
+                // fused lazy sequence `Seq[T]` (REQ-LLL-159b) — same grammar as List.
+                // A SECOND-CLASS type: parsing it is legal (the grammar is uniform), but
+                // `contains_seq` (types.rs) rejects it wherever a type is WRITTEN — it may
+                // only be the inferred type of a seq builtin, never an annotation.
+                self.eat(Tok::LBracket)?;
+                let elem = self.ty()?;
+                self.eat(Tok::RBracket)?;
+                Ok(Ty::seq(elem))
+            }
             // a lowercase-initial bareword is a parametric type variable
             // (REQ-LLL-007). Constructors (Int/Bool/List) are capitalized.
             Tok::Ident(s) if s.chars().next().is_some_and(|c| c.is_lowercase()) => {

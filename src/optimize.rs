@@ -32,7 +32,7 @@
 //! trap the original run did not already incur.
 
 use crate::ast::{BinOp, Expr, Stmt, Arm, Handle, HandleClause};
-use crate::ast::{is_array_builtin, is_map_builtin, is_set_builtin};
+use crate::ast::{is_array_builtin, is_map_builtin, is_seq_builtin, is_set_builtin};
 use crate::types::CheckedModule;
 use std::collections::{HashMap, HashSet};
 
@@ -229,6 +229,15 @@ impl EGraph {
             {
                 self.opaque_of(e)
             }
+            // REQ-LLL-159b: a `Seq` builtin (producer/combinator/consumer) is a FUSION
+            // BARRIER for the e-graph. A `Seq` has no reifiable value — it is compiled away
+            // to a single loop — so it must NEVER be CSE'd, hoisted, or deduplicated: sharing
+            // a fused pipeline across two sites is meaningless and would "reify" a `Seq`. Keep
+            // the whole seq expression OPAQUE and UNIQUE per occurrence, and DO NOT recurse
+            // into its internals (its lambda bodies fuse in place at codegen). Explicit here,
+            // ahead of `is_pure_call`, so no future edit can accidentally make a `Seq`
+            // hoistable (a `Seq` is deliberately absent from `is_pure_call`).
+            Expr::Call(name, _) if is_seq_builtin(name) => self.opaque_of(e),
             Expr::Call(name, args) if self.is_pure_call(name) => {
                 let cs: Vec<Id> = args.iter().map(|a| self.add(a)).collect();
                 self.mk(Node::Call(name.clone(), cs))

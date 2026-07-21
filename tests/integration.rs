@@ -57,3 +57,6 @@ mod examples_smoke;
 mod pkg;
 #[path = "integration/effect_inference.rs"]
 mod effect_inference;
+
+#[path = "integration/seq.rs"]
+mod seq;

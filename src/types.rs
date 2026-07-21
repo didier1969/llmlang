@@ -413,6 +413,15 @@ struct Ctx<'a> {
     /// into a hole's `hypotheses`. Pushed/popped by lexical scope; never touches Z3,
     /// the cache, or a verdict.
     path_facts: Vec<PathFact>,
+    /// REQ-LLL-159b linear discipline: true ONLY while checking a `Seq`-argument
+    /// position of a seq builtin (the receiver of a combinator/consumer). `check_expr`
+    /// captures this at entry and immediately resets it to false, so EVERY ordinary
+    /// nested position sees false; the seq-builtin arm re-enables it just for its seq
+    /// args. A computed type that is (or contains) a `Seq` while this was false is a
+    /// discipline violation — a `Seq` that escaped its pipeline — and is rejected
+    /// fail-closed. This is what keeps a `Seq` second-class and its fusion loop always
+    /// rooted at a FINITE producer (termination preserved).
+    seq_ok: bool,
 }
 
 impl Ctx<'_> {
@@ -679,6 +688,18 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             }
             if op.ret != Ty::Never {
                 check_user_ty_declared(&op.ret, &typarams)?;
+            }
+            // REQ-LLL-159b: a `Seq` is second-class and fused away — it can never cross an
+            // effect boundary (which havocs values), so an effect op signature mentioning
+            // one is rejected here (fail-closed, defense-in-depth alongside `check_signature`).
+            for t in op.params.iter().chain(std::iter::once(&op.ret)) {
+                if contains_seq(t) {
+                    return Err(format!(
+                        "effect `{}` op `{}`: a `Seq` is second-class and cannot appear in an \
+                         effect operation signature (REQ-LLL-159b)",
+                        ed.name, op.name
+                    ));
+                }
             }
             // EXTERN FENCE for record invariants (REQ-LLL-158 S3): a foreign value can
             // never be PROVEN to satisfy a record's `invariant`, and havoc-without-assume
@@ -1204,6 +1225,16 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             if !mnames.insert(mn.as_str()) {
                 return Err(format!("class `{}`: duplicate method `{mn}`", c.name));
             }
+            // REQ-LLL-159b: a `Seq` is second-class — never a class-method signature type.
+            for t in mparams.iter().chain(std::iter::once(mret)) {
+                if contains_seq(t) {
+                    return Err(format!(
+                        "class `{}` method `{mn}`: a `Seq` is second-class and cannot appear in \
+                         a method signature (REQ-LLL-159b)",
+                        c.name
+                    ));
+                }
+            }
             // an EFFECTFUL class method (REQ-LLL-095) declares `via <Effect>` — each named
             // effect must be a real declared/builtin effect, exactly like a part's `via`.
             for e in meffs {
@@ -1380,6 +1411,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             hole_policy: HolePolicy::Record,
             holes: Vec::new(),
             path_facts: Vec::new(),
+            seq_ok: false,
         };
         // effect checking is row-based (REQ-LLL-018): each perform / effectful call
         // is validated against ctx.effect_allowed (the part's `via` row ∪ any effect
@@ -1469,6 +1501,14 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             ));
         }
         check_user_ty_declared(&inst.ty, &typarams)?;
+        // REQ-LLL-159b: no `instance C[Seq[…]]` — a `Seq` is second-class.
+        if contains_seq(&inst.ty) {
+            return Err(format!(
+                "instance `{}[{}]`: a `Seq` is second-class and cannot be an instantiation type \
+                 (REQ-LLL-159b)",
+                inst.class, inst.ty
+            ));
+        }
         let provided: HashSet<&str> = inst.defs.iter().map(|(n, _)| n.as_str()).collect();
         if provided.len() != inst.defs.len() {
             return Err(format!(
@@ -1552,6 +1592,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 hole_policy: HolePolicy::Reject,
                 holes: Vec::new(),
                 path_facts: Vec::new(),
+                seq_ok: false,
             };
             let got = check_expr(&mut ctx, body, None)?;
             // A PHANTOM-parameterised return (REQ-LLL-095) synthesises with the ADT's own
@@ -1635,7 +1676,7 @@ fn valid_field_ty(t: &Ty, types: &HashSet<String>, params: &[String]) -> bool {
 fn ty_mentions_var(t: &Ty, v: &str) -> bool {
     match t {
         Ty::Var(a) => a == v,
-        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => ty_mentions_var(e, v),
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) | Ty::Seq(e) => ty_mentions_var(e, v),
         Ty::Map(k, val) => ty_mentions_var(k, v) || ty_mentions_var(val, v),
         Ty::Fun(ps, r) => ps.iter().any(|p| ty_mentions_var(p, v)) || ty_mentions_var(r, v),
         Ty::Tuple(cs) => cs.iter().any(|c| ty_mentions_var(c, v)),
@@ -1650,7 +1691,7 @@ fn ty_mentions_var(t: &Ty, v: &str) -> bool {
 fn ty_uses_only_var(t: &Ty, only: &str) -> bool {
     match t {
         Ty::Var(v) => v == only,
-        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => ty_uses_only_var(e, only),
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) | Ty::Seq(e) => ty_uses_only_var(e, only),
         Ty::Map(k, v) => ty_uses_only_var(k, only) && ty_uses_only_var(v, only),
         Ty::Fun(ps, r) => ps.iter().all(|p| ty_uses_only_var(p, only)) && ty_uses_only_var(r, only),
         Ty::Tuple(cs) => cs.iter().all(|c| ty_uses_only_var(c, only)),
@@ -1719,6 +1760,7 @@ pub(crate) fn subst_tyvar(t: &Ty, var: &str, with: &Ty) -> Ty {
         Ty::List(e) => Ty::List(Box::new(subst_tyvar(e, var, with))),
         Ty::Array(e) => Ty::Array(Box::new(subst_tyvar(e, var, with))),
         Ty::Set(e) => Ty::Set(Box::new(subst_tyvar(e, var, with))),
+        Ty::Seq(e) => Ty::Seq(Box::new(subst_tyvar(e, var, with))),
         Ty::Map(k, v) => Ty::Map(
             Box::new(subst_tyvar(k, var, with)),
             Box::new(subst_tyvar(v, var, with)),
@@ -3229,6 +3271,29 @@ fn collect_part_refs(
 }
 
 fn check_signature(part: &Part) -> Result<(), String> {
+    // REQ-LLL-159b: a `Seq` is SECOND-CLASS — it has no runtime representation and is
+    // fused away, so it may NEVER appear in a written signature (a param or return
+    // type). It exists only as the inferred type of a seq builtin, consumed in place.
+    // Rejecting it here (and in `contract`/effect/class/instance sweeps) is the
+    // fail-closed guard that keeps a `Seq` from ever being returned or stored.
+    for (n, t) in &part.params {
+        if contains_seq(t) {
+            return Err(format!(
+                "part `{}`: parameter `{n}` has type {t} — a `Seq` is second-class and cannot \
+                 be a part parameter (it is built and consumed within one expression, never \
+                 passed or stored) — REQ-LLL-159b",
+                part.name
+            ));
+        }
+    }
+    if contains_seq(&part.ret) {
+        return Err(format!(
+            "part `{}`: return type {} mentions a `Seq` — a `Seq` is second-class and cannot \
+             be returned from a part (it must be consumed by `s_fold`/`s_any`/`s_all`/`s_collect` \
+             in the producing expression) — REQ-LLL-159b",
+            part.name, part.ret
+        ));
+    }
     if matches!(part.ret, Ty::Fun(..)) {
         return Err(format!(
             "part `{}`: returning a function is not supported (v1)",
@@ -4149,6 +4214,7 @@ fn subst_ty(t: &Ty, subst: &HashMap<String, Ty>) -> Ty {
         Ty::Array(e) => Ty::array(subst_ty(e, subst)),
         Ty::Map(k, v) => Ty::map(subst_ty(k, subst), subst_ty(v, subst)),
         Ty::Set(e) => Ty::set(subst_ty(e, subst)),
+        Ty::Seq(e) => Ty::seq(subst_ty(e, subst)),
         Ty::Fun(ps, r) => Ty::Fun(
             ps.iter().map(|p| subst_ty(p, subst)).collect(),
             Box::new(subst_ty(r, subst)),
@@ -4614,7 +4680,116 @@ fn check_body(ctx: &mut Ctx, body: &[Stmt], ret: &Ty) -> Result<(), String> {
     Ok(())
 }
 
-fn check_expr(
+/// REQ-LLL-159b: check a `Seq`-typed ARGUMENT (the receiver of a combinator/consumer)
+/// with the linear-discipline flag SET, and return its element type. Centralising the
+/// `seq_ok = true` toggle here means a seq argument is the ONLY position that admits a
+/// `Seq`, and it is always immediately unwrapped — never stored.
+fn seq_arg_elem(ctx: &mut Ctx, builtin: &str, arg: &Expr) -> Result<Ty, String> {
+    ctx.seq_ok = true;
+    match check_expr(ctx, arg, None)? {
+        Ty::Seq(e) => Ok(*e),
+        other => Err(format!(
+            "part `{}`: `{builtin}` needs a `Seq` as its first argument, got {other} \
+             — build one with `s_from_list`/`s_from_array`/`s_range` (REQ-LLL-159b)",
+            ctx.part.name
+        )),
+    }
+}
+
+/// REQ-LLL-159b: check that a combinator/consumer FUNCTION argument is a lambda with
+/// the expected parameter types, and return its body type. v1 requires a syntactic
+/// lambda (`\(x: T) -> …`) — not a bare part name — so codegen can inline the body into
+/// the fused loop and vc can discharge its totality obligations directly. The lambda
+/// body is checked with `seq_ok` clear (via `check_expr`), so a lambda that tries to
+/// yield a `Seq` is rejected.
+fn seq_lambda_ret(
+    ctx: &mut Ctx,
+    builtin: &str,
+    arg: &Expr,
+    param_tys: &[Ty],
+) -> Result<Ty, String> {
+    let params = match arg {
+        Expr::Lambda(ps, _) => ps,
+        _ => {
+            return Err(format!(
+                "part `{}`: `{builtin}`'s function argument must be a lambda \
+                 `\\(x: T) -> …` in v1 (a bare part name is not accepted here) — REQ-LLL-159b",
+                ctx.part.name
+            ))
+        }
+    };
+    if params.len() != param_tys.len() {
+        return Err(format!(
+            "part `{}`: `{builtin}`'s lambda takes {} parameter(s), got {}",
+            ctx.part.name,
+            param_tys.len(),
+            params.len()
+        ));
+    }
+    for ((pname, pty), want) in params.iter().zip(param_tys) {
+        if pty != want {
+            return Err(format!(
+                "part `{}`: `{builtin}`'s lambda parameter `{pname}` must be {want}, got {pty}",
+                ctx.part.name
+            ));
+        }
+    }
+    match check_expr(ctx, arg, None)? {
+        Ty::Fun(_, ret) => Ok(*ret),
+        other => Err(format!(
+            "part `{}`: `{builtin}`'s function argument did not type as a function ({other})",
+            ctx.part.name
+        )),
+    }
+}
+
+/// REQ-LLL-159b: `s_zip`'s two arguments must each be a BARE producer in v1. A zip of
+/// two INDEPENDENTLY-advanced pipelines (with an intervening `filter`, whose
+/// advancement is data-dependent) needs a dual-loop lowering that the single-fused-loop
+/// model deliberately does not emit — restricting the inputs keeps the lockstep loop
+/// provably correct and finite (fail-closed; a genuine v1 gap, not a soundness hole).
+fn require_bare_seq_producer(part: &str, arg: &Expr) -> Result<(), String> {
+    match arg {
+        Expr::Call(n, _)
+            if matches!(n.as_str(), "s_from_list" | "s_from_array" | "s_range") =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "part `{part}`: `s_zip`'s arguments must each be a bare producer \
+             (`s_from_list`/`s_from_array`/`s_range`) in v1 — a `map`/`filter`/`take`/`zip` \
+             under a `zip` needs the dual-loop lowering (deferred, REQ-LLL-159b)"
+        )),
+    }
+}
+
+/// Type an expression, ENFORCING the `Seq` linear discipline (REQ-LLL-159b) at the
+/// boundary. `ctx.seq_ok` is the "a Seq is acceptable HERE" flag: it is captured on
+/// entry and reset to false so every ordinary nested position rejects a Seq; only a
+/// seq builtin's seq-argument re-enables it. A computed type that carries a `Seq` in a
+/// non-seq position is a Seq that ESCAPED its pipeline (returned, stored, put in a
+/// field, or used a second time) — rejected fail-closed. Because the only Seq-typed
+/// expression is a producer/combinator call and it is allowed ONLY as another seq
+/// builtin's argument, every Seq value is provably consumed, in place, by a bounded
+/// consumer — so the fused loop is always rooted at a finite producer and termination
+/// is preserved exactly as before.
+fn check_expr(ctx: &mut Ctx, e: &Expr, expected: Option<&Ty>) -> Result<Ty, String> {
+    let seq_ok = ctx.seq_ok;
+    ctx.seq_ok = false;
+    let t = check_expr_inner(ctx, e, expected)?;
+    if !seq_ok && contains_seq(&t) {
+        return Err(format!(
+            "part `{}`: a `Seq` value must be consumed by a bounded consumer \
+             (`s_fold`/`s_any`/`s_all`/`s_collect`) in the SAME expression — a `Seq` \
+             cannot be returned, bound to a `let`, stored in a field/tuple/list, or used \
+             twice (REQ-LLL-159b: second-class, fail-closed, termination-preserving)",
+            ctx.part.name
+        ));
+    }
+    Ok(t)
+}
+
+fn check_expr_inner(
     ctx: &mut Ctx,
     e: &Expr,
     expected: Option<&Ty>,
@@ -5414,6 +5589,205 @@ fn check_expr(
                 _ => unreachable!("is_set_builtin covers emptyset/add/member/elems"),
             }
         }
+        // FUSED lazy sequences (REQ-LLL-159b), UNLESS the module shadows the name with a
+        // user part/constructor/local. Producers make a FINITE `Seq`; combinators preserve
+        // finitude; bounded consumers fold it away to a NON-Seq value. The linear discipline
+        // (a `Seq` never escapes) is enforced by the `check_expr` wrapper via `ctx.seq_ok`,
+        // toggled on only for seq arguments (see `seq_arg_elem`). Element types are always
+        // NON-Seq — flat fusion, no `Seq[Seq]`.
+        Expr::Call(name, args)
+            if is_seq_builtin(name)
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            match name.as_str() {
+                // ---- PRODUCERS (finite by construction) ----
+                "s_from_list" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "part `{}`: `s_from_list` takes 1 argument (a List)",
+                            ctx.part.name
+                        ));
+                    }
+                    match check_expr(ctx, &args[0], None)? {
+                        Ty::List(e) => Ty::seq(*e),
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `s_from_list` needs a List, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    }
+                }
+                "s_from_array" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "part `{}`: `s_from_array` takes 1 argument (an Array)",
+                            ctx.part.name
+                        ));
+                    }
+                    match check_expr(ctx, &args[0], None)? {
+                        Ty::Array(e) => Ty::seq(*e),
+                        other => {
+                            return Err(format!(
+                                "part `{}`: `s_from_array` needs an Array, got {other}",
+                                ctx.part.name
+                            ))
+                        }
+                    }
+                }
+                "s_range" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_range` takes 2 arguments (lo, hi) and yields Seq[Int]",
+                            ctx.part.name
+                        ));
+                    }
+                    let lo = check_expr(ctx, &args[0], Some(&Ty::Int))?;
+                    let hi = check_expr(ctx, &args[1], Some(&Ty::Int))?;
+                    if lo != Ty::Int || hi != Ty::Int {
+                        return Err(format!(
+                            "part `{}`: `s_range` bounds must be Int, got {lo} and {hi}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::seq(Ty::Int)
+                }
+                // ---- COMBINATORS (finitude-preserving) ----
+                "s_map" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_map` takes 2 arguments (a Seq, a lambda)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_map", &args[0])?;
+                    let ret = seq_lambda_ret(ctx, "s_map", &args[1], &[elem])?;
+                    if contains_seq(&ret) {
+                        return Err(format!(
+                            "part `{}`: `s_map`'s lambda may not produce a `Seq` — v1 fusion is \
+                             flat (no `Seq[Seq]`), REQ-LLL-159b",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::seq(ret)
+                }
+                "s_filter" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_filter` takes 2 arguments (a Seq, a predicate lambda)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_filter", &args[0])?;
+                    let pred = seq_lambda_ret(ctx, "s_filter", &args[1], std::slice::from_ref(&elem))?;
+                    if pred != Ty::Bool {
+                        return Err(format!(
+                            "part `{}`: `s_filter`'s predicate must return Bool, got {pred}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::seq(elem)
+                }
+                "s_take" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_take` takes 2 arguments (a Seq, a count Int)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_take", &args[0])?;
+                    let nt = check_expr(ctx, &args[1], Some(&Ty::Int))?;
+                    if nt != Ty::Int {
+                        return Err(format!(
+                            "part `{}`: `s_take`'s count must be Int, got {nt}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::seq(elem)
+                }
+                "s_zip" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_zip` takes 2 arguments (two producers)",
+                            ctx.part.name
+                        ));
+                    }
+                    require_bare_seq_producer(&ctx.part.name.clone(), &args[0])?;
+                    require_bare_seq_producer(&ctx.part.name.clone(), &args[1])?;
+                    let a = seq_arg_elem(ctx, "s_zip", &args[0])?;
+                    let b = seq_arg_elem(ctx, "s_zip", &args[1])?;
+                    Ty::seq(Ty::Tuple(vec![a, b]))
+                }
+                // ---- CONSUMERS (bounded, terminal — return a NON-Seq value) ----
+                "s_fold" => {
+                    if args.len() != 3 {
+                        return Err(format!(
+                            "part `{}`: `s_fold` takes 3 arguments (a Seq, an initial \
+                             accumulator, a lambda `\\(acc, x) -> …`)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_fold", &args[0])?;
+                    let init = check_expr(ctx, &args[1], None)?;
+                    let ret = seq_lambda_ret(ctx, "s_fold", &args[2], &[init.clone(), elem])?;
+                    if ret != init {
+                        return Err(format!(
+                            "part `{}`: `s_fold`'s lambda must return the accumulator type \
+                             {init}, got {ret}",
+                            ctx.part.name
+                        ));
+                    }
+                    init
+                }
+                "s_any" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_any` takes 2 arguments (a Seq, a predicate lambda)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_any", &args[0])?;
+                    let pred = seq_lambda_ret(ctx, "s_any", &args[1], &[elem])?;
+                    if pred != Ty::Bool {
+                        return Err(format!(
+                            "part `{}`: `s_any`'s predicate must return Bool, got {pred}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::Bool
+                }
+                "s_all" => {
+                    if args.len() != 2 {
+                        return Err(format!(
+                            "part `{}`: `s_all` takes 2 arguments (a Seq, a predicate lambda)",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_all", &args[0])?;
+                    let pred = seq_lambda_ret(ctx, "s_all", &args[1], &[elem])?;
+                    if pred != Ty::Bool {
+                        return Err(format!(
+                            "part `{}`: `s_all`'s predicate must return Bool, got {pred}",
+                            ctx.part.name
+                        ));
+                    }
+                    Ty::Bool
+                }
+                "s_collect" => {
+                    if args.len() != 1 {
+                        return Err(format!(
+                            "part `{}`: `s_collect` takes 1 argument (a Seq) and yields a List",
+                            ctx.part.name
+                        ));
+                    }
+                    let elem = seq_arg_elem(ctx, "s_collect", &args[0])?;
+                    Ty::list(elem)
+                }
+                _ => unreachable!("is_seq_builtin covers producers/combinators/consumers"),
+            }
+        }
         Expr::Call(name, args) if ctx.ctors.contains_key(name) => {
             // ADT constructor application `Ctor(f1, …)` (REQ-LLL-011)
             let (tyname, fields) = ctx.ctors.get(name).unwrap().clone();
@@ -5759,8 +6133,17 @@ fn check_expr(
             // past `check` to a rustc generic-arity error at build time. Every other
             // annotation site is validated in `check_module`; a lambda binder is the one
             // nested inside an expression, so it is checked here.
-            for (_, t) in params {
+            for (pn, t) in params {
                 check_user_ty_declared(t, ctx.arities)?;
+                // REQ-LLL-159b: a lambda binder is never a `Seq` (a `Seq` is never a value
+                // that can be passed to a lambda) — reject the annotation cleanly.
+                if contains_seq(t) {
+                    return Err(format!(
+                        "part `{}`: lambda parameter `{pn}` has type {t} — a `Seq` is \
+                         second-class and cannot be a lambda parameter (REQ-LLL-159b)",
+                        ctx.part.name
+                    ));
+                }
             }
             // lambdas are pure (v1); check the body in a fresh scope holding the
             // lambda parameters (it may still read enclosing locals — codegen

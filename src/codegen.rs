@@ -1751,6 +1751,15 @@ fn rs_ty(t: &Ty) -> String {
         // a set is a thin layer on the map (DEC-LLL-043 §5): `Map<T, ()>`, the same
         // Rc<BTreeMap> machinery with a unit value.
         Ty::Set(e) => format!("Map<{}, ()>", rs_ty(e)),
+        // a fused sequence has NO runtime type (REQ-LLL-159b) — it is compiled away to a
+        // single loop and never reified. A `Seq` can only appear as a local expression
+        // consumed in place; it is second-class, so `contains_seq` rejects it in every
+        // position `rs_ty` renders (part params/return, fields, class sigs). Reaching here
+        // is an internal invariant break, not a user error.
+        Ty::Seq(_) => unreachable!(
+            "Seq is second-class and erased before codegen — it never reaches rs_ty \
+             (REQ-LLL-159b; check_seq_usage/contains_seq are the fail-closed guards)"
+        ),
         // first-class function → Rust fn pointer (REQ-LLL-009); a non-capturing
         // lambda / mangled part name coerces to it.
         Ty::Fun(ps, r) => {
@@ -1837,6 +1846,12 @@ fn rs_ty_self(t: &Ty, self_var: &str) -> String {
         Ty::Array(e) => format!("Arr<{}>", rs_ty_self(e, self_var)),
         Ty::Map(k, v) => format!("Map<{}, {}>", rs_ty_self(k, self_var), rs_ty_self(v, self_var)),
         Ty::Set(e) => format!("Map<{}, ()>", rs_ty_self(e, self_var)),
+        // a fused sequence is second-class and erased (REQ-LLL-159b) — never a class
+        // method signature type (`contains_seq` rejects it there).
+        Ty::Seq(_) => unreachable!(
+            "Seq is second-class and erased before codegen — it never reaches rs_ty_self \
+             (REQ-LLL-159b)"
+        ),
         Ty::Fun(ps, r) => {
             let a: Vec<String> = ps.iter().map(|p| rs_ty_self(p, self_var)).collect();
             format!("fn({}) -> {}", a.join(", "), rs_ty_self(r, self_var))
@@ -1992,7 +2007,9 @@ fn collect_key_tvars(t: &Ty, acc: &mut Vec<String>) {
         }
         // a set is `Map[T, ()]`, so its element is a BTreeMap key ⇒ needs Ord
         Ty::Set(e) => collect_tvars(e, acc),
-        Ty::List(e) | Ty::Array(e) => collect_key_tvars(e, acc),
+        // a Seq element is never a map key (and Seq is erased before monomorphisation
+        // anyway) — walk it like a list element, no `+ Ord` (REQ-LLL-159b)
+        Ty::List(e) | Ty::Array(e) | Ty::Seq(e) => collect_key_tvars(e, acc),
         Ty::Fun(ps, r) => {
             for p in ps {
                 collect_key_tvars(p, acc);
@@ -2026,7 +2043,7 @@ fn collect_tvars(t: &Ty, acc: &mut Vec<String>) {
             collect_tvars(k, acc);
             collect_tvars(v, acc);
         }
-        Ty::Set(e) => collect_tvars(e, acc),
+        Ty::Set(e) | Ty::Seq(e) => collect_tvars(e, acc),
         Ty::Fun(ps, r) => {
             for p in ps {
                 collect_tvars(p, acc);
@@ -3439,6 +3456,12 @@ fn body_is_scalar_fragment(body: &[Stmt]) -> bool {
                 !(is_array_builtin(n)
                     || is_map_builtin(n)
                     || is_set_builtin(n)
+                    // a `Seq` pipeline (REQ-LLL-159b) fuses to a loop over LllInt/heap
+                    // values — never expressible on the raw-i64 twin. Excluded explicitly
+                    // (the same soundness/compilability boundary as the array builtins),
+                    // even though a consumer always also carries a lambda or a non-scalar
+                    // return that would disqualify it anyway.
+                    || is_seq_builtin(n)
                     || n == "str_of"
                     || n == "str_cat")
             }
@@ -4673,6 +4696,247 @@ fn supplies_owned(
     }
 }
 
+/// One stage of a fused `Seq` pipeline (REQ-LLL-159b), applied to the running element
+/// `__e` in source (pipeline) order. `Map`/`Filter` carry the combinator's inlined
+/// lambda; `Take` carries the count expression.
+enum SeqStage<'a> {
+    Map(&'a [(String, Ty)], &'a Expr),
+    Filter(&'a [(String, Ty)], &'a Expr),
+    Take(&'a Expr),
+}
+
+/// Peel a `Seq` combinator chain from a consumer's seq-argument down to its FINITE
+/// producer (REQ-LLL-159b). Combinators are recorded outermost-first, then reversed to
+/// pipeline order, so codegen replays them exactly as written: producer → stage₁ → … →
+/// consumer. Returns the producer expression plus the ordered stages.
+fn flatten_seq_pipeline(mut e: &Expr) -> Result<(&Expr, Vec<SeqStage<'_>>), String> {
+    let mut stages_rev = Vec::new();
+    loop {
+        match e {
+            Expr::Call(n, args) => match n.as_str() {
+                "s_map" | "s_filter" => {
+                    let (params, body) = match &args[1] {
+                        Expr::Lambda(ps, b) => (ps.as_slice(), b.as_ref()),
+                        _ => {
+                            return Err(format!(
+                                "codegen: `{n}`'s function argument must be a lambda (REQ-LLL-159b)"
+                            ))
+                        }
+                    };
+                    stages_rev.push(if n == "s_map" {
+                        SeqStage::Map(params, body)
+                    } else {
+                        SeqStage::Filter(params, body)
+                    });
+                    e = &args[0];
+                }
+                "s_take" => {
+                    stages_rev.push(SeqStage::Take(&args[1]));
+                    e = &args[0];
+                }
+                // a producer terminates the peel
+                "s_from_list" | "s_from_array" | "s_range" | "s_zip" => break,
+                other => {
+                    return Err(format!(
+                        "codegen: `{other}` is not a `Seq` producer/combinator (REQ-LLL-159b)"
+                    ))
+                }
+            },
+            _ => {
+                return Err(
+                    "codegen: a `Seq` pipeline stage must be a seq builtin call (REQ-LLL-159b)"
+                        .into(),
+                )
+            }
+        }
+    }
+    stages_rev.reverse();
+    Ok((e, stages_rev))
+}
+
+/// Emit a FINITE producer (REQ-LLL-159b) as `(setup, step)`: `setup` runs ONCE before
+/// the loop (bind the source / cursor / bounds); `step` runs at the TOP of each loop
+/// iteration and either `break`s when the producer is exhausted or binds the next
+/// element to `__e{sfx}` AND advances the cursor. Advancing inside `step` (before any
+/// downstream `filter` `continue`) is what keeps the fused loop total. A `s_zip`
+/// producer advances two sub-producers in lockstep and stops at the shorter (finite by
+/// construction); its inputs are bare producers (the checker enforces this), so the
+/// suffixes never collide.
+fn build_seq_producer(p: &Expr, cx: &Cx, sfx: &str) -> Result<(String, String), String> {
+    let (n, args) = match p {
+        Expr::Call(n, a) => (n.as_str(), a),
+        _ => return Err("codegen: a `Seq` producer must be a call (REQ-LLL-159b)".into()),
+    };
+    let e = format!("__e{sfx}");
+    match n {
+        "s_range" => {
+            let hi = format!("__hi{sfx}");
+            let i = format!("__i{sfx}");
+            let setup = format!(
+                "let {hi} = {}; let mut {i} = {};",
+                expr(&args[1], cx, false)?,
+                expr(&args[0], cx, false)?
+            );
+            // half-open, ascending, EMPTY when hi <= lo — the guard makes it total.
+            let step = format!(
+                "if {i} >= {hi} {{ break; }} let {e} = {i}.clone(); {i} = {i} + LllInt::S(1);"
+            );
+            Ok((setup, step))
+        }
+        "s_from_list" => {
+            let src = format!("__src{sfx}");
+            let cur = format!("__cur{sfx}");
+            // bind the source first so it OUTLIVES the borrow that walks it (mirror of the
+            // comprehension's `__csrc`), and borrow rather than clone the `Rc` at each node.
+            let setup = format!(
+                "let {src} = {}; let mut {cur} = &{src};",
+                expr(&args[0], cx, false)?
+            );
+            let step = format!(
+                "let {e} = match &**{cur} {{ LstI::Nil => break, \
+                 LstI::Cons(__h{sfx}, __t{sfx}) => {{ {cur} = __t{sfx}; __h{sfx}.clone() }} }};"
+            );
+            Ok((setup, step))
+        }
+        "s_from_array" => {
+            let arr = format!("__arr{sfx}");
+            let idx = format!("__idx{sfx}");
+            let setup = format!(
+                "let {arr} = {}; let mut {idx} = 0usize;",
+                expr(&args[0], cx, false)?
+            );
+            let step = format!(
+                "if {idx} >= (**{arr}).len() {{ break; }} let {e} = (**{arr})[{idx}].clone(); \
+                 {idx} += 1;"
+            );
+            Ok((setup, step))
+        }
+        "s_zip" => {
+            let (s1, st1) = build_seq_producer(&args[0], cx, &format!("{sfx}1"))?;
+            let (s2, st2) = build_seq_producer(&args[1], cx, &format!("{sfx}2"))?;
+            let setup = format!("{s1} {s2}");
+            // lockstep: advance BOTH; a break in either exits the whole loop (shorter wins).
+            let step = format!("{st1} {st2} let {e} = (__e{sfx}1, __e{sfx}2);");
+            Ok((setup, step))
+        }
+        other => Err(format!(
+            "codegen: `{other}` is not a `Seq` producer (REQ-LLL-159b)"
+        )),
+    }
+}
+
+/// Lower a whole `Seq` pipeline — rooted at a bounded CONSUMER — to ONE fused Rust loop
+/// (REQ-LLL-159b, strymonas-style). No intermediate `Vec`/`Seq` is ever materialised:
+/// the producer drives a single `loop`, each combinator stage transforms/guards the
+/// running element `__e` in place, and the consumer folds/short-circuits/collects. All
+/// lambda bodies are emitted through the standard `expr()` path, so euclidean div/mod
+/// and overflow fail-stop come for free (DEC-LLL-026). Every `mut` binding below is
+/// actually mutated (no `unused_mut` in the generated code).
+fn emit_seq_pipeline(consumer: &Expr, cx: &Cx) -> Result<String, String> {
+    let (cname, cargs) = match consumer {
+        Expr::Call(n, a) => (n.as_str(), a),
+        _ => return Err("codegen: seq consumer must be a call (REQ-LLL-159b)".into()),
+    };
+    let (producer, stages) = flatten_seq_pipeline(&cargs[0])?;
+    let (psetup, pstep) = build_seq_producer(producer, cx, "")?;
+
+    // combinator stages, in pipeline order, applied to `__e`. A `Take` count is
+    // evaluated ONCE (hoisted before the loop) with its own persistent counter.
+    let mut hoist = String::new();
+    let mut stage_code = String::new();
+    for (i, st) in stages.iter().enumerate() {
+        match st {
+            SeqStage::Map(params, body) => {
+                stage_code.push_str(&format!(
+                    " let __e = {{ let {} = __e; {} }};",
+                    local(&params[0].0),
+                    expr(body, cx, false)?
+                ));
+            }
+            SeqStage::Filter(params, body) => {
+                // clone the element to test the predicate — `__e` must survive downstream.
+                stage_code.push_str(&format!(
+                    " if !({{ let {} = __e.clone(); {} }}) {{ continue; }}",
+                    local(&params[0].0),
+                    expr(body, cx, false)?
+                ));
+            }
+            SeqStage::Take(n) => {
+                let ctr = format!("__take{i}");
+                let lim = format!("__lim{i}");
+                hoist.push_str(&format!(
+                    "let {lim} = {}; let mut {ctr} = LllInt::S(0);",
+                    expr(n, cx, false)?
+                ));
+                // take the FIRST n elements that reach this stage, then stop the whole loop.
+                stage_code.push_str(&format!(
+                    " if {ctr} >= {lim} {{ break; }} {ctr} = {ctr} + LllInt::S(1);"
+                ));
+            }
+        }
+    }
+
+    // consumer: accumulator setup, per-element step, and the final value.
+    let (setup, step, finalize) = match cname {
+        "s_fold" => {
+            let init = expr(&cargs[1], cx, false)?;
+            let (params, body) = match &cargs[2] {
+                Expr::Lambda(ps, b) => (ps, b),
+                _ => return Err("codegen: `s_fold`'s function must be a lambda".into()),
+            };
+            (
+                format!("let mut __acc = {init};"),
+                format!(
+                    " __acc = {{ let {} = __acc; let {} = __e; {} }};",
+                    local(&params[0].0),
+                    local(&params[1].0),
+                    expr(body, cx, false)?
+                ),
+                "__acc".to_string(),
+            )
+        }
+        "s_any" | "s_all" => {
+            let (params, body) = match &cargs[1] {
+                Expr::Lambda(ps, b) => (ps, b),
+                _ => return Err("codegen: predicate must be a lambda".into()),
+            };
+            let pred = format!("{{ let {} = __e; {} }}", local(&params[0].0), expr(body, cx, false)?);
+            if cname == "s_any" {
+                (
+                    "let mut __found = false;".to_string(),
+                    format!(" if {pred} {{ __found = true; break; }}"),
+                    "__found".to_string(),
+                )
+            } else {
+                (
+                    "let mut __ok = true;".to_string(),
+                    format!(" if !({pred}) {{ __ok = false; break; }}"),
+                    "__ok".to_string(),
+                )
+            }
+        }
+        "s_collect" => (
+            "let mut __out = ::std::vec::Vec::new();".to_string(),
+            " __out.push(__e);".to_string(),
+            // cons the collected elements back in reverse → source order (as the
+            // comprehension lowering does), a finite `List[T]` value.
+            "{ let mut __acc = Rc::new(LstI::Nil); \
+             for __ce in __out.into_iter().rev() { __acc = Rc::new(LstI::Cons(__ce, __acc)); } \
+             __acc }"
+                .to_string(),
+        ),
+        other => {
+            return Err(format!(
+                "codegen: `{other}` is not a `Seq` consumer (REQ-LLL-159b)"
+            ))
+        }
+    };
+
+    Ok(format!(
+        "{{ {setup} {hoist} {psetup} loop {{ {pstep}{stage_code}{step} }} {finalize} }}"
+    ))
+}
+
 fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
     Ok(match e {
         // Fail-stop (DEC-LLL-052, DEC-LLL-015): a holey module refuses to build at the
@@ -4915,6 +5179,27 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     expr(&args[0], cx, res)?,
                     expr(&args[1], cx, res)?
                 )
+            }
+        }
+        // FUSED lazy sequences (REQ-LLL-159b): a whole pipeline rooted at a bounded
+        // CONSUMER lowers to ONE Rust loop over a FINITE producer — zero intermediate
+        // allocation, no `Seq` value ever reified (strymonas-style fusion). A bare
+        // producer/combinator never reaches term position (the checker's linear discipline
+        // guarantees a `Seq` is consumed in place), so only consumers dispatch here.
+        Expr::Call(name, _)
+            if is_seq_builtin(name)
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            if is_seq_consumer(name) {
+                emit_seq_pipeline(e, cx)?
+            } else {
+                return Err(format!(
+                    "codegen: seq producer/combinator `{name}` reached term position — a `Seq` \
+                     must be consumed by `s_fold`/`s_any`/`s_all`/`s_collect` in place \
+                     (REQ-LLL-159b; the checker guarantees this)"
+                ));
             }
         }
         Expr::Call(name, args)

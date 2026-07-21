@@ -356,6 +356,18 @@ pub enum Ty {
     /// layer on the map — same underlying machinery (a `Map[T, Unit]`), NOT a third
     /// structure. v1 intrinsics — `emptyset()`, `add(s, x)`, `member(s, x)`.
     Set(Box<Ty>),
+    /// A FUSED lazy sequence `Seq[T]` (REQ-LLL-159b). A SECOND-CLASS type: it has NO
+    /// runtime representation — a `Seq` is compiled away to a SINGLE fused loop
+    /// (strymonas-style, zero intermediate allocation). Soundness rests on TERMINATION:
+    /// llmlang requires verified termination, so `Seq` is FINITE BY CONSTRUCTION — its
+    /// producers are all finite (`s_from_list`/`s_from_array`/`s_range`), its combinators
+    /// preserve finitude (`s_map`/`s_filter`/`s_take`/`s_zip`), and every `Seq` value MUST
+    /// be consumed by a BOUNDED consumer (`s_fold`/`s_any`/`s_all`/`s_collect`) in the same
+    /// expression. It therefore never appears in a written type annotation (a part
+    /// param/return, an ADT field, a contract, an effect/class signature) — `contains_seq`
+    /// sweeps every source-written type and rejects it (fail-closed). The element `T` is
+    /// itself never a `Seq` (no `Seq[Seq[T]]` — flat fusion only).
+    Seq(Box<Ty>),
     /// Function type `(T1, …) -> R` — first-class functions (REQ-LLL-009).
     /// v1: parameter and result types are concrete (monomorphic HOF).
     Fun(Vec<Ty>, Box<Ty>),
@@ -395,6 +407,10 @@ impl Ty {
     pub fn set(elem: Ty) -> Ty {
         Ty::Set(Box::new(elem))
     }
+    /// `Seq[elem]` (REQ-LLL-159b).
+    pub fn seq(elem: Ty) -> Ty {
+        Ty::Seq(Box::new(elem))
+    }
     /// The concrete `List[Int]` — the v1 monomorphic list, now a special case.
     pub fn list_int() -> Ty {
         Ty::list(Ty::Int)
@@ -407,7 +423,7 @@ impl Ty {
             Ty::Var(_) => false,
             Ty::List(e) | Ty::Array(e) => e.is_concrete(),
             Ty::Map(k, v) => k.is_concrete() && v.is_concrete(),
-            Ty::Set(e) => e.is_concrete(),
+            Ty::Set(e) | Ty::Seq(e) => e.is_concrete(),
             Ty::Fun(ps, r) => ps.iter().all(|p| p.is_concrete()) && r.is_concrete(),
             Ty::Tuple(cs) => cs.iter().all(|c| c.is_concrete()),
         }
@@ -426,6 +442,7 @@ impl std::fmt::Display for Ty {
             Ty::Array(e) => write!(f, "Array[{e}]"),
             Ty::Map(k, v) => write!(f, "Map[{k}, {v}]"),
             Ty::Set(e) => write!(f, "Set[{e}]"),
+            Ty::Seq(e) => write!(f, "Seq[{e}]"),
             Ty::Fun(ps, r) => {
                 let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
                 write!(f, "({}) -> {r}", ps.join(", "))
@@ -566,6 +583,70 @@ pub fn is_set_builtin(name: &str) -> bool {
 /// empty `emptyset()` is a value literal.
 pub fn is_set_spec_term(name: &str) -> bool {
     matches!(name, "member")
+}
+
+/// Reserved builtin names for FUSED lazy sequences (REQ-LLL-159b). Dispatched BY
+/// NAME in every fork (checker, vc, codegen, hash, optimize), exactly like the array
+/// builtins — a `Seq` never resolves to a user part. Three kinds:
+/// * PRODUCERS (finite by construction): `s_from_list`/`s_from_array`/`s_range`.
+/// * COMBINATORS (finitude-preserving): `s_map`/`s_filter`/`s_take`/`s_zip`.
+/// * CONSUMERS (bounded, terminal — see [`is_seq_consumer`]): `s_fold`/`s_any`/
+///   `s_all`/`s_collect`.
+///
+/// A `Seq` value is NEVER stored, returned, or reused (the linear discipline in
+/// the `check_expr` `seq_ok` wrapper, types.rs); it exists only in expression
+/// position, consumed. There is NO infinite producer (`s_unfold`/`s_iterate`) in v1 —
+/// that would break the verified-termination invariant, so it is forbidden by
+/// construction.
+pub fn is_seq_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "s_from_list"
+            | "s_from_array"
+            | "s_range"
+            | "s_map"
+            | "s_filter"
+            | "s_take"
+            | "s_zip"
+            | "s_fold"
+            | "s_any"
+            | "s_all"
+            | "s_collect"
+    )
+}
+
+/// The BOUNDED CONSUMERS of a `Seq` (REQ-LLL-159b): they short-circuit or fold a
+/// finite sequence to a NON-`Seq` value, so they may appear anywhere an ordinary
+/// value is expected. Every `Seq` pipeline MUST terminate in one of these — a
+/// producer/combinator result (still a `Seq`) that is not consumed is a compile
+/// error (fail-closed). `s_fold` folds to the accumulator type; `s_any`/`s_all`
+/// short-circuit to `Bool`; `s_collect` materialises the (already bounded) sequence
+/// to a `List[T]`.
+pub fn is_seq_consumer(name: &str) -> bool {
+    matches!(name, "s_fold" | "s_any" | "s_all" | "s_collect")
+}
+
+/// The `Seq` PRODUCERS (REQ-LLL-159b) — the finite roots of a pipeline. Kept
+/// distinct so codegen's fusion and the zip restriction can test "is this the
+/// source?" without re-listing names.
+pub fn is_seq_producer(name: &str) -> bool {
+    matches!(name, "s_from_list" | "s_from_array" | "s_range" | "s_zip")
+}
+
+/// True if the type mentions a `Seq` anywhere (REQ-LLL-159b). Swept over every
+/// SOURCE-WRITTEN type at module-check entry (part params/return, ADT ctor fields,
+/// effect op sigs, class method sigs, instance types) — no legitimate annotation
+/// ever names a `Seq` (it is only ever the INFERRED type of a seq builtin), so this
+/// is complete with zero false positives and more robust than a per-site guard.
+pub fn contains_seq(t: &Ty) -> bool {
+    match t {
+        Ty::Seq(_) => true,
+        Ty::Int | Ty::Big | Ty::Bool | Ty::Rational | Ty::Never | Ty::Unit | Ty::Var(_) => false,
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) => contains_seq(e),
+        Ty::Map(k, v) => contains_seq(k) || contains_seq(v),
+        Ty::Fun(ps, r) => ps.iter().any(contains_seq) || contains_seq(r),
+        Ty::Tuple(cs) | Ty::User(_, cs) => cs.iter().any(contains_seq),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
