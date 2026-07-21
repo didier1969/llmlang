@@ -363,20 +363,34 @@ fn normalize_part(
         // them to positional markers so two α-equivalent effect-generic definitions
         // that differ only in the row-variable name share one identity, exactly like
         // type variables (DEC-LLL-019/020, blind to bound names).
-        let mut concrete: Vec<String> = part
-            .effects
+        //
+        // REQ-LLL-159a: a `via ..` part hashes the TEXT — its explicit prefix effects
+        // plus the `..` marker — NEVER the elaborated row (a derived artifact,
+        // DEC-LLL-020). `declared_row` holds the textual list once `elaborate_rows`
+        // has overwritten `effects`; before elaboration (`blind_normal_form` on a
+        // freshly parsed part) `effects` still IS the textual list, so both paths
+        // canonicalize the same string. A callee's row change still propagates into
+        // the caller's def-hash through the callee's own hash (the dep channel).
+        let textual: &[String] = if part.row_infer {
+            part.declared_row.as_deref().unwrap_or(&part.effects)
+        } else {
+            &part.effects
+        };
+        let mut concrete: Vec<String> = textual
             .iter()
             .filter(|e| e.chars().next().is_some_and(|c| c.is_uppercase()))
             .cloned()
             .collect();
         concrete.sort();
-        let n_rows = part
-            .effects
+        let n_rows = textual
             .iter()
             .filter(|e| e.chars().next().is_some_and(|c| c.is_lowercase()))
             .count();
         for i in 0..n_rows {
             concrete.push(format!("#row{i}"));
+        }
+        if part.row_infer {
+            concrete.push("..".to_string());
         }
         concrete.join(",")
     };

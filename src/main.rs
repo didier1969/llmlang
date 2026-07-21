@@ -450,6 +450,7 @@ fn check_report_json_with(
         status: Some("failed".to_string()),
         module,
         diagnostics: vec![diag::Diagnostic::from_error(e)],
+        elaborated_rows: Vec::new(),
     };
     let (module, cm) = match loader::load_program(file) {
         Err(e) => return err_report(None, &e),
@@ -493,7 +494,20 @@ fn check_report_json_with(
     } else {
         None
     };
-    diag::Report { ok: diagnostics.is_empty(), status, module: Some(module), diagnostics }
+    // REQ-LLL-159a: surface every `via ..` part's ELABORATED row — the display-only
+    // derive that keeps interfaces readable without rewriting the text (DEC-LLL-020).
+    let elaborated_rows: Vec<diag::ElaboratedRow> = cm
+        .module
+        .parts
+        .iter()
+        .filter(|p| p.row_infer)
+        .map(|p| diag::ElaboratedRow {
+            part: p.name.clone(),
+            declared: p.declared_row.clone().unwrap_or_default(),
+            row: p.effects.clone(),
+        })
+        .collect();
+    diag::Report { ok: diagnostics.is_empty(), status, module: Some(module), diagnostics, elaborated_rows }
 }
 
 fn dispatch(args: &[String]) -> Result<(), String> {
@@ -1269,6 +1283,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
                     diagnostics: vec![diag::Diagnostic::from_error(&format!(
                         "lsp: unsupported document uri `{uri}` (only file:// is handled)"
                     ))],
+                    elaborated_rows: Vec::new(),
                 },
             })
         }

@@ -55,3 +55,5 @@ mod cli_fmt;
 mod examples_smoke;
 #[path = "integration/pkg.rs"]
 mod pkg;
+#[path = "integration/effect_inference.rs"]
+mod effect_inference;

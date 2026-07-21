@@ -365,13 +365,15 @@ fn effect_generic_cannot_assume_function_result() {
 
 
 #[test]
-fn effect_generic_effectful_lambda_is_rejected() {
-    // v1 (DEC-LLL-038): an effectful function argument must be a named part — an
-    // effectful lambda would need captured evidence, not a fn pointer.
-    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part main() -> Int via State:\n    yield apply(\\(n: Int) -> State.get(), 5)\n";
-    let m = parser::parse_module(src).expect("parse");
-    let err = types::check_module(m).expect_err("must reject effectful lambda arg");
-    assert!(err.contains("effectful lambda"), "unexpected error: {err}");
+fn effect_generic_effectful_lambda_is_accepted_req159a() {
+    // REQ-LLL-159a A2-1 (élargissement DEC-LLL-038): an EFFECTFUL lambda is now a
+    // legal function argument — codegen emits its closure with its OWN evidence
+    // parameters, so nothing is captured (still a fn pointer). The v1 rejection
+    // this test used to assert is gone; the row it forces is still checked
+    // (`run` must cover State) and its totality is still proven (see
+    // effect_inference.rs for the adverse cases).
+    let src = "module T:\n\n  part apply(f: (Int) -> Int, x: Int) -> Int via e:\n    yield f(x)\n\n  part run() -> Int via State:\n    yield apply(\\(n: Int) -> State.get(), 5)\n\n  part main() -> Int:\n    handle run() with State from 3:\n      return r -> yield r\n";
+    assert!(build_run(src).contains("=> 3"), "effectful lambda instantiation wrong");
 }
 
 

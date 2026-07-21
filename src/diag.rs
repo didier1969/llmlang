@@ -67,6 +67,18 @@ pub struct Diagnostic {
     pub sufficient_hypotheses: Vec<String>,
 }
 
+/// REQ-LLL-159a: one `via ..` part's ELABORATED effect row — a DISPLAY-ONLY derive
+/// (the `.lll` text keeps `via ..` and stays the hashed source of truth, DEC-LLL-020).
+/// `declared` is the explicit textual prefix (`via IO, ..` → `["IO"]`); `row` is the
+/// full inferred concrete row the checker materialized. This preserves interface
+/// READABILITY without ever rewriting the text.
+#[derive(Debug, Clone, Serialize)]
+pub struct ElaboratedRow {
+    pub part: String,
+    pub declared: Vec<String>,
+    pub row: Vec<String>,
+}
+
 /// The `lll check --format=json` payload: the overall verdict plus every
 /// diagnostic. An agent reads `ok` and repairs from `diagnostics`.
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +92,10 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
+    /// REQ-LLL-159a: the elaborated row of every `via ..` part (empty when the module
+    /// uses none) — the machine channel an agent/editor reads instead of the text.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub elaborated_rows: Vec<ElaboratedRow>,
 }
 
 impl Report {

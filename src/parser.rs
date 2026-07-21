@@ -1015,12 +1015,25 @@ impl Parser {
         self.eat(Tok::Arrow)?;
         let ret = self.ty()?;
         let mut effects = Vec::new();
+        let mut row_infer = false;
         if self.peek() == &Tok::Via {
             self.pos += 1;
             loop {
                 match self.bump() {
                     Tok::Ident(e) | Tok::Dotted(e) => effects.push(e),
-                    other => return Err(self.err(&format!("expected effect name, found {other:?}"))),
+                    // REQ-LLL-159a: `via ..` (or `via IO, ..` = at-least-IO) — the rest
+                    // of the row is INFERRED at check time (`elaborate_rows`). The `..`
+                    // is part of the TEXT, hence of the content-hash; the elaborated row
+                    // is a derived display artifact (DEC-LLL-020).
+                    Tok::DotDot => {
+                        if row_infer {
+                            return Err(self.err(
+                                "duplicate `..` in `via` — a single `..` already infers the whole rest of the row",
+                            ));
+                        }
+                        row_infer = true;
+                    }
+                    other => return Err(self.err(&format!("expected effect name or `..`, found {other:?}"))),
                 }
                 if self.peek() == &Tok::Comma {
                     self.pos += 1;
@@ -1092,6 +1105,8 @@ impl Parser {
             params,
             ret,
             effects,
+            row_infer,
+            declared_row: None,
             given,
             requires,
             ensures,
@@ -1141,6 +1156,8 @@ impl Parser {
             params,
             ret,
             effects: Vec::new(),
+            row_infer: false,
+            declared_row: None,
             given: Vec::new(),
             requires: Vec::new(),
             ensures: Vec::new(),

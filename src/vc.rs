@@ -663,6 +663,8 @@ fn gen_instance_law_obligations(
         params: Vec::new(),
         ret: Ty::Unit,
         effects: Vec::new(),
+        row_infer: false,
+        declared_row: None,
         given: Vec::new(),
         requires: Vec::new(),
         ensures: Vec::new(),

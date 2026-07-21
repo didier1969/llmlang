@@ -452,7 +452,7 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
     // REQ-LLL-138: inline `spec` predicate calls in contracts and erase the spec parts BEFORE any
     // trusted stage runs. Everything below (index, check_contracts, hash, vc, codegen) then sees a
     // spec-free module whose contracts are exactly the hand-inlined form (sugar-hash-identity).
-    let module = crate::spec_expand::expand_spec_predicates(module)?;
+    let mut module = crate::spec_expand::expand_spec_predicates(module)?;
     let mut index = HashMap::new();
     for (i, p) in module.parts.iter().enumerate() {
         if index.insert(p.name.clone(), i).is_some() {
@@ -1103,6 +1103,12 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 .to_string(),
         );
     }
+    // REQ-LLL-159a: elaborate `via ..` inferred rows BEFORE the row classification, so
+    // everything downstream (effect_allowed, abort/stateful/readerful, caps_of, effect
+    // monomorphization, codegen, vc) runs UNCHANGED on concrete rows. This mutates the
+    // WORKING COPY only — the `.lll` text keeps `via ..` and stays the hashed source of
+    // truth (DEC-LLL-020); the textual row is preserved in `declared_row` for the hash.
+    elaborate_rows(&mut module, &index, &effect_names, &user_tail_effects)?;
     // classify `via` rows (REQ-LLL-026 item 3, DEC-LLL-038): an UPPERCASE name is
     // a concrete effect (must be declared); a lowercase name is a ROW VARIABLE that
     // makes the part effect-generic (row-polymorphic). v1: at most one row variable,
@@ -1126,26 +1132,56 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                     part.name
                 ));
             }
-            if part.effects.len() != 1 {
-                return Err(format!(
-                    "part `{}`: the effect row variable `{rv}` cannot be mixed with concrete \
-                     effects (v1, DEC-LLL-038)",
-                    part.name
-                ));
-            }
+            // REQ-LLL-159a A2-2: concrete effects MAY share the row with the variable
+            // (`via State, e`) — the specialization row is their union with every
+            // function argument's row. A2-3: SEVERAL function parameters are allowed;
+            // they all share the one row (each argument narrower than the union is
+            // adapted by codegen). Zero function parameters stays meaningless.
             let fn_params = part
                 .params
                 .iter()
                 .filter(|(_, t)| matches!(t, Ty::Fun(..)))
                 .count();
-            if fn_params != 1 {
+            if fn_params == 0 {
                 return Err(format!(
-                    "part `{}`: an effect-generic part (row variable `{rv}`) needs exactly one \
-                     function-typed parameter that carries the row (v1, DEC-LLL-038)",
+                    "part `{}`: an effect-generic part (row variable `{rv}`) needs at least one \
+                     function-typed parameter that carries the row (DEC-LLL-038)",
                     part.name
                 ));
             }
             effect_generic.insert(part.name.clone(), (*rv).clone());
+        }
+    }
+
+    // REQ-LLL-159a (extension of the REQ-LLL-180 family): an ENTRY POINT is executed
+    // directly — `lll run` calls `main`, the actor runtime calls `step` — so NO llmlang
+    // caller exists to supply effect evidence and no enclosing `handle` can discharge
+    // its row. Only AMBIENT effects (IO, all-`extern` effects) may remain in an entry's
+    // row, declared or inferred: anything else promises evidence nobody provides, which
+    // previously surfaced as a cryptic rustc error deep in generated code. Fail-closed
+    // here instead (DEC-LLL-015).
+    let mut entry_names: Vec<&str> = vec!["main"];
+    if uses_actor_runtime {
+        entry_names.push("step");
+    }
+    for en in entry_names {
+        if let Some(p) = module.parts.iter().find(|p| p.name == en) {
+            for eff in &p.effects {
+                if !is_row_var(eff) && !ambient_effects.contains(eff) {
+                    let origin = if p.row_infer {
+                        "inferred by `via ..`"
+                    } else {
+                        "declared in its `via` row"
+                    };
+                    return Err(format!(
+                        "part `{en}`: the entry point performs `{eff}` ({origin}), but an entry \
+                         point has no caller to provide `{eff}` — only ambient effects (IO, \
+                         `= extern`) may remain undischarged at an entry (REQ-LLL-159a, famille \
+                         REQ-LLL-180). Handle it inside the body (`handle … with {eff}`) or \
+                         remove it."
+                    ));
+                }
+            }
         }
     }
 
@@ -1483,6 +1519,8 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 // effects so `IO.print(x)` in the body is checked as effectful, not rejected as
                 // impure. A PURE method (empty effects) keeps the REQ-LLL-048 purity check.
                 effects: method.3.clone(),
+                row_infer: false,
+                declared_row: None,
                 given: Vec::new(),
                 requires: Vec::new(),
                 ensures: Vec::new(),
@@ -2354,14 +2392,274 @@ fn tuple_has_fun_component(t: &Ty) -> bool {
 
 /// A `via` entry starting with a lowercase letter is an effect ROW VARIABLE
 /// (REQ-LLL-026 item 3, DEC-LLL-038); an uppercase one is a concrete effect.
-fn is_row_var(e: &str) -> bool {
+/// `pub(crate)`: codegen filters rows through the same predicate (REQ-LLL-159a A2).
+pub(crate) fn is_row_var(e: &str) -> bool {
     e.chars().next().is_some_and(|c| c.is_lowercase())
 }
 
+/// REQ-LLL-159a: the concrete effects an EXPRESSION forces on its evaluation context —
+/// its `Effect.op` performs, the (current-estimate) rows of the parts it calls, and,
+/// at a call to an effect-generic part, the row its function argument instantiates
+/// (a named part's row; a lambda's effects are reached by the same walk, which
+/// descends into lambda bodies). Row VARIABLES are never emitted — they are the
+/// caller's choice, not a concrete need.
+///
+/// SHARED between the checker's row inference (`elaborate_rows`, `fn_arg_row`) and
+/// codegen's dispatch (the specialization row of an effectful lambda argument) via the
+/// two lookups, so the two sides can never disagree on a row: `row_of` maps a part
+/// name to its row (types: `Part.effects`; codegen: `part_row`), `fn_pos_of` maps an
+/// EFFECT-GENERIC part to its function-parameter positions (empty for anything else).
+pub(crate) fn collect_expr_row(
+    e: &Expr,
+    row_of: &dyn Fn(&str) -> Option<Vec<String>>,
+    fn_pos_of: &dyn Fn(&str) -> Vec<usize>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    e.walk(&mut |x| match x {
+        Expr::EffCall(name, _) => {
+            if let Some((eff, _)) = name.split_once('.') {
+                out.insert(eff.to_string());
+            }
+        }
+        Expr::Call(name, args) => {
+            if let Some(row) = row_of(name) {
+                for eff in &row {
+                    if !is_row_var(eff) {
+                        out.insert(eff.clone());
+                    }
+                }
+                // a named part passed in a row-carrying position instantiates the
+                // callee's row variable with ITS row — a bare `Var` the walk would
+                // otherwise not see as an effect source. (A lambda in the same
+                // position needs nothing here: the walk visits its body's performs
+                // and calls directly.)
+                for i in fn_pos_of(name) {
+                    if let Some(Expr::Var(g)) = args.get(i) {
+                        if let Some(grow) = row_of(g) {
+                            for eff in &grow {
+                                if !is_row_var(eff) {
+                                    out.insert(eff.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    });
+}
+
+/// REQ-LLL-159a: fold a statement list's row needs into `need`, subtracting the
+/// effects an enclosing `handle` discharges — mirroring `Ctx::effect_allowed`
+/// EXACTLY: the handled effect covers the handled CALL only (never the clause
+/// bodies), and a user tail-resumptive op clause is capture-free (only ambient
+/// effects are performable there, which need no row entry — so it contributes
+/// nothing, exactly as the checker checks it under `captureless`).
+#[allow(clippy::too_many_arguments)]
+fn collect_body_row(
+    body: &[Stmt],
+    handled: &mut Vec<String>,
+    row_of: &dyn Fn(&str) -> Option<Vec<String>>,
+    fn_pos_of: &dyn Fn(&str) -> Vec<usize>,
+    effect_names: &HashSet<String>,
+    user_tail_effects: &HashSet<String>,
+    need: &mut std::collections::BTreeSet<String>,
+) {
+    let on_expr = |e: &Expr,
+                   handled: &[String],
+                   need: &mut std::collections::BTreeSet<String>| {
+        let mut tmp = std::collections::BTreeSet::new();
+        collect_expr_row(e, row_of, fn_pos_of, &mut tmp);
+        for eff in tmp {
+            // unknown effect names fall through to the checker's own precise error
+            // (unknown operation / unknown effect) rather than being inferred.
+            if effect_names.contains(&eff) && !handled.contains(&eff) {
+                need.insert(eff);
+            }
+        }
+    };
+    for s in body {
+        match s {
+            Stmt::Let(_, e) | Stmt::Yield(e) => on_expr(e, handled, need),
+            Stmt::Match(e, arms) => {
+                on_expr(e, handled, need);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        on_expr(g, handled, need);
+                    }
+                    collect_body_row(
+                        &a.body, handled, row_of, fn_pos_of, effect_names, user_tail_effects, need,
+                    );
+                }
+            }
+            Stmt::Handle(h) => {
+                // the handled effect is discharged for the handled call ONLY
+                handled.push(h.effect.clone());
+                on_expr(&h.call, handled, need);
+                handled.pop();
+                if let Some(f) = &h.from {
+                    on_expr(f, handled, need);
+                }
+                let capture_free = user_tail_effects.contains(&h.effect);
+                for c in &h.clauses {
+                    if capture_free && c.op != "return" {
+                        // capture-free clause: only ambient effects are legal there
+                        // (DEC-LLL-037) and ambient effects need no row entry.
+                        continue;
+                    }
+                    collect_body_row(
+                        &c.body, handled, row_of, fn_pos_of, effect_names, user_tail_effects, need,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// REQ-LLL-159a: elaborate every `via ..` row as the LEAST FIXED POINT of
+/// { row(callee) minus handled-at-site } ∪ { E per `E.op` perform minus handled } —
+/// monotone on the finite lattice of declared effects, computed callee-first (the
+/// call-graph SCC condensation order, reusing `kosaraju`) with a global fixpoint
+/// loop so mutual `via ..` cycles converge. The result is materialized into
+/// `Part.effects` on the working copy; the textual row moves to `declared_row`
+/// so the hash keeps canonicalizing the TEXT (DEC-LLL-020).
+fn elaborate_rows(
+    module: &mut Module,
+    index: &HashMap<String, usize>,
+    effect_names: &HashSet<String>,
+    user_tail_effects: &HashSet<String>,
+) -> Result<(), String> {
+    // guard: `..` on an effect-generic part is contradictory — a row variable IS
+    // the caller's choice, there is nothing to infer (and a spec/class method has
+    // no `via` surface at all, rejected by the parser).
+    for p in &module.parts {
+        if p.row_infer && p.effects.iter().any(|e| is_row_var(e)) {
+            return Err(format!(
+                "part `{}`: `via ..` cannot be combined with an effect row variable — an \
+                 effect-generic part's row is instantiated by its CALLER, so there is \
+                 nothing to infer (REQ-LLL-159a)",
+                p.name
+            ));
+        }
+    }
+    if !module.parts.iter().any(|p| p.row_infer) {
+        return Ok(());
+    }
+    // effect-generic function-parameter positions (a lowercase row entry marks the
+    // part generic — classification proper runs just after this pass).
+    let fn_pos: HashMap<String, Vec<usize>> = module
+        .parts
+        .iter()
+        .map(|p| {
+            let pos = if p.effects.iter().any(|e| is_row_var(e)) {
+                p.params
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, t))| matches!(t, Ty::Fun(..)))
+                    .map(|(i, _)| i)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (p.name.clone(), pos)
+        })
+        .collect();
+    // current row estimates: explicit concretes for a `via ..` part (its textual
+    // prefix, e.g. `via IO, ..`), the declared row for everything else.
+    let mut rows: HashMap<String, Vec<String>> = module
+        .parts
+        .iter()
+        .map(|p| (p.name.clone(), p.effects.clone()))
+        .collect();
+    // callee-first order: Kosaraju numbers SCCs sources-first on the caller→callee
+    // graph, so DECREASING id visits callees before callers — one pass per acyclic
+    // chain; the outer loop reruns until mutual `via ..` cycles reach the LFP.
+    let names: Vec<String> = module.parts.iter().map(|p| p.name.clone()).collect();
+    let is_part = |n: &str| index.contains_key(n);
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for p in &module.parts {
+        let mut strong = Vec::new();
+        let mut weak = Vec::new();
+        collect_part_refs(&p.body, &is_part, &mut strong, &mut weak);
+        strong.extend(weak);
+        strong.sort();
+        strong.dedup();
+        adj.insert(p.name.clone(), strong);
+    }
+    let (scc_id, _) = kosaraju(&names, &adj);
+    let mut order: Vec<&String> = names.iter().collect();
+    order.sort_by_key(|n| std::cmp::Reverse(scc_id[n.as_str()]));
+    loop {
+        let mut changed = false;
+        for name in &order {
+            let p = &module.parts[index[name.as_str()]];
+            if !p.row_infer {
+                continue;
+            }
+            let mut need: std::collections::BTreeSet<String> =
+                p.effects.iter().filter(|e| !is_row_var(e)).cloned().collect();
+            let row_of = |n: &str| rows.get(n).cloned();
+            let fn_pos_of = |n: &str| fn_pos.get(n).cloned().unwrap_or_default();
+            collect_body_row(
+                &p.body,
+                &mut Vec::new(),
+                &row_of,
+                &fn_pos_of,
+                effect_names,
+                user_tail_effects,
+                &mut need,
+            );
+            let new_row: Vec<String> = need.into_iter().collect();
+            if rows[name.as_str()] != new_row {
+                rows.insert((*name).clone(), new_row);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // materialize: the elaborated row becomes the working-copy row; the textual row
+    // is preserved for the content-hash canon (the text is what is hashed).
+    for p in module.parts.iter_mut() {
+        if p.row_infer {
+            p.declared_row = Some(p.effects.clone());
+            p.effects = rows.remove(&p.name).unwrap_or_default();
+        }
+    }
+    Ok(())
+}
+
+/// The function-parameter positions of `name` when it is EFFECT-GENERIC (its row
+/// contains a row variable), else EMPTY — the shared gate that keeps the checker's
+/// row computation and codegen's dispatch row equal (REQ-LLL-159a A2): only a
+/// generic callee's function arguments contribute a row of their own (a plain
+/// HOF's arguments surface through its DECLARED row).
+fn fn_positions_if_generic(
+    name: &str,
+    module: &Module,
+    index: &HashMap<String, usize>,
+) -> Vec<usize> {
+    let Some(&idx) = index.get(name) else { return Vec::new() };
+    let p = &module.parts[idx];
+    if !p.effects.iter().any(|e| is_row_var(e)) {
+        return Vec::new();
+    }
+    p.params
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, t))| matches!(t, Ty::Fun(..)))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// The concrete effect row (sorted, deduped) of a function argument passed to an
-/// effect-generic HOF (DEC-LLL-038). v1: the argument must be a bare part name
-/// with a concrete row, or a pure lambda; an effect-generic argument or an
-/// effectful lambda is rejected (no higher-rank rows, no captured evidence).
+/// effect-generic HOF (DEC-LLL-038, élargi REQ-LLL-159a A2): a bare part name with
+/// a concrete row, or a lambda — whose row is its body's performs plus its callees'
+/// rows (`collect_expr_row`). An EFFECTFUL lambda is now admitted: codegen emits its
+/// closure with its OWN evidence parameters, so no capture is ever needed. Still
+/// rejected: an effect-generic argument (no higher-rank rows).
 fn fn_arg_row(
     arg: &Expr,
     module: &Module,
@@ -2384,53 +2682,32 @@ fn fn_arg_row(
             Ok(row)
         }
         Expr::Lambda(_, body) => {
-            let mut effs = Vec::new();
-            collect_expr_effects(body, module, index, &mut effs);
-            if effs.is_empty() {
-                Ok(Vec::new())
-            } else {
-                Err("an effectful lambda cannot be passed to an effect-generic HOF (v1) — \
-                     use a named part".to_string())
-            }
+            let row_of = |n: &str| index.get(n).map(|&i| module.parts[i].effects.clone());
+            let fn_pos_of = |n: &str| fn_positions_if_generic(n, module, index);
+            let mut out = std::collections::BTreeSet::new();
+            collect_expr_row(body, &row_of, &fn_pos_of, &mut out);
+            // keep DECLARED effects only: an unknown `Bogus.op` inside the lambda body
+            // falls through to the body check's own precise error, not a row message.
+            let declared = |e: &str| {
+                matches!(e, "IO" | "State" | "Reader")
+                    || module.effects.iter().any(|ed| ed.name == e)
+            };
+            Ok(out.into_iter().filter(|e| declared(e)).collect())
         }
-        _ => Err("an effect-generic function argument must be a part name or a pure lambda".into()),
+        _ => Err("an effect-generic function argument must be a part name or a lambda".into()),
     }
 }
 
-/// Effects an expression performs: its `Effect.op` calls plus the declared
-/// effects of any part it calls (used to reject an effectful lambda argument).
-fn collect_expr_effects(
-    e: &Expr,
-    module: &Module,
-    index: &HashMap<String, usize>,
-    out: &mut Vec<String>,
-) {
-    e.walk(&mut |x| match x {
-        Expr::EffCall(name, _) => {
-            if let Some((eff, _)) = name.split_once('.') {
-                out.push(eff.to_string());
-            }
-        }
-        Expr::Call(name, _) => {
-            if let Some(&idx) = index.get(name) {
-                for eff in &module.parts[idx].effects {
-                    out.push(eff.clone());
-                }
-            }
-        }
-        _ => {}
-    });
-}
-
 /// Every call site of an effect-generic part, as `(enclosing part, callee, the
-/// function argument expr)` — the raw material for instantiation collection.
+/// function arguments IN POSITION ORDER)` — the raw material for instantiation
+/// collection (REQ-LLL-159a A2-3: a generic part may take several fn params).
 fn gather_generic_call_sites(
     body: &[Stmt],
     enclosing: &str,
     module: &Module,
     index: &HashMap<String, usize>,
     effect_generic: &HashMap<String, String>,
-    out: &mut Vec<(String, String, Expr)>,
+    out: &mut Vec<(String, String, Vec<Expr>)>,
 ) {
     fn on_expr(
         e: &Expr,
@@ -2438,28 +2715,23 @@ fn gather_generic_call_sites(
         module: &Module,
         index: &HashMap<String, usize>,
         effect_generic: &HashMap<String, String>,
-        out: &mut Vec<(String, String, Expr)>,
+        out: &mut Vec<(String, String, Vec<Expr>)>,
     ) {
-        let mut hits: Vec<(String, Expr)> = Vec::new();
+        let mut hits: Vec<(String, Vec<Expr>)> = Vec::new();
         e.walk(&mut |x| {
             if let Expr::Call(name, args) = x {
-                if effect_generic.contains_key(name) {
-                    if let Some(&idx) = index.get(name) {
-                        if let Some(fp) = module.parts[idx]
-                            .params
-                            .iter()
-                            .position(|(_, t)| matches!(t, Ty::Fun(..)))
-                        {
-                            if let Some(arg) = args.get(fp) {
-                                hits.push((name.clone(), arg.clone()));
-                            }
-                        }
+                if effect_generic.contains_key(name) && index.contains_key(name) {
+                    let fps = fn_positions_if_generic(name, module, index);
+                    let fargs: Vec<Expr> =
+                        fps.iter().filter_map(|&i| args.get(i).cloned()).collect();
+                    if fargs.len() == fps.len() {
+                        hits.push((name.clone(), fargs));
                     }
                 }
             }
         });
-        for (name, arg) in hits {
-            out.push((enclosing.to_string(), name, arg));
+        for (name, fargs) in hits {
+            out.push((enclosing.to_string(), name, fargs));
         }
     }
     for s in body {
@@ -2489,30 +2761,47 @@ fn gather_generic_call_sites(
     }
 }
 
-/// The effect-monomorphization worklist (DEC-LLL-038): every (effect-generic
-/// part, concrete row) instantiation, as a least fixed point. SEED = call sites
-/// whose function argument has a concrete row; PROPAGATE = inside an instantiated
-/// part `(P, ρ)`, a call to a generic `Q` passing P's own row parameter yields
-/// `(Q, ρ)`. Deduped, deterministic (BTreeSet order).
+/// The effect-monomorphization worklist (DEC-LLL-038, élargi REQ-LLL-159a A2):
+/// every (effect-generic part, concrete row) instantiation, as a least fixed
+/// point. A site's row = the callee's CONCRETE effects ∪ every function
+/// argument's row (A2-2 mixed rows / A2-3 several fn params). SEED = sites whose
+/// arguments all resolve to concrete rows; PROPAGATE = inside an instantiated
+/// part `(P, ρ)`, a call to a generic `Q` forwarding one of P's own row
+/// parameters yields `(Q, ρ ∪ concretes(Q) ∪ sibling-argument rows)` — the
+/// check-side forwarding fence keeps that union equal to ρ, the union here is
+/// belt-and-braces. Deduped, deterministic (BTreeSet order).
 fn collect_instantiations(
     module: &Module,
     index: &HashMap<String, usize>,
     effect_generic: &HashMap<String, String>,
 ) -> Vec<(String, Vec<String>)> {
-    let fn_param: HashMap<String, String> = effect_generic
+    let fn_params: HashMap<String, HashSet<String>> = effect_generic
         .keys()
         .map(|p| {
             let idx = index[p];
-            let fpn = module.parts[idx]
+            let names: HashSet<String> = module.parts[idx]
                 .params
                 .iter()
-                .find(|(_, t)| matches!(t, Ty::Fun(..)))
+                .filter(|(_, t)| matches!(t, Ty::Fun(..)))
                 .map(|(n, _)| n.clone())
-                .expect("effect-generic part has a function param");
-            (p.clone(), fpn)
+                .collect();
+            (p.clone(), names)
         })
         .collect();
-    let mut sites: Vec<(String, String, Expr)> = Vec::new();
+    let concrete_of = |q: &str| -> Vec<String> {
+        index
+            .get(q)
+            .map(|&i| {
+                module.parts[i]
+                    .effects
+                    .iter()
+                    .filter(|e| !is_row_var(e))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut sites: Vec<(String, String, Vec<Expr>)> = Vec::new();
     for part in &module.parts {
         gather_generic_call_sites(
             &part.body,
@@ -2523,25 +2812,56 @@ fn collect_instantiations(
             &mut sites,
         );
     }
+    let is_own = |enc: &str, a: &Expr| -> bool {
+        matches!(a, Expr::Var(g) if fn_params.get(enc).is_some_and(|s| s.contains(g.as_str())))
+    };
     let mut seen: std::collections::BTreeSet<(String, Vec<String>)> = Default::default();
-    for (_enc, q, arg) in &sites {
-        if let Ok(row) = fn_arg_row(arg, module, index, effect_generic) {
-            seen.insert((q.clone(), row));
+    for (enc, q, fargs) in &sites {
+        if fargs.iter().any(|a| is_own(enc, a)) {
+            continue; // needs the enclosing instantiation — handled by PROPAGATE
+        }
+        let mut rho: std::collections::BTreeSet<String> = concrete_of(q).into_iter().collect();
+        let mut ok = true;
+        for a in fargs {
+            match fn_arg_row(a, module, index, effect_generic) {
+                Ok(r) => rho.extend(r),
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            seen.insert((q.clone(), rho.into_iter().collect()));
         }
     }
     let mut work: Vec<(String, Vec<String>)> = seen.iter().cloned().collect();
     while let Some((p, rho)) = work.pop() {
-        for (enc, q, arg) in &sites {
-            if enc != &p {
+        for (enc, q, fargs) in &sites {
+            if enc != &p || !fargs.iter().any(|a| is_own(enc, a)) {
                 continue;
             }
-            if let (Expr::Var(g), Some(fpn)) = (arg, fn_param.get(&p)) {
-                if g == fpn {
-                    let inst = (q.clone(), rho.clone());
-                    if seen.insert(inst.clone()) {
-                        work.push(inst);
+            let mut rho2: std::collections::BTreeSet<String> = rho.iter().cloned().collect();
+            rho2.extend(concrete_of(q));
+            let mut ok = true;
+            for a in fargs {
+                if is_own(enc, a) {
+                    continue;
+                }
+                match fn_arg_row(a, module, index, effect_generic) {
+                    Ok(r) => rho2.extend(r),
+                    Err(_) => {
+                        ok = false;
+                        break;
                     }
                 }
+            }
+            if !ok {
+                continue;
+            }
+            let inst = (q.clone(), rho2.into_iter().collect::<Vec<String>>());
+            if seen.insert(inst.clone()) {
+                work.push(inst);
             }
         }
     }
@@ -5191,26 +5511,70 @@ fn check_expr(
                     args.len()
                 ));
             }
-            let fp_idx = callee_params
+            // REQ-LLL-159a A2-2/A2-3: EVERY function-typed position shares the one row;
+            // the SITE row is the callee's concrete effects ∪ each argument's row.
+            let fn_positions: Vec<usize> = callee_params
                 .iter()
-                .position(|(_, t)| matches!(t, Ty::Fun(..)))
-                .expect("effect-generic part has exactly one function param");
-            // concrete row of the function argument. If it is the ENCLOSING
-            // effect-generic part's own function parameter (recursive HOF), the row
-            // is our own row variable (polymorphic) — already covered by our row.
+                .enumerate()
+                .filter(|(_, (_, t))| matches!(t, Ty::Fun(..)))
+                .map(|(i, _)| i)
+                .collect();
+            // ENCLOSING effect-generic context: forwarding one of our OWN row-carrying
+            // function parameters (recursive/cross-generic HOF) contributes our own row
+            // variable (polymorphic) — already covered by our row.
             let my_row_var = ctx.effect_generic.get(&ctx.part.name).cloned();
-            let my_fn_param = my_row_var.as_ref().and_then(|_| {
+            let my_fn_params: HashSet<String> = if my_row_var.is_some() {
                 ctx.part
                     .params
                     .iter()
-                    .find(|(_, t)| matches!(t, Ty::Fun(..)))
+                    .filter(|(_, t)| matches!(t, Ty::Fun(..)))
                     .map(|(n, _)| n.clone())
-            });
-            let row: Vec<String> = match (&args[fp_idx], &my_row_var, &my_fn_param) {
-                (Expr::Var(g), Some(rv), Some(fp)) if g == fp => vec![rv.clone()],
-                _ => fn_arg_row(&args[fp_idx], ctx.module, ctx.index, ctx.effect_generic)
-                    .map_err(|e| format!("part `{}`: calling `{name}`: {e}", ctx.part.name))?,
+                    .collect()
+            } else {
+                HashSet::new()
             };
+            let callee_concrete: Vec<String> = ctx.module.parts[idx]
+                .effects
+                .iter()
+                .filter(|e| !is_row_var(e))
+                .cloned()
+                .collect();
+            let mut row: Vec<String> = callee_concrete;
+            let mut forwards_own = false;
+            for &fp in &fn_positions {
+                match (&args[fp], &my_row_var) {
+                    (Expr::Var(g), Some(rv)) if my_fn_params.contains(g.as_str()) => {
+                        forwards_own = true;
+                        row.push(rv.clone());
+                    }
+                    _ => row.extend(
+                        fn_arg_row(&args[fp], ctx.module, ctx.index, ctx.effect_generic)
+                            .map_err(|e| format!("part `{}`: calling `{name}`: {e}", ctx.part.name))?,
+                    ),
+                }
+            }
+            row.sort();
+            row.dedup();
+            // v1 FENCE for forwarding our own row parameter: every OTHER concrete
+            // contribution (the callee's own effects, sibling arguments) must already
+            // sit in OUR declared concrete row — then the callee's specialization row
+            // equals ours at every instantiation, so the forwarded fn value keeps its
+            // exact evidence signature. Anything wider would need a CAPTURING adapter
+            // around a fn pointer, which does not exist (REQ-LLL-159a A2-3).
+            if forwards_own {
+                for eff in row.iter().filter(|e| !is_row_var(e)) {
+                    if !ctx.part.effects.iter().any(|e| e == eff) {
+                        return Err(format!(
+                            "part `{}`: calling `{name}` forwards this part's own row parameter \
+                             while adding the concrete effect `{eff}` — the forwarded function \
+                             value cannot gain evidence it was not given (v1). Declare `via \
+                             {eff}` on `{}` alongside its row variable so every instantiation \
+                             carries it (REQ-LLL-159a)",
+                            ctx.part.name, ctx.part.name
+                        ));
+                    }
+                }
+            }
             for eff in &row {
                 if !ctx.effect_allowed(eff) {
                     return Err(format!(
@@ -5221,27 +5585,33 @@ fn check_expr(
                     ));
                 }
             }
-            // the function argument's declared type, lifting the effectful-part
-            // -as-value rejection for this position (a named effectful part is now a
+            // each function argument's declared type, lifting the effectful-part
+            // -as-value rejection for these positions (a named effectful part is a
             // valid function value here — DEC-LLL-038).
-            let fn_arg_ty_override: Option<Ty> = match &args[fp_idx] {
-                Expr::Var(g) if ctx.index.contains_key(g) => {
-                    let gp = &ctx.module.parts[ctx.index[g]];
-                    Some(Ty::Fun(
-                        gp.params.iter().map(|(_, t)| t.clone()).collect(),
-                        Box::new(gp.ret.clone()),
-                    ))
-                }
-                _ => None,
-            };
+            let fn_arg_ty_overrides: HashMap<usize, Ty> = fn_positions
+                .iter()
+                .filter_map(|&fp| match &args[fp] {
+                    Expr::Var(g) if ctx.index.contains_key(g) => {
+                        let gp = &ctx.module.parts[ctx.index[g]];
+                        Some((
+                            fp,
+                            Ty::Fun(
+                                gp.params.iter().map(|(_, t)| t.clone()).collect(),
+                                Box::new(gp.ret.clone()),
+                            ),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect();
             let mut subst: HashMap<String, Ty> = HashMap::new();
             for (i, (a, (pn, pt))) in args.iter().zip(&callee_params).enumerate() {
-                let ta = match (i == fp_idx, &fn_arg_ty_override) {
-                    (true, Some(t)) => t.clone(),
+                let ta = match fn_arg_ty_overrides.get(&i) {
+                    Some(t) => t.clone(),
                     // push the param type with the bindings gathered SO FAR (REQ-LLL-068):
                     // once an earlier argument pinned a type variable, a later nullary
                     // constructor `None` sees the concrete expected type `Option[Int]`.
-                    _ => check_expr(ctx, a, Some(&subst_ty(pt, &subst)))?,
+                    None => check_expr(ctx, a, Some(&subst_ty(pt, &subst)))?,
                 };
                 unify_arg(pt, &ta, &mut subst).map_err(|e| {
                     format!("part `{}`: argument `{pn}` of `{name}`: {e}", ctx.part.name)

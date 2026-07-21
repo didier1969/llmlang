@@ -1526,18 +1526,23 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
     for part in &cm.module.parts {
         part_caps.insert(part.name.clone(), caps_of(&part.effects, &user_tail_ops));
     }
-    // effect-generic support (DEC-LLL-038): the function-param index of each
-    // generic part, and each part's concrete effect row (sorted).
-    let mut generic_fn_pos: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    // effect-generic support (DEC-LLL-038, élargi REQ-LLL-159a A2-3): each generic
+    // part's fn-param signatures (position + declared types, for dispatch adapters),
+    // and each part's concrete effect row (sorted).
+    let mut generic_fn_pos: GenericFnSigs = std::collections::HashMap::new();
     for pname in cm.effect_generic.keys() {
         let part = &cm.module.parts[cm.index[pname]];
-        let pos = part
+        let sigs: Vec<(usize, Vec<Ty>, Ty)> = part
             .params
             .iter()
-            .position(|(_, t)| matches!(t, Ty::Fun(..)))
-            .expect("effect-generic part has a function param");
-        generic_fn_pos.insert(pname.clone(), pos);
+            .enumerate()
+            .filter_map(|(i, (_, t))| match t {
+                Ty::Fun(ats, r) => Some((i, ats.clone(), (**r).clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(!sigs.is_empty(), "effect-generic part has a function param");
+        generic_fn_pos.insert(pname.clone(), sigs);
     }
     let mut part_row: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
@@ -1904,7 +1909,7 @@ fn emit_instance_impl(
     let empty_ptrset: PtrSet = std::collections::HashSet::new();
     let empty_ops: std::collections::HashMap<String, Vec<OpSig>> = std::collections::HashMap::new();
     let empty_caps: PartCaps = std::collections::HashMap::new();
-    let empty_pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let empty_pos: GenericFnSigs = std::collections::HashMap::new();
     let empty_rows: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let empty_gm: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
     for (mn, body) in &inst.defs {
@@ -1953,7 +1958,7 @@ fn emit_instance_impl(
             generic_fn_pos: &empty_pos,
             part_row: &empty_rows,
             given_methods: &empty_gm,
-            row_fn: None,
+            row_fns: Names::new(),
             row_ev: Vec::new(),
             row_abort: false,
             row: Vec::new(),
@@ -2475,6 +2480,155 @@ fn rho_has_abort(rho: &[String], abort_effects: &Names) -> bool {
     rho.iter().any(|e| abort_effects.contains(e))
 }
 
+/// The specialization row ρ at an effect-generic CALL SITE (REQ-LLL-159a A2):
+/// the callee's concrete effects ∪ each function argument's row — computed with
+/// the SAME shared walker as the checker's instantiation collection
+/// (`types::collect_expr_row`), so the specializations the checker collects and
+/// the ones this dispatch names can never diverge.
+fn generic_site_rho(name: &str, args: &[Expr], cx: &Cx) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> = cx
+        .part_row
+        .get(name)
+        .into_iter()
+        .flatten()
+        .filter(|e| !crate::types::is_row_var(e))
+        .cloned()
+        .collect();
+    for (fp, _, _) in &cx.generic_fn_pos[name] {
+        match args.get(*fp) {
+            // our own row parameter carries this specialization's whole row
+            Some(Expr::Var(f)) if cx.row_fns.contains(f.as_str()) => {
+                out.extend(cx.row.iter().cloned());
+            }
+            // a named part contributes its (concrete, elaborated) row
+            Some(Expr::Var(g)) if cx.parts.contains(g.as_str()) => {
+                out.extend(
+                    cx.part_row
+                        .get(g.as_str())
+                        .into_iter()
+                        .flatten()
+                        .filter(|e| !crate::types::is_row_var(e))
+                        .cloned(),
+                );
+            }
+            // a lambda contributes its body's row (performs + callees' rows)
+            Some(Expr::Lambda(_, body)) => {
+                let row_of = |n: &str| cx.part_row.get(n).cloned();
+                let fn_pos_of = |n: &str| -> Vec<usize> {
+                    cx.generic_fn_pos
+                        .get(n)
+                        .map(|v| v.iter().map(|(i, _, _)| *i).collect())
+                        .unwrap_or_default()
+                };
+                crate::types::collect_expr_row(body, &row_of, &fn_pos_of, &mut out);
+            }
+            _ => {}
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// ρ's evidence PARAMETER declarations (name + type), in the fixed
+/// [State, Reader, caps] order — the closure-side mirror of
+/// `rho_evidence_param_types` (REQ-LLL-159a A2).
+fn rho_evidence_params(
+    rho: &[String],
+    user_tail_ops: &std::collections::HashMap<String, Vec<OpSig>>,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    if rho.iter().any(|e| e == "State") {
+        v.push("__st: &mut LllInt".to_string());
+    }
+    if rho.iter().any(|e| e == "Reader") {
+        v.push("__env: &LllInt".to_string());
+    }
+    for (dotted, ptys, cret) in caps_of(rho, user_tail_ops) {
+        let ps: Vec<String> = ptys.iter().map(rs_ty).collect();
+        v.push(format!("{}: fn({}) -> {}", cap_name(&dotted), ps.join(", "), rs_ty(&cret)));
+    }
+    v
+}
+
+/// REQ-LLL-159a A2-3: adapt a NAMED part `g` (concrete row `row_g` ⊆ ρ) to the
+/// FULL-ρ fn-argument signature of a specialization: a NON-capturing closure that
+/// takes the declared argument types plus ρ's whole evidence, forwards only the
+/// slice `g` declares (fixed [State, Reader, caps] order), and Ok-lifts the result
+/// when ρ aborts but `g` does not. Non-capturing by construction (the body reads
+/// only the closure's own parameters) → coerces to the fn-pointer type.
+fn adapt_fn_arg(g: &str, argtys: &[Ty], row_g: &[String], rho: &[String], cx: &Cx) -> String {
+    let mut params: Vec<String> = argtys
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("__a{i}: {}", rs_ty(t)))
+        .collect();
+    params.extend(rho_evidence_params(rho, cx.user_tail_ops));
+    let mut fargs: Vec<String> = (0..argtys.len()).map(|i| format!("__a{i}")).collect();
+    if row_g.iter().any(|e| e == "State") {
+        fargs.push("__st".to_string());
+    }
+    if row_g.iter().any(|e| e == "Reader") {
+        fargs.push("__env".to_string());
+    }
+    for (dotted, _, _) in caps_of(row_g, cx.user_tail_ops) {
+        fargs.push(cap_name(&dotted));
+    }
+    let call = format!("{}({})", mangle(g), fargs.join(", "));
+    let g_abort = rho_has_abort(row_g, cx.abort_effects);
+    let body = if rho_has_abort(rho, cx.abort_effects) && !g_abort {
+        format!("Ok({call})")
+    } else {
+        call
+    };
+    format!("(|{}| {body})", params.join(", "))
+}
+
+/// REQ-LLL-159a A2-1: an EFFECTFUL lambda passed to an effect-generic part —
+/// emitted as a closure carrying its OWN evidence parameters for the full site
+/// row ρ (State cell, Reader env, capabilities), so the body's performs resolve
+/// to the closure's parameters and nothing is ever captured. When ρ aborts, the
+/// body lowers in Result position (`?` propagation works) and the result is
+/// Ok-wrapped — an abort perform inside remains an early `return Err`.
+fn emit_lambda_fn_arg(
+    lparams: &[(String, Ty)],
+    body: &Expr,
+    rho: &[String],
+    cx: &Cx,
+) -> Result<String, String> {
+    let rho_abort = rho_has_abort(rho, cx.abort_effects);
+    let mut params: Vec<String> = lparams
+        .iter()
+        .map(|(n, t)| format!("{}: {}", local(n), rs_ty(t)))
+        .collect();
+    params.extend(rho_evidence_params(rho, cx.user_tail_ops));
+    let mut caps_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut row_ev: Vec<String> = Vec::new();
+    let is_state = rho.iter().any(|e| e == "State");
+    let is_reader = rho.iter().any(|e| e == "Reader");
+    if is_state {
+        row_ev.push("__st".to_string());
+    }
+    if is_reader {
+        row_ev.push("__env".to_string());
+    }
+    for (dotted, _, _) in caps_of(rho, cx.user_tail_ops) {
+        let cn = cap_name(&dotted);
+        caps_map.insert(dotted, cn.clone());
+        row_ev.push(cn);
+    }
+    let mut cx2 = cx.clone();
+    cx2.state_ev = is_state.then(|| "__st".to_string());
+    cx2.reader_ev = is_reader.then(|| "__env".to_string());
+    cx2.caps = caps_map;
+    cx2.row_fns = Names::new();
+    cx2.row_ev = row_ev;
+    cx2.row_abort = rho_abort;
+    cx2.row = rho.to_vec();
+    let b = expr(body, &cx2, rho_abort)?;
+    let b = if rho_abort { format!("Ok({b})") } else { b };
+    Ok(format!("(|{}| {b})", params.join(", ")))
+}
+
 fn emit_enum(out: &mut String, td: &TypeDecl) {
     // Rc-wrapped like lists: `type T = Rc<TI>`, so a self-referential field
     // (rs_ty renders it as `T` = the Rc alias) gives recursion for free
@@ -2632,7 +2786,7 @@ fn emit_fast_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), Stri
         generic_fn_pos: g.generic_fn_pos,
         part_row: g.part_row,
         given_methods: &no_methods,
-        row_fn: None,
+        row_fns: Names::new(),
         row_ev: Vec::new(),
         row_abort: false,
         row: Vec::new(),
@@ -2827,7 +2981,7 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         generic_fn_pos: g.generic_fn_pos,
         part_row: g.part_row,
         given_methods: &given_methods,
-        row_fn: None,
+        row_fns: Names::new(),
         row_ev: Vec::new(),
         row_abort: false,
         row: Vec::new(),
@@ -2911,12 +3065,16 @@ fn emit_specialized_part(
     collect_key_tvars(&part.ret, &mut key_tvars);
     let generics = generics_clause(&tvars, &key_tvars, &part.given);
     let given_methods = given_methods_map(&part.given, g.classes);
-    let fn_param_name = part
+    // REQ-LLL-159a A2-3: EVERY function-typed parameter carries the one row — they
+    // all get the row's evidence appended to their fn type, and applying any of them
+    // forwards the specialization's evidence.
+    let fn_param_names: Names = part
         .params
         .iter()
-        .find(|(_, t)| matches!(t, Ty::Fun(..)))
+        .filter(|(_, t)| matches!(t, Ty::Fun(..)))
         .map(|(n, _)| n.clone())
-        .expect("effect-generic part has a function param");
+        .collect();
+    assert!(!fn_param_names.is_empty(), "effect-generic part has a function param");
     // borrow model (DEC-LLL-031): an effect-generic part is never used as a value,
     // so it borrows its List/ADT non-function parameters (`&Rc<…>`) like a plain
     // part; the row-carrying function parameter is unaffected (it is a fn pointer).
@@ -2925,8 +3083,8 @@ fn emit_specialized_part(
     let mut params: Vec<String> = Vec::new();
     for (i, (n, t)) in part.params.iter().enumerate() {
         match t {
-            Ty::Fun(argtys, ret0) if *n == fn_param_name => {
-                // the row-carrying function parameter: append the row's evidence
+            Ty::Fun(argtys, ret0) if fn_param_names.contains(n.as_str()) => {
+                // a row-carrying function parameter: append the row's evidence
                 // types and wrap the return in `Result` if the row aborts.
                 let mut ats: Vec<String> = argtys.iter().map(rs_ty).collect();
                 ats.extend(rho_evidence_param_types(rho, g.user_tail_ops));
@@ -3008,7 +3166,7 @@ fn emit_specialized_part(
         generic_fn_pos: g.generic_fn_pos,
         part_row: g.part_row,
         given_methods: &given_methods,
-        row_fn: Some(fn_param_name),
+        row_fns: fn_param_names,
         row_ev,
         row_abort: has_abort,
         row: rho.to_vec(),
@@ -3034,6 +3192,11 @@ type Names = std::collections::HashSet<String>;
 type CapSig = (String, Vec<Ty>, Ty);
 /// part name → its ordered capability requirements.
 type PartCaps = std::collections::HashMap<String, Vec<CapSig>>;
+/// effect-generic part name → its function-parameter signatures, each as
+/// `(position, argument types, return type)` — REQ-LLL-159a A2-3: a generic part
+/// may take SEVERAL fn params, and the dispatch needs their declared types to
+/// build non-capturing adapters.
+type GenericFnSigs = std::collections::HashMap<String, Vec<(usize, Vec<Ty>, Ty)>>;
 
 /// Shared codegen context: the name-sets that classify an identifier at a call
 /// site — constructors, function-valued params, part names, and abort-row parts
@@ -3068,8 +3231,8 @@ struct Globals<'a> {
     effect_generic: &'a std::collections::HashMap<String, String>,
     /// effects that carry an abort op (`-> Never`) — a row containing one is Result-typed
     abort_effects: &'a Names,
-    /// effect-generic part name → the index of its function parameter
-    generic_fn_pos: &'a std::collections::HashMap<String, usize>,
+    /// effect-generic part name → its fn-param signatures (REQ-LLL-159a A2-3)
+    generic_fn_pos: &'a GenericFnSigs,
     /// part name → its concrete effect row (sorted) — for instantiating a generic call
     part_row: &'a std::collections::HashMap<String, Vec<String>>,
     /// typeclasses in the module (REQ-LLL-039) — for building a part's per-call
@@ -3130,8 +3293,8 @@ struct Cx<'a> {
     effect_generic: &'a std::collections::HashMap<String, String>,
     /// effects carrying an abort op — a row with one is Result-typed
     abort_effects: &'a Names,
-    /// effect-generic part name → the index of its function parameter
-    generic_fn_pos: &'a std::collections::HashMap<String, usize>,
+    /// effect-generic part name → its fn-param signatures (REQ-LLL-159a A2-3)
+    generic_fn_pos: &'a GenericFnSigs,
     /// part name → its concrete effect row (sorted)
     part_row: &'a std::collections::HashMap<String, Vec<String>>,
     /// method name → (trait/class name, Rust generic type param) for every method
@@ -3139,14 +3302,15 @@ struct Cx<'a> {
     /// translates to a fully-qualified trait dispatch `<T as Class>::method(args)`.
     given_methods: &'a std::collections::HashMap<String, (String, String)>,
     /// inside a specialized (effect-monomorphized) body: the row-carrying function
-    /// parameter's name; applying it forwards `row_ev` (+ `?` if `row_abort`).
-    row_fn: Option<String>,
+    /// parameters' names (REQ-LLL-159a A2-3: possibly several, all sharing the one
+    /// row); applying one forwards `row_ev` (+ `?` if `row_abort`).
+    row_fns: Names,
     /// evidence variable names to append when applying the row function or calling
     /// another generic part at this same row (State cell, Reader env, caps order).
     row_ev: Vec<String>,
     /// this specialization's row is abort-carrying → applications propagate with `?`.
     row_abort: bool,
-    /// this specialization's concrete row (only meaningful when `row_fn` is set) —
+    /// this specialization's concrete row (only meaningful when `row_fns` is non-empty) —
     /// used to name/forward when calling another generic part at the same row.
     row: Vec<String>,
     /// REQ-LLL-162 — we are lowering the SPECULATIVE raw-`i64` twin, not the exact body.
@@ -4051,7 +4215,7 @@ fn emit_body(
                     generic_fn_pos: cx.generic_fn_pos,
                     part_row: cx.part_row,
                     given_methods: cx.given_methods,
-                    row_fn: cx.row_fn.clone(),
+                    row_fns: cx.row_fns.clone(),
                     row_ev: cx.row_ev.clone(),
                     row_abort: cx.row_abort,
                     row: cx.row.clone(),
@@ -4134,7 +4298,7 @@ fn emit_body(
                         generic_fn_pos: cx.generic_fn_pos,
                         part_row: cx.part_row,
                         given_methods: cx.given_methods,
-                        row_fn: None,
+                        row_fns: Names::new(),
                         row_ev: Vec::new(),
                         row_abort: false,
                         row: Vec::new(),
@@ -4174,7 +4338,7 @@ fn emit_body(
                     generic_fn_pos: cx.generic_fn_pos,
                     part_row: cx.part_row,
                     given_methods: cx.given_methods,
-                    row_fn: cx.row_fn.clone(),
+                    row_fns: cx.row_fns.clone(),
                     row_ev: cx.row_ev.clone(),
                     row_abort: cx.row_abort,
                     row: cx.row.clone(),
@@ -4913,7 +5077,7 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                 // application of a function-valued parameter (REQ-LLL-009). If it is
                 // the row-carrying parameter of an effect-monomorphized part, forward
                 // the row's evidence and propagate abort with `?` (DEC-LLL-038).
-                if cx.row_fn.as_deref() == Some(name.as_str()) {
+                if cx.row_fns.contains(name.as_str()) {
                     xs.extend(cx.row_ev.iter().cloned());
                     let call = format!("{}({})", local(name), xs.join(", "));
                     if cx.row_abort {
@@ -4925,26 +5089,63 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
                     format!("{}({})", local(name), xs.join(", "))
                 }
             } else if cx.effect_generic.contains_key(name) {
-                // calling an effect-generic part → its specialization for the row of
-                // the function argument, with that row's evidence forwarded (DEC-038).
-                let fp = cx.generic_fn_pos[name];
-                let (rho, evidence): (Vec<String>, Vec<String>) = match &args[fp] {
-                    // our own row parameter → this specialization's row
-                    Expr::Var(f) if cx.row_fn.as_deref() == Some(f.as_str()) => {
-                        (cx.row.clone(), cx.row_ev.clone())
+                // calling an effect-generic part (DEC-LLL-038, élargi REQ-LLL-159a A2):
+                // the specialization row ρ = the callee's concrete effects ∪ every
+                // function argument's row. Each fn argument is brought to the FULL-ρ
+                // evidence signature: pass-through when its own signature already
+                // matches, a NON-capturing adapter (or an evidence-carrying closure
+                // for an effectful lambda) otherwise.
+                let rho = generic_site_rho(name, args, cx);
+                let rho_abort = rho_has_abort(&rho, cx.abort_effects);
+                let rho_ev_tys = rho_evidence_param_types(&rho, cx.user_tail_ops);
+                for (fp, argtys, _) in &cx.generic_fn_pos[name] {
+                    let repl: Option<String> = match &args[*fp] {
+                        // forwarding our own row parameter: its signature IS the
+                        // full-ρ one iff ρ equals this specialization's row — the
+                        // check-side forwarding fence guarantees it; anything else
+                        // is a compiler bug, fail LOUDLY (DEC-LLL-015).
+                        Expr::Var(f) if cx.row_fns.contains(f.as_str()) => {
+                            if rho != cx.row {
+                                return Err(format!(
+                                    "codegen: forwarding row parameter `{f}` needs row \
+                                     {rho:?} but this specialization carries {:?} — \
+                                     evidence signatures diverge (REQ-LLL-159a)",
+                                    cx.row
+                                ));
+                            }
+                            None
+                        }
+                        // a concrete part as the function value: pass the bare fn item
+                        // when its evidence signature already equals ρ's, else adapt.
+                        Expr::Var(gp) if cx.parts.contains(gp) => {
+                            let row_g = cx.part_row.get(gp).cloned().unwrap_or_default();
+                            let same_ev = rho_evidence_param_types(&row_g, cx.user_tail_ops)
+                                == rho_ev_tys
+                                && rho_has_abort(&row_g, cx.abort_effects) == rho_abort;
+                            if same_ev {
+                                None
+                            } else {
+                                Some(adapt_fn_arg(gp, argtys, &row_g, &rho, cx))
+                            }
+                        }
+                        // a lambda: pure ρ keeps the plain closure; an evidence-carrying
+                        // ρ gets a closure with its OWN evidence params (REQ-LLL-159a A2-1).
+                        Expr::Lambda(lparams, lbody) => {
+                            if rho_ev_tys.is_empty() && !rho_abort {
+                                None
+                            } else {
+                                Some(emit_lambda_fn_arg(lparams, lbody, &rho, cx)?)
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(r) = repl {
+                        xs[*fp] = r;
                     }
-                    // a concrete part used as the function value → its declared row
-                    Expr::Var(gp) if cx.parts.contains(gp) => {
-                        let r = cx.part_row.get(gp).cloned().unwrap_or_default();
-                        let ev = forward_evidence(&r, cx);
-                        (r, ev)
-                    }
-                    // a pure lambda → the pure specialization, no evidence
-                    _ => (Vec::new(), Vec::new()),
-                };
-                xs.extend(evidence);
+                }
+                xs.extend(forward_evidence(&rho, cx));
                 let call = format!("{}({})", mangle_generic(name, &rho), xs.join(", "));
-                if res && rho_has_abort(&rho, cx.abort_effects) {
+                if res && rho_abort {
                     format!("{call}?")
                 } else {
                     call

@@ -266,6 +266,21 @@ pub struct Part {
     pub ret: Ty,
     /// Declared effects (`via IO`). Empty = pure. v1: only "IO".
     pub effects: Vec<String>,
+    /// REQ-LLL-159a: the `via` list ends with `..` — the rest of the row is INFERRED.
+    /// `check_module` elaborates it (`elaborate_rows`) as the least fixed point of
+    /// callee rows plus performed effects, minus effects discharged by an enclosing
+    /// `handle`, and materializes the result into `effects` on the WORKING COPY only.
+    /// The `.lll` text keeps `via ..` and that TEXT is what is hashed (DEC-LLL-020:
+    /// the elaborated row is a derived, display-only artifact).
+    #[serde(default)]
+    pub row_infer: bool,
+    /// The textual explicit row written before `..` (`via IO, ..` → `["IO"]`),
+    /// captured by `elaborate_rows` at the moment it overwrites `effects` with the
+    /// inferred row. `None` until elaboration, and always `None` when `row_infer`
+    /// is false. The content-hash canon reads THIS, never the elaborated `effects`
+    /// (DEC-LLL-020 — the text is the source of truth).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_row: Option<Vec<String>>,
     /// Typeclass constraints `given Class[a]` (REQ-LLL-039, DEC-LLL-047): each
     /// entry is (class name, the part's OWN type variable it constrains). A
     /// class method call in the body resolves to an OPAQUE uninterpreted function

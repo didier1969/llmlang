@@ -744,6 +744,7 @@ fn err_report(msg: &str) -> diag::Report {
         status: Some("failed".to_string()),
         module: None,
         diagnostics: vec![diag::Diagnostic::from_error(msg)],
+        elaborated_rows: Vec::new(),
     }
 }
 
@@ -892,6 +893,7 @@ mod tests {
     fn fake_check(_uri: &str, text: &str) -> diag::Report {
         if text.contains("BAD") {
             diag::Report {
+                elaborated_rows: vec![],
                 ok: false,
                 status: Some("failed".to_string()),
                 module: Some("M".to_string()),
@@ -912,7 +914,7 @@ mod tests {
                 }],
             }
         } else {
-            diag::Report { ok: true, status: None, module: Some("M".to_string()), diagnostics: vec![] }
+            diag::Report { ok: true, status: None, module: Some("M".to_string()), diagnostics: vec![], elaborated_rows: vec![] }
         }
     }
 
@@ -1025,7 +1027,7 @@ mod tests {
             if text.contains("PANIC") {
                 panic!("boom in the checker");
             }
-            diag::Report { ok: true, status: None, module: None, diagnostics: vec![] }
+            diag::Report { ok: true, status: None, module: None, diagnostics: vec![], elaborated_rows: vec![] }
         }
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // silence the expected panic's backtrace
@@ -1059,6 +1061,7 @@ mod tests {
             sufficient_hypotheses: vec![],
         };
         let report = diag::Report {
+            elaborated_rows: vec![],
             ok: false,
             status: Some("incomplete".to_string()),
             module: Some("M".to_string()),
@@ -1092,6 +1095,7 @@ mod tests {
             sufficient_hypotheses: vec!["x > 0".to_string()],
         };
         let report = diag::Report {
+            elaborated_rows: vec![],
             ok: false,
             status: Some("failed".to_string()),
             module: Some("M".to_string()),
@@ -1229,6 +1233,7 @@ mod tests {
     #[test]
     fn diagnostic_with_no_line_falls_back_to_document_head() {
         let report = diag::Report {
+            elaborated_rows: vec![],
             ok: false,
             status: Some("failed".to_string()),
             module: None,
@@ -1345,9 +1350,10 @@ mod tests {
         // A checker that reports a typed hole on line 4 (1-based) when text has a `?`.
         fn holey_check(_uri: &str, text: &str) -> diag::Report {
             if !text.contains('?') {
-                return diag::Report { ok: true, status: None, module: None, diagnostics: vec![] };
+                return diag::Report { ok: true, status: None, module: None, diagnostics: vec![], elaborated_rows: vec![] };
             }
             diag::Report {
+                elaborated_rows: vec![],
                 ok: false,
                 status: Some("incomplete".to_string()),
                 module: Some("M".to_string()),
