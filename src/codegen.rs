@@ -234,6 +234,161 @@ mod lll_fs_runtime {
     );
 }
 
+/// REQ-LLL-191 (CPT-LLL-017, "oracle au bord"): the built-in optimization-oracle runtime,
+/// emitted iff an op binds to `lll_solver_runtime::solve` (a mirror of `emit_fs_runtime` —
+/// a `std`-only shim, no external crate). It consults a solver OUT OF PROCESS: it translates
+/// a SOLVER-AGNOSTIC neutral-form linear model (integer variables + `sum(c_i*x_i) <=/>=/== b`
+/// constraints + one linear objective) into SMT-LIB2 and shells out to the vendored z3-opt
+/// (`(maximize|minimize)` + `(check-sat)` + `(get-model)`, reusing vc.rs's find/run pattern).
+/// The neutral form is the thesis, not the backend: z3-opt and a future CP-SAT are two
+/// ADAPTERS of the SAME form. Crucially, the returned assignment is UNTRUSTED — the caller's
+/// verified core havocs it (DEC-LLL-017) and can prove nothing about it, so a verified
+/// witness-check (a pure llmlang `check_solution`) is FORCED to re-validate it before use; a
+/// solution violating the constraints is rejected fail-stop at execution. Faults (z3 missing,
+/// unsat, malformed model, unparseable model) return an EMPTY assignment — the witness then
+/// rejects it, never a silent wrong result (DEC-LLL-026 philosophy).
+fn emit_solver_runtime(out: &mut String) {
+    out.push_str(
+        r#"
+mod lll_solver_runtime {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // z3 discovery — the mirror of vc.rs `find_z3`: $LLL_Z3, then the vendored binary next
+    // to cwd / the executable, then PATH. The oracle is an EFFECT BOUNDARY, so this reaches
+    // outside the verified core by design (the result is re-checked, DEC-LLL-017).
+    fn z3_path() -> String {
+        if let Ok(p) = std::env::var("LLL_Z3") {
+            return p;
+        }
+        for base in [
+            std::env::current_dir().ok(),
+            std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for c in [base.join("vendor/z3/bin/z3"), base.join("../../vendor/z3/bin/z3")] {
+                if c.exists() {
+                    return c.to_string_lossy().into_owned();
+                }
+            }
+        }
+        "z3".to_string()
+    }
+
+    // render an integer as an SMT-LIB2 term: a negative uses the `(- n)` prefix form.
+    fn smt_int(v: i64) -> String {
+        if v < 0 {
+            format!("(- {})", v.unsigned_abs())
+        } else {
+            v.to_string()
+        }
+    }
+
+    // parse `(define-fun x{i} () Int <v>)` out of z3's model — z3 puts <v> on the next line,
+    // as a bare number or the `(- n)` negative form. Returns None if absent/unparseable.
+    fn parse_var(model: &str, i: usize) -> Option<i64> {
+        let key = format!("(define-fun x{i} () Int");
+        let start = model.find(&key)? + key.len();
+        let rest = model[start..].trim_start();
+        if let Some(neg) = rest.strip_prefix("(- ") {
+            let num: String = neg.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+            if num.is_empty() {
+                return None;
+            }
+            num.parse::<i64>().ok().map(|n| -n)
+        } else {
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if num.is_empty() {
+                return None;
+            }
+            num.parse::<i64>().ok()
+        }
+    }
+
+    // Solve a neutral-form integer-linear model. Flat layout:
+    //   [ nvars, nconstraints, sense, obj_0 .. obj_{nvars-1},
+    //     then per constraint: rel, rhs, coeff_0 .. coeff_{nvars-1} ]
+    // sense: 0 = minimize, 1 = maximize.  rel: 0 = `<=`, 1 = `>=`, 2 = `==`.
+    // Returns the optimal assignment (nvars ints), or an EMPTY vec on ANY failure —
+    // the caller's verified witness-check then rejects an empty/wrong assignment.
+    pub fn solve(model: &[i64]) -> Vec<i64> {
+        if model.len() < 3 {
+            return Vec::new();
+        }
+        if model[0] < 0 || model[1] < 0 {
+            return Vec::new();
+        }
+        let nvars = model[0] as usize;
+        let ncons = model[1] as usize;
+        let sense = model[2];
+        let obj_start = 3usize;
+        let cons_start = obj_start + nvars;
+        let stride = 2 + nvars;
+        if model.len() != cons_start + ncons * stride {
+            return Vec::new();
+        }
+        let mut s = String::new();
+        for i in 0..nvars {
+            s.push_str(&format!("(declare-const x{i} Int)\n"));
+        }
+        for c in 0..ncons {
+            let base = cons_start + c * stride;
+            let terms: Vec<String> =
+                (0..nvars).map(|j| format!("(* {} x{j})", smt_int(model[base + 2 + j]))).collect();
+            let lhs =
+                if nvars == 1 { terms[0].clone() } else { format!("(+ {})", terms.join(" ")) };
+            let op = match model[base] {
+                0 => "<=",
+                1 => ">=",
+                _ => "=",
+            };
+            s.push_str(&format!("(assert ({op} {lhs} {}))\n", smt_int(model[base + 1])));
+        }
+        let obj_terms: Vec<String> =
+            (0..nvars).map(|j| format!("(* {} x{j})", smt_int(model[obj_start + j]))).collect();
+        let obj = if nvars == 1 { obj_terms[0].clone() } else { format!("(+ {})", obj_terms.join(" ")) };
+        let dir = if sense == 1 { "maximize" } else { "minimize" };
+        s.push_str(&format!("({dir} {obj})\n(check-sat)\n(get-model)\n"));
+
+        let mut child = match Command::new(z3_path())
+            .arg("-in")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(s.as_bytes()).is_err() {
+                return Vec::new();
+            }
+        }
+        let done = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        let text = String::from_utf8_lossy(&done.stdout);
+        if text.contains("unsat") || !text.contains("sat") {
+            return Vec::new();
+        }
+        let mut sol = Vec::with_capacity(nvars);
+        for i in 0..nvars {
+            match parse_var(&text, i) {
+                Some(v) => sol.push(v),
+                None => return Vec::new(),
+            }
+        }
+        sol
+    }
+}
+"#,
+    );
+}
+
 /// REQ-LLL-154: the built-in MessagePack runtime, emitted iff an op binds to
 /// `lll_msgpack_runtime::…`. Binary interop that reuses the SHARED `Json` marshalling
 /// end-to-end: `rmp_serde` round-trips through `serde_json::Value` (any serde type), so a
@@ -1216,6 +1371,13 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
             .unwrap_or(Ty::Int);
         emit_actor_runtime(&mut out, &msg_ty);
     }
+    // REQ-LLL-191 (CPT-LLL-017): emit the built-in optimization-oracle runtime iff any op
+    // binds to it (checker whitelists the exact `lll_solver_runtime::solve` path). A z3-opt
+    // subprocess whose UNTRUSTED result is havoc'd (DEC-LLL-017) and re-checked by a verified
+    // witness — no external crate, so it single-file-rustc's like `emit_fs_runtime`.
+    if extern_ops.values().any(|p| p.starts_with("lll_solver_runtime::")) {
+        emit_solver_runtime(&mut out);
+    }
     // REQ-LLL-066 / DEC-LLL-064: emit the built-in SQLite runtime iff any op binds to it
     // (checker whitelists the exact `lll_db_runtime::…` paths). Composition of an EMITTED
     // module with FFI `as`-marshalling was proven by the session-11 probe before this.
@@ -1347,6 +1509,27 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
                     .collect();
                 let call = format!("{path}({})", args.join(", "));
                 let key = format!("{}.{}", ed.name, op.name);
+                // REQ-LLL-191 (CPT-LLL-017): the optimization oracle's bespoke frontier.
+                // The neutral-form model `List[Int]` marshals to `&[i64]`; the returned
+                // assignment (`Vec<i64>`) marshals to the fixed 2-variable `(Int, Int)`
+                // tuple the checker guarantees. Any oracle failure (empty/short vec) yields
+                // the sentinel `(-1, -1)`, which the verified witness-check rejects — the
+                // untrusted result is never used unchecked (DEC-LLL-017). No trace/replay
+                // channel: the result is havoc'd + re-verified, so replay determinism is
+                // established by the witness, not by recording (follow-up if ever needed).
+                if path == "lll_solver_runtime::solve" {
+                    out.push_str(&format!(
+                        "#[inline] fn {}({}) -> {} {{ \
+                         let __sol = lll_solver_runtime::solve(&__lll_ints_to_rust(&__a0)); \
+                         let __x = __sol.first().copied().unwrap_or(-1); \
+                         let __y = __sol.get(1).copied().unwrap_or(-1); \
+                         (LllInt::from(__x), LllInt::from(__y)) }}\n",
+                        ffi_shim(&key),
+                        params.join(", "),
+                        rs_ty(&op.ret),
+                    ));
+                    continue;
+                }
                 // DEC-LLL-080 (REQ-LLL-183): the actor runtime reports a dead/unknown
                 // actor's state as `Option<i64>::None` — marshalled INTO the module's
                 // Option-shaped ADT here at the frontier (the mirror of the foreign
@@ -5674,6 +5857,22 @@ fn __lll_bytes_of_rust(b: &[u8]) -> Lst<LllInt> {
         acc = Rc::new(LstI::Cons(LllInt::S(*x as i64), acc));
     }
     acc
+}
+
+// REQ-LLL-191 (CPT-LLL-017): marshal a `List[Int]` to a `Vec<i64>` for the optimization
+// oracle (`lll_solver_runtime::solve`) — the neutral-form model crossing the effect
+// boundary. Unlike the byte marshaller this is NOT range-clamped: a model coefficient is a
+// full exact `Int` narrowed at the frontier like every other `i64`-carried FFI value
+// (`to_i64` fail-stops out of range, DEC-LLL-077). The oracle's answer is untrusted and
+// re-checked, so this direction is the only marshalling of consequence.
+fn __lll_ints_to_rust(xs: &Lst<LllInt>) -> Vec<i64> {
+    let mut v = Vec::new();
+    let mut cur: &Lst<LllInt> = xs;
+    while let LstI::Cons(c, t) = &**cur {
+        v.push(c.to_i64());
+        cur = t;
+    }
+    v
 }
 
 // Verified array (REQ-LLL-037): an Rc-shared Vec — O(1) indexing, structural

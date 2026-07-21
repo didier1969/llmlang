@@ -60,3 +60,6 @@ mod effect_inference;
 
 #[path = "integration/seq.rs"]
 mod seq;
+
+#[path = "integration/solver.rs"]
+mod solver;

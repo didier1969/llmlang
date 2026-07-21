@@ -1,0 +1,44 @@
+module SolverLp:
+
+  # REQ-LLL-191 (CPT-LLL-017, « l'oracle au bord ») — TRACER-BULLET.
+  #
+  # Un effet `Solver` consulte un solveur d'optimisation HORS-PROCESS (z3-opt, via
+  # src/codegen.rs `emit_solver_runtime`). Le modèle est une FORME NEUTRE, agnostique
+  # du solveur : variables entières + contraintes linéaires `sum(c_i*x_i) <=/>=/== b`
+  # + UN objectif linéaire — encodée à plat dans un `List[Int]`. z3-opt et un futur
+  # CP-SAT ne sont que deux ADAPTATEURS de cette même forme.
+  #
+  # LA THÈSE. Le résultat de `solve` est HAVOCÉ (DEC-LLL-017) : le cœur vérifié ne peut
+  # RIEN en prouver. Donc pour décharger le `requires` de `use_solution` (les contraintes),
+  # le programme DOIT appeler un WITNESS-CHECK vérifié — la discipline de vérification
+  # FORCE la re-vérification. Une solution qui viole les contraintes est REJETÉE
+  # fail-stop à l'exécution (branche `false`), jamais utilisée.
+
+  effect Solver:
+    solve(List[Int]) -> (Int, Int) = extern "lll_solver_runtime::solve"
+
+  # WITNESS-CHECK vérifié : pur, chaque contrainte du problème testée. Son `ensures`
+  # lie le résultat exécutable à la conjonction des contraintes ; le pare-feu de contrat
+  # l'ASSUME au site d'appel, donc sur la branche `true` de `match check_solution(...)`
+  # les contraintes deviennent une hypothèse qui décharge le `requires` de `use_solution`.
+  part check_solution(x: Int, y: Int) -> Bool:
+    ensures result == (x >= 0 and y >= 0 and x + y <= 10 and x <= 6)
+    yield x >= 0 and y >= 0 and x + y <= 10 and x <= 6
+
+  # Consomme la solution. Son `requires` NE PEUT être déchargé que via le witness-check :
+  # `x`,`y` viennent de l'oracle havocé, donc rien n'est prouvable sans la re-vérification.
+  part use_solution(x: Int, y: Int) -> Int:
+    requires x >= 0 and y >= 0 and x + y <= 10 and x <= 6
+    ensures result >= 0
+    yield x * 2 + y
+
+  part main() -> Int via Solver, IO:
+    # max 2x+y  s.c.  x+y<=10, x<=6, x>=0, y>=0   ->  (x,y)=(6,4), objectif 16.
+    # forme neutre à plat : [nvars, ncons, sens, obj.., puis par contrainte: rel, rhs, coeffs..]
+    #   sens: 1=max ; rel: 0=`<=` 1=`>=` 2=`==`
+    let model = [2, 4, 1, 2, 1, 0, 10, 1, 1, 0, 6, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1]
+    match Solver.solve(model):
+      (x, y) ->
+        match check_solution(x, y):
+          true  -> yield IO.print(use_solution(x, y))   # 2*6 + 4 = 16
+          false -> yield IO.print(0 - 1)                 # solution rejetée — jamais utilisée

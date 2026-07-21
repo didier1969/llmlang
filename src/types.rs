@@ -760,6 +760,29 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 if path.starts_with("lll_db_multi_runtime::") {
                     uses_db_multi_runtime = true;
                 }
+                // REQ-LLL-191 (CPT-LLL-017, "oracle au bord"): `solve` takes the neutral-form
+                // linear model as `List[Int]` (flat: nvars, nconstraints, sense, objective
+                // coeffs, then per-constraint rel/rhs/coeffs) and returns a FIXED 2-variable
+                // integer assignment `(Int, Int)` — the tracer's minimal, non-general shape (a
+                // general modelling surface would be the ERP feature, not this bullet). The
+                // result is havoc'd (UNTRUSTED oracle, DEC-LLL-017) and MUST be re-validated by
+                // a verified witness-check. Enforced here so codegen's bespoke shim
+                // (`Vec<i64>` → the 2-tuple) can rely on the shape, fail-closed (DEC-LLL-015).
+                if path == "lll_solver_runtime::solve"
+                    && (op.params != [Ty::list(Ty::Int)]
+                        || op.ret != Ty::Tuple(vec![Ty::Int, Ty::Int]))
+                {
+                    return Err(format!(
+                        "effect `{}` op `{}`: `lll_solver_runtime::solve` must be declared \
+                         `(List[Int]) -> (Int, Int)` — the neutral-form model in, a 2-variable \
+                         integer assignment out; the untrusted solution is re-checked by a \
+                         verified witness (REQ-LLL-191); found `({}) -> {}`",
+                        ed.name,
+                        op.name,
+                        op.params.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "),
+                        op.ret
+                    ));
+                }
             }
             // foreign-signature guard (REQ-LLL-042, DEC-LLL-045): an `as (T,…) -> R`
             // clause must be positional (arity match) and every (llmlang, foreign)
@@ -2104,6 +2127,14 @@ pub(crate) const ACTOR_RUNTIME_SPAWN_PATH: &str = "lll_actor_runtime::spawn";
 pub(crate) const ACTOR_RUNTIME_PATHS: &[&str] =
     &[ACTOR_RUNTIME_SPAWN_PATH, "lll_actor_runtime::send", "lll_actor_runtime::state"];
 
+/// REQ-LLL-191 (CPT-LLL-017, "oracle au bord"): the fixed set of reserved paths under
+/// `lll_solver_runtime` that name the ONLY built-in optimization-oracle glue codegen
+/// emits (src/codegen.rs `emit_solver_runtime`). An oracle solves a neutral-form linear
+/// model OUT OF PROCESS (z3-opt subprocess), so — like every extern — its result is
+/// UNTRUSTED and havoc'd (DEC-LLL-017); a verified witness-check re-validates it. Narrow
+/// and exact, NOT a general "any lll_solver_runtime::path" escape hatch.
+pub(crate) const SOLVER_RUNTIME_PATHS: &[&str] = &["lll_solver_runtime::solve"];
+
 /// DEC-LLL-080 (REQ-LLL-183): the `(none_ctor, some_ctor)` names of the Option-shaped
 /// ADT an actor `state` op must return — exactly two constructors, one NULLARY (the
 /// absence: a dead or unknown actor) and one carrying a single `Int` (the live state)
@@ -2172,6 +2203,18 @@ fn validate_extern_path(
         return Err(format!(
             "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_actor_runtime` path \
              — only {ACTOR_RUNTIME_PATHS:?} are built in (REQ-LLL-036 W2)"
+        ));
+    }
+    // REQ-LLL-191 (CPT-LLL-017): the emitted `lll_solver_runtime` glue (codegen.rs
+    // `emit_solver_runtime`) mirrors the actor/db whitelist — an EXACT set, not a general
+    // escape hatch. The oracle's result is havoc'd (DEC-LLL-017) and re-verified.
+    if root == "lll_solver_runtime" {
+        if SOLVER_RUNTIME_PATHS.contains(&p) {
+            return Ok(());
+        }
+        return Err(format!(
+            "effect `{effect}` op `{op}`: \"{path}\" is not a recognized `lll_solver_runtime` path \
+             — only {SOLVER_RUNTIME_PATHS:?} are built in (REQ-LLL-191)"
         ));
     }
     // REQ-LLL-066 / DEC-LLL-064: the emitted `lll_db_runtime` glue (src/codegen.rs
