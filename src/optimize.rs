@@ -9,13 +9,16 @@
 //! Soundness rests on three preservation axes, each with its own gate (the #1
 //! risk of this feature, treated explicitly).
 //!
-//! VALUE + TRAP: every algebraic rule is checked by Z3 over 64-bit two's-complement
-//! `x` (`(_ BitVec 64)`, the actual i64 backend — NOT unbounded `Int`), requiring
-//! lhs and rhs to trap on exactly the same inputs (signed-overflow predicates,
-//! DEC-LLL-026) AND agree in value everywhere else; a rule whose negation is not
-//! `unsat` is REJECTED. An operator we do not trap-model is rejected fail-loud
-//! (DEC-LLL-015), so extending the catalogue to Div/Mod/… trips a gate rather than
-//! silently riding a value-only check.
+//! VALUE + TRAP: every algebraic rule is checked by Z3 over the UNBOUNDED integer
+//! sort `Int` — the runtime's actual semantics since DEC-LLL-077 (`Int` is exact
+//! arbitrary-precision `LllInt`; add/sub/mul can never overflow, so their trap
+//! predicate is `false`/bottom), the SAME sort the proof fork (`vc.rs`) reasons
+//! over. The lemma requires lhs and rhs to trap on exactly the same inputs AND
+//! agree in value everywhere else; a rule whose negation is not `unsat` is
+//! REJECTED. An operator we do not trap-model is rejected fail-loud (DEC-LLL-015):
+//! extending the catalogue to Div/Mod/… must first model the EUCLIDEAN value and
+//! the one remaining trap, division by zero (DEC-LLL-026) — the gate trips rather
+//! than silently riding a value-only check.
 //!
 //! EFFECT: `EffCall` (and any impure sub-term) is OPAQUE — never merged, never
 //! shared, never reordered — so two `IO.read()` stay distinct.
@@ -258,9 +261,9 @@ impl EGraph {
 // ---------------------------------------------------------------------------
 
 /// A candidate arithmetic identity `Bin(op, x, k) → x` (or `→ k`), validated
-/// before use. `result` picks which side survives; `erases` marks that the
-/// surviving side drops the other operand (the totality gate). The SMT lemma is
-/// GENERATED from these structured fields (`bv_lhs`/`bv_rhs`), not carried as a
+/// before use. `result` picks which side survives (and thereby whether the rule
+/// ERASES `x` — see `erases()`, the totality gate). The SMT lemma is GENERATED
+/// from these structured fields (`int_lhs`/`int_rhs`), not carried as a
 /// hand-written string — one source of truth, and it cannot drift from the fields
 /// the e-graph actually matches on.
 struct AlgRule {
@@ -271,12 +274,20 @@ struct AlgRule {
     lit_on_right: bool,
     /// `Keep` → the non-literal operand survives; `Zero` → the whole term becomes `0`
     result: RuleResult,
-    /// does the rewrite erase `x` (present in lhs, absent in rhs)? (totality axis)
-    /// INVARIANT: must be `true` whenever `result == Zero` — the SMT value/trap
-    /// check does NOT defend a mislabel (`x*0` never overflows, so a `Zero` rule
-    /// with `erases:false` would slip past `validate_rule_smt` and drop `x`'s
-    /// sub-expression trap). The erasing gate runs first precisely for this.
-    erases: bool,
+}
+
+impl AlgRule {
+    /// Does the rewrite erase `x` (present in lhs, absent in rhs)? (totality axis)
+    /// DERIVED from `result` — `Keep` keeps `x` on the rhs, `Zero` drops it — so a
+    /// mislabel is UNREPRESENTABLE (REQ-LLL-187). This used to be a hand-written
+    /// bool field the SMT value/trap check does not defend: `x*0` never traps, so
+    /// a `Zero` rule mislabeled non-erasing would have slipped past
+    /// `validate_rule_smt` and dropped the trap of `x`'s sub-expression. The
+    /// erasing gate runs first precisely for this, and now cannot disagree with
+    /// the rule's structure.
+    fn erases(&self) -> bool {
+        self.result == RuleResult::Zero
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -299,37 +310,42 @@ pub enum RuleVerdict {
 fn candidate_rules() -> Vec<AlgRule> {
     use BinOp::*;
     vec![
-        AlgRule { op: Add, lit: 0, lit_on_right: true, result: RuleResult::Keep, erases: false },
-        AlgRule { op: Add, lit: 0, lit_on_right: false, result: RuleResult::Keep, erases: false },
-        AlgRule { op: Sub, lit: 0, lit_on_right: true, result: RuleResult::Keep, erases: false },
-        AlgRule { op: Mul, lit: 1, lit_on_right: true, result: RuleResult::Keep, erases: false },
-        AlgRule { op: Mul, lit: 1, lit_on_right: false, result: RuleResult::Keep, erases: false },
-        // erasing candidates — value-valid but drop `x` → REJECTED by the totality gate
-        AlgRule { op: Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero, erases: true },
-        AlgRule { op: Mul, lit: 0, lit_on_right: false, result: RuleResult::Zero, erases: true },
+        AlgRule { op: Add, lit: 0, lit_on_right: true, result: RuleResult::Keep },
+        AlgRule { op: Add, lit: 0, lit_on_right: false, result: RuleResult::Keep },
+        AlgRule { op: Sub, lit: 0, lit_on_right: true, result: RuleResult::Keep },
+        AlgRule { op: Mul, lit: 1, lit_on_right: true, result: RuleResult::Keep },
+        AlgRule { op: Mul, lit: 1, lit_on_right: false, result: RuleResult::Keep },
+        // erasing candidates (`result: Zero` ⇒ `erases()`) — value-valid but drop
+        // `x` → REJECTED by the totality gate
+        AlgRule { op: Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero },
+        AlgRule { op: Mul, lit: 0, lit_on_right: false, result: RuleResult::Zero },
     ]
 }
 
-/// SMT-LIB 64-bit two's-complement literal for `v`, matching the i64 the backend
-/// actually emits (`v as u64` is the exact two's-complement bit pattern).
-fn bv64(v: i64) -> String {
-    format!("(_ bv{} 64)", v as u64)
+/// SMT-LIB `Int` literal for `v` (a negative literal is `(- |v|)` — bare `-5` is
+/// not a well-formed SMT-LIB numeral). `unsigned_abs` keeps `i64::MIN` exact.
+fn int_lit(v: i64) -> String {
+    if v < 0 { format!("(- {})", v.unsigned_abs()) } else { v.to_string() }
 }
 
 /// `(value, trap)` SMT terms for the rule's LHS `Bin(op, ·, ·)` over the free
-/// `x : (_ BitVec 64)`. `trap` is the op's SIGNED-overflow predicate — the exact
-/// fail-stop condition of the i64 backend (DEC-LLL-026), NOT unbounded `Int`.
+/// `x : Int` — the UNBOUNDED integer sort, the runtime's actual semantics since
+/// DEC-LLL-077 (exact arbitrary-precision `LllInt`). Add/Sub/Mul can never
+/// overflow there, so their trap predicate is `false` (bottom); the pair is kept
+/// so the lemma shape already carries the trap axis for the ops that DO trap.
 /// Returns `None` for an op outside the trap-modeled set {Add,Sub,Mul}: the caller
 /// then rejects the rule (fail-loud, DEC-LLL-015) rather than silently validate it
-/// under a value-only model — a future rule on Div/Mod/… must extend this first.
-fn bv_lhs(rule: &AlgRule) -> Option<(String, String)> {
+/// under a value-only model — a future rule on Div/Mod/… must extend this first
+/// with the EUCLIDEAN value and the sole remaining trap, division by zero
+/// (DEC-LLL-026; the old i64 INT_MIN/-1 overflow trap is gone with DEC-LLL-077).
+fn int_lhs(rule: &AlgRule) -> Option<(String, String)> {
     use BinOp::*;
-    let k = bv64(rule.lit);
+    let k = int_lit(rule.lit);
     let (a, b) = if rule.lit_on_right { ("x".to_string(), k) } else { (k, "x".to_string()) };
     let sides = match rule.op {
-        Add => (format!("(bvadd {a} {b})"), format!("(bvsaddo {a} {b})")),
-        Sub => (format!("(bvsub {a} {b})"), format!("(bvssubo {a} {b})")),
-        Mul => (format!("(bvmul {a} {b})"), format!("(bvsmulo {a} {b})")),
+        Add => (format!("(+ {a} {b})"), "false".to_string()),
+        Sub => (format!("(- {a} {b})"), "false".to_string()),
+        Mul => (format!("(* {a} {b})"), "false".to_string()),
         _ => return None,
     };
     Some(sides)
@@ -337,10 +353,10 @@ fn bv_lhs(rule: &AlgRule) -> Option<(String, String)> {
 
 /// `(value, trap)` SMT terms for the rule's RHS. Both surviving shapes are
 /// trap-free constants over `x`: `Keep` → `x`, `Zero` → `0`.
-fn bv_rhs(rule: &AlgRule) -> (String, String) {
+fn int_rhs(rule: &AlgRule) -> (String, String) {
     match rule.result {
         RuleResult::Keep => ("x".to_string(), "false".to_string()),
-        RuleResult::Zero => (bv64(0), "false".to_string()),
+        RuleResult::Zero => (int_lit(0), "false".to_string()),
     }
 }
 
@@ -350,30 +366,36 @@ fn bv_rhs(rule: &AlgRule) -> (String, String) {
 /// TOTALITY runs FIRST and independently of Z3: a rule that erases `x` may drop a
 /// trap incurred by an arbitrary trapping SUB-EXPRESSION bound to `x` (e.g. `a/b`
 /// with `b=0` under `x*0→0`) — the constant-`x` SMT model below cannot see that,
-/// so it must be caught structurally (DEC-LLL-026). This gate is load-bearing.
+/// so it must be caught structurally (DEC-LLL-026). This gate is load-bearing,
+/// and its label is DERIVED from the rule's structure (`AlgRule::erases`), never
+/// hand-written (REQ-LLL-187).
 ///
-/// VALUE + TRAP are then discharged by Z3 over 64-bit two's-complement `x`
-/// (matching the i64 backend, NOT unbounded `Int`): the rule is enabled only if
-/// for EVERY `x` its lhs and rhs trap on exactly the same inputs AND agree in
-/// value — the negation `(∃x. trap_L ≠ trap_R ∨ val_L ≠ val_R)` must be `unsat`.
-/// This criterion is sound for both the fail-stop default and `--unchecked`
-/// (wrapping) builds, and is verdict-neutral on the current identity catalogue
-/// (identities never overflow ⇒ trap-free ⇒ both conjuncts already held).
+/// VALUE + TRAP are then discharged by Z3 over the UNBOUNDED `Int` sort `x` —
+/// the runtime's actual semantics since DEC-LLL-077 (exact `LllInt`; the same
+/// sort the vc fork proves over, NOT the retired i64/BitVec64 backend): the rule
+/// is enabled only if for EVERY `x` its lhs and rhs trap on exactly the same
+/// inputs AND agree in value — the negation
+/// `(∃x. trap_L ≠ trap_R ∨ val_L ≠ val_R)` must be `unsat`. Add/Sub/Mul never
+/// trap on `Int`, so their trap terms are `false`; the trap conjunct stays in
+/// the lemma so a future Div/Mod rule (euclidean value + div-by-zero trap,
+/// DEC-LLL-026) slots into the same criterion. Re-anchoring from BitVec64 is
+/// verdict-neutral on the current identity catalogue: each identity is Z-valid
+/// AND was BV64-valid, trap-free under both models.
 fn validate_rule_smt(rule: &AlgRule, z3: Option<&std::path::Path>) -> RuleVerdict {
-    if rule.erases {
+    if rule.erases() {
         return RuleVerdict::RejectedErasing;
     }
     let z3 = match z3 {
         Some(p) => p,
         None => return RuleVerdict::RejectedNoZ3,
     };
-    let (val_l, trap_l) = match bv_lhs(rule) {
+    let (val_l, trap_l) = match int_lhs(rule) {
         Some(vt) => vt,
         None => return RuleVerdict::RejectedValueUnsound,
     };
-    let (val_r, trap_r) = bv_rhs(rule);
+    let (val_r, trap_r) = int_rhs(rule);
     let script = format!(
-        "(declare-const x (_ BitVec 64))\n\
+        "(declare-const x Int)\n\
          (assert (or (distinct {trap_l} {trap_r}) (distinct {val_l} {val_r})))\n\
          (check-sat)\n"
     );
@@ -521,9 +543,16 @@ struct Linearizer<'a> {
 impl<'a> Linearizer<'a> {
     fn chosen(&mut self, id: Id) -> Node {
         let rid = self.eg.find(id);
-        // every added class has >=1 node, so `best` is always populated; the literal
-        // fallback only keeps the method total.
-        self.ex.best.get(&rid).cloned().unwrap_or(Node::Int(0))
+        // Every added class has >=1 node, so `best` must be populated. If it is
+        // not, extraction failed on a reachable class and the ONLY sound outcome
+        // is to abort compilation (DEC-LLL-015) — the old `unwrap_or(Node::Int(0))`
+        // fallback would have silently miscompiled the expression to `0`.
+        self.ex.best.get(&rid).cloned().unwrap_or_else(|| {
+            panic!(
+                "internal soundness bug (DEC-LLL-015): optimizer e-class {rid} has no \
+                 extracted best node — refusing to linearize it to a constant"
+            )
+        })
     }
 
     fn is_pure(&mut self, id: Id) -> bool {
@@ -766,9 +795,43 @@ mod tests {
     fn erasing_rule_x_times_zero_is_rejected_by_the_totality_gate() {
         // `x*0 → 0` is VALUE-valid (∀x. x*0 = 0) yet erases `x` → must be rejected
         // regardless of Z3, on the totality axis (DEC-LLL-026).
-        let r = AlgRule { op: BinOp::Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero, erases: true };
+        let r = AlgRule { op: BinOp::Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero };
         let v = validate_rule_smt(&r, crate::vc::find_z3().ok().as_deref());
         assert_eq!(v, RuleVerdict::RejectedErasing);
+    }
+
+    #[test]
+    fn erasure_label_is_derived_from_the_rule_structure() {
+        // REQ-LLL-187 (OPT5-2): `erases` is no longer a hand-written field the SMT
+        // check does not defend — it is DERIVED from `result`, so the once-feared
+        // `{result: Zero, erases: false}` mislabel is unrepresentable. Every `Zero`
+        // rule is erasing by construction, every `Keep` rule is not.
+        assert!(AlgRule { op: BinOp::Mul, lit: 0, lit_on_right: true, result: RuleResult::Zero }.erases());
+        assert!(!AlgRule { op: BinOp::Add, lit: 0, lit_on_right: true, result: RuleResult::Keep }.erases());
+        for r in candidate_rules() {
+            assert_eq!(r.erases(), r.result == RuleResult::Zero);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "internal soundness bug")]
+    fn missing_extraction_panics_instead_of_miscompiling_to_zero() {
+        // REQ-LLL-187 (OPT5-4): a class with no extracted best node must abort
+        // fail-loud (DEC-LLL-015) — the old fallback silently rewrote it to `0`.
+        let mut eg = EGraph::new(HashSet::new());
+        let id = eg.add(&Expr::Var("x".into()));
+        let ex = Extraction { best: HashMap::new(), cost: HashMap::new() };
+        let mut counter = 0usize;
+        let mut lin = Linearizer {
+            eg: &mut eg,
+            ex: &ex,
+            refcount: HashMap::new(),
+            unguarded: HashSet::new(),
+            pure: HashMap::new(),
+            cse: HashMap::new(),
+            counter: &mut counter,
+        };
+        let _ = lin.build_expr(id, false);
     }
 
     #[test]
@@ -777,7 +840,7 @@ mod tests {
         if z3.is_none() {
             return; // z3 unavailable in this environment — the vc suite gates that
         }
-        let r = AlgRule { op: BinOp::Add, lit: 0, lit_on_right: true, result: RuleResult::Keep, erases: false };
+        let r = AlgRule { op: BinOp::Add, lit: 0, lit_on_right: true, result: RuleResult::Keep };
         let v = validate_rule_smt(&r, z3.as_deref());
         assert_eq!(v, RuleVerdict::Enabled);
     }
@@ -789,32 +852,35 @@ mod tests {
             return;
         }
         // a deliberately wrong (value-unsound) non-erasing rule: `x+5 → x`.
-        let r = AlgRule { op: BinOp::Add, lit: 5, lit_on_right: true, result: RuleResult::Keep, erases: false };
+        let r = AlgRule { op: BinOp::Add, lit: 5, lit_on_right: true, result: RuleResult::Keep };
         let v = validate_rule_smt(&r, z3.as_deref());
         assert_eq!(v, RuleVerdict::RejectedValueUnsound);
     }
 
     #[test]
     fn unmodeled_op_is_rejected_fail_loud_even_when_value_valid() {
-        // `x/1 → x` is VALUE-valid on Int, but Div is NOT in the trap-modeled set
-        // {Add,Sub,Mul}: the oracle refuses to enable it rather than validate it
-        // under a value-only model (fail-loud, DEC-LLL-015). A future Div/Mod rule
-        // must extend `bv_lhs` with the euclidean value + div-by-zero / INT_MIN/-1
-        // trap before it can pass — this is the teeth that make that non-optional.
+        // `x/1 → x` is VALUE-valid on Int (euclidean `x div 1 = x`, divisor ≠ 0 so
+        // it cannot trap), but Div is NOT in the trap-modeled set {Add,Sub,Mul}:
+        // the oracle refuses to enable it rather than validate it under a
+        // value-only model (fail-loud, DEC-LLL-015). A future Div/Mod rule must
+        // extend `int_lhs` with the EUCLIDEAN value + the div-by-zero trap
+        // (DEC-LLL-026; the sole trap left — DEC-LLL-077 retired INT_MIN/-1)
+        // before it can pass — this is the teeth that make that non-optional.
         let z3 = crate::vc::find_z3().ok();
         if z3.is_none() {
             return;
         }
-        let r = AlgRule { op: BinOp::Div, lit: 1, lit_on_right: true, result: RuleResult::Keep, erases: false };
+        let r = AlgRule { op: BinOp::Div, lit: 1, lit_on_right: true, result: RuleResult::Keep };
         let v = validate_rule_smt(&r, z3.as_deref());
         assert_eq!(v, RuleVerdict::RejectedValueUnsound);
     }
 
     #[test]
     fn trap_aware_oracle_is_verdict_neutral_on_the_current_catalogue() {
-        // Hardening the oracle from unbounded Int to trap-aware BitVec64 must not
-        // change a single verdict on today's rules: the 5 identities stay Enabled
-        // (they never overflow ⇒ trap-free), the 2 erasing stay RejectedErasing.
+        // Re-anchoring the oracle from BitVec64 to the runtime's true unbounded
+        // `Int` sort (DEC-LLL-077, REQ-LLL-187) must not change a single verdict
+        // on today's rules: the 5 identities stay Enabled (Z-valid, trap-free),
+        // the 2 erasing stay RejectedErasing.
         let z3 = crate::vc::find_z3().ok();
         if z3.is_none() {
             return;
