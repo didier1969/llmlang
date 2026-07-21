@@ -1,0 +1,36 @@
+module Bench.TreeInc:
+
+  # REQ-LLL-196 — the SAME-SHAPE ADT/TREE REBUILD kernel. `inc` deconstructs each `Node`
+  # cell of a binary tree at its last use and reconstructs a cell of IDENTICAL shape
+  # (`Node(x + 1, inc(l), inc(r))`): the Perceus/FBIP reuse opportunity, now for a TREE
+  # (general recursion, two self-calls — NOT a fold). When the tree is UNIQUELY owned (as
+  # here — `build` hands it over at its last use), the reuse pass consumes each unique cell
+  # and OVERWRITES it in place instead of allocating a new one, guarded at runtime by
+  # `Rc::get_mut` (strong_count == 1). A SHARED cell falls back to a fresh copy — never a
+  # mutation through an alias. The tree is of BOUNDED DEPTH (recursion depth == d), so the
+  # stack is safe at ~2M nodes; the honest metric is the ALLOCATION count, not time.
+  # Measured with bench/cspeed/alloc_count.sh.
+
+  type Tree = Tip | Node(Int, Tree, Tree)
+
+  part build(d: Int, v: Int) -> Tree:
+    requires d >= 0
+    measure d
+    match d:
+      0 -> yield Tip
+      _ -> yield Node(v, build(d - 1, v + v), build(d - 1, v + v + 1))
+
+  part inc(t: Tree) -> Tree:
+    match t:
+      Tip           -> yield Tip
+      Node(x, l, r) -> yield Node(x + 1, inc(l), inc(r))
+
+  part sumt(t: Tree) -> Int:
+    match t:
+      Tip           -> yield 0
+      Node(x, l, r) -> yield x + sumt(l) + sumt(r)
+
+  part main() -> Int via IO:
+    let t = build(20, 1)
+    let u = inc(t)
+    yield IO.print(sumt(u))

@@ -2098,3 +2098,157 @@ fn reuse_guarded_same_shape_rebuild_copies_shared_req195() {
         "REQ-195: a SHARED spine must be COPIED, leaving the alias intact (expect 6009), got: {stdout}"
     );
 }
+
+/// Compile lll-generated Rust with the product's ship posture (`-O`, `overflow-checks=on`) and
+/// return its stdout, asserting the build succeeded. Shared by the REQ-196 reuse tests.
+fn rustc_run(rust: &str, tag: &str) -> String {
+    let dir = tempdir();
+    let rs = dir.join(format!("{tag}.rs"));
+    let bin = dir.join(format!("{tag}_bin"));
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "{tag}: generated Rust failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// REQ-LLL-196 (Perceus/FBIP reuse, ADTs/trees): a same-shape TREE rebuild (`inc`,
+/// `Node(x+1, inc(l), inc(r))`) forces its spine ADT param OWNED and reuses each UNIQUE cell's
+/// allocation in place under a RUNTIME uniqueness guard. This test proves the FAIL-SAFE
+/// contract: when the spine is SHARED (a non-last-use call site → a shallow `Rc::clone`) the
+/// `Rc::get_mut` guard falls to a fresh allocation, so the caller's aliased tree is left
+/// BIT-IDENTICAL — the copy, never a mutation through the alias (DEC-LLL-020).
+#[test]
+fn reuse_guarded_tree_rebuild_copies_shared_req196() {
+    // `inc(t)` is called with `t` STILL LIVE afterwards (SHARED → copy). If the reuse had
+    // mutated the shared tree, `sumt(t)` would change from 6 to 9 and the total would be 9009.
+    let src = "module T:\n\n  \
+        type Tree = Tip | Node(Int, Tree, Tree)\n\n  \
+        part build(d: Int, v: Int) -> Tree:\n    requires d >= 0\n    measure d\n    \
+        match d:\n      0 -> yield Tip\n      \
+        _ -> yield Node(v, build(d - 1, v + v), build(d - 1, v + v + 1))\n\n  \
+        part inc(t: Tree) -> Tree:\n    \
+        match t:\n      Tip -> yield Tip\n      \
+        Node(x, l, r) -> yield Node(x + 1, inc(l), inc(r))\n\n  \
+        part sumt(t: Tree) -> Int:\n    \
+        match t:\n      Tip -> yield 0\n      \
+        Node(x, l, r) -> yield x + sumt(l) + sumt(r)\n\n  \
+        part main() -> Int via IO:\n    \
+        let t = build(2, 1)\n    \
+        let u = inc(t)\n    \
+        let a = sumt(t)\n    \
+        let b = sumt(u)\n    \
+        yield IO.print(a * 1000 + b)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "reuse kernel must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+
+    // the pass fired: the spine param is OWNED (not `&Rc<TreeI>`), guarded by a RUNTIME
+    // uniqueness check, blanked in place to the nullary, and reused via the threaded token.
+    assert!(
+        rust.contains("pub fn lll_inc(u_t: Rc<TreeI>)"),
+        "REQ-196: inc's spine ADT param must be forced OWNED:\n{rust}"
+    );
+    assert!(
+        rust.contains("Rc::get_mut(&mut u_t)")
+            && rust.contains("*Rc::get_mut(&mut u_t).unwrap() = TreeI::Tip")
+            && rust.contains("__lll_reuse_ctor(u_t,"),
+        "REQ-196: runtime guard + in-place nullary blank + token reuse must be emitted:\n{rust}"
+    );
+
+    // sumt(t) = 1+2+3 = 6 (t intact) ; sumt(u) = 2+3+4 = 9  →  6 * 1000 + 9 = 6009 (NOT 9009).
+    let stdout = rustc_run(&rust, "reuse196_shared");
+    assert!(
+        stdout.contains("6009"),
+        "REQ-196: a SHARED tree must be COPIED, leaving the alias intact (expect 6009), got: {stdout}"
+    );
+}
+
+/// REQ-LLL-196: the UNIQUE path is correct for the general two-self-call shape, including a
+/// child SWAP (`mirror`: `Node(x, mirror(r), mirror(l))` — the `Node(f(l), f(r))` motivating
+/// case). The whole tree is uniquely owned (built and consumed at its last use), so every cell
+/// is reused in place; the result must still be the correct MIRROR, proven by a position-
+/// sensitive readout that distinguishes left from right.
+#[test]
+fn reuse_tree_rebuild_unique_mirror_req196() {
+    // `leftspine` sums the always-left path. t = Node(1, Node(2,..), Node(3,..)) → leftspine 3;
+    // mirror(t) = Node(1, Node(3,..), Node(2,..)) → leftspine 4. A swap that failed (or a reuse
+    // that corrupted the shape) would not read 4.
+    let src = "module T:\n\n  \
+        type Tree = Tip | Node(Int, Tree, Tree)\n\n  \
+        part build(d: Int, v: Int) -> Tree:\n    requires d >= 0\n    measure d\n    \
+        match d:\n      0 -> yield Tip\n      \
+        _ -> yield Node(v, build(d - 1, v + v), build(d - 1, v + v + 1))\n\n  \
+        part mirror(t: Tree) -> Tree:\n    \
+        match t:\n      Tip -> yield Tip\n      \
+        Node(x, l, r) -> yield Node(x, mirror(r), mirror(l))\n\n  \
+        part leftspine(t: Tree) -> Int:\n    \
+        match t:\n      Tip -> yield 0\n      \
+        Node(x, l, r) -> yield x + leftspine(l)\n\n  \
+        part main() -> Int via IO:\n    \
+        let t = build(2, 1)\n    \
+        let m = mirror(t)\n    \
+        yield IO.print(leftspine(m))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "mirror kernel must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    // reuse fired for the swapping rebuild too (both children stolen before either is rebuilt).
+    assert!(
+        rust.contains("pub fn lll_mirror(u_t: Rc<TreeI>)") && rust.contains("__lll_reuse_ctor(u_t,"),
+        "REQ-196: mirror (child-swap rebuild) must also reuse:\n{rust}"
+    );
+    let stdout = rustc_run(&rust, "reuse196_mirror");
+    assert!(
+        stdout.contains('4') && !stdout.contains('3'),
+        "REQ-196: mirror(build(2,1)) leftspine must be 4 (children swapped), got: {stdout}"
+    );
+}
+
+/// REQ-LLL-196 same-constructor-TYPE rule: a rebuild that CHANGES the ADT type (deconstruct an
+/// `A`, reconstruct a `B`) must NOT reuse — the two `Rc<…I>` boxes share no layout. The
+/// detection rejects it (spine type != return type), so the ordinary borrowed recursion runs and
+/// the result is a correct fresh `B`. (rustc's type system is the ultimate backstop: reusing an
+/// `Rc<AI>` box for a `BI` value cannot compile.)
+#[test]
+fn reuse_excludes_cross_type_rebuild_req196() {
+    let src = "module T:\n\n  \
+        type A = AZ | AN(Int, A)\n  \
+        type B = BZ | BN(Int, B)\n\n  \
+        part build(n: Int) -> A:\n    requires n >= 0\n    measure n\n    \
+        match n:\n      0 -> yield AZ\n      _ -> yield AN(n, build(n - 1))\n\n  \
+        part conv(a: A) -> B:\n    \
+        match a:\n      AZ -> yield BZ\n      \
+        AN(x, t) -> yield BN(x + 1, conv(t))\n\n  \
+        part sumb(b: B) -> Int:\n    \
+        match b:\n      BZ -> yield 0\n      BN(x, t) -> yield x + sumb(t)\n\n  \
+        part main() -> Int via IO:\n    \
+        let a = build(3)\n    \
+        let b = conv(a)\n    \
+        yield IO.print(sumb(b))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "cross-type kernel must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    // the cross-type conversion must NOT reuse: no in-place blank on conv's spine.
+    assert!(
+        !rust.contains("*Rc::get_mut(&mut u_a)"),
+        "REQ-196: a cross-TYPE rebuild must not reuse the source box:\n{rust}"
+    );
+    // and it is still correct: sumb(conv(build(3))) = (1+1)+(2+1)+(3+1) = 9.
+    let stdout = rustc_run(&rust, "reuse196_crosstype");
+    assert!(
+        stdout.contains('9'),
+        "REQ-196: cross-type conv must still be correct (expect 9), got: {stdout}"
+    );
+}

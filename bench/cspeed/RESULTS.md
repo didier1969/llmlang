@@ -95,7 +95,46 @@ oversold. def_hash/proof_hash are BYTE-IDENTICAL before/after (`lll hash`, verif
 is a pure execution transformation (DEC-LLL-020); the reuse guard is RUNTIME, never a static
 elision (contrast Morphic/Roc). Scope: LIST cons-cells of the SAME element type as the
 result (a type-changing `map[a]->[b]` shares no layout and keeps the ordinary rebuild); ADT
-/ tree reuse is a separate, larger change (general-recursion token threading) — deferred.
+/ tree reuse landed next as REQ-LLL-196 (below).
+
+## REQ-LLL-196 — constructor reuse for ADTs/TREES (general recursion), measured in ALLOCATIONS
+
+REQ-195 reused LIST cells in a fold-to-loop. Business entities (records/ADTs) are not lists,
+and the gain has to reach a TREE rebuild — `Node(x+1, inc(l), inc(r))`, two self-calls, no
+fold exists. REQ-196 extends the reuse to the canonical same-shape ADT/tree rebuild under
+GENERAL recursion: the spine ADT param is forced OWNED, and when a node is UNIQUELY owned
+(`Rc::get_mut`, strong_count == 1) its cell is reused with ZERO allocation — the fields are
+cloned out (an `Rc` child clone is an O(1) refcount bump), the box is blanked to the ADT's
+NULLARY variant IN PLACE (`*node = TI::Tip`, a stack write, no `Rc::new`) which releases the
+children so each recurses uniquely in turn, and the blank box is overwritten with the rebuilt
+`Node(..)` via the threaded token (`__lll_reuse_ctor`). A SHARED node fails the guard → a
+fresh copy, never a mutation through an alias (proven by the `reuse196_shared` test: a still-
+live tree summed after `inc` reads 6009, not the 9009 that alias corruption would give).
+
+The honest metric is the **allocation count**, not time. Measured on a BOUNDED-DEPTH binary
+tree (depth 20, ~2.1M cells) — general tree recursion overflows the stack at large N, but the
+depth (== recursion depth) is the bound, so counting allocations needs no large N (the
+perf-discipline trap: keep the work equal and the stack safe). Counting `#[global_allocator]`,
+`rustc -O`, `-C overflow-checks=on` both sides; A/B the compiler at the merge-base for "before".
+Reproduce with `bash bench/cspeed/alloc_count.sh`.
+
+| kernel (depth 20, ~2.1M cells)      | before (borrow+rebuild) | after (REQ-196 reuse) |
+|-------------------------------------|------------------------:|----------------------:|
+| `treesum` (build + sum, control)    |               2 097 154 |             2 097 154 |
+| `treeinc` (build + **inc** + sum)   |               4 194 305 |         **2 097 154** |
+| ⇒ `inc`'s OWN allocations           |               2 097 151 |             **0**     |
+
+`inc`'s per-node allocation is eliminated **exactly to zero** (every unique cell reused in
+place): a **2.0× reduction** in total heap allocations across build+map+consume, cleaner than
+the list case (which kept a fixed 40-entry `Vec`-growth residual — the tree recursion has no
+such buffer). Time ~neutral-to-slightly-better (0.25s → 0.19s `%U`), not oversold. def_hash/
+proof_hash BYTE-IDENTICAL before/after (`lll hash`, verified — `vc.rs`/`hash.rs` untouched);
+same-constructor-TYPE is enforced by rustc's type system (an `Rc<TI>` box can only carry a
+`TI` — a cross-type reuse cannot compile), and the child-SWAP shape (`mirror`) reuses too.
+Scope (narrow, as REQ-195): the ADT must have a NULLARY identity base arm (the zero-cost
+in-place blank), one reconstructing constructor equal to the matched one, spine type == return
+type. Out of scope (blockers): a tree with no nullary base (`Leaf(Int) | Node(..)` — needs a
+synthesized field-default sentinel), a type-changing map, multiple reconstructing ctors.
 
 Method: min of 3–5 runs; `rustc -O` (edition 2021) for llmlang/Rust, `gcc -O2` for C.
 Reproduce: `bash bench/cspeed/run.sh`. Env: WSL2, Rust 1.93 (sub-second times are noisy

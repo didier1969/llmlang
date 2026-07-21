@@ -1,0 +1,22 @@
+module Bench.TreeSum:
+
+  # Control for bench/cspeed/treeinc.lll: build a bounded-depth binary tree and sum it, with
+  # NO rebuild. `treeinc_allocs - treesum_allocs` is exactly `inc`'s own allocation cost.
+
+  type Tree = Tip | Node(Int, Tree, Tree)
+
+  part build(d: Int, v: Int) -> Tree:
+    requires d >= 0
+    measure d
+    match d:
+      0 -> yield Tip
+      _ -> yield Node(v, build(d - 1, v + v), build(d - 1, v + v + 1))
+
+  part sumt(t: Tree) -> Int:
+    match t:
+      Tip           -> yield 0
+      Node(x, l, r) -> yield x + sumt(l) + sumt(r)
+
+  part main() -> Int via IO:
+    let t = build(20, 1)
+    yield IO.print(sumt(t))

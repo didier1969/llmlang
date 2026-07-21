@@ -62,3 +62,13 @@ RUST
 echo "# REQ-LLL-195 heap-allocation count (counting global_allocator; rustc -O, overflow-checks=on)"
 measure bench/cspeed/buildsum.lll
 measure bench/cspeed/mapinc.lll
+
+# REQ-LLL-196 — the ADT/TREE analogue: same-shape rebuild under GENERAL (tree) recursion.
+#   treeinc  = build ~2M-node bounded-depth tree + inc (same-shape rebuild) + sum
+#   treesum  = build ~2M-node tree            + sum       (control — no rebuild)
+#   inc's OWN allocations  =  treeinc_allocs - treesum_allocs
+# With the reuse pass, inc's unique cells are overwritten in place, so its per-node allocation
+# drops to ZERO. Same A/B recipe (build lllc at the merge-base, point $LLL at it, re-run).
+echo "# REQ-LLL-196 tree-rebuild reuse"
+measure bench/cspeed/treesum.lll
+measure bench/cspeed/treeinc.lll
