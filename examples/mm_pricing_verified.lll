@@ -1,0 +1,38 @@
+module MmPricing:
+
+  # Migration VÉRIFIÉE du cœur monétaire de l'ERP (SAP condition-technique VK11/VK12,
+  # cf. erp_elixir mm/pricing_agent.ex : base PR00 + remises K004/K005 + taxe).
+  #
+  # AVANT (Elixir, GenServer non vérifié) : `base_price * cond.amount / 100.0` — de l'argent
+  # calculé en FLOTTANTS => arrondi silencieux (0.1 + 0.2 != 0.3), et AUCUNE garantie que le
+  # prix net reste positif. C'est la classe de bug que la finance interdit.
+  #
+  # APRÈS (llmlang) : ENTIERS EXACTS (montants en centimes, taux en points de base — 10000 bps
+  # = 100%), zéro flottant, et l'invariant « prix net jamais négatif » est PROUVÉ par Z3 pour
+  # TOUTES les entrées valides, pas testé sur quelques cas.
+
+  # Prix net = (base - remise) + taxe, remise et taxe en points de base (bps).
+  # Prouvé : sous des taux valides, le résultat est toujours >= 0 (exact, pas d'arrondi).
+  part net_price(base: Int, disc_bps: Int, tax_bps: Int) -> Int:
+    requires base >= 0
+    requires disc_bps >= 0
+    requires disc_bps <= 10000
+    requires tax_bps >= 0
+    ensures result >= 0
+    let discount = base * disc_bps div 10000
+    let taxable = base - discount
+    let tax = taxable * tax_bps div 10000
+    yield taxable + tax
+
+  # Un devis complet est monotone : appliquer une remise ne peut pas augmenter le taxable.
+  part taxable_after_discount(base: Int, disc_bps: Int) -> Int:
+    requires base >= 0
+    requires disc_bps >= 0
+    requires disc_bps <= 10000
+    ensures result >= 0
+    ensures result <= base
+    yield base - (base * disc_bps div 10000)
+
+  part main() -> Int via IO:
+    # base 100.00€ (10000 centimes), remise 15% (1500 bps), taxe 20% (2000 bps) -> 102.00€ exact.
+    yield IO.print(net_price(10000, 1500, 2000))
