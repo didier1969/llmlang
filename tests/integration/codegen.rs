@@ -2029,3 +2029,72 @@ fn functional_update_moves_owned_param_not_clone_req146() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("11"), "pass([10,20,30]) then get(_,0) must print 11, got: {stdout}");
 }
+
+/// REQ-LLL-195 (Perceus/FBIP constructor reuse): a same-shape list rebuild (`inc`,
+/// `Cons(h+1, inc(t))`) forces its spine param OWNED and consumes it with a RUNTIME
+/// uniqueness guard, reusing each unique cell's allocation in place. This test proves the
+/// FAIL-SAFE contract end to end: when the spine is UNIQUE (last use) the result is correct
+/// AND the reuse loop is emitted; when the spine is SHARED (a non-last-use call site → a
+/// shallow `Rc::clone`) the guard falls to a fresh allocation, so the caller's aliased list
+/// is left BIT-IDENTICAL — the copy, never a mutation through the alias (DEC-LLL-020).
+#[test]
+fn reuse_guarded_same_shape_rebuild_copies_shared_req195() {
+    // `inc(xs)` is called TWICE: once with `xs` still live afterwards (SHARED → copy), and
+    // its result plus the untouched `xs` are summed. If the reuse had mutated the shared
+    // spine, `sum(xs)` would change from 6 to 9 and the total would be 909 000 not 606 009.
+    let src = "module T:\n\n  \
+        part build(n: Int) -> List[Int]:\n    requires n >= 0\n    measure n\n    \
+        match n:\n      0 -> yield []\n      _ -> yield n :: build(n - 1)\n\n  \
+        part inc(xs: List[Int]) -> List[Int]:\n    \
+        match xs:\n      []     -> yield []\n      h :: t -> yield (h + 1) :: inc(t)\n\n  \
+        part sum(xs: List[Int]) -> Int:\n    \
+        match xs:\n      []     -> yield 0\n      h :: t -> yield h + sum(t)\n\n  \
+        part main() -> Int via IO:\n    \
+        let xs = build(3)\n    \
+        let ys = inc(xs)\n    \
+        let a = sum(xs)\n    \
+        let b = sum(ys)\n    \
+        yield IO.print(a * 1000 + b)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "reuse kernel must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+
+    // the pass fired: the spine param is OWNED (not `&Lst`) and the reuse machinery is present.
+    assert!(
+        rust.contains("pub fn lll_inc(mut u_xs: Lst<LllInt>)"),
+        "REQ-195: inc's spine param must be forced OWNED:\n{rust}"
+    );
+    assert!(
+        rust.contains("__lll_reuse_cons") && rust.contains("__reuse.push(u_xs)"),
+        "REQ-195: the reuse loop (token stash + in-place reuse) must be emitted:\n{rust}"
+    );
+    // and the guard is a RUNTIME check, never a static elision.
+    assert!(
+        rust.contains("Rc::get_mut(&mut u_xs)"),
+        "REQ-195: reuse must be guarded by a runtime Rc::get_mut uniqueness check:\n{rust}"
+    );
+
+    let dir = tempdir();
+    let rs = dir.join("reuse195.rs");
+    let bin = dir.join("reuse195_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "REQ-195 reuse codegen failed to compile:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // sum([3,2,1]) = 6 (xs intact) ; sum([4,3,2]) = 9  →  6 * 1000 + 9 = 6009
+    assert!(
+        stdout.contains("6009"),
+        "REQ-195: a SHARED spine must be COPIED, leaving the alias intact (expect 6009), got: {stdout}"
+    );
+}

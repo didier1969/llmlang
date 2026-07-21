@@ -68,6 +68,35 @@
 > The `aset` / `map` analysis below (REQ-LLL-140, the write/associative regime) does not
 > depend on the `Int` representation and still stands.
 
+## REQ-LLL-195 — constructor reuse (Perceus/FBIP), measured in ALLOCATIONS
+
+A same-shape list rebuild (`inc`: `(h + 1) :: inc(t)`) deconstructs each cons-cell at its
+last use and reconstructs a cell of identical shape. The reuse pass forces such a spine
+parameter OWNED, consumes it, and — guarded at runtime by `Rc::get_mut` (strong_count == 1)
+— OVERWRITES each unique cell in place instead of allocating a fresh one. A SHARED spine
+(any non-last-use caller passes a shallow `Rc::clone`) fails the guard and falls back to a
+fresh copy, so a wrong verdict can only cost an allocation, never corrupt an alias.
+
+The honest metric is the **allocation count**, not time (time is confounded here by unequal
+drop/build work — the perf-discipline trap). Counting `#[global_allocator]`, `rustc -O`,
+`-C overflow-checks=on` both sides; reproduce with `bash bench/cspeed/alloc_count.sh`
+(A/B the compiler at the merge-base for the "before" column).
+
+| kernel (N = 1 000 000)            | before (borrow+rebuild) | after (REQ-195 reuse) |
+|-----------------------------------|------------------------:|----------------------:|
+| `buildsum` (build + sum, control) |               1 000 024 |             1 000 024 |
+| `mapinc`   (build + **inc** + sum)|               2 000 045 |         **1 000 064** |
+| ⇒ `inc`'s OWN allocations         |               1 000 021 |            **40** (≈0/elem) |
+
+`inc`'s per-element allocation is eliminated (the residual 40 is fixed `Vec`-growth of the
+fold-to-loop's head buffer, present before too): a **2.0× reduction** in total heap
+allocations across build+map+consume. Time is roughly neutral-to-slightly-better and is not
+oversold. def_hash/proof_hash are BYTE-IDENTICAL before/after (`lll hash`, verified) — this
+is a pure execution transformation (DEC-LLL-020); the reuse guard is RUNTIME, never a static
+elision (contrast Morphic/Roc). Scope: LIST cons-cells of the SAME element type as the
+result (a type-changing `map[a]->[b]` shares no layout and keeps the ordinary rebuild); ADT
+/ tree reuse is a separate, larger change (general-recursion token threading) — deferred.
+
 Method: min of 3–5 runs; `rustc -O` (edition 2021) for llmlang/Rust, `gcc -O2` for C.
 Reproduce: `bash bench/cspeed/run.sh`. Env: WSL2, Rust 1.93 (sub-second times are noisy
 on WSL — treat ±2× under 0.5s as ties; the load-bearing result below is 4 orders of

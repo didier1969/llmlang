@@ -1,0 +1,20 @@
+module Bench.BuildSum:
+
+  # Control for bench/cspeed/mapinc.lll: build a 1M list and sum it, with NO rebuild.
+  # `mapinc_allocs - buildsum_allocs` is exactly `inc`'s own allocation cost.
+
+  part build(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield []
+      _ -> yield n :: build(n - 1)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part main() -> Int via IO:
+    let xs = build(1000000)
+    yield IO.print(sum(xs))

@@ -1833,6 +1833,24 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
             }
         }
     }
+    // REQ-LLL-195 (Perceus/FBIP): the SPINE param of a same-shape list rebuild is
+    // destructured at its last use and a `Cons` of identical shape is rebuilt — force it
+    // OWNED so the loop can CONSUME its nodes and REUSE unique allocations in place (the
+    // reuse emitter fires on the same predicate, `cons_reuse_spine`). No
+    // `all_callers_supply_owned` gate is needed: the flip is allocation-NEUTRAL on the
+    // shared path — a non-last-use caller passes a shallow `Rc::clone`, the runtime
+    // strong_count==1 guard then fails and we allocate fresh, exactly as today's borrowed
+    // rebuild. Only a UNIQUE (last-use) argument reaches the in-place path. `rustc` borrowck
+    // backstops any wrong move as a build error, never a wrong result.
+    for part in &cm.module.parts {
+        if let Some(idx) = cons_reuse_spine(part) {
+            if let Some(mask) = borrow_mask.get_mut(&part.name) {
+                if let Some(b) = mask.get_mut(idx) {
+                    *b = false;
+                }
+            }
+        }
+    }
     // REQ-LLL-162 — which parts get a speculative raw-`i64` twin (see `fast_eligible`).
     let fast_ok = fast_eligible(&cm.module.parts, &cm.effect_generic);
     let g = Globals {
@@ -3193,11 +3211,29 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
     if g.fast_ok.contains(&part.name) {
         out.push_str(&fast_dispatch(part));
     }
-    // The loop is LABELLED: a comprehension lowers to its own `loop`, so an unlabelled
-    // `continue` in a tail call nested inside one would bind to the WRONG loop.
-    // The loop never `break`s (every tail position `return`s or `continue`s), so it has
-    // type `!` and coerces to the part's return type with no trailing expression.
-    if looping {
+    // REQ-LLL-195: a same-shape list rebuild whose spine param was forced OWNED gets the
+    // Perceus/FBIP reuse loop instead of the ordinary fold-to-loop — consuming the spine and
+    // reusing unique node allocations in place. Gated on the borrow bit actually being
+    // cleared (the flip and the emitter share `cons_reuse_spine`), and never on the abort
+    // (`res`) path. Any other shape falls through to the unchanged fold-to-loop below.
+    // Belt-and-suspenders: reuse is a PURE-only transform. `cons_reuse_spine` already rejects
+    // any part with a declared effect row, and effect-GENERIC specializations are emitted by
+    // `emit_specialized_part` (never here) — so `cx.row_*` are always empty on this path. The
+    // extra guard makes the invariant local and future-proof: it can only ever DISABLE reuse.
+    let reuse_spine = (!res
+        && cx.row_ev.is_empty()
+        && !cx.row_abort
+        && cx.row_fns.is_empty())
+        .then(|| cons_reuse_spine(part))
+        .flatten()
+        .filter(|&i| mask.and_then(|m| m.get(i)).copied() == Some(false));
+    if let Some(spine) = reuse_spine {
+        emit_cons_reuse_loop(out, part, spine, &cx, res)?;
+    } else if looping {
+        // The loop is LABELLED: a comprehension lowers to its own `loop`, so an unlabelled
+        // `continue` in a tail call nested inside one would bind to the WRONG loop.
+        // The loop never `break`s (every tail position `return`s or `continue`s), so it has
+        // type `!` and coerces to the part's return type with no trailing expression.
         if let Some(ar) = &acc_rec {
             out.push_str(&match ar.kind {
                 AccKind::Op(op) => format!("    let mut __acc = {};\n", acc_identity(op, &part.ret, false)),
@@ -3762,6 +3798,108 @@ fn is_associative(op: BinOp) -> bool {
     matches!(op, BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or)
 }
 
+/// Does the variable `v` appear anywhere in `e`? (used to prove the consumed spine is not
+/// read again in the reuse rewrite — REQ-LLL-195).
+fn mentions_var(e: &Expr, v: &str) -> bool {
+    let mut hit = false;
+    e.walk(&mut |x| {
+        if let Expr::Var(n) = x {
+            if n == v {
+                hit = true;
+            }
+        }
+    });
+    hit
+}
+
+/// REQ-LLL-195 (Perceus/FBIP constructor reuse) — the index of the SPINE heap parameter of
+/// a same-shape list rebuild. Matches EXACTLY the canonical two-arm list recursion
+///
+/// ```text
+/// part f(.., xs: List[T], ..):
+///   match xs:
+///     []     -> yield <base>          # no self-call, does not read `xs`
+///     h :: t -> yield <head> :: f(.., t, ..)   # `t` threaded back into the SAME slot
+/// ```
+///
+/// i.e. the node bound by `h :: t` is DECONSTRUCTED at its last use and a `Cons` of
+/// identical shape is rebuilt in the continuation — the precise reuse opportunity. Returns
+/// the spine param index; `None` (→ the ordinary borrowed fold-to-loop, unchanged) for any
+/// body that is not this exact shape. Deliberately narrow: the reuse emitter only knows this
+/// shape, and a `None` is always sound (it just forgoes the reuse). `map`/`inc`/`append`
+/// fit (extra params like `f`/`ys` are rebound normally); `filter` (a tail `if`) and
+/// tree/ADT recursions do not — those are separate, larger changes (see blockers).
+fn cons_reuse_spine(part: &Part) -> Option<usize> {
+    if !part.effects.is_empty() {
+        return None; // pure only — reuse reorders nothing observable, but keep the fold gate
+    }
+    // body must be a single `match <param>:` with exactly two guard-free arms.
+    let [Stmt::Match(scrut, arms)] = &part.body[..] else {
+        return None;
+    };
+    let Expr::Var(spine) = scrut else {
+        return None;
+    };
+    let spine_idx = part.params.iter().position(|(n, _)| n == spine)?;
+    // The reused cell must have the SAME type as the node rebuilt from it: only a `List`
+    // whose element type is UNCHANGED by the rebuild (spine type == return type) can donate
+    // its `Rc<LstI<T>>` allocation. A type-CHANGING map (`List[Ta] -> List[Tb]`) shares no
+    // layout — it falls through to the ordinary fold-to-loop (no reuse). This is the Perceus
+    // "reuse only at identical constructor type" rule.
+    if !matches!(&part.params[spine_idx].1, Ty::List(_)) || part.params[spine_idx].1 != part.ret {
+        return None;
+    }
+    if arms.len() != 2 || arms.iter().any(|a| a.guard.is_some()) {
+        return None;
+    }
+    let arity = part.params.len();
+    let mut saw_cons = false;
+    let mut saw_base = false;
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::Cons(_h, t) => {
+                // body must be exactly `yield <head> :: f(.., t, ..)`
+                let [Stmt::Yield(Expr::Cons(head, rec))] = &arm.body[..] else {
+                    return None;
+                };
+                if !is_self_call(rec, &part.name, arity) {
+                    return None;
+                }
+                let Expr::Call(_, rargs) = &**rec else {
+                    return None;
+                };
+                // the tail binder must feed back into the SPINE slot, and nothing may read
+                // the consumed spine variable again (head or any non-spine rebind).
+                if !matches!(&rargs[spine_idx], Expr::Var(v) if v == t) {
+                    return None;
+                }
+                if mentions_var(head, spine) {
+                    return None;
+                }
+                for (j, a) in rargs.iter().enumerate() {
+                    if j != spine_idx && mentions_var(a, spine) {
+                        return None;
+                    }
+                }
+                saw_cons = true;
+            }
+            // a base arm: a single `yield <base>` with no self-call, not reading the
+            // (consumed) spine. `map`/`inc`/`append` all fit (`yield []`, `yield ys`).
+            Pattern::Nil | Pattern::Wildcard | Pattern::Var(_) => {
+                let [Stmt::Yield(b)] = &arm.body[..] else {
+                    return None;
+                };
+                if contains_self_call(b, &part.name) || mentions_var(b, spine) {
+                    return None;
+                }
+                saw_base = true;
+            }
+            _ => return None,
+        }
+    }
+    (saw_cons && saw_base).then_some(spine_idx)
+}
+
 /// Detect the accumulator recursion a part can be folded into. Conservative: a `None` costs
 /// only speed (and the old stack behaviour); a wrong `Some` would be a miscompile.
 ///
@@ -4268,6 +4406,135 @@ fn emit_acc_base(
             ));
         }
     }
+    Ok(())
+}
+
+/// REQ-LLL-195 — the Perceus/FBIP reuse loop for a same-shape list rebuild whose SPINE
+/// param (`spine`) has been forced OWNED. The shape is guaranteed by [`cons_reuse_spine`].
+///
+/// Each iteration CONSUMES the owned spine node. When this frame is its sole owner
+/// (`Rc::get_mut` → strong_count == 1, the RUNTIME uniqueness guard), the node is emptied to
+/// `Nil` — releasing its child so the tail flows on UNIQUELY too — and its now-blank
+/// allocation is stashed as a REUSE TOKEN. When the node is SHARED, it is read through `&*`
+/// and its tail is CLONED: copy semantics, never a write through an alias. At the base the
+/// collected heads are rebuilt from the end, each `Cons` taking a stashed token in place
+/// (`__lll_reuse_cons`, itself a second get_mut guard) or a fresh `Rc::new` once tokens run
+/// out. FAIL-SAFE BY CONSTRUCTION: a wrong uniqueness verdict can only downgrade to a fresh
+/// allocation, so a shared value's result is a bit-identical COPY (proven by test, REQ-195).
+fn emit_cons_reuse_loop(
+    out: &mut String,
+    part: &Part,
+    spine: usize,
+    cx: &Cx,
+    res: bool,
+) -> Result<(), String> {
+    let [Stmt::Match(_, arms)] = &part.body[..] else {
+        unreachable!("cons_reuse_spine proved a single match body");
+    };
+    // Re-extract the two arms (shape proven by cons_reuse_spine).
+    let mut head: Option<&Expr> = None;
+    let mut rec_args: &[Expr] = &[];
+    let (mut hb, mut tb) = (String::new(), String::new());
+    let mut base: Option<&Expr> = None;
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::Cons(h, t) => {
+                let [Stmt::Yield(Expr::Cons(hd, rec))] = &arm.body[..] else {
+                    unreachable!("cons arm shape proven")
+                };
+                let Expr::Call(_, ra) = &**rec else { unreachable!("self-call proven") };
+                head = Some(hd);
+                rec_args = ra;
+                hb = h.clone();
+                tb = t.clone();
+            }
+            _ => {
+                let [Stmt::Yield(b)] = &arm.body[..] else { unreachable!("base shape proven") };
+                base = Some(b);
+            }
+        }
+    }
+    let head = head.expect("cons arm proven");
+    let base = base.expect("base arm proven");
+    let sp = local(&part.params[spine].0);
+    let (uh, ut) = (local(&hb), local(&tb));
+    let spine_ty = rs_ty(&part.params[spine].1);
+
+    // The head/tail binders are treated as BORROWS in BOTH paths — in the UNIQUE path they
+    // are `&mut Field` (matched through `Rc::get_mut`), in the SHARED path `&Field` (matched
+    // through `&*`); `.clone()` yields an owned value from either, so a single lowering (with
+    // the binders in `refs`) serves both, and no argument is ever wrongly MOVED out of a
+    // borrow. The spine tail is the sole exception, advanced explicitly (steal when unique,
+    // clone when shared).
+    let mut cx_b = cx.clone();
+    cx_b.refs.insert(hb.clone());
+    cx_b.refs.insert(tb.clone());
+
+    // The rebind of every NON-spine param (`f` of `map`, `ys` of `append`, …) to its
+    // self-call argument — lowered exactly like the ordinary fold (`part_call_args`), so
+    // borrow/own stays in lock-step with the callee signature.
+    let lowered = part_call_args(&part.name, rec_args, &cx_b, res)?;
+    let mut temps = String::new();
+    let mut assigns = String::new();
+    for (i, (n, _)) in part.params.iter().enumerate() {
+        if i == spine {
+            continue;
+        }
+        temps.push_str(&format!("let __ac{i} = {}; ", lowered[i]));
+        assigns.push_str(&format!("{} = __ac{i}; ", local(n)));
+    }
+    let head_code = expr(head, &cx_b, res)?;
+
+    // the base: rebuild the collected heads from the end, reusing tokens in place. The base
+    // value (`[]`, `ys`, …) cannot read the consumed spine (cons_reuse_spine), so `cx` and
+    // `cx_shared` lower it identically — compute it once.
+    let base_code = format!(
+        "{{ let mut __acc = {}; for __e in __cons.into_iter().rev() {{ \
+         __acc = match __reuse.pop() {{ \
+         ::core::option::Option::Some(__cell) => __lll_reuse_cons(__cell, __e, __acc), \
+         ::core::option::Option::None => Rc::new(LstI::Cons(__e, __acc)), }}; }} \
+         return __acc; }}",
+        expr(base, cx, res)?
+    );
+
+    // The uniqueness test is a borrow-free `Rc::get_mut(..).is_some()` (strong_count == 1 &&
+    // weak_count == 0); the two paths then re-borrow independently. `LstI` implements `Drop`
+    // (REQ-LLL-163 iterative unlink), so its fields can NEVER be moved out — the UNIQUE path
+    // therefore CLONEs the head (like the borrowed baseline) and STEALS only the tail with
+    // `mem::replace` on the `&mut` field, leaving the cell as `Cons(old_h, Nil)`; that blank
+    // cell is the reuse token. The spine is advanced OUTSIDE the borrow (`{sp} = __t2`), which
+    // is why the tail is threaded out through the match value rather than assigned in place.
+    out.push_str(&format!(
+        "    let mut __cons = ::std::vec::Vec::new();\n\
+         \x20   let mut __reuse: ::std::vec::Vec<{spine_ty}> = ::std::vec::Vec::new();\n\
+         \x20   let __nil: {spine_ty} = Rc::new(LstI::Nil);\n\
+         \x20   '__tail: loop {{\n\
+         \x20       if Rc::get_mut(&mut {sp}).is_some() {{\n\
+         \x20           let __step = match Rc::get_mut(&mut {sp}).unwrap() {{\n\
+         \x20               LstI::Cons({uh}, {ut}) => {{ let __ae = {head_code}; __cons.push(__ae); \
+                                {temps}{assigns}\
+                                ::core::option::Option::Some(::std::mem::replace({ut}, __nil.clone())) }}\n\
+         \x20               LstI::Nil => ::core::option::Option::None,\n\
+         \x20           }};\n\
+         \x20           match __step {{\n\
+         \x20               ::core::option::Option::Some(__t2) => {{ __reuse.push({sp}); {sp} = __t2; continue '__tail; }}\n\
+         \x20               ::core::option::Option::None => {{ {base_code} }}\n\
+         \x20           }}\n\
+         \x20       }} else {{\n\
+         \x20           let __nt = match &*{sp} {{\n\
+         \x20               LstI::Cons({uh}, {ut}) => {{ let __ae = {head_code}; __cons.push(__ae); \
+                                {temps}{assigns}\
+                                ::core::option::Option::Some({ut}.clone()) }}\n\
+         \x20               LstI::Nil => ::core::option::Option::None,\n\
+         \x20           }};\n\
+         \x20           match __nt {{\n\
+         \x20               ::core::option::Option::Some(__t2) => {{ {sp} = __t2; continue '__tail; }}\n\
+         \x20               ::core::option::Option::None => {{ {base_code} }}\n\
+         \x20           }}\n\
+         \x20       }}\n\
+         \x20   }}\n\
+         }}\n",
+    ));
     Ok(())
 }
 
@@ -5684,6 +5951,22 @@ impl<T> Drop for LstI<T> {
             // drop is shallow; depth stays constant however long the chain is.
             cur = std::mem::replace(t, nil.clone());
         }
+    }
+}
+
+// REQ-LLL-195 (Perceus/FBIP constructor reuse): the reuse POINT of a same-shape list
+// rebuild. `cell` is a heap node the caller has proven it solely owns (taken via
+// `Rc::get_mut`, then emptied to `Nil`); `Rc::get_mut` here re-checks strong_count == 1 and,
+// unique, OVERWRITES the fields IN PLACE — the same allocation now carries the rebuilt
+// `Cons`, so a `map`/`inc` over a uniquely-owned list allocates ZERO new nodes. FAIL-SAFE BY
+// CONSTRUCTION: were the cell somehow shared, `get_mut` returns `None` and we fall to a fresh
+// `Rc::new` — a wrong uniqueness verdict can only cost an allocation, never corrupt an alias.
+// This is a RUNTIME guard, not a static elision (contrast Morphic/Roc, DEC-LLL-020).
+#[inline]
+fn __lll_reuse_cons<T>(mut cell: Lst<T>, h: T, t: Lst<T>) -> Lst<T> {
+    match Rc::get_mut(&mut cell) {
+        Some(node) => { *node = LstI::Cons(h, t); cell }
+        None => Rc::new(LstI::Cons(h, t)),
     }
 }
 

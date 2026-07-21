@@ -1,0 +1,31 @@
+module Bench.MapInc:
+
+  # REQ-LLL-195 — the SAME-SHAPE REBUILD kernel. `inc` deconstructs each cons-cell of `xs`
+  # at its last use and reconstructs a cell of IDENTICAL shape (`(h + 1) :: inc(t)`): the
+  # exact Perceus/FBIP reuse opportunity. When `xs` is UNIQUELY owned (as here — `build`
+  # hands it over at its last use), the reuse pass consumes the spine and OVERWRITES each
+  # unique cell in place instead of allocating a new one, guarded at runtime by
+  # `Rc::get_mut` (strong_count == 1). A SHARED spine falls back to a fresh copy — never a
+  # mutation through an alias. Measured with bench/cspeed/alloc_count.sh.
+
+  part build(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield []
+      _ -> yield n :: build(n - 1)
+
+  part inc(xs: List[Int]) -> List[Int]:
+    match xs:
+      []     -> yield []
+      h :: t -> yield (h + 1) :: inc(t)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part main() -> Int via IO:
+    let xs = build(1000000)
+    let ys = inc(xs)
+    yield IO.print(sum(ys))
