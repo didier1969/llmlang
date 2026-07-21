@@ -3,7 +3,7 @@ name = "lllc"
 version = "0.1.0"
 edition = "2021"
 description = "llmlang compiler — LLM-first language: hash-identity, algebraic effects, Z3-verified contracts, Rust backend"
-license = "MIT"
+publish = false
 
 [[bin]]
 name = "lll"
