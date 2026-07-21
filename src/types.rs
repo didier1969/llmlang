@@ -626,6 +626,33 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 if path.starts_with("lll_actor_runtime::") {
                     uses_actor_runtime = true;
                 }
+                // DEC-LLL-080 (REQ-LLL-183): `state` is the ONE actor op that PROMISES a
+                // value, yet the Pid it is asked about may be DEAD (anti-storm-stopped
+                // after MAX_RESTARTS) or unknown. Its return is therefore an
+                // Option-shaped ADT the program MUST match — a dead actor's state is a
+                // first-class ABSENCE, never a fabricated 0 and never an abort (the
+                // process survives, REQ-LLL-036 W3). Enforced here at declaration so
+                // codegen's frontier marshalling (`Some(state)`/`None` → the ADT's two
+                // constructors) can rely on the shape, fail-closed (DEC-LLL-015).
+                if path == "lll_actor_runtime::state"
+                    && (op.params != [Ty::Int]
+                        || actor_state_option_ctors(&module, &op.ret).is_none())
+                {
+                    return Err(format!(
+                        "effect `{}` op `{}`: `lll_actor_runtime::state` must be declared \
+                         `(Int) -> <Option[Int]-shaped ADT>` — a 2-constructor ADT with one \
+                         nullary constructor (the actor is DEAD after anti-storm stop, or the \
+                         Pid is unknown) and one constructor carrying a single `Int` (the live \
+                         state), e.g. `type Option[a] = None | Some(a)` used as `Option[Int]`. \
+                         A dead actor's state is a first-class absence the program must \
+                         handle — never a fabricated 0 (DEC-LLL-080, REQ-LLL-183); found \
+                         `({}) -> {}`",
+                        ed.name,
+                        op.name,
+                        op.params.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "),
+                        op.ret
+                    ));
+                }
                 if path.starts_with("lll_pg_runtime::") {
                     uses_pg_runtime = true;
                 }
@@ -1916,6 +1943,36 @@ pub(crate) const ACTOR_RUNTIME_SPAWN_PATH: &str = "lll_actor_runtime::spawn";
 /// rejected precisely so the surface stays narrow and intentional.
 pub(crate) const ACTOR_RUNTIME_PATHS: &[&str] =
     &[ACTOR_RUNTIME_SPAWN_PATH, "lll_actor_runtime::send", "lll_actor_runtime::state"];
+
+/// DEC-LLL-080 (REQ-LLL-183): the `(none_ctor, some_ctor)` names of the Option-shaped
+/// ADT an actor `state` op must return — exactly two constructors, one NULLARY (the
+/// absence: a dead or unknown actor) and one carrying a single `Int` (the live state)
+/// after instantiating the ADT's type parameters at the return's arguments
+/// (`Option[Int]` → `Some(Int)`). `None` when `ret` is not that shape. Shared with
+/// codegen, which marshals the runtime's `Option<i64>` into these constructors at the
+/// FFI frontier — ONE source for the shape, so the check-time guarantee and the emitted
+/// code can never drift apart.
+pub(crate) fn actor_state_option_ctors(module: &Module, ret: &Ty) -> Option<(String, String)> {
+    let Ty::User(n, targs) = ret else {
+        return None;
+    };
+    let td = module.types.iter().find(|td| &td.name == n)?;
+    if td.type_params.len() != targs.len() || td.ctors.len() != 2 {
+        return None;
+    }
+    let inst = |t: &Ty| {
+        let mut r = t.clone();
+        for (p, a) in td.type_params.iter().zip(targs) {
+            r = subst_tyvar(&r, p, a);
+        }
+        r
+    };
+    let pick = |none: &(String, Vec<Ty>), some: &(String, Vec<Ty>)| {
+        (none.1.is_empty() && some.1.len() == 1 && inst(&some.1[0]) == Ty::Int)
+            .then(|| (none.0.clone(), some.0.clone()))
+    };
+    pick(&td.ctors[0], &td.ctors[1]).or_else(|| pick(&td.ctors[1], &td.ctors[0]))
+}
 
 /// v1 FFI resolution guard (REQ-LLL-027 gap 2). `lll build` compiles the generated
 /// Rust as a SINGLE file with `rustc` (no Cargo), so an `= extern "path"` resolves

@@ -143,14 +143,24 @@ mod lll_actor_runtime {{
         }}
     }}
 
-    pub fn state(pid: i64) -> i64 {{
+    // DEC-LLL-080 (REQ-LLL-183): a DEAD actor (anti-storm-stopped after MAX_RESTARTS,
+    // its task returned and the mailbox closed) or an unknown Pid has NO state — report
+    // the absence honestly as `None`, NEVER a fabricated 0 (a verified program would
+    // print it and exit 0, false in silence) and NEVER an abort (the process SURVIVES a
+    // crash-looping actor, REQ-LLL-036 W3). The FFI shim marshals this `Option<i64>`
+    // into the module's Option-shaped ADT, which the program MUST match (types.rs
+    // enforces the shape). A LIVE actor mid-restart still answers `Some` (restart-fresh
+    // keeps it in the table and its loop running).
+    pub fn state(pid: i64) -> Option<i64> {{
         match sender_for(pid) {{
             Some(tx) => runtime().block_on(async {{
                 let (reply_tx, reply_rx) = oneshot::channel();
                 let _ = tx.send(ActorMsg::GetState(reply_tx)).await;
-                reply_rx.await.unwrap_or(0)
+                // a mailbox that closed mid-request (the actor died with GetState
+                // still queued) drops the reply sender — that too is an absence.
+                reply_rx.await.ok()
             }}),
-            None => 0,
+            None => None,
         }}
     }}
 }}
@@ -1336,6 +1346,38 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
                     })
                     .collect();
                 let call = format!("{path}({})", args.join(", "));
+                let key = format!("{}.{}", ed.name, op.name);
+                // DEC-LLL-080 (REQ-LLL-183): the actor runtime reports a dead/unknown
+                // actor's state as `Option<i64>::None` — marshalled INTO the module's
+                // Option-shaped ADT here at the frontier (the mirror of the foreign
+                // `Result` mapping below; types.rs guarantees the shape). The absence
+                // also round-trips through trace/replay as JSON `null` via the
+                // `*_opt` channel — recorded and replayed as an absence, never a
+                // fabricated scalar (REQ-LLL-028 / REQ-LLL-036 W4).
+                if path == "lll_actor_runtime::state" {
+                    let (none_c, some_c) =
+                        crate::types::actor_state_option_ctors(&cm.module, &op.ret).expect(
+                            "checker guarantees an Option-shaped `state` return (REQ-LLL-183)",
+                        );
+                    let ei = match &op.ret {
+                        Ty::User(n, _) => format!("{n}I"),
+                        _ => unreachable!("an Option-shaped return is a user ADT"),
+                    };
+                    out.push_str(&format!(
+                        "#[inline] fn {}({}) -> {} {{ \
+                         if let Some(__t) = replay_next_opt(\"{key}\") {{ return match __t {{ \
+                         ::core::option::Option::Some(__s) => Rc::new({ei}::{some_c}(__s)), \
+                         ::core::option::Option::None => Rc::new({ei}::{none_c}) }}; }} \
+                         let __r = {call}; trace_write_opt(\"{key}\", __r); match __r {{ \
+                         ::core::option::Option::Some(__s) => \
+                         Rc::new({ei}::{some_c}(LllInt::from(__s))), \
+                         ::core::option::Option::None => Rc::new({ei}::{none_c}) }} }}\n",
+                        ffi_shim(&key),
+                        params.join(", "),
+                        rs_ty(&op.ret),
+                    ));
+                    continue;
+                }
                 // marshal the return foreign→llmlang: a Rust `String` becomes a
                 // codepoint list; identity (i64/bool or no clause) passes through.
                 let body = match op.extern_foreign.as_ref().map(|fs| &fs.ret) {
@@ -1450,7 +1492,6 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
                     None => marshal_out_bare(&op.ret, &call),
                     _ => call,
                 };
-                let key = format!("{}.{}", ed.name, op.name);
                 let ret_ty = rs_ty(&op.ret);
                 // FFI replay/trace (REQ-LLL-043 → REQ-LLL-028, Pillar-6): an extern op is
                 // an ambient, possibly impure/nondeterministic effect, so — like IO.read
@@ -4935,7 +4976,11 @@ use std::sync::Mutex;
 // re-parsed with `LllInt::from_str` — a 30-digit result round-trips through `--replay`
 // losslessly (a JSON `i64` would have silently clipped it).
 static TRACE: Mutex<Option<std::fs::File>> = Mutex::new(None);
-static REPLAY: Mutex<Option<Vec<(String, LllInt)>>> = Mutex::new(None);
+// The replay queue stores each record's RAW `v` token (an unbounded decimal, or JSON
+// `null` for an actor-state absence — DEC-LLL-080); the typed consumers (`replay_next`
+// for an `Int`, `replay_next_opt` for an optional one) parse it, so a decimal keeps
+// round-tripping losslessly and an absence replays as an absence.
+static REPLAY: Mutex<Option<Vec<(String, String)>>> = Mutex::new(None);
 // REQ-LLL-036 W4: a global, monotonic delivery sequence — stamped the moment
 // an actor actually APPLIES a message (see `emit_actor_runtime`'s
 // `trace_delivery`), recording the real order messages were delivered in this
@@ -4955,7 +5000,7 @@ fn trace_file() -> std::sync::MutexGuard<'static, Option<std::fs::File>> {
     g
 }
 
-fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, LllInt)>>> {
+fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, String)>>> {
     let mut g = REPLAY.lock().unwrap();
     if g.is_none() {
         *g = std::env::var("LLL_REPLAY").ok().map(|p| match std::fs::File::open(&p) {
@@ -4969,8 +5014,8 @@ fn replay_entries() -> std::sync::MutexGuard<'static, Option<Vec<(String, LllInt
                 .map(|l| {
                     let eff =
                         l.split("\"eff\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
-                    let v: LllInt =
-                        l.split("\"v\":").nth(1).unwrap().trim_end_matches('}').trim().parse().unwrap();
+                    let v =
+                        l.split("\"v\":").nth(1).unwrap().trim_end_matches('}').trim().to_string();
                     (eff, v)
                 })
                 .collect::<Vec<_>>()
@@ -5017,7 +5062,8 @@ fn trace_delivery<M: std::fmt::Debug>(pid: i64, msg: M) {
     }
 }
 
-fn replay_next(expected_eff: &str) -> Option<LllInt> {
+// Pop the next raw `v` token for `expected_eff` — `None` when not replaying at all.
+fn replay_next_raw(expected_eff: &str) -> Option<String> {
     let mut g = replay_entries();
     match g.as_mut() {
         None => None,
@@ -5027,6 +5073,41 @@ fn replay_next(expected_eff: &str) -> Option<LllInt> {
                 "replay divergence: expected {expected_eff}, trace has {eff}"),
             None => panic!("replay divergence: trace exhausted at {expected_eff}"),
         },
+    }
+}
+
+fn replay_next(expected_eff: &str) -> Option<LllInt> {
+    replay_next_raw(expected_eff).map(|v| {
+        v.parse().unwrap_or_else(|_| {
+            panic!("replay divergence: {expected_eff} expected an integer, trace has {v}")
+        })
+    })
+}
+
+// Optional-value channel (DEC-LLL-080): an actor-state read replays as the recorded
+// presence (`Some`) or recorded ABSENCE (`None`, stored as JSON `null`) — a trace of a
+// dead-actor read round-trips honestly. Outer `None` = not replaying.
+fn replay_next_opt(expected_eff: &str) -> Option<Option<LllInt>> {
+    replay_next_raw(expected_eff).map(|v| {
+        if v == "null" {
+            None
+        } else {
+            Some(v.parse().unwrap_or_else(|_| {
+                panic!("replay divergence: {expected_eff} expected an integer or null, trace has {v}")
+            }))
+        }
+    })
+}
+
+// Record an optional scalar (the actor runtime speaks `i64` at the frontier): a present
+// state as its decimal, an absence as JSON `null` — never a fabricated sentinel.
+fn trace_write_opt(eff: &str, v: Option<i64>) {
+    let mut g = trace_file();
+    if let Some(f) = g.as_mut() {
+        match v {
+            Some(s) => writeln!(f, "{{\"eff\":\"{eff}\",\"v\":{s}}}").unwrap(),
+            None => writeln!(f, "{{\"eff\":\"{eff}\",\"v\":null}}").unwrap(),
+        }
     }
 }
 

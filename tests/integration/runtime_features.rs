@@ -741,6 +741,51 @@ fn actor_non_int_state_rejected_at_check() {
 
 
 #[test]
+fn actor_state_op_int_return_rejected_req183() {
+    // DEC-LLL-080 (REQ-LLL-183): `state(Int) -> Int` was the LIE the old runtime
+    // ratified — a dead (anti-storm-stopped) or unknown actor produced a FABRICATED 0
+    // and a verified program printed it, exit 0, false in silence. The op must now
+    // return an Option-shaped ADT (`None | Some(Int)`) the program matches; the old
+    // scalar signature is a pedagogical check-time error (DEC-LLL-015 fail-closed).
+    let src = "module M:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state\n\n  effect Actor:\n    state(Int) -> Int = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor:\n    yield 0\n";
+    let m = parser::parse_module(src).expect("parse");
+    let err = types::check_module(m).expect_err("a scalar `state` return must be rejected");
+    assert!(
+        err.contains("REQ-LLL-183") && err.contains("Option[Int]-shaped"),
+        "the rejection must name the decision and the required shape, got: {err}"
+    );
+}
+
+
+#[test]
+fn actor_state_op_wrong_shape_rejected_req183() {
+    // The shape gate is structural, not nominal: an ADT named whatever the user likes
+    // is fine, but it must have EXACTLY one nullary constructor (the absence) and one
+    // single-`Int` constructor (the live state). Two payload ctors → rejected; a
+    // non-`Int` pid parameter → rejected too (codegen's frontier relies on both).
+    let two_payloads = "module M:\n\n  type St = A(Int) | B(Int)\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state\n\n  effect Actor:\n    state(Int) -> St = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor:\n    yield 0\n";
+    let m = parser::parse_module(two_payloads).expect("parse");
+    let err = types::check_module(m).expect_err("a 2-payload-ctor ADT must be rejected");
+    assert!(err.contains("REQ-LLL-183"), "expected the REQ-LLL-183 shape error, got: {err}");
+
+    let bad_param = "module M:\n\n  type Option[a] = None | Some(a)\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state\n\n  effect Actor:\n    state(Bool) -> Option[Int] = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor:\n    yield 0\n";
+    let m2 = parser::parse_module(bad_param).expect("parse");
+    let err2 = types::check_module(m2).expect_err("a non-Int `state` pid parameter must be rejected");
+    assert!(err2.contains("REQ-LLL-183"), "expected the REQ-LLL-183 signature error, got: {err2}");
+}
+
+
+#[test]
+fn actor_state_op_option_signature_accepted_req183() {
+    // Anti-over-reject guard: the canonical Option-shaped declaration (parametric
+    // `Option[a]` instantiated at `Int`) checks cleanly with the full actor plumbing.
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule M:\n\n  type Option[a] = None | Some(a)\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n";
+    let m = parser::parse_module(src).expect("parse");
+    types::check_module(m).expect("the Option-shaped `state` signature must check");
+}
+
+
+#[test]
 fn actor_runtime_unrecognized_path_rejected() {
     // the `lll_actor_runtime` root is NOT a general escape hatch — only the 3
     // built-in paths are recognized; anything else under that root is rejected.

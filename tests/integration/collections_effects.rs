@@ -1041,7 +1041,9 @@ fn actor_reactive_integrated_dod_example_verifies_and_replays() {
     // examples/actor_reactive_integrated.lll) with zero new compiler
     // machinery, proving the DoD is actually met, not just each piece alone.
     let repo = env!("CARGO_MANIFEST_DIR");
-    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReactiveIntegrated:\n\n  type Delta = NoChange | Changed(Int)\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  part view(state: Int) -> Int:\n    yield state * 2\n\n  part diff(old_view: Int, new_view: Int) -> Delta:\n    ensures (old_view == new_view) == (result == NoChange)\n    example diff(0, 0) == NoChange\n    example diff(0, 6) != NoChange\n    match old_view == new_view:\n      true  -> yield NoChange\n      false -> yield Changed(new_view)\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let v0 = view(Actor.state(pid))\n    let _ = Actor.send(pid, 5)\n    let v1 = view(Actor.state(pid))\n    let d1 = diff(v0, v1)\n    let _ = Actor.send(pid, 3)\n    let v2 = view(Actor.state(pid))\n    let d2 = diff(v1, v2)\n    match d1:\n      Changed(x) -> yield IO.print(x)\n      NoChange   -> yield IO.print(0 - 1)\n";
+    // DEC-LLL-080 (REQ-LLL-183): `state` now returns `Option[Int]` — each read
+    // handles the dead/unknown-actor absence (`None`) explicitly by `match`.
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReactiveIntegrated:\n\n  type Option[a] = None | Some(a)\n\n  type Delta = NoChange | Changed(Int)\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  part view(state: Int) -> Int:\n    yield state * 2\n\n  part diff(old_view: Int, new_view: Int) -> Delta:\n    ensures (old_view == new_view) == (result == NoChange)\n    example diff(0, 0) == NoChange\n    example diff(0, 6) != NoChange\n    match old_view == new_view:\n      true  -> yield NoChange\n      false -> yield Changed(new_view)\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    match Actor.state(pid):\n      None -> yield IO.print(0 - 1)\n      Some(s0) ->\n        let v0 = view(s0)\n        let _ = Actor.send(pid, 5)\n        match Actor.state(pid):\n          None -> yield IO.print(0 - 1)\n          Some(s1) ->\n            let v1 = view(s1)\n            let d1 = diff(v0, v1)\n            let _ = Actor.send(pid, 3)\n            match Actor.state(pid):\n              None -> yield IO.print(0 - 1)\n              Some(s2) ->\n                let v2 = view(s2)\n                let d2 = diff(v1, v2)\n                match d1:\n                  Changed(x) -> yield IO.print(x)\n                  NoChange   -> yield IO.print(0 - 1)\n";
     let dir = tempdir();
     let f = dir.join("actor_reactive_integrated.lll");
     std::fs::write(&f, src).unwrap();
@@ -1094,7 +1096,7 @@ fn actor_runtime_trace_records_delivery_order_and_replay_round_trips() {
     // correctly skips the interleaved delivery records, proving the format
     // extension didn't break existing replay).
     let repo = env!("CARGO_MANIFEST_DIR");
-    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorTrace:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, 7)\n    let _ = Actor.send(pid, 3)\n    yield IO.print(Actor.state(pid))\n";
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorTrace:\n\n  type Option[a] = None | Some(a)\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, 7)\n    let _ = Actor.send(pid, 3)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n";
     let dir = tempdir();
     let f = dir.join("actor_trace.lll");
     std::fs::write(&f, src).unwrap();
@@ -1150,7 +1152,7 @@ fn actor_adt_message_scalar_fields_round_trips_via_cargo() {
     // the state stays `Int`. Proves compile + `lll run` deliver ADT messages correctly and the
     // multi-thread runtime is NOT regressed. 0 → Inc → 1 → Add(5) → 6 → Inc → 7.
     let repo = env!("CARGO_MANIFEST_DIR");
-    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorAdtMsg:\n\n  type Msg = Inc | Add(Int)\n\n  part step(state: Int, msg: Msg) -> Int:\n    match msg:\n      Inc    -> yield state + 1\n      Add(n) -> yield state + n\n\n  effect Actor:\n    spawn(Int) -> Int      = extern \"lll_actor_runtime::spawn\"\n    send(Int, Msg) -> Unit = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int      = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, Inc)\n    let _ = Actor.send(pid, Add(5))\n    let _ = Actor.send(pid, Inc)\n    yield IO.print(Actor.state(pid))\n";
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorAdtMsg:\n\n  type Option[a] = None | Some(a)\n\n  type Msg = Inc | Add(Int)\n\n  part step(state: Int, msg: Msg) -> Int:\n    match msg:\n      Inc    -> yield state + 1\n      Add(n) -> yield state + n\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Msg) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, Inc)\n    let _ = Actor.send(pid, Add(5))\n    let _ = Actor.send(pid, Inc)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n";
     let dir = tempdir();
     let f = dir.join("actor_adt_msg.lll");
     std::fs::write(&f, src).unwrap();
@@ -1216,17 +1218,23 @@ fn actor_adt_message_scalar_fields_round_trips_via_cargo() {
 
 #[test]
 fn actor_runtime_anti_storm_stops_crash_looping_actor() {
-    // REQ-LLL-036 W3 (anti-storm, CPT-LLL-015 §8 — scoped to this ONE piece:
-    // restart-fresh stays the only policy, no configurability yet). An actor
-    // that panics on EVERY message (state resets to i64::MAX each restart, so
-    // the next `+1` overflows again) would crash-loop forever under t2b alone.
-    // After MAX_RESTARTS (5) within the 1s window, the actor STOPS (its task
-    // returns) instead of looping — proof: `state()` on it afterward observes
-    // the closed mailbox (falls back to its existing sentinel, 0 — the same
-    // fallback `state()` already used for an unknown Pid), NOT i64::MAX (which
-    // a 6th silent restart-fresh would have produced).
+    // REQ-LLL-036 W3 (anti-storm, CPT-LLL-015 §8 — restart-fresh stays the only
+    // policy, no configurability yet). An actor that panics on EVERY message
+    // (state resets to i64::MAX each restart, so the next `+1` overflows the
+    // boundary narrowing again) would crash-loop forever under t2b alone. After
+    // MAX_RESTARTS (5) within the 1s window, the actor STOPS (its task returns)
+    // instead of looping.
+    //
+    // DEC-LLL-080 (REQ-LLL-183) reshapes the OBSERVATION, not the intent: the
+    // old proof ratified a fabricated sentinel (`state()` returned 0 for the
+    // closed mailbox — a verified program printing a false value in silence).
+    // Now `state` returns `Option[Int]`: the program MUST match the absence
+    // (`None`) — proof of BOTH W3 halves at once: (a) the process SURVIVES the
+    // crash-looping actor, (b) the dead actor is observed as an explicit,
+    // program-handled `None` (printed -1 here), NOT i64::MAX (which a 6th
+    // silent restart-fresh would have produced) and NOT a fabricated 0.
     let repo = env!("CARGO_MANIFEST_DIR");
-    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorStorm:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(9223372036854775807)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    yield IO.print(Actor.state(pid))\n";
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorStorm:\n\n  type Option[a] = None | Some(a)\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(9223372036854775807)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    let _ = Actor.send(pid, 1)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n";
     let dir = tempdir();
     let f = dir.join("actor_storm.lll");
     std::fs::write(&f, src).unwrap();
@@ -1244,9 +1252,41 @@ fn actor_runtime_anti_storm_stops_crash_looping_actor() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("=> 0"),
-        "expected 0 (actor stopped by anti-storm, mailbox closed — not i64::MAX from a 6th \
-         restart-fresh), got:\n{stdout}"
+        stdout.contains("=> -1"),
+        "expected -1 (the program's own None arm: actor stopped by anti-storm, mailbox \
+         closed — not i64::MAX from a 6th restart-fresh, not a fabricated 0), got:\n{stdout}"
+    );
+    // DEC-LLL-080 + REQ-LLL-028: the ABSENCE round-trips through trace/replay —
+    // recorded as JSON `null`, replayed as `None` (never a fabricated scalar), so a
+    // dead-actor audit trail stays honest and deterministic.
+    let trace_path = dir.join("storm_trace.jsonl");
+    let t = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--trace"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --trace");
+    assert!(t.status.success(), "trace run failed:\nstderr={}", String::from_utf8_lossy(&t.stderr));
+    let trace = std::fs::read_to_string(&trace_path).expect("read storm trace");
+    assert!(
+        trace.contains("{\"eff\":\"Actor.state\",\"v\":null}"),
+        "the dead actor's state must be recorded as an explicit null, got:\n{trace}"
+    );
+    let r = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["run"])
+        .arg(&f)
+        .args(["--replay"])
+        .arg(&trace_path)
+        .current_dir(repo)
+        .output()
+        .expect("run lll --replay");
+    let rout = String::from_utf8_lossy(&r.stdout);
+    assert!(
+        r.status.success() && rout.contains("=> -1") && rout.contains("[replay: OK"),
+        "dead-actor absence must replay deterministically:\nstdout={rout}\nstderr={}",
+        String::from_utf8_lossy(&r.stderr)
     );
 }
 
@@ -1264,7 +1304,7 @@ fn actor_runtime_panic_isolated_and_restarts_fresh() {
     // panicked actor itself restarts-fresh (its state resets to its ORIGINAL
     // spawn value, not left corrupt or hung).
     let repo = env!("CARGO_MANIFEST_DIR");
-    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorIsolation:\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let healthy = Actor.spawn(10)\n    let doomed = Actor.spawn(9223372036854775807)\n    let _ = Actor.send(healthy, 5)\n    let _ = Actor.send(doomed, 1)\n    let _ = Actor.send(healthy, 3)\n    let h = Actor.state(healthy)\n    let d = Actor.state(doomed)\n    match d == 9223372036854775807:\n      true  -> yield IO.print(h)\n      false -> yield IO.print(0 - 1)\n";
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorIsolation:\n\n  type Option[a] = None | Some(a)\n\n  part step(state: Int, msg: Int) -> Int:\n    yield state + msg\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let healthy = Actor.spawn(10)\n    let doomed = Actor.spawn(9223372036854775807)\n    let _ = Actor.send(healthy, 5)\n    let _ = Actor.send(doomed, 1)\n    let _ = Actor.send(healthy, 3)\n    let h = Actor.state(healthy)\n    match Actor.state(doomed):\n      None -> yield IO.print(0 - 2)\n      Some(d) ->\n        match d == 9223372036854775807:\n          true  ->\n            match h:\n              None -> yield IO.print(0 - 3)\n              Some(hv) -> yield IO.print(hv)\n          false -> yield IO.print(0 - 1)\n";
     let dir = tempdir();
     let f = dir.join("actor_isolation.lll");
     std::fs::write(&f, src).unwrap();
@@ -1299,7 +1339,10 @@ fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
     // Requires Cargo mode (tokio dependency) — same pattern as
     // ffi_external_crate_links_via_cargo.
     let repo = env!("CARGO_MANIFEST_DIR");
-    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorMulti:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let p0 = Actor.spawn(0)\n    let p1 = Actor.spawn(10)\n    let p2 = Actor.spawn(20)\n    let p3 = Actor.spawn(30)\n    let p4 = Actor.spawn(40)\n    let _ = Actor.send(p2, 1)\n    let _ = Actor.send(p0, 1)\n    let _ = Actor.send(p4, 1)\n    let _ = Actor.send(p1, 1)\n    let _ = Actor.send(p3, 1)\n    let _ = Actor.send(p0, 1)\n    let _ = Actor.send(p1, 1)\n    let s0 = Actor.state(p0)\n    let s1 = Actor.state(p1)\n    let s2 = Actor.state(p2)\n    let s3 = Actor.state(p3)\n    let s4 = Actor.state(p4)\n    yield IO.print(s0 + s1 + s2 + s3 + s4)\n";
+    // DEC-LLL-080: each state read yields `Option[Int]`; `val_or_dead` is the
+    // program's OWN explicit absence handling (an unmistakable -100000 would sink
+    // the 107 sum), never a runtime-fabricated sentinel.
+    let src = "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorMulti:\n\n  type Option[a] = None | Some(a)\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n  part val_or_dead(o: Option[Int]) -> Int:\n    match o:\n      None    -> yield 0 - 100000\n      Some(s) -> yield s\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n\n  part main() -> Int via Actor, IO:\n    let p0 = Actor.spawn(0)\n    let p1 = Actor.spawn(10)\n    let p2 = Actor.spawn(20)\n    let p3 = Actor.spawn(30)\n    let p4 = Actor.spawn(40)\n    let _ = Actor.send(p2, 1)\n    let _ = Actor.send(p0, 1)\n    let _ = Actor.send(p4, 1)\n    let _ = Actor.send(p1, 1)\n    let _ = Actor.send(p3, 1)\n    let _ = Actor.send(p0, 1)\n    let _ = Actor.send(p1, 1)\n    let s0 = val_or_dead(Actor.state(p0))\n    let s1 = val_or_dead(Actor.state(p1))\n    let s2 = val_or_dead(Actor.state(p2))\n    let s3 = val_or_dead(Actor.state(p3))\n    let s4 = val_or_dead(Actor.state(p4))\n    yield IO.print(s0 + s1 + s2 + s3 + s4)\n";
     let dir = tempdir();
     let f = dir.join("actor_multi.lll");
     std::fs::write(&f, src).unwrap();
@@ -1329,14 +1372,14 @@ fn actor_runtime_tokio_real_parallelism_multi_actor_correctness() {
 // then the compiled binary crashed (100 div 0). Undischarged = compile error, never a
 // runtime fallback (DEC-LLL-015/017).
 
-const ACTOR_182_EFFECT: &str = "  effect Actor:\n    spawn(Int) -> Int       = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit  = extern \"lll_actor_runtime::send\"\n    state(Int) -> Int       = extern \"lll_actor_runtime::state\"\n";
+const ACTOR_182_EFFECT: &str = "  type Option[a] = None | Some(a)\n\n  effect Actor:\n    spawn(Int) -> Int          = extern \"lll_actor_runtime::spawn\"\n    send(Int, Int) -> Unit     = extern \"lll_actor_runtime::send\"\n    state(Int) -> Option[Int]  = extern \"lll_actor_runtime::state\"\n";
 
 #[test]
 fn actor_spawn_violating_step_requires_is_rejected_req182() {
     // Candidate A (INIT): spawn(0) violates `requires state >= 1` — the spawn site
     // must PROVE step's requires of the initial state, exactly like a call site.
     let src = format!(
-        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqInit:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 1\n    ensures result >= 0\n    yield 100 div state\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, 7)\n    let s = Actor.state(pid)\n    yield IO.print(s)\n"
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqInit:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 1\n    ensures result >= 0\n    yield 100 div state\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    let _ = Actor.send(pid, 7)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n"
     );
     let r = verify_src(&src);
     assert!(!r.ok(), "spawn(0) against `requires state >= 1` must NOT verify (REQ-LLL-182)");
@@ -1354,7 +1397,7 @@ fn actor_non_inductive_step_contract_is_rejected_req182() {
     // RETURN 0 (state - 1) and nothing implies the next turn's requires — the
     // invariant is not inductive, so a later message divides by zero.
     let src = format!(
-        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqInduct:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 1\n    match msg == 0:\n      true  -> yield 100 div state\n      false -> yield state - 1\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(1)\n    let _ = Actor.send(pid, 5)\n    let _ = Actor.send(pid, 0)\n    let s = Actor.state(pid)\n    yield IO.print(s)\n"
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqInduct:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 1\n    match msg == 0:\n      true  -> yield 100 div state\n      false -> yield state - 1\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(1)\n    let _ = Actor.send(pid, 5)\n    let _ = Actor.send(pid, 0)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n"
     );
     let r = verify_src(&src);
     assert!(!r.ok(), "a non-inductive `step` contract must NOT verify (REQ-LLL-182)");
@@ -1372,7 +1415,7 @@ fn actor_step_requires_on_message_is_rejected_at_check_req182() {
     // MESSAGE parameter (messages come from arbitrary `send` sites; `spawn` seeds a
     // state, not a message). Rejected pedagogically at check, before any VC.
     let src = format!(
-        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqMsg:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires msg >= 1\n    yield state + msg\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    yield IO.print(Actor.state(pid))\n"
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorReqMsg:\n\n  part step(state: Int, msg: Int) -> Int:\n    requires msg >= 1\n    yield state + msg\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid = Actor.spawn(0)\n    match Actor.state(pid):\n      None    -> yield IO.print(0 - 1)\n      Some(s) -> yield IO.print(s)\n"
     );
     let m = parser::parse_module(&src).expect("parse");
     let err = types::check_module(m)
@@ -1389,7 +1432,7 @@ fn actor_inductive_step_contract_still_verifies_req182() {
     // — INIT holds at every spawn, `ensures result >= 0` implies the next `requires` —
     // must keep verifying, now with 2 extra INIT obligations + 1 PRESERVATION.
     let src = format!(
-        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorOk:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid1 = Actor.spawn(0)\n    let pid2 = Actor.spawn(100)\n    let _ = Actor.send(pid1, 5)\n    let s1 = Actor.state(pid1)\n    let s2 = Actor.state(pid2)\n    yield IO.print(s1 + s2)\n"
+        "depends tokio \"1.52.3\" features \"rt-multi-thread, sync\"\n\nmodule ActorOk:\n\n  part max0(x: Int) -> Int:\n    ensures result >= 0\n    match x >= 0:\n      true  -> yield x\n      false -> yield 0\n\n  part step(state: Int, msg: Int) -> Int:\n    requires state >= 0\n    ensures result >= 0\n    yield max0(state + msg)\n\n{ACTOR_182_EFFECT}\n  part main() -> Int via Actor, IO:\n    let pid1 = Actor.spawn(0)\n    let pid2 = Actor.spawn(100)\n    let _ = Actor.send(pid1, 5)\n    match Actor.state(pid1):\n      None -> yield IO.print(0 - 1)\n      Some(s1) ->\n        match Actor.state(pid2):\n          None -> yield IO.print(0 - 1)\n          Some(s2) -> yield IO.print(s1 + s2)\n"
     );
     let r = verify_src(&src);
     assert!(

@@ -1,3 +1,5 @@
+import "../std/option.lll"
+
 depends tokio "1.52.3" features "rt-multi-thread, sync"
 
 module ActorReactiveIntegrated:
@@ -9,6 +11,10 @@ module ActorReactiveIntegrated:
   # process-global). Zéro nouvelle machinerie de compilateur ici — juste le
   # câblage : après chaque message, `main()` recalcule la vue et le delta
   # depuis l'état réel de l'acteur (lu via l'effet `Actor.state`, havoc'd).
+  #
+  # DEC-LLL-080 (REQ-LLL-183) : `state` rend `Option[Int]` — un acteur mort
+  # (anti-tempête) ou un Pid inconnu est un `None` que chaque lecture DOIT
+  # traiter, jamais un 0 fabriqué en silence.
 
   type Delta = NoChange | Changed(Int)
 
@@ -39,23 +45,33 @@ module ActorReactiveIntegrated:
       false -> yield Changed(new_view)
 
   effect Actor:
-    spawn(Int) -> Int       = extern "lll_actor_runtime::spawn"
-    send(Int, Int) -> Unit  = extern "lll_actor_runtime::send"
-    state(Int) -> Int       = extern "lll_actor_runtime::state"
+    spawn(Int) -> Int          = extern "lll_actor_runtime::spawn"
+    send(Int, Int) -> Unit     = extern "lll_actor_runtime::send"
+    state(Int) -> Option[Int]  = extern "lll_actor_runtime::state"
 
   # Le driver : après CHAQUE message envoyé au VRAI runtime d'acteur (Tokio,
   # isolé, anti-tempête), on relit l'état (frontière d'effet, havoc'd), on
   # calcule la vue et le delta — exactement le pattern "compute view, diff
   # against previous, push only if changed" de LiveView, câblé au runtime réel.
+  # Chaque lecture traite l'absence (`None`) explicitement (DEC-LLL-080).
   part main() -> Int via Actor, IO:
     let pid = Actor.spawn(0)
-    let v0 = view(Actor.state(pid))
-    let _ = Actor.send(pid, 5)
-    let v1 = view(Actor.state(pid))
-    let d1 = diff(v0, v1)
-    let _ = Actor.send(pid, 3)
-    let v2 = view(Actor.state(pid))
-    let d2 = diff(v1, v2)
-    match d1:
-      Changed(x) -> yield IO.print(x)   # view(0)=0 -> view(5)=10, Changed(10)
-      NoChange   -> yield IO.print(0 - 1)
+    match Actor.state(pid):
+      None -> yield IO.print(0 - 1)
+      Some(s0) ->
+        let v0 = view(s0)
+        let _ = Actor.send(pid, 5)
+        match Actor.state(pid):
+          None -> yield IO.print(0 - 1)
+          Some(s1) ->
+            let v1 = view(s1)
+            let d1 = diff(v0, v1)
+            let _ = Actor.send(pid, 3)
+            match Actor.state(pid):
+              None -> yield IO.print(0 - 1)
+              Some(s2) ->
+                let v2 = view(s2)
+                let d2 = diff(v1, v2)
+                match d1:
+                  Changed(x) -> yield IO.print(x)   # view(0)=0 -> view(5)=10, Changed(10)
+                  NoChange   -> yield IO.print(0 - 1)
