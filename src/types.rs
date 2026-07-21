@@ -549,6 +549,68 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
         }
         records.insert(td.name.clone(), td.field_names.clone());
     }
+    // RECORD invariants (REQ-LLL-158 S3): validate the clause ONCE, at declaration.
+    // Records-only is enforced by GRAMMAR (the clause only parses on the `{…}` form);
+    // the guards below are the semantic gates: v1 keeps the clause in the SAME
+    // restricted, decidable contract fragment as `requires` (DEC-LLL-017) — QF,
+    // call-free, Bool over the fields — and monomorphic (provable at ONE concrete
+    // field sort).
+    for td in &module.types {
+        let Some(inv) = &td.invariant else { continue };
+        if td.field_names.is_empty() {
+            return Err(format!("type `{}`: `invariant` is records-only (v1)", td.name));
+        }
+        if !td.type_params.is_empty() {
+            return Err(format!(
+                "type `{}`: `invariant` on a PARAMETRIC record is not supported (v1) — the \
+                 clause must be provable at one concrete field sort (REQ-LLL-158)",
+                td.name
+            ));
+        }
+        if !quantifier_free(inv) {
+            return Err(format!(
+                "type `{}`: a `forall`/`exists` may not appear in a record `invariant` — v1 \
+                 is the QF scalar fragment; a quantified field invariant is deferred \
+                 (REQ-LLL-158 S3b)",
+                td.name
+            ));
+        }
+        let mut bad_call = false;
+        inv.walk(&mut |x| {
+            let disallowed = match x {
+                Expr::EffCall(..) => true,
+                Expr::Call(n, _) => {
+                    index.contains_key(n)
+                        || !(ctors.contains_key(n)
+                            || is_array_spec_term(n)
+                            || is_map_spec_term(n)
+                            || is_set_spec_term(n))
+                }
+                _ => false,
+            };
+            if disallowed {
+                bad_call = true;
+            }
+        });
+        if bad_call {
+            return Err(format!(
+                "type `{}`: calls are not allowed in `invariant` (v1 restricted contract \
+                 fragment, DEC-LLL-017)",
+                td.name
+            ));
+        }
+        let fields: HashMap<String, Ty> = td
+            .field_names
+            .iter()
+            .cloned()
+            .zip(td.ctors[0].1.iter().cloned())
+            .collect();
+        let t = type_of_pure(inv, &fields, None, &ctors, &records, &typarams)
+            .map_err(|e| format!("type `{}` invariant: {e}", td.name))?;
+        if t != Ty::Bool {
+            return Err(format!("type `{}`: the `invariant` clause must be Bool", td.name));
+        }
+    }
     // every `User` type mentioned in a signature must be declared AND applied at its
     // correct arity (REQ-LLL-075)
     for p in &module.parts {
@@ -617,6 +679,24 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
             }
             if op.ret != Ty::Never {
                 check_user_ty_declared(&op.ret, &typarams)?;
+            }
+            // EXTERN FENCE for record invariants (REQ-LLL-158 S3): a foreign value can
+            // never be PROVEN to satisfy a record's `invariant`, and havoc-without-assume
+            // would silently break every downstream assumption — so an `= extern` op
+            // whose signature mentions such a type ANYWHERE (directly, in a container,
+            // or nested in another ADT's fields) is HARD-rejected at check
+            // (DEC-LLL-015: fail closed, never a runtime fallback).
+            if op.extern_path.is_some() {
+                for t in op.params.iter().chain(std::iter::once(&op.ret)) {
+                    if let Some(tn) = ty_mentions_invariant_record(t, &module.types) {
+                        return Err(format!(
+                            "effect `{}` op `{}`: record `{tn}` carries an `invariant` and \
+                             cannot cross the extern boundary — a foreign value cannot be \
+                             proven to satisfy it (REQ-LLL-158, DEC-LLL-015)",
+                            ed.name, op.name
+                        ));
+                    }
+                }
             }
             // FFI resolution guard (REQ-LLL-027 gap 2): reject an `= extern` path that
             // cannot link in v1's single-file rustc build, here, instead of letting it
@@ -2993,6 +3073,44 @@ fn quantifier_position_ok(clause: &Expr) -> Result<(), String> {
             }
         }
     }
+}
+
+/// REQ-LLL-158 S3: does `t` transitively MENTION a record type carrying an
+/// `invariant`? Returns the first offending type name. Transitive through
+/// containers, tuples, functions, type arguments and ADT FIELDS (a record inside a
+/// `List` inside another ADT still crosses the extern boundary as data). Cycle-safe
+/// via the `seen` set (recursive ADTs terminate).
+fn ty_mentions_invariant_record(t: &Ty, types: &[TypeDecl]) -> Option<String> {
+    fn go(t: &Ty, types: &[TypeDecl], seen: &mut HashSet<String>) -> Option<String> {
+        match t {
+            Ty::User(n, targs) => {
+                if seen.insert(n.clone()) {
+                    if let Some(td) = types.iter().find(|td| &td.name == n) {
+                        if td.invariant.is_some() {
+                            return Some(n.clone());
+                        }
+                        for (_, fs) in &td.ctors {
+                            for f in fs {
+                                if let Some(x) = go(f, types, seen) {
+                                    return Some(x);
+                                }
+                            }
+                        }
+                    }
+                }
+                targs.iter().find_map(|a| go(a, types, seen))
+            }
+            Ty::List(e) | Ty::Array(e) | Ty::Set(e) => go(e, types, seen),
+            Ty::Map(k, v) => go(k, types, seen).or_else(|| go(v, types, seen)),
+            Ty::Fun(ps, r) => ps
+                .iter()
+                .find_map(|p| go(p, types, seen))
+                .or_else(|| go(r, types, seen)),
+            Ty::Tuple(cs) => cs.iter().find_map(|c| go(c, types, seen)),
+            _ => None,
+        }
+    }
+    go(t, types, &mut HashSet::new())
 }
 
 fn check_contracts(

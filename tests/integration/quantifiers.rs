@@ -1541,3 +1541,380 @@ fn forall_over_map_values_via_get_instantiates_at_haskey_req158() {
         "`forall k in m: get(m,k)>0` + `haskey(m,e)` must prove `get(m,e)>0`"
     );
 }
+
+// ---- REQ-LLL-158 S1: prove-side `forall` over DERIVED collections (Set/Map/callee result) ----
+// The fresh-const proof introduces a binder `i0` guarded by membership in the GOAL collection.
+// What was missing for a DERIVED collection (a `store`-chain over a param, a callee's havoc'd
+// result) was ONE ground instance of each already-GRANTED `forall` at `i0` — Z3's QF_AX decides
+// the store-chain membership itself, no membership axiom needed. A guarded ground instance of a
+// granted universal is a VALID consequence (the membership guard is RETAINED, so a mis-targeted
+// instance is inert): this extends completeness only, never soundness. Still never
+// `assert forall` (DEC-LLL-015).
+
+#[test]
+fn forall_over_derived_set_false_body_is_rejected_req158_s1() {
+    // MUST-NOT-PROVE keystone: `add(s, 5)` puts 5 in the result, and `5 > 5` is FALSE, so
+    // `forall x in result: x > 5` must be REJECTED. If the ground instantiation of the granted
+    // `forall x in s: x > 0` ever proved this, it would be asserting MORE than granted — the
+    // exact unsoundness the retained guard prevents.
+    let src = "module M:\n\n  part f(s: Set[Int]) -> Set[Int]:\n    requires forall x in s: x > 0\n    ensures forall x in result: x > 5\n    yield add(s, 5)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        !vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`forall x in result: x > 5` on `add(s, 5)` is FALSE (5 > 5) and must be rejected"
+    );
+}
+
+#[test]
+fn forall_over_derived_set_other_container_guard_is_retained_req158_s1() {
+    // A/B adverse: the result derives from `t`, but the granted `forall` is over `s`. Its
+    // ground instance at the fresh binder is `member(s, i0) => i0 > 0` — the RETAINED guard
+    // makes it inert for an element of `t`, whose values are unconstrained. Must NOT prove.
+    // If this ever verifies, an instance dropped its membership guard (real unsoundness).
+    let src = "module M:\n\n  part f(s: Set[Int], t: Set[Int]) -> Set[Int]:\n    requires forall x in s: x > 0\n    ensures forall x in result: x > 0\n    yield add(t, 5)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        !vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "an instance of the `s` forall must stay guarded by membership in `s` — a result \
+         derived from `t` must NOT inherit it"
+    );
+}
+
+#[test]
+fn forall_sort_mismatch_registered_forall_is_inert_req158_s1() {
+    // Sort fence: a granted `forall` whose binder sort (Bool, elements of `t: Set[Bool]`)
+    // differs from the prove binder sort (Int, elements of the Set[Int] result) must be
+    // SKIPPED by the sort filter — instantiating it at an Int binder would be ill-sorted SMT
+    // and Z3 would fail the whole goal, rejecting a VALID program (fail-closed). Must still
+    // PROVE with the mismatched registration present. (Two SETS on purpose: both erase to
+    // `(Maybe Unit)` values, so this isolates the SORT fence from the pre-existing bare-`none`
+    // ambiguity that appears whenever two DIFFERENT `(Maybe T)` instantiations coexist in one
+    // goal — a separate, older completeness wart.)
+    let src = "module M:\n\n  part f(s: Set[Int], t: Set[Bool]) -> Set[Int]:\n    requires forall x in s: x > 0\n    requires forall b in t: b == true\n    ensures forall x in result: x > 0\n    yield add(s, 5)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "a Bool-binder registration must be filtered out (sort fence), not poison the Int proof"
+    );
+}
+
+#[test]
+fn forall_over_derived_set_proves_req158_s1() {
+    // MUST-PROVE: result = add(s, 5); the fresh binder i0 under `member(result, i0)` splits
+    // (QF_AX) into i0 = 5 (then 5 > 0) or member(s, i0) — closed by the ground instance
+    // `member(s, i0) => i0 > 0` of the GRANTED requires-forall. The missing link was ONLY
+    // that instance.
+    let src = "module M:\n\n  part f(s: Set[Int]) -> Set[Int]:\n    requires forall x in s: x > 0\n    ensures forall x in result: x > 0\n    yield add(s, 5)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`forall x in result: x > 0` on `add(s, 5)` with `forall x in s: x > 0` granted must prove"
+    );
+}
+
+#[test]
+fn forall_over_derived_map_keys_proves_req158_s1() {
+    // MUST-PROVE (Map keys): result = insert(m, 5, 7); key binder k0 under
+    // `haskey(result, k0)` splits into k0 = 5 or haskey(m, k0), closed by the granted
+    // `forall k in m: k > 0` instance at k0.
+    let src = "module M:\n\n  part f(m: Map[Int, Int]) -> Map[Int, Int]:\n    requires forall k in m: k > 0\n    ensures forall k in result: k > 0\n    yield insert(m, 5, 7)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "`forall k in result: k > 0` on `insert(m, 5, 7)` with the m-keys forall granted must prove"
+    );
+}
+
+#[test]
+fn forall_over_callee_result_set_proves_req158_s1() {
+    // MUST-PROVE (callee result): `use_it`'s result IS the havoc'd result of `pos_set`, whose
+    // proven `forall` ensures is REGISTERED under that term (forall_ens). The prove-side fresh
+    // binder i0 is closed by the registered instance `member(r, i0) => i0 > 0`.
+    let src = "module M:\n\n  part pos_set() -> Set[Int]:\n    ensures forall x in result: x > 0\n    yield add(add(emptyset(), 3), 7)\n\n  part use_it() -> Set[Int]:\n    ensures forall x in result: x > 0\n    yield pos_set()\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    assert!(
+        vc::verify(&cm, &hm, &dir, false).expect("verify runs").ok(),
+        "a callee's proven set-forall must transfer to the caller's identical ensures"
+    );
+}
+
+// ---- REQ-LLL-158 S2: `exists` PROVE over Map/Set by GROUND witness disjunction ----
+// An UNWITNESSED `exists … in <Map/Set>` was fail-loud deferred. S2 harvests GROUND witness
+// CANDIDATES from the AST (add/insert keys of the defining collection expression, Int literals
+// of the body, in-scope names of the binder's sort — deterministic order, HARD cap 8) and
+// obliges the DISJUNCTION `⋁ guard(cᵢ) ∧ body(cᵢ)` — every disjunct keeps its DOMAIN guard, so
+// an out-of-domain candidate can never prove; obligations stay LIVE (the keystone assert is
+// shared with the T3 witness path). Still never `assert exists` (DEC-LLL-015); zero candidates
+// remains fail-loud, now suggesting `witness <t>`.
+
+#[test]
+fn exists_auto_witness_from_add_key_proves_req158_s2() {
+    // MUST-PROVE: the defining `add(s, 5)` provides candidate 5; its disjunct
+    // `member(result, 5) ∧ 5 == 5` holds by the store chain — no `witness` clause needed.
+    let (code, out, _) = check_lll_src(
+        "158-s2-auto",
+        "module M:\n\n  part f(s: Set[Int]) -> Set[Int]:\n    ensures exists x in result: x == 5\n    yield add(s, 5)\n",
+    );
+    assert_eq!(code, Some(0), "the add-key candidate must prove the existential unaided: {out}");
+}
+
+#[test]
+fn exists_auto_witness_proves_callee_requires_at_call_site_req158_s2() {
+    // MUST-PROVE (call site): the ARGUMENT expression `add(t, 5)` defines the callee's `s`;
+    // its key 5 is harvested as a candidate and discharges `exists x in s: x == 5`.
+    let (code, out, _) = check_lll_src(
+        "158-s2-callsite",
+        "module M:\n\n  part needs(s: Set[Int]) -> Int:\n    requires exists x in s: x == 5\n    yield 1\n\n  part call(t: Set[Int]) -> Int:\n    yield needs(add(t, 5))\n",
+    );
+    assert_eq!(code, Some(0), "the call-argument add-key must prove the callee's exists: {out}");
+}
+
+#[test]
+fn exists_auto_witness_out_of_domain_candidate_does_not_prove_req158_s2() {
+    // MUST-NOT-PROVE keystone: candidate `e` makes the BODY true (`e == e`) but is NOT known
+    // to be a member — the RETAINED domain guard blocks it; candidate 7 is a member but its
+    // body `7 == e` is unprovable. If this ever verifies, a disjunct dropped its domain guard
+    // (the exact unsoundness the guard exists to prevent).
+    let (code, _out, _err) = check_lll_src(
+        "158-s2-outdom",
+        "module M:\n\n  part f(s: Set[Int], e: Int) -> Set[Int]:\n    ensures exists x in result: x == e\n    yield add(s, 7)\n",
+    );
+    assert_ne!(code, Some(0), "a candidate outside the domain must NOT prove the existential");
+}
+
+#[test]
+fn exists_auto_witness_failure_suggests_witness_req158_s2() {
+    // S2.2: a failed auto-witness proof must NAME the candidates it tried and point at the
+    // `witness <t>` escape hatch — the repair loop's next move.
+    let (code, out, _err) = check_lll_src(
+        "158-s2-hint",
+        "module M:\n\n  part f(s: Set[Int], e: Int) -> Set[Int]:\n    ensures exists x in result: x == e\n    yield add(s, 7)\n",
+    );
+    assert_ne!(code, Some(0), "the out-of-domain module must fail");
+    assert!(out.contains("witness"), "the failure suggests pinning a `witness <t>`: {out}");
+    assert!(out.contains('7') && out.contains('e'), "the failure names the tried candidates: {out}");
+}
+
+#[test]
+fn exists_auto_witness_no_candidates_stays_fail_loud_req158_s2() {
+    // S2 boundary: NO harvestable candidate (no add/insert key, no Int literal in the body,
+    // no in-scope Int name) keeps the honest fail-loud deferral — never a silent skip
+    // (DEC-LLL-015) — and the message points at `witness <t>`.
+    let (code, _out, err) = check_lll_src(
+        "158-s2-none",
+        "module M:\n\n  part f(s: Set[Int]) -> Set[Int]:\n    ensures exists x in result: x == x\n    yield s\n",
+    );
+    assert_ne!(code, Some(0), "zero candidates must stay a loud deferral");
+    assert!(err.contains("witness"), "the deferral suggests `witness <t>`: {err}");
+}
+
+// ---- REQ-LLL-158 S3: RECORD invariants — `type Pos = {v: Int} invariant v > 0` ----
+// ONE quantifier-free Bool clause over the record's fields. INIT: proved at EVERY constructor
+// application. ASSUME: held wherever a value of the type enters a part (record-typed params,
+// call results) — sound by induction over INIT plus the EXTERN FENCE (a foreign value cannot
+// be proven to satisfy the clause, so an extern op mentioning the type is hard-rejected).
+// v1 keeps the clause in the same restricted fragment as `requires` (QF, call-free, records
+// only, monomorphic); the quantified-field form is deferred (S3b).
+
+#[test]
+fn record_invariant_violating_ctor_is_rejected_req158_s3() {
+    // MUST-NOT-PROVE keystone (INIT): `Pos(0)` violates `v > 0` — the construction is
+    // REJECTED. If this ever verifies, constructions are unchecked and every downstream
+    // assumption of the invariant is a lie (the exact unsoundness INIT prevents).
+    let (code, out, _) = check_lll_src(
+        "158-s3-init-bad",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk() -> Pos:\n    yield Pos(0)\n",
+    );
+    assert_ne!(code, Some(0), "a constructor violating the invariant must be rejected");
+    assert!(out.contains("invariant"), "the failure names the invariant obligation: {out}");
+}
+
+#[test]
+fn record_invariant_holds_at_construction_req158_s3() {
+    // MUST-PROVE (INIT): `Pos(5)` satisfies `v > 0`.
+    let (code, out, _) = check_lll_src(
+        "158-s3-init-ok",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk() -> Pos:\n    yield Pos(5)\n",
+    );
+    assert_eq!(code, Some(0), "a satisfying construction verifies: {out}");
+}
+
+#[test]
+fn record_invariant_symbolic_ctor_arg_needs_the_requires_req158_s3() {
+    // INIT under a symbolic argument: `Pos(n)` with `n` unconstrained must be REJECTED;
+    // adding `requires n > 0` makes the same construction prove. The obligation is real,
+    // path-sensitive, and dischargeable — not a rubber stamp.
+    let (bad, _, _) = check_lll_src(
+        "158-s3-sym-bad",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk(n: Int) -> Pos:\n    yield Pos(n)\n",
+    );
+    assert_ne!(bad, Some(0), "an unconstrained symbolic field must not prove the invariant");
+    let (ok, out, _) = check_lll_src(
+        "158-s3-sym-ok",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk(n: Int) -> Pos:\n    requires n > 0\n    yield Pos(n)\n",
+    );
+    assert_eq!(ok, Some(0), "`requires n > 0` discharges the INIT obligation: {out}");
+}
+
+#[test]
+fn record_invariant_assumed_at_use_req158_s3() {
+    // ASSUME: a part RECEIVING a `Pos` may rely on its invariant — `p.v > 0` holds with no
+    // `requires` clause (the type carries the fact).
+    let (code, out, _) = check_lll_src(
+        "158-s3-assume",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part use(p: Pos) -> Int:\n    ensures result > 0\n    yield p.v\n",
+    );
+    assert_eq!(code, Some(0), "the invariant is assumed on a record-typed param: {out}");
+}
+
+#[test]
+fn record_without_invariant_gets_no_free_fact_req158_s3() {
+    // A/B adverse (assume side): the SAME module without the `invariant` clause must NOT
+    // prove `result > 0` — the hypothesis comes from the declared invariant and nowhere
+    // else. If this ever verifies, the assumption machinery fabricates facts.
+    let (code, _, _) = check_lll_src(
+        "158-s3-noinv",
+        "module M:\n\n  type Pos = {v: Int}\n\n  part use(p: Pos) -> Int:\n    ensures result > 0\n    yield p.v\n",
+    );
+    assert_ne!(code, Some(0), "no invariant declared ⇒ no free fact about the field");
+}
+
+#[test]
+fn record_invariant_assumed_from_callee_result_req158_s3() {
+    // ASSUME (call result): a callee returning `Pos` re-establishes the invariant, so the
+    // caller derives `p.v > 0` from the type alone (mk's own INIT proof is the license).
+    let (code, out, _) = check_lll_src(
+        "158-s3-callee",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk() -> Pos:\n    yield Pos(5)\n\n  part use() -> Int:\n    ensures result > 0\n    let p = mk()\n    yield p.v\n",
+    );
+    assert_eq!(code, Some(0), "a callee-returned record carries its invariant: {out}");
+}
+
+#[test]
+fn record_invariant_extern_crossing_is_hard_rejected_req158_s3() {
+    // FFI FENCE: an `= extern` op mentioning a record WITH an invariant is HARD-rejected —
+    // a foreign value cannot be proven to satisfy the clause, and havoc-without-assume
+    // would poison every downstream assumption. The A/B control (same module, no
+    // invariant) passes, pinning the rejection on the fence itself.
+    let (code, _, err) = check_lll_src(
+        "158-s3-fence",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  effect FFI:\n    mk(Int) -> Pos = extern \"std::mk\"\n\n  part main() -> Int:\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "an invariant record crossing extern must be rejected");
+    assert!(
+        err.contains("invariant") && err.contains("extern"),
+        "the fence names the invariant and the boundary: {err}"
+    );
+    let (ctrl, out, _) = check_lll_src(
+        "158-s3-fence-ctrl",
+        "module M:\n\n  type Pos = {v: Int}\n\n  effect FFI:\n    mk(Int) -> Pos = extern \"std::mk\"\n\n  part main() -> Int:\n    yield 0\n",
+    );
+    assert_eq!(ctrl, Some(0), "the SAME module without the invariant passes (A/B): {out}");
+}
+
+#[test]
+fn record_invariant_extern_nested_mention_is_fenced_req158_s3() {
+    // FENCE transitivity: the invariant record hidden INSIDE a container (`List[Pos]`)
+    // still cannot cross — the fence walks the whole signature type, not just its head.
+    let (code, _, err) = check_lll_src(
+        "158-s3-fence-nested",
+        "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  effect FFI:\n    mk(Int) -> List[Pos] = extern \"std::mk\"\n\n  part main() -> Int:\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "a nested invariant record crossing extern must be rejected");
+    assert!(err.contains("invariant"), "the fence names the invariant: {err}");
+}
+
+#[test]
+fn record_invariant_quantified_body_is_deferred_req158_s3() {
+    // v1 boundary: a QUANTIFIED invariant body (`forall` over an Array field) is the S3b
+    // slice — rejected with a clear deferral message, never silently accepted (DEC-LLL-015).
+    let (code, _, err) = check_lll_src(
+        "158-s3-qf-only",
+        "module M:\n\n  type Sorted = {xs: List[Int]} invariant forall i in 0 .. length(xs): i >= 0\n\n  part main() -> Int:\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "a quantified invariant body is deferred, not accepted");
+    assert!(err.contains("deferred"), "the error names the deferral: {err}");
+}
+
+#[test]
+fn record_invariant_on_parametric_record_is_rejected_req158_s3() {
+    // v1 boundary: an invariant on a PARAMETRIC record has no single concrete field sort
+    // to prove at — rejected with a clear message.
+    let (code, _, err) = check_lll_src(
+        "158-s3-parametric",
+        "module M:\n\n  type Box[a] = {v: a} invariant true\n\n  part main() -> Int:\n    yield 0\n",
+    );
+    assert_ne!(code, Some(0), "an invariant on a parametric record is rejected (v1)");
+    assert!(err.contains("PARAMETRIC") || err.contains("parametric"), "clear message: {err}");
+}
+
+#[test]
+fn record_invariant_edit_flips_cached_verdict_req158_s3() {
+    // Identity/cache (DEC-LLL-020, REQ-LLL-128 pattern): strengthening the invariant must
+    // flip the verdict WITHOUT --no-cache — the clause folds into the verdict cache key
+    // (a stale "proved" hit here would be the oracle lying).
+    let dir = tempdir().join("158-s3-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let f = dir.join("m.lll");
+    let v1 = "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk() -> Pos:\n    yield Pos(5)\n";
+    let v2 = "module M:\n\n  type Pos = {v: Int} invariant v > 5\n\n  part mk() -> Pos:\n    yield Pos(5)\n";
+    std::fs::write(&f, v1).unwrap();
+    let a = std::process::Command::new(bin).arg("check").arg(&f).output().unwrap();
+    assert_eq!(a.status.code(), Some(0), "v1 verifies: {}", String::from_utf8_lossy(&a.stdout));
+    std::fs::write(&f, v2).unwrap();
+    let b = std::process::Command::new(bin).arg("check").arg(&f).output().unwrap();
+    assert_ne!(
+        b.status.code(),
+        Some(0),
+        "strengthened invariant must re-verify and FAIL, never a stale cache hit: {}",
+        String::from_utf8_lossy(&b.stdout)
+    );
+}
+
+#[test]
+fn record_invariant_module_builds_and_runs_req158_s3() {
+    // Concordance (DEC-LLL-026): the invariant is a STATIC contract — the module still
+    // builds and runs, and the runtime value agrees with the proven field fact.
+    let dir = tempdir().join("158-s3-build");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let src = "module M:\n\n  type Pos = {v: Int} invariant v > 0\n\n  part mk() -> Pos:\n    yield Pos(5)\n\n  part main() -> Int via IO:\n    let p = mk()\n    yield IO.print(p.v)\n";
+    let f = dir.join("m.lll");
+    std::fs::write(&f, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", "--no-cache", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "verifies: {}", String::from_utf8_lossy(&out.stdout));
+    let b = std::process::Command::new(bin)
+        .current_dir(&dir)
+        .args(["run", f.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(b.status.success(), "runs: {}", String::from_utf8_lossy(&b.stderr));
+    assert!(
+        String::from_utf8_lossy(&b.stdout).contains('5'),
+        "the runtime field value concords with the proof"
+    );
+}
+
+#[test]
+fn exists_auto_witness_candidate_cap_is_hard_and_deterministic_req158_s2() {
+    // The candidate cap is a HARD DoS fence: 8 add-keys (outermost first: 10..3) fill the cap,
+    // so the true witness 1 (innermost key, also the body literal) is never tried — the proof
+    // fails CLOSED, and IDENTICALLY on a re-run (candidate order is deterministic; `forall_ens`
+    // iteration order can never leak into the goal).
+    let src = "module M:\n\n  part f(s: Set[Int]) -> Set[Int]:\n    ensures exists x in result: x == 1\n    yield add(add(add(add(add(add(add(add(add(add(s, 1), 2), 3), 4), 5), 6), 7), 8), 9), 10)\n";
+    let (cm, hm) = full(src);
+    let a = vc::verify(&cm, &hm, &tempdir(), false).expect("verify runs").ok();
+    let b = vc::verify(&cm, &hm, &tempdir(), false).expect("verify runs").ok();
+    assert!(!a, "the winning candidate lies beyond the hard cap — sound rejection");
+    assert_eq!(a, b, "the capped candidate set must be deterministic across runs");
+}

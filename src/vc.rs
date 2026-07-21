@@ -22,7 +22,7 @@ use crate::ast::*;
 use crate::hash::HashedModule;
 use crate::types::{subst_tyvar, CheckedModule, Recursion};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -370,6 +370,41 @@ pub fn find_z3() -> Result<PathBuf, String> {
 /// `Emit::forall_ens` field doc for the full instantiation contract.
 type ForallEnsMap = HashMap<String, Vec<(Expr, HashMap<String, String>)>>;
 
+/// The DEFINING expression of a prove-side `exists` domain collection, with the env in
+/// which that expression (and its harvested `add`/`insert` keys) translate
+/// (REQ-LLL-158 S2): the YIELD expression for `result` at the ensures site, the matching
+/// ARGUMENT expression for a callee param at a call site (there the harvest env is the
+/// CALLER's — argument ASTs name caller variables, not callee params). Used ONLY to
+/// harvest witness candidates; the obligation itself always speaks about the domain as
+/// bound in the contract env.
+struct CollDef<'e> {
+    expr: &'e Expr,
+    env: &'e HashMap<String, String>,
+}
+
+/// The record TypeDecl carrying an `invariant`, for a MONOMORPHIC type name
+/// (REQ-LLL-158 S3). `None` for sums, invariant-free records, or unknown names —
+/// every caller then simply adds no obligation/hypothesis (the feature is opt-in
+/// per type; its absence can never weaken an existing proof).
+fn record_with_invariant<'t>(types: &'t [TypeDecl], name: &str) -> Option<&'t TypeDecl> {
+    types
+        .iter()
+        .find(|td| td.name == name && td.invariant.is_some() && !td.field_names.is_empty())
+}
+
+/// Human label for an auto-witness candidate in an obligation description
+/// (REQ-LLL-158 S2). Candidates are harvested as Int literals, in-scope names, or
+/// arbitrary `add`/`insert` key expressions — only the first two have an obvious
+/// surface spelling; anything else is labelled opaquely (the description is a repair
+/// hint, never an identity input).
+fn exists_candidate_label(e: &Expr) -> String {
+    match e {
+        Expr::IntLit(v) => v.to_string(),
+        Expr::Var(n) => n.clone(),
+        _ => "<expr>".to_string(),
+    }
+}
+
 struct Emit<'a> {
     cm: &'a CheckedModule,
     part: &'a Part,
@@ -452,6 +487,30 @@ fn setup_part_emit<'a>(
             }
         }
         env.insert(n.clone(), c);
+    }
+    // REQ-LLL-158 S3 ASSUME: a RECORD-typed parameter carries its type's `invariant`
+    // as a hypothesis over its field SELECTORS — sound because every construction
+    // proves it (INIT at each ctor application), every llmlang producer therefore
+    // re-establishes it inductively, and a foreign value can never carry the type
+    // (extern fence in the checker). Monomorphic records only (the checker rejects
+    // an invariant on a parametric record), so the declared field sorts are concrete.
+    for (n, t) in &part.params {
+        if let Ty::User(tn, targs) = t {
+            if targs.is_empty() {
+                if let Some(td) = record_with_invariant(&cm.module.types, tn) {
+                    let inv = td.invariant.as_ref().expect("guarded");
+                    let ctor = &td.ctors[0].0;
+                    let mut fenv: HashMap<String, String> = HashMap::new();
+                    for (i, fname) in td.field_names.iter().enumerate() {
+                        let sel = format!("({ctor}_{i} p_{n})");
+                        em.sorts.insert(sel.clone(), smt_ty(&td.ctors[0].1[i]));
+                        fenv.insert(fname.clone(), sel);
+                    }
+                    let h = em.tr(inv, &fenv, None)?;
+                    em.hyps.push(h);
+                }
+            }
+        }
     }
     // typeclass constraints `given Class[a]` (REQ-LLL-039, DEC-LLL-047): each
     // required method is declared as an uninterpreted function over the abstract
@@ -1311,12 +1370,71 @@ impl<'a> Emit<'a> {
         let was = self.instantiating;
         self.instantiating = true;
         for (f, eenv) in &foralls {
-            if let Expr::Forall { var, domain, body } = f {
-                let guard = self.domain_guard(domain, idx, eenv)?;
-                let mut benv = eenv.clone();
-                benv.insert(var.clone(), idx.to_string());
-                let body_s = self.tr(body, &benv, None)?;
-                self.hyps.push(format!("(=> {guard} {body_s})"));
+            self.push_forall_instance(f, eenv, idx)?;
+        }
+        self.instantiating = was;
+        Ok(())
+    }
+
+    /// Emit ONE guarded ground instance `guard(idx) => body[v := idx]` of a registered
+    /// `forall` clause as a hypothesis. The guard is RETAINED (see [`domain_guard`]) —
+    /// dropping it is the unsound direction. The CALLER manages the `instantiating`
+    /// flag (must be `true` around this call so the body's own `get`/`lookup`s add
+    /// neither an obligation nor a further instance). Shared by the per-access
+    /// instantiation ([`instantiate_forall_at`]) and the prove-side sweep
+    /// ([`instantiate_registered_foralls_at`]).
+    fn push_forall_instance(
+        &mut self,
+        f: &Expr,
+        eenv: &HashMap<String, String>,
+        idx: &str,
+    ) -> Result<(), String> {
+        if let Expr::Forall { var, domain, body } = f {
+            let guard = self.domain_guard(domain, idx, eenv)?;
+            let mut benv = eenv.clone();
+            benv.insert(var.clone(), idx.to_string());
+            let body_s = self.tr(body, &benv, None)?;
+            self.hyps.push(format!("(=> {guard} {body_s})"));
+        }
+        Ok(())
+    }
+
+    /// GROUND-INSTANTIATE every REGISTERED `forall` (all containers) at ONE concrete
+    /// index/key `idx`, filtered by binder SORT (REQ-LLL-158 S1). Called from the
+    /// prove-side fresh-const proof: the fresh binder `i0` names "any" element of the
+    /// GOAL domain, and each granted universal contributes its guarded instance
+    /// `guard(i0) => body(i0)` — a VALID consequence of an already-granted `forall`
+    /// (the membership guard is retained, so a mis-targeted instance is inert; the
+    /// trigger choice affects completeness only, never soundness). This is the one
+    /// missing link for a `forall` over a DERIVED collection (a `store`-chain over a
+    /// param, a callee's havoc'd result): Z3's QF_AX decides the store-chain
+    /// membership itself. Keys are iterated in SORTED order (`forall_ens` is a
+    /// HashMap — cache/verdict stability demands a deterministic goal). The sort
+    /// filter is HARD: a mis-sorted instance would be ill-sorted SMT and fail the
+    /// whole goal CLOSED on a valid program; an undeterminable binder sort skips the
+    /// clause (we assume less — sound). Runs under `instantiating = true`; still
+    /// never `assert forall` (DEC-LLL-015).
+    fn instantiate_registered_foralls_at(
+        &mut self,
+        idx: &str,
+        idx_sort: &str,
+    ) -> Result<(), String> {
+        let mut keys: Vec<String> = self.forall_ens.keys().cloned().collect();
+        keys.sort();
+        let was = self.instantiating;
+        self.instantiating = true;
+        for a in &keys {
+            let Some(foralls) = self.forall_ens.get(a).cloned() else {
+                continue;
+            };
+            for (f, eenv) in &foralls {
+                let Expr::Forall { domain, .. } = f else {
+                    continue;
+                };
+                if self.forall_binder_sort(domain, eenv).ok().as_deref() != Some(idx_sort) {
+                    continue;
+                }
+                self.push_forall_instance(f, eenv, idx)?;
             }
         }
         self.instantiating = was;
@@ -1367,6 +1485,7 @@ impl<'a> Emit<'a> {
     /// DEFERRED — fail LOUD (DEC-LLL-015), never a silent skip. A user-supplied `witness`
     /// (Tranche 3, handled at the top of this fn) crosses that wall soundly for EVERY domain: it
     /// needs neither search nor `assert forall`, only a GROUND `guard(w) ∧ body(w)` discharge.
+    #[allow(clippy::too_many_arguments)] // one arg per independent proof ingredient
     fn oblige_exists(
         &mut self,
         descr: &str,
@@ -1375,6 +1494,7 @@ impl<'a> Emit<'a> {
         body: &Expr,
         witness: Option<&Expr>,
         env: &HashMap<String, String>,
+        coll_def: Option<CollDef>,
     ) -> Result<(), String> {
         // REQ-LLL-089 T3 — a user-PROVIDED `witness`. Proving `∃v∈D. P(v)` with an explicit
         // term `w` for `v` becomes the discharge of a GROUND obligation `guard(w) ∧ P[v:=w]`:
@@ -1413,18 +1533,17 @@ impl<'a> Emit<'a> {
                     return Err(format!(
                         "part `{}`: {descr} — proving `exists … in <lo> .. <hi>` needs CONCRETE \
                          integer bounds; a symbolic bound is the soundness wall, deferred to \
-                         REQ-LLL-089 Tranche 2 (DEC-LLL-015)",
+                         REQ-LLL-089 Tranche 2 (DEC-LLL-015); pin a ground term with \
+                         `witness <t>` to cross it (T3)",
                         self.part.name
                     ))
                 }
             },
             ForallDomain::In(_) => {
-                return Err(format!(
-                    "part `{}`: {descr} — proving `exists … in <Map/Set>` is deferred; only an \
-                     ASSUMED existential over a collection is supported, by Skolemization \
-                     (REQ-LLL-089, DEC-LLL-015)",
-                    self.part.name
-                ))
+                // REQ-LLL-158 S2: an UNWITNESSED existential over a Map/Set is proved by a
+                // GROUND disjunction of harvested witness candidates — or stays fail-loud
+                // when none can be harvested. Never `assert exists` (DEC-LLL-015).
+                return self.oblige_exists_auto_witness(descr, var, domain, body, env, coll_def);
             }
         };
         // Empty range ⇒ the existential is vacuously FALSE (`∃x∈∅` never holds): the goal
@@ -1455,6 +1574,166 @@ impl<'a> Emit<'a> {
             format!("(or {})", disj.join(" "))
         };
         self.oblige(descr.to_string(), goal);
+        Ok(())
+    }
+
+    /// PROVE an UNWITNESSED `exists … in <Map/Set>` by a GROUND DISJUNCTION of harvested
+    /// witness candidates (REQ-LLL-158 S2) — the automatic sibling of the T3 user
+    /// `witness`. Candidates, in DETERMINISTIC order, HARD-capped at 8:
+    ///   1. `add`/`insert` KEYS of the domain collection's DEFINING expression
+    ///      ([`CollDef`]: the yield expression for `result`, the matching argument for a
+    ///      callee param — or the domain expression itself when written inline),
+    ///      outermost first;
+    ///   2. Int literals of the BODY (Int binder only), in AST walk order;
+    ///   3. in-scope names of the binder's sort, name-sorted (`env` is a HashMap — the
+    ///      goal must be deterministic for cache/verdict stability).
+    ///
+    /// Every disjunct is `guard(cᵢ) ∧ body(cᵢ)` with the DOMAIN guard RETAINED, so an
+    /// out-of-domain candidate can never prove — the same two-condition discharge as a
+    /// user witness — and the disjunction is translated with obligations LIVE
+    /// (`instantiating == false`, the keystone assert below). Proving `guard(c) ∧ P(c)`
+    /// for ANY ground `c` entails `∃x∈D. P(x)`: sound for every candidate, harvested or
+    /// not — the harvest only decides COMPLETENESS, never soundness. Zero candidates
+    /// stays the honest fail-loud deferral (DEC-LLL-015), naming the `witness <t>`
+    /// escape hatch. Never `assert exists`.
+    fn oblige_exists_auto_witness(
+        &mut self,
+        descr: &str,
+        var: &str,
+        domain: &ForallDomain,
+        body: &Expr,
+        env: &HashMap<String, String>,
+        coll_def: Option<CollDef>,
+    ) -> Result<(), String> {
+        // Same soundness keystone as the T3 witness path (see the HARD assert there):
+        // each disjunct's own `get`/`lookup` access obligations must stay LIVE.
+        assert!(
+            !self.instantiating,
+            "oblige_exists auto-witness path must run with obligations LIVE (soundness keystone)"
+        );
+        const MAX_WITNESS_CANDIDATES: usize = 8;
+        let ForallDomain::In(coll) = domain else {
+            unreachable!("auto-witness is only reachable for a Map/Set domain")
+        };
+        // 1) `add`/`insert` keys of the defining collection expression, outermost first.
+        let (mut src_expr, harvest_env) = match &coll_def {
+            Some(d) => (d.expr, d.env),
+            None => (coll.as_ref(), env),
+        };
+        let mut cands: Vec<(Expr, &HashMap<String, String>)> = Vec::new();
+        loop {
+            match src_expr {
+                Expr::Call(n, a) if n == "add" && a.len() == 2 => {
+                    cands.push((a[1].clone(), harvest_env));
+                    src_expr = &a[0];
+                }
+                Expr::Call(n, a) if n == "insert" && a.len() == 3 => {
+                    cands.push((a[1].clone(), harvest_env));
+                    src_expr = &a[0];
+                }
+                _ => break,
+            }
+        }
+        // 2) Int literals of the body (Int binder only).
+        let sort = self.forall_binder_sort(domain, env)?;
+        if sort == "Int" {
+            body.walk(&mut |x| {
+                if matches!(x, Expr::IntLit(_)) {
+                    cands.push((x.clone(), env));
+                }
+            });
+        }
+        // 3) in-scope names of the binder's sort, name-sorted.
+        let mut names: Vec<&String> = env.keys().collect();
+        names.sort();
+        for n in names {
+            let v = Expr::Var(n.clone());
+            if self.sort_of(&v, env).as_deref() == Some(sort.as_str()) {
+                cands.push((v, env));
+            }
+        }
+        // Translate, dedup on the ground term, HARD cap (DoS fence, like MAX_EXISTS_WIDTH).
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut disj: Vec<String> = Vec::new();
+        let mut labels: Vec<String> = Vec::new();
+        for (c, harv_env) in &cands {
+            if disj.len() >= MAX_WITNESS_CANDIDATES {
+                break;
+            }
+            let c_s = self.tr(c, harv_env, None)?;
+            if !seen.insert(c_s.clone()) {
+                continue;
+            }
+            let guard = self.domain_guard(domain, &c_s, env)?;
+            let mut benv = env.clone();
+            benv.insert(var.to_string(), c_s);
+            let body_s = self.tr(body, &benv, None)?;
+            disj.push(format!("(and {guard} {body_s})"));
+            labels.push(exists_candidate_label(c));
+        }
+        if disj.is_empty() {
+            return Err(format!(
+                "part `{}`: {descr} — proving `exists … in <Map/Set>` found no ground witness \
+                 candidate (no `add`/`insert` key on the collection, no Int literal in the \
+                 body, no in-scope name of the binder's sort); pin one with `witness <t>` \
+                 (REQ-LLL-158, DEC-LLL-015)",
+                self.part.name
+            ));
+        }
+        let goal = if disj.len() == 1 {
+            disj.pop().unwrap()
+        } else {
+            format!("(or {})", disj.join(" "))
+        };
+        self.oblige(
+            format!(
+                "{descr} — auto-witness disjunction over [{}]; if the true witness is missing, \
+                 pin it with `witness <t>` (REQ-LLL-158)",
+                labels.join(", ")
+            ),
+            goal,
+        );
+        Ok(())
+    }
+
+    /// PROVE a bounded `forall` obligation by FRESH-CONST universal generalization
+    /// (REQ-LLL-087): a fresh, otherwise-unconstrained binder `i0` stands for "any"
+    /// element of the domain, so proving `body(i0)` UNDER the domain guard proves it
+    /// for every element. Quantifier-free — no `assert forall` ever reaches Z3
+    /// (DEC-LLL-015). `i0` is genuinely fresh (`self.fresh`), so it is UNconstrained
+    /// beyond the guard — the soundness invariant (over-constraining it would prove
+    /// `∀` from a single witness). The guard is pushed as a HYPOTHESIS (not folded
+    /// into the goal) so the body's OWN `get(result, i0)` bounds / key-present
+    /// obligation is discharged by it — and a range that OVERRUNS the array
+    /// (`0 .. length(result)+1`) leaves that obligation unmet, a sound rejection.
+    /// The binder sort is `Int` for a range, else the Map key / Set element sort.
+    /// Scoped: the guard hypothesis is truncated after the obligation is emitted.
+    /// Shared by the two PROVE sites — a part's own `ensures` at `yield`, and a
+    /// callee's `requires` at the call site (`env` binds the callee's params to the
+    /// argument terms there, so it proves the property of the actual arguments).
+    fn prove_forall_fresh_const(
+        &mut self,
+        descr: String,
+        var: &str,
+        domain: &ForallDomain,
+        body: &Expr,
+        env: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let sort = self.forall_binder_sort(domain, env)?;
+        let i0 = self.fresh(&sort);
+        let guard = self.domain_guard(domain, &i0, env)?;
+        let mut benv = env.clone();
+        benv.insert(var.to_string(), i0.clone());
+        let saved = self.hyps.len();
+        self.hyps.push(guard);
+        // REQ-LLL-158 S1: `i0` names "any" element of the goal domain — feed the proof
+        // every GRANTED universal's guarded ground instance at `i0` (sort-filtered,
+        // guard retained: a valid consequence, scoped away with the guard below). This
+        // closes the DERIVED-collection gap (store-chain over a param / callee result).
+        self.instantiate_registered_foralls_at(&i0, &sort)?;
+        let body_s = self.tr(body, &benv, None)?;
+        self.oblige(descr, body_s);
+        self.hyps.truncate(saved);
         Ok(())
     }
 
@@ -1541,6 +1820,18 @@ impl<'a> Emit<'a> {
                 tuple_component_sorts(&s)?.get(*i).cloned()
             }
             // a call to a module part yields its declared return type's sort; a
+            // a Set/Map BUILDER preserves its base collection's sort (`add(s, e)` /
+            // `insert(m, k, v)` return the same `(Array K (Maybe V))` sort as their
+            // first argument, by typing) — this is what lets a call-site binder sort
+            // be determined for a DERIVED argument like `add(t, 5)` (REQ-LLL-158 S2).
+            // `emptyset()` / `map()` carry no element sort structurally and stay
+            // `None` (the caller fails LOUD, never guesses).
+            Expr::Call(name, args)
+                if (name == "add" && args.len() == 2)
+                    || (name == "insert" && args.len() == 3) =>
+            {
+                self.sort_of(&args[0], env)
+            }
             // CONSTRUCTOR call yields its owning user datatype (REQ-LLL-070). The ctor
             // fallback is what lets a field access on a freshly-constructed record at a
             // call-site precondition (`f(Point(1,2))` with `requires p.x > 0`) recover
@@ -1617,36 +1908,32 @@ impl<'a> Emit<'a> {
                         if let Expr::Exists { var, domain, body, witness } = ens {
                             // PROVE a bounded existential `ensures` (REQ-LLL-089). T2: finite
                             // disjunction for concrete bounds; T3: a user-supplied `witness`
-                            // discharges a GROUND `guard(w) ∧ body(w)` (any domain); else the
-                            // symbolic/Map-Set case is deferred (fail-loud). Consuming a callee's
-                            // `exists` ensures is Skolemized at the call site, independent of this
-                            // prove side.
-                            self.oblige_exists(&descr, var, domain, body, witness.as_deref(), &env2)?;
+                            // discharges a GROUND `guard(w) ∧ body(w)` (any domain); Map/Set
+                            // without a witness tries the auto-witness disjunction (REQ-LLL-158
+                            // S2, harvesting the YIELD expression when the domain is `result`);
+                            // else fail-loud deferral. Consuming a callee's `exists` ensures is
+                            // Skolemized at the call site, independent of this prove side.
+                            let coll_def = match domain {
+                                ForallDomain::In(c)
+                                    if matches!(c.as_ref(), Expr::Var(n) if n == "result") =>
+                                {
+                                    Some(CollDef { expr: e, env: &env2 })
+                                }
+                                _ => None,
+                            };
+                            self.oblige_exists(
+                                &descr,
+                                var,
+                                domain,
+                                body,
+                                witness.as_deref(),
+                                &env2,
+                                coll_def,
+                            )?;
                         } else if let Expr::Forall { var, domain, body } = ens {
                             // PROVE a bounded universal by FRESH-CONST universal
-                            // generalization (REQ-LLL-087): a fresh, otherwise-unconstrained
-                            // binder `i0` stands for "any" element of the domain, so proving
-                            // `body(i0)` UNDER the domain guard proves it for every element.
-                            // Quantifier-free — no `assert forall` ever reaches Z3
-                            // (DEC-LLL-015). `i0` is genuinely fresh (`self.fresh`), so it is
-                            // UNconstrained beyond the guard — the soundness invariant
-                            // (over-constraining it would prove `∀` from a single witness).
-                            // The guard is pushed as a HYPOTHESIS (not folded into the goal)
-                            // so the body's OWN `get(result, i0)` bounds / key-present
-                            // obligation is discharged by it — and a range that OVERRUNS the
-                            // array (`0 .. length(result)+1`) leaves that obligation unmet, a
-                            // sound rejection. The binder sort is `Int` for a range, else the
-                            // Map key / Set element sort. Scoped: truncated after this clause.
-                            let sort = self.forall_binder_sort(domain, &env2)?;
-                            let i0 = self.fresh(&sort);
-                            let guard = self.domain_guard(domain, &i0, &env2)?;
-                            let mut benv = env2.clone();
-                            benv.insert(var.clone(), i0);
-                            let saved = self.hyps.len();
-                            self.hyps.push(guard);
-                            let body_s = self.tr(body, &benv, None)?;
-                            self.oblige(descr, body_s);
-                            self.hyps.truncate(saved);
+                            // generalization (REQ-LLL-087) — see `prove_forall_fresh_const`.
+                            self.prove_forall_fresh_const(descr, var, domain, body, &env2)?;
                         } else {
                             let goal = self.tr(ens, &env2, None)?;
                             self.oblige(descr, goal);
@@ -2610,6 +2897,36 @@ impl<'a> Emit<'a> {
                     for (i, a) in args.iter().enumerate() {
                         ts.push(self.tr(a, env, fields.get(i))?);
                     }
+                    // REQ-LLL-158 S3 INIT: a record's `invariant` is PROVED at EVERY
+                    // construction — the induction base licensing its assumption at every
+                    // typed occurrence (params, call results). Skipped while STATING an
+                    // already-proven fact (`instantiating`), the same discipline as the
+                    // access obligations. The field env binds each FIELD NAME to its
+                    // argument term; declared field sorts are recorded so a spec term in
+                    // the clause (e.g. `length`) dispatches correctly.
+                    if !self.instantiating {
+                        let cmref = self.cm;
+                        if let Some(td) = record_with_invariant(&cmref.module.types, &owner) {
+                            let inv = td.invariant.as_ref().expect("guarded");
+                            let mut fenv: HashMap<String, String> = HashMap::new();
+                            for (i, fname) in td.field_names.iter().enumerate() {
+                                let t = ts.get(i).cloned().ok_or_else(|| {
+                                    format!(
+                                        "vcgen: record `{owner}` constructed with too few fields"
+                                    )
+                                })?;
+                                if let Some(ft) = td.ctors[0].1.get(i) {
+                                    self.sorts.entry(t.clone()).or_insert_with(|| smt_ty(ft));
+                                }
+                                fenv.insert(fname.clone(), t);
+                            }
+                            let goal = self.tr(inv, &fenv, None)?;
+                            self.oblige(
+                                format!("invariant of record `{owner}` holds at construction"),
+                                goal,
+                            );
+                        }
+                    }
                     // the constructed value's sort: prefer the CONCRETE instantiation
                     // fixed by context (`Some(5)` in an `Option[Int]` position →
                     // `(Option Int)`, not the sort-incomplete `Option`) so a sibling bare
@@ -2715,30 +3032,38 @@ impl<'a> Emit<'a> {
                     if let Expr::Exists { var, domain, body, witness } = req {
                         // PROVE a quantified `exists` requires at the call site (REQ-LLL-089).
                         // T2: finite disjunction for concrete bounds; T3: a user-supplied
-                        // `witness` discharges a GROUND `guard(w) ∧ body(w)` (any domain); else
-                        // the symbolic/Map-Set case is deferred (fail-loud). `cenv` binds the
-                        // callee's params to the ARGUMENTS, so the witness (written over the
-                        // callee's params) is evaluated at the actual argument terms.
-                        self.oblige_exists(&descr, var, domain, body, witness.as_deref(), &cenv)?;
+                        // `witness` discharges a GROUND `guard(w) ∧ body(w)` (any domain);
+                        // Map/Set without a witness tries the auto-witness disjunction
+                        // (REQ-LLL-158 S2, harvesting the ARGUMENT expression bound to the
+                        // domain param — argument ASTs name CALLER variables, so they harvest
+                        // under the caller `env`, while the obligation itself runs under
+                        // `cenv`, which binds the callee's params to the argument terms).
+                        let coll_def = match domain {
+                            ForallDomain::In(c) => match c.as_ref() {
+                                Expr::Var(n) => callee
+                                    .params
+                                    .iter()
+                                    .position(|(pn, _)| pn == n)
+                                    .and_then(|i| args.get(i))
+                                    .map(|a| CollDef { expr: a, env }),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        self.oblige_exists(
+                            &descr,
+                            var,
+                            domain,
+                            body,
+                            witness.as_deref(),
+                            &cenv,
+                            coll_def,
+                        )?;
                     } else if let Expr::Forall { var, domain, body } = req {
                         // PROVE a quantified `requires` by FRESH-CONST universal
                         // generalization — the SAME sound encoding as a quantified `ensures`
-                        // proof (REQ-LLL-087 A1/A2). A fresh, otherwise-unconstrained `i0`
-                        // stands for "any" element of the domain; the guard is pushed as a
-                        // scoped HYPOTHESIS (not folded into the goal) so the body's own
-                        // `get`/`lookup` obligation is discharged by it. `cenv` binds the
-                        // callee's params to the ARGUMENT terms, so this proves the property
-                        // of the actual arguments. Never `assert forall` (DEC-LLL-015).
-                        let sort = self.forall_binder_sort(domain, &cenv)?;
-                        let i0 = self.fresh(&sort);
-                        let guard = self.domain_guard(domain, &i0, &cenv)?;
-                        let mut benv = cenv.clone();
-                        benv.insert(var.clone(), i0);
-                        let saved = self.hyps.len();
-                        self.hyps.push(guard);
-                        let body_s = self.tr(body, &benv, None)?;
-                        self.oblige(descr, body_s);
-                        self.hyps.truncate(saved);
+                        // proof (REQ-LLL-087 A1/A2); see `prove_forall_fresh_const`.
+                        self.prove_forall_fresh_const(descr, var, domain, body, &cenv)?;
                     } else {
                         let goal = self.tr_contract(req, &cenv)?;
                         self.oblige(descr, goal);
@@ -2857,6 +3182,27 @@ impl<'a> Emit<'a> {
                     } else {
                         let a = self.tr_contract(&ens, &eenv)?;
                         self.hyps.push(a);
+                    }
+                }
+                // REQ-LLL-158 S3 ASSUME: a callee returning a RECORD with an `invariant`
+                // re-establishes it — every construction inside llmlang code is proven at
+                // INIT and foreign entry is fenced — so the havoc'd result carries the
+                // invariant over its field selectors, exactly like a record-typed param.
+                if let Ty::User(tn, targs) = &callee.ret {
+                    if targs.is_empty() {
+                        let cmref = self.cm;
+                        if let Some(td) = record_with_invariant(&cmref.module.types, tn) {
+                            let inv = td.invariant.as_ref().expect("guarded");
+                            let ctor = &td.ctors[0].0;
+                            let mut fenv: HashMap<String, String> = HashMap::new();
+                            for (i, fname) in td.field_names.iter().enumerate() {
+                                let sel = format!("({ctor}_{i} {r})");
+                                self.sorts.insert(sel.clone(), smt_ty(&td.ctors[0].1[i]));
+                                fenv.insert(fname.clone(), sel);
+                            }
+                            let h = self.tr(inv, &fenv, None)?;
+                            self.hyps.push(h);
+                        }
                     }
                 }
                 r

@@ -634,6 +634,17 @@ impl Parser {
                 }
             }
             self.eat(Tok::RBrace)?;
+            // optional RECORD invariant `… invariant <expr>` (REQ-LLL-158 S3): one Bool
+            // clause over the field names, records-only by GRAMMAR (a sum type never
+            // reaches this branch). `invariant` is a CONTEXTUAL keyword (like `extern`) —
+            // no new lexer token, so existing sources and the fmt token-stream identity
+            // guard are untouched.
+            let invariant = if matches!(self.peek(), Tok::Ident(k) if k == "invariant") {
+                self.pos += 1;
+                Some(self.expr()?)
+            } else {
+                None
+            };
             self.eat(Tok::Newline)?;
             if field_names.is_empty() {
                 return Err(self.err("record type must declare at least one field"));
@@ -644,6 +655,7 @@ impl Parser {
                 type_params,
                 ctors: vec![(ctor, fields)],
                 field_names,
+                invariant,
             });
         }
         let mut ctors = Vec::new();
@@ -669,7 +681,7 @@ impl Parser {
             }
         }
         self.eat(Tok::Newline)?;
-        Ok(TypeDecl { name, type_params, ctors, field_names: Vec::new() })
+        Ok(TypeDecl { name, type_params, ctors, field_names: Vec::new(), invariant: None })
     }
 
     /// `effect Name:` + one `op(T, …) -> Ret` per indented line (REQ-LLL-018).

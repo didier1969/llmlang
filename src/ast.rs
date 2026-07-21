@@ -180,7 +180,7 @@ pub struct ForeignSig {
 /// A user algebraic data type `type Name = C1(T…) | C2 | …` (REQ-LLL-011).
 /// A single-constructor type is a record (product); many constructors form a
 /// sum. A field of the type's own name makes it recursive (e.g. a tree).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypeDecl {
     pub name: String,
     /// parametric type parameters `type Option[a] = …` (REQ-LLL-068). Empty for a
@@ -199,6 +199,18 @@ pub struct TypeDecl {
     /// captured automatically by the text-based type-block hash (DEC-LLL-020).
     #[serde(default)]
     pub field_names: Vec<String>,
+    /// RECORD invariant (REQ-LLL-158 S3): ONE quantifier-free Bool clause over the
+    /// record's FIELD NAMES — `type Pos = {v: Int} invariant v > 0`. Records-only,
+    /// non-parametric, call-free (the same restricted contract fragment as
+    /// `requires`). Semantics: proved at EVERY constructor application (INIT),
+    /// ASSUMED wherever a value of the type enters a part (params, call results),
+    /// and a HARD FENCE at the extern boundary — a foreign value cannot be proven
+    /// to satisfy it, so an extern op mentioning the type is rejected at check
+    /// (DEC-LLL-015: never havoc-without-assume). Identity: the clause lives in
+    /// the type's source text (DEC-LLL-020) and folds into the verdict cache key
+    /// (the `Debug` fold of `module.types` in `vc::cache_key`).
+    #[serde(default)]
+    pub invariant: Option<Expr>,
 }
 
 /// A typeclass `class Eq[a]:` with required method signatures and laws
