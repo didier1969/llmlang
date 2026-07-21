@@ -132,7 +132,7 @@ pub fn audit_repl(ctx: &AuditCtx) -> Result<(), String> {
             ["deps", part] => match find_part(ctx.cm, part) {
                 Some(p) => {
                     let mut names = Vec::new();
-                    crate::hash_deps(&p.body, &mut names);
+                    crate::hash_deps(p, &mut names);
                     names.sort();
                     names.dedup();
                     let mut any = false;

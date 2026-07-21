@@ -373,7 +373,7 @@ fn export_ist(file: &str) -> Result<String, String> {
             },
         }));
         let mut deps: Vec<String> = Vec::new();
-        hash_deps(&p.body, &mut deps);
+        hash_deps(p, &mut deps);
         deps.sort();
         deps.dedup();
         for callee in deps {
@@ -502,9 +502,9 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             }
             let file = file.ok_or_else(usage)?;
             // REQ-LLL-155: reproducibility gate — every resolved module AND every
-            // [[package]] pin must match lll.lock (loader::pkg::verify_lock).
+            // [[package]] pin must match lll.lock (pkg::verify_lock).
             if locked {
-                loader::pkg::verify_lock(file)?;
+                pkg::verify_lock(file)?;
             }
             if json {
                 // LLM channel: structured diagnostics on stdout. The exit-code MIRRORS the
@@ -592,9 +592,13 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         ["build", rest @ ..] => {
-            // Overflow policy: the verifier reasons over mathematical Int; the
-            // runtime uses i64. DEFAULT = fail-stop (-C overflow-checks=on): a
-            // proven contract either holds or the program traps — it is never
+            // Overflow policy: the verifier reasons over mathematical Int, and since
+            // DEC-LLL-077 the runtime AGREES — `Int` compiles to `LllInt` (exact,
+            // unbounded ℤ; i64 fast path promoting to the heap via explicit checked
+            // ops), so proved arithmetic can no longer wrap. DEFAULT still ships
+            // fail-stop (-C overflow-checks=on) as a BACKSTOP for the residual
+            // machine-integer arithmetic in the generated program (glue, FFI edges):
+            // a proven contract either holds or the program traps — it is never
             // silently violated by wrap-around (DEC-LLL-015: no silent
             // downgrade). `--unchecked` opts out for measured hot kernels.
             // flags in any order: --unchecked (overflow policy), --no-opt (skip the
@@ -871,7 +875,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             // resolved module (portable keys: `<pkg:name>/…`, `<std>/…` — never a
             // machine-absolute path) plus one [[package]] pin (name/version/source/
             // blake3) per [dependencies] package. `lll check <f> --locked` verifies it.
-            let (lock_path, n_mod, n_pkg) = loader::pkg::write_lock(file)?;
+            let (lock_path, n_mod, n_pkg) = pkg::write_lock(file)?;
             println!(
                 "✔ locked {n_mod} module(s), {n_pkg} package(s) → {}",
                 lock_path.display()
@@ -883,7 +887,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             // [dependencies] source (rev-pinned, transitively) into the content-
             // addressed store `lll/store/<blake3(url#rev)>/` via a git shell-out.
             // `check`/`build` resolve from the store and NEVER touch the network.
-            let (fetched, store) = loader::pkg::fetch(file)?;
+            let (fetched, store) = pkg::fetch(file)?;
             if fetched.is_empty() {
                 println!("✔ nothing to fetch — every [dependencies] package is already materialized");
             } else {

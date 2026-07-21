@@ -17,13 +17,6 @@ use crate::parser;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// The package subsystem (REQ-LLL-155 wave A: `[dependencies]` path+git sources,
-/// content-addressed store, lockfile pins). It lives in `src/pkg.rs` and is wired
-/// through THIS module — the loader is its single compiler-side consumer (packages
-/// are import roots, nothing more; zero soundness surface past the front-end).
-#[path = "pkg.rs"]
-pub mod pkg;
-
 /// The project `lll.toml` manifest (REQ-LLL-149). It maps a dotted-import root
 /// segment to a directory RELATIVE to the manifest, so `import std.list` with
 /// `std = "vendor/std"` resolves to `<manifest dir>/vendor/std/list.lll`. Roots are
@@ -67,7 +60,7 @@ fn build_resolver(entry: &Path) -> Result<Resolver, String> {
         None => None,
     };
     let packages: HashMap<String, PathBuf> = match &manifest_path {
-        Some(mp) => pkg::packages_for_manifest(mp)?
+        Some(mp) => crate::pkg::packages_for_manifest(mp)?
             .into_iter()
             .map(|(name, p)| (name, p.dir))
             .collect(),

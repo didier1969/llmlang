@@ -25,46 +25,64 @@ pub mod mcp;
 pub mod opsem;
 pub mod optimize;
 pub mod parser;
+/// The package subsystem (REQ-LLL-155 wave A: `[dependencies]` path+git sources,
+/// content-addressed store, lockfile pins). The loader is its single
+/// compiler-side consumer — packages are import roots, nothing more; zero
+/// soundness surface past the front-end.
+pub mod pkg;
 pub mod refactor;
 pub mod spec_expand;
 pub mod synth;
 pub mod types;
 pub mod vc;
 
-use ast::{Expr, Stmt};
+use ast::{Expr, Part, Stmt};
 
-/// Collect names of parts called anywhere in a body (shared by hash/vc/audit).
-pub fn hash_deps(body: &[Stmt], out: &mut Vec<String>) {
+/// Collect names of parts called anywhere in a `part` (shared by hash/vc/audit
+/// surfaces): the body AND the `example` clauses. Examples are a contractual
+/// channel that MAY contain calls (REQ-LLL-049) and fold into the def-hash, so
+/// a dependency carried only by an example is a real dependency (REQ-LLL-186 —
+/// display-side mirror of the `hash.rs::collect_dep_names` ordering fix).
+pub fn hash_deps(part: &Part, out: &mut Vec<String>) {
+    hash_deps_body(&part.body, out);
+    for ex in &part.examples {
+        collect_calls(ex, out);
+    }
+}
+
+/// The body-level walker behind [`hash_deps`] (recursive over nested bodies).
+fn hash_deps_body(body: &[Stmt], out: &mut Vec<String>) {
     for s in body {
         match s {
-            Stmt::Let(_, e) | Stmt::Yield(e) => collect(e, out),
+            Stmt::Let(_, e) | Stmt::Yield(e) => collect_calls(e, out),
             Stmt::Match(e, arms) => {
-                collect(e, out);
+                collect_calls(e, out);
                 for a in arms {
                     if let Some(g) = &a.guard {
-                        collect(g, out);
+                        collect_calls(g, out);
                     }
-                    hash_deps(&a.body, out);
+                    hash_deps_body(&a.body, out);
                 }
             }
             Stmt::Handle(h) => {
-                collect(&h.call, out);
+                collect_calls(&h.call, out);
                 if let Some(f) = &h.from {
-                    collect(f, out);
+                    collect_calls(f, out);
                 }
                 for c in &h.clauses {
-                    hash_deps(&c.body, out);
+                    hash_deps_body(&c.body, out);
                 }
             }
         }
     }
-    fn collect(e: &Expr, out: &mut Vec<String>) {
-        e.walk(&mut |x| {
-            if let Expr::Call(n, _) = x {
-                out.push(n.clone());
-            }
-        });
-    }
+}
+
+fn collect_calls(e: &Expr, out: &mut Vec<String>) {
+    e.walk(&mut |x| {
+        if let Expr::Call(n, _) = x {
+            out.push(n.clone());
+        }
+    });
 }
 
 /// McCabe cyclomatic complexity of a `part` body (REQ-LLL-172): base 1 plus one

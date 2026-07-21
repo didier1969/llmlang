@@ -58,9 +58,10 @@ pub fn edit_context(src: &str, cm: &CheckedModule, part: &str) -> Result<EditCon
     let (part_source, _) = extract_part_block(src, part)
         .ok_or_else(|| format!("could not locate the source of `{part}` in this file"))?;
 
-    // Direct callees (Expr::Call targets) that are genuine parts, minus self.
+    // Direct callees (Expr::Call targets, body AND `example` clauses — REQ-LLL-186)
+    // that are genuine parts, minus self.
     let mut callees = Vec::new();
-    crate::hash_deps(&cm.module.parts[idx].body, &mut callees);
+    crate::hash_deps(&cm.module.parts[idx], &mut callees);
     callees.retain(|d| cm.index.contains_key(d) && d != part);
     callees.sort();
     callees.dedup();

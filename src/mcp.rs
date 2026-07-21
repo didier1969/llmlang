@@ -172,7 +172,7 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
                 s.push_str(&format!("  measure  {m:?}\n"));
             }
             let mut deps = Vec::new();
-            crate::hash_deps(&p.body, &mut deps);
+            crate::hash_deps(p, &mut deps);
             deps.sort();
             deps.dedup();
             for d in deps {
