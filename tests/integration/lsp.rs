@@ -24,6 +24,37 @@ fn did_open(uri: &str, text: &str) -> Value {
     })
 }
 
+fn did_change(uri: &str, version: u64, text: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": version },
+            "contentChanges": [ { "text": text } ]
+        }
+    })
+}
+
+/// Spawn the real `lll lsp`, feed it the whole framed `input`, and return the framed
+/// messages it wrote to stdout (asserting a clean exit).
+fn run_lsp(input: &str) -> Vec<Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lll"))
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn lll lsp");
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let out = child.wait_with_output().expect("wait lll lsp");
+    assert!(
+        out.status.success(),
+        "lll lsp exited with failure:\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    parse_frames(&out.stdout)
+}
+
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
@@ -58,6 +89,18 @@ fn publish_for<'a>(frames: &'a [Value], uri: &str) -> Option<&'a Value> {
     frames.iter().find(|m| {
         m["method"] == json!("textDocument/publishDiagnostics") && m["params"]["uri"] == json!(uri)
     })
+}
+
+/// EVERY `publishDiagnostics` for `uri`, in wire order (the live loop publishes on
+/// each fully-handled change — the LAST one is the current verdict).
+fn publishes_for<'a>(frames: &'a [Value], uri: &str) -> Vec<&'a Value> {
+    frames
+        .iter()
+        .filter(|m| {
+            m["method"] == json!("textDocument/publishDiagnostics")
+                && m["params"]["uri"] == json!(uri)
+        })
+        .collect()
 }
 
 /// Byte offset of a 0-based (line, char) position in `text` (char-indexed within
@@ -301,4 +344,184 @@ fn lsp_code_action_fills_hole_with_verified_completion_req161() {
     let patched = format!("{}{}{}", &src[..at], edit["newText"].as_str().unwrap(), &src[end..]);
     let (code, so, se) = check_lll_src("req161-hole-filled", &patched);
     assert_eq!(code, Some(0), "the filled module must verify:\npatched:\n{patched}\nstdout:{so}\nstderr:{se}");
+}
+
+// ===================================================================
+// REQ-LLL-160 — the LIVE loop: coalescing, session memo, hover, agent
+// channel. E2E over the real wire (reader thread → drain/debounce →
+// coalesce → real checker → publish), not the pure unit harness.
+// ===================================================================
+
+#[test]
+fn lsp_burst_of_did_changes_publishes_the_last_text_req160() {
+    // A rafale of 3 didChange: whatever the batching timing, the FINAL publish must
+    // reflect the LAST text (last-wins). v0..v2 fail their `ensures`; v3 proves —
+    // so a stale check of any earlier text would leave a non-empty final publish.
+    let dir = tempdir();
+    let uri = format!("file://{}/live.lll", dir.display());
+    let v0 = "module Live:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x\n";
+    let v1 = "module Live:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x - 1\n";
+    let v2 = "module Live:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x - 2\n";
+    let v3 = "module Live:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x + 1\n";
+
+    let mut input = String::new();
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
+    input.push_str(&frame(&did_open(&uri, v0)));
+    input.push_str(&frame(&did_change(&uri, 2, v1)));
+    input.push_str(&frame(&did_change(&uri, 3, v2)));
+    input.push_str(&frame(&did_change(&uri, 4, v3)));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":2,"method":"shutdown"})));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
+    let frames = run_lsp(&input);
+
+    let pubs = publishes_for(&frames, &uri);
+    assert!(!pubs.is_empty(), "the burst must publish at least once");
+    let last = pubs.last().unwrap();
+    assert_eq!(
+        last["params"]["diagnostics"].as_array().unwrap().len(),
+        0,
+        "the FINAL publish must be for the LAST text (v3 proves): {last}"
+    );
+    // the didOpen text (v0, failing) was fully handled — its publish is non-empty.
+    assert!(
+        !pubs[0]["params"]["diagnostics"].as_array().unwrap().is_empty(),
+        "the opened text fails and must have published its diagnostic"
+    );
+    // lifecycle preserved through the batching: shutdown is still acknowledged.
+    let sd = frames.iter().find(|m| m["id"] == json!(2)).expect("no shutdown response");
+    assert_eq!(sd["result"], json!(null));
+}
+
+#[test]
+fn lsp_failure_persists_when_editing_another_part_req160() {
+    // Anti-staleness through the SESSION MEMO (T1): `bad` fails; the edit touches
+    // ONLY `good`. On the re-check, `bad` is a disk-cache miss (proofs.json is
+    // proved-only) answered from the session memo — and its diagnostic must PERSIST
+    // verbatim in the new publish, never silently vanish or go stale.
+    let dir = tempdir();
+    let uri = format!("file://{}/memo.lll", dir.display());
+    let v1 = "module Memo:\n\n  part bad(x: Int) -> Int:\n    ensures result > x\n    yield x\n\n  part good(y: Int) -> Int:\n    yield y\n";
+    let v2 = "module Memo:\n\n  part bad(x: Int) -> Int:\n    ensures result > x\n    yield x\n\n  part good(y: Int) -> Int:\n    yield y + 1\n";
+
+    let mut input = String::new();
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
+    input.push_str(&frame(&did_open(&uri, v1)));
+    input.push_str(&frame(&did_change(&uri, 2, v2)));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":2,"method":"shutdown"})));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
+    let frames = run_lsp(&input);
+
+    let pubs = publishes_for(&frames, &uri);
+    assert!(pubs.len() >= 2, "didOpen and the didChange must each publish: {}", pubs.len());
+    for (which, p) in [("open", pubs[0]), ("re-check", *pubs.last().unwrap())] {
+        let diags = p["params"]["diagnostics"].as_array().unwrap();
+        let bad = diags
+            .iter()
+            .find(|d| d["data"]["part"] == json!("bad"))
+            .unwrap_or_else(|| panic!("`bad`'s failure missing after {which}: {p}"));
+        assert_eq!(bad["severity"], json!(1));
+        assert!(
+            !bad["data"]["counterexample"].as_array().unwrap().is_empty(),
+            "the decoded counterexample must persist through the memo path ({which})"
+        );
+    }
+}
+
+#[test]
+fn lsp_hover_on_dep_call_shows_contract_verbatim_req160() {
+    // T3: hovering a dep CALL serves the dep's contract VERBATIM (signature +
+    // requires/ensures, body withheld — the firewall, DEC-LLL-021/020).
+    let dir = tempdir();
+    let uri = format!("file://{}/hov.lll", dir.display());
+    let src = "module Hov:\n\n  part helper(a: Int) -> Int:\n    requires a >= 0\n    ensures result >= a\n    yield a + 1\n\n  part f(x: Int) -> Int:\n    requires x >= 0\n    yield helper(x)\n";
+
+    let mut input = String::new();
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
+    input.push_str(&frame(&did_open(&uri, src)));
+    // `    yield helper(x)` is line index 9; char 12 sits inside `helper`.
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":4,"method":"textDocument/hover","params":{
+        "textDocument": { "uri": uri }, "position": { "line": 9, "character": 12 }}})));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
+    let frames = run_lsp(&input);
+
+    let init = frames.iter().find(|m| m["id"] == json!(1)).expect("no initialize response");
+    assert_eq!(init["result"]["capabilities"]["hoverProvider"], json!(true));
+    let hov = frames.iter().find(|m| m["id"] == json!(4)).expect("no hover response");
+    let v = hov["result"]["contents"]["value"].as_str().expect("markdown hover contents");
+    assert!(v.contains("part helper(a: Int) -> Int:"), "signature verbatim: {v}");
+    assert!(v.contains("requires a >= 0"), "requires verbatim: {v}");
+    assert!(v.contains("ensures result >= a"), "ensures verbatim: {v}");
+    assert!(!v.contains("yield a + 1"), "the BODY is withheld — contract only: {v}");
+}
+
+#[test]
+fn lsp_edit_context_serves_live_deps_and_contracts_req160() {
+    // T4: the agent channel `lll/editContext` returns `lll context --format=json`
+    // for the LIVE buffer (loader + checker only, no Z3): the part's own source and
+    // its deps' CONTRACTS. An unknown part is JSON-RPC -32602.
+    let dir = tempdir();
+    let uri = format!("file://{}/ctx.lll", dir.display());
+    let src = "module Ctx:\n\n  part helper(a: Int) -> Int:\n    requires a >= 0\n    ensures result >= a\n    yield a + 1\n\n  part f(x: Int) -> Int:\n    requires x >= 0\n    yield helper(x)\n";
+
+    let mut input = String::new();
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})));
+    input.push_str(&frame(&did_open(&uri, src)));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":4,"method":"lll/editContext","params":{
+        "textDocument": { "uri": uri }, "part": "f"}})));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","id":5,"method":"lll/editContext","params":{
+        "textDocument": { "uri": uri }, "part": "nope"}})));
+    input.push_str(&frame(&json!({"jsonrpc":"2.0","method":"exit"})));
+    let frames = run_lsp(&input);
+
+    let init = frames.iter().find(|m| m["id"] == json!(1)).expect("no initialize response");
+    assert_eq!(init["result"]["capabilities"]["experimental"]["lll"]["editContext"], json!(true));
+
+    let ok = frames.iter().find(|m| m["id"] == json!(4)).expect("no editContext response");
+    let ctx = &ok["result"];
+    assert_eq!(ctx["part"], json!("f"));
+    assert!(
+        ctx["part_source"].as_str().unwrap().contains("yield helper(x)"),
+        "the part's own source is served: {ctx}"
+    );
+    let deps = ctx["deps"].as_array().expect("deps array");
+    let helper = deps
+        .iter()
+        .find(|d| d["name"] == json!("helper"))
+        .expect("`helper` is a direct dep of `f`");
+    let contract = helper["contract"].as_str().unwrap();
+    assert!(contract.contains("requires a >= 0"), "dep contract verbatim: {contract}");
+    assert!(contract.contains("ensures result >= a"), "dep contract verbatim: {contract}");
+    assert!(!contract.contains("yield a + 1"), "dep BODY withheld (firewall): {contract}");
+
+    let bad = frames.iter().find(|m| m["id"] == json!(5)).expect("no error response");
+    assert_eq!(bad["error"]["code"], json!(-32602), "unknown part → InvalidParams: {bad}");
+}
+
+#[test]
+fn discharge_memo_answers_reruns_without_z3_req160() {
+    // T1, surgically: verify a FAILING module with a session memo, MARK the memoised
+    // failure with a sentinel, re-verify with the same memo — the sentinel coming
+    // back proves the second run was answered from the memo (Z3 would have derived
+    // the real descr), and that failures persist VERBATIM. The DISK cache is
+    // untouched here (use_cache=false), isolating the memo path.
+    use super::prelude::{failures, full, vc};
+    let (cm, hm) =
+        full("module M:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x\n");
+    let dir = tempdir();
+    let mut memo = vc::DischargeMemo::new();
+    let r1 = vc::verify_session(&cm, &hm, &dir, false, Some(&mut memo)).expect("verify #1");
+    assert!(!r1.ok(), "the module must fail");
+    let key = memo
+        .iter()
+        .find(|(_, v)| !v.is_empty())
+        .map(|(k, _)| k.clone())
+        .expect("the failed obligation set must be memoised");
+    memo.get_mut(&key).unwrap()[0].descr = "MEMO-SENTINEL".to_string();
+    let r2 = vc::verify_session(&cm, &hm, &dir, false, Some(&mut memo)).expect("verify #2");
+    let f2 = failures(&r2);
+    assert!(
+        f2.iter().any(|f| f.descr == "MEMO-SENTINEL"),
+        "run #2 must be answered from the session memo, verbatim — got descrs {:?}",
+        f2.iter().map(|f| f.descr.clone()).collect::<Vec<_>>()
+    );
 }

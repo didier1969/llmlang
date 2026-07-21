@@ -81,6 +81,21 @@ pub struct FailedObligation {
     pub goal: String,
 }
 
+/// Session-scoped discharge memo (REQ-LLL-160 live loop): memo-key → the obligation
+/// set's outcome (empty = proved; non-empty = the recorded failures). Unlike the DISK
+/// cache (`proofs.json`, proved-only — DEC-LLL-025 unchanged), this in-memory memo also
+/// remembers FAILURES, so a long-running server re-checking after an edit of an
+/// UNRELATED part republishes the SAME failures without re-running Z3 — the diagnostic
+/// persists verbatim, never goes stale-silent. `unknown`/`timeout` outcomes are NEVER
+/// stored (they re-run — no sticky unknown). Keyed by [`memo_key`] over what Z3
+/// actually sees, so any change to the obligations misses cleanly.
+pub type DischargeMemo = HashMap<String, Vec<FailedObligation>>;
+
+/// Beyond this many entries the session memo is CLEARED (simple, bounded — a live LSP
+/// session rarely accumulates this many distinct obligation sets; a clear only costs
+/// re-proving, never soundness).
+const MEMO_CAP: usize = 4096;
+
 pub struct VerifyReport {
     pub parts: Vec<(String, PartVerdict)>,
 }
@@ -107,6 +122,24 @@ pub fn verify(
     hm: &HashedModule,
     cache_dir: &Path,
     use_cache: bool,
+) -> Result<VerifyReport, String> {
+    // One-shot callers (check/build/test) pass no session memo — behaviour is
+    // bit-identical to the pre-memo `verify` (REQ-LLL-160 T1).
+    verify_session(cm, hm, cache_dir, use_cache, None)
+}
+
+/// [`verify`] with an optional SESSION discharge memo (REQ-LLL-160 live loop): a
+/// long-running server passes `Some(&mut memo)` so an obligation set already sent to
+/// Z3 in THIS session — proved OR failed — is answered from memory. The memo is
+/// consulted at BOTH discharge sites (cache-miss parts and instance laws), keyed
+/// AFTER obligation generation over exactly what Z3 would see. The DISK cache
+/// (`proofs.json`) stays proved-only (DEC-LLL-025 unchanged).
+pub fn verify_session(
+    cm: &CheckedModule,
+    hm: &HashedModule,
+    cache_dir: &Path,
+    use_cache: bool,
+    mut memo: Option<&mut DischargeMemo>,
 ) -> Result<VerifyReport, String> {
     let z3 = find_z3()?;
     // user-ADT datatype declarations (REQ-LLL-011) — module-global, prepended to
@@ -149,7 +182,7 @@ pub fn verify(
         obligations.extend(gen_part_example_obligations(cm, part)?);
         let n = obligations.len();
         let t0 = std::time::Instant::now();
-        let failures = discharge(&z3, &obligations, &dt_decls)?;
+        let failures = discharge_memoised(&z3, &obligations, &dt_decls, &mut memo)?;
         let time_ms = t0.elapsed().as_millis();
         if failures.is_empty() {
             cache.insert(
@@ -184,7 +217,7 @@ pub fn verify(
         let name = format!("instance {}[{}]", inst.class, inst.ty);
         let n = obligations.len();
         let t0 = std::time::Instant::now();
-        let failures = discharge(&z3, &obligations, &dt_decls)?;
+        let failures = discharge_memoised(&z3, &obligations, &dt_decls, &mut memo)?;
         let time_ms = t0.elapsed().as_millis();
         if failures.is_empty() {
             parts.push((name, PartVerdict::Proved { obligations: n, time_ms }));
@@ -236,6 +269,68 @@ pub fn cache_key(part: &Part, cm: &CheckedModule, hm: &HashedModule) -> String {
     let env_hash = blake3::hash(env.as_bytes()).to_hex().to_string();
     let input = format!("{VCGEN_VERSION}|{}|{env_hash}", hm.proof_hash[&part.name]);
     blake3::hash(input.as_bytes()).to_hex().to_string()
+}
+
+/// Session-memo key (REQ-LLL-160 T1): `blake3(VCGEN_VERSION | dt_decls | obligations)`,
+/// computed AFTER obligation generation so it keys exactly what Z3 will see — every
+/// rendered decl/hyp/goal (plus part/descr) is folded with a field tag, so the key is
+/// deterministic AND sensitive to any change in the obligation set or the module's
+/// datatype environment. The epoch makes a rebuilt binary never reuse an old session's
+/// shape by accident (defence-in-depth; the memo is in-memory anyway).
+pub fn memo_key(obligations: &[Obligation], dt_decls: &[String]) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(VCGEN_VERSION.as_bytes());
+    for d in dt_decls {
+        h.update(b"|dt:");
+        h.update(d.as_bytes());
+    }
+    for o in obligations {
+        h.update(b"|part:");
+        h.update(o.part.as_bytes());
+        h.update(b"|descr:");
+        h.update(o.descr.as_bytes());
+        for d in &o.decls {
+            h.update(b"|d:");
+            h.update(d.as_bytes());
+        }
+        for hy in &o.hyps {
+            h.update(b"|h:");
+            h.update(hy.as_bytes());
+        }
+        h.update(b"|g:");
+        h.update(o.goal.as_bytes());
+    }
+    h.finalize().to_hex().to_string()
+}
+
+/// [`discharge`] behind the optional session memo (REQ-LLL-160 T1). Memo hit → the
+/// recorded outcome verbatim (Z3 not consulted). Miss → discharge, then record the
+/// outcome UNLESS any obligation came back `unknown`/`timeout` — those must re-run on
+/// the next check, never stick. `None` memo ⇒ exactly `discharge` (the one-shot path).
+fn discharge_memoised(
+    z3: &Path,
+    obligations: &[Obligation],
+    dt_decls: &[String],
+    memo: &mut Option<&mut DischargeMemo>,
+) -> Result<Vec<FailedObligation>, String> {
+    let key = memo.as_ref().map(|_| memo_key(obligations, dt_decls));
+    if let (Some(m), Some(k)) = (&*memo, &key) {
+        if let Some(hit) = m.get(k.as_str()) {
+            return Ok(hit.clone());
+        }
+    }
+    let failures = discharge(z3, obligations, dt_decls)?;
+    if let (Some(m), Some(k)) = (memo.as_mut(), key) {
+        // proved (empty) and REAL counterexamples (`sat`) are stable facts of this
+        // obligation set under this epoch; `unknown`/`timeout` are not — skip them.
+        if failures.iter().all(|f| f.status == "sat") {
+            if m.len() >= MEMO_CAP {
+                m.clear();
+            }
+            m.insert(k, failures.clone());
+        }
+    }
+    Ok(failures)
 }
 
 pub fn find_z3() -> Result<PathBuf, String> {
@@ -3766,6 +3861,35 @@ mod tests {
         );
         // finite and well-formed: every candidate carries a non-empty source rendering.
         assert!(!cands.is_empty() && cands.iter().all(|c| !c.src.is_empty()));
+    }
+
+    #[test]
+    fn memo_key_is_deterministic_and_sensitive_req160() {
+        // REQ-LLL-160 T1: the session-memo key is a pure function of the obligation
+        // set + datatype env (deterministic), and ANY change to a goal, a hypothesis,
+        // a declaration or the datatype env moves it (sensitive) — so a memo hit can
+        // only ever answer for the EXACT script Z3 would have been sent.
+        let obl = |hyp: &str, goal: &str| Obligation {
+            part: "f".into(),
+            descr: "ensures".into(),
+            decls: vec!["(declare-const p_x Int)".into()],
+            hyps: vec![hyp.into()],
+            goal: goal.into(),
+        };
+        let a = [obl("(> p_x 0)", "(> p_x 1)")];
+        let b = [obl("(> p_x 0)", "(> p_x 1)")];
+        assert_eq!(memo_key(&a, &[]), memo_key(&b, &[]), "same obligations → same key");
+        let goal_moved = [obl("(> p_x 0)", "(> p_x 2)")];
+        assert_ne!(memo_key(&a, &[]), memo_key(&goal_moved, &[]), "a changed goal → new key");
+        let hyp_moved = [obl("(> p_x 5)", "(> p_x 1)")];
+        assert_ne!(memo_key(&a, &[]), memo_key(&hyp_moved, &[]), "a changed hypothesis → new key");
+        let dt = ["(declare-datatypes ((T 0)) (((mk))))".to_string()];
+        assert_ne!(memo_key(&a, &[]), memo_key(&a, &dt), "the datatype env is part of the key");
+        assert_ne!(
+            memo_key(&a, &[]),
+            memo_key(&[a[0].clone(), b[0].clone()], &[]),
+            "the number of obligations is part of the key"
+        );
     }
 
     #[test]

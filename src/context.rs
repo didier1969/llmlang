@@ -104,6 +104,14 @@ pub fn edit_context(src: &str, cm: &CheckedModule, part: &str) -> Result<EditCon
     })
 }
 
+/// The verbatim CONTRACT of `part name` in `src` (REQ-LLL-160 hover): its signature +
+/// `requires`/`ensures`/`measure` lines, body withheld — the same firewall text
+/// `edit_context` serves for deps (DEC-LLL-021), extracted textually so a hover shows
+/// exactly what the author wrote (DEC-LLL-020), never a normalised re-render.
+pub(crate) fn part_contract(src: &str, name: &str) -> Option<String> {
+    extract_part_block(src, name).map(|(block, _)| contract_header(&block))
+}
+
 /// Keep the signature line and the contract lines (`requires`/`ensures`/`measure`); drop the
 /// body. A whitelist (not "cut at the first body keyword") cannot be fooled by a body form
 /// that was not enumerated — the contract shown is never accidentally over-long.

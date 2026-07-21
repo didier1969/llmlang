@@ -431,6 +431,20 @@ fn cache_dir() -> PathBuf {
 /// failure yields one diagnostic per undischarged obligation, with the Z3 model
 /// decoded to a named counterexample.
 fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
+    // One-shot channel (`check --format=json`): no session memo — bit-identical to the
+    // pre-memo behaviour (REQ-LLL-160 T1b).
+    check_report_json_with(file, no_cache, None)
+}
+
+/// [`check_report_json`] with an optional SESSION discharge memo (REQ-LLL-160): the
+/// long-running LSP passes `Some` so a re-check after an edit reuses this session's Z3
+/// verdicts — including FAILURES, so an untouched failing part keeps its diagnostic
+/// without a Z3 re-run (and never silently loses it).
+fn check_report_json_with(
+    file: &str,
+    no_cache: bool,
+    memo: Option<&mut vc::DischargeMemo>,
+) -> diag::Report {
     let err_report = |module: Option<String>, e: &str| diag::Report {
         ok: false,
         status: Some("failed".to_string()),
@@ -448,7 +462,7 @@ fn check_report_json(file: &str, no_cache: bool) -> diag::Report {
         Err(e) => return err_report(Some(module), &e),
         Ok(hm) => hm,
     };
-    let report = match vc::verify(&cm, &hm, &cache_dir(), !no_cache) {
+    let report = match vc::verify_session(&cm, &hm, &cache_dir(), !no_cache, memo) {
         Err(e) => return err_report(Some(module), &e),
         Ok(r) => r,
     };
@@ -1236,10 +1250,18 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             // REQ-LLL-160 — language server: live structured diagnostics streamed
             // to the editor / LLM agent over the SAME `diag::Report` the JSON channel
             // emits. The buffer (possibly unsaved) is checked via a sibling temp file
-            // so imports resolve as `lll check` would; `check_report_json` is reused
-            // verbatim as the checker (single source of truth for a verdict).
+            // so imports resolve as `lll check` would; `check_report_json_with` is
+            // reused verbatim as the checker (single source of truth for a verdict),
+            // sharing ONE session discharge memo across the server's whole lifetime:
+            // an obligation set already sent to Z3 — proved OR failed — is answered
+            // from memory, so editing one part never re-proves (nor silently drops)
+            // the others' verdicts. `RefCell`: the dispatch loop is single-threaded
+            // (the reader thread only feeds a channel), so no lock is warranted.
+            let memo = std::cell::RefCell::new(vc::DischargeMemo::new());
             lsp::run_stdio(|uri, text| match lsp::uri_to_path(uri) {
-                Some(path) => lsp::check_buffer(&path, text, |f| check_report_json(f, false)),
+                Some(path) => lsp::check_buffer(&path, text, |f| {
+                    check_report_json_with(f, false, Some(&mut *memo.borrow_mut()))
+                }),
                 None => diag::Report {
                     ok: false,
                     status: Some("failed".to_string()),

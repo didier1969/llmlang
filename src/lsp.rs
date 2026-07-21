@@ -15,15 +15,26 @@
 //! obligation (slice 1) and fill a `?` with a proved completion (slice 2b). A
 //! diagnostic squiggles the WHOLE line (LSP ranges are 0-based), EXCEPT a typed hole
 //! now anchors on its OWN line — the `?` line, not the enclosing `part` (slice 2a).
-//! Traced follow-ups (child REQs of 160): column-precise spans (thread columns
-//! through parser/checker; a hole fill re-derives its `?` column server-side for
-//! now), import-aware INCREMENTAL re-check (REQ-141/149), and `hover`.
+//!
+//! LIVE loop (REQ-LLL-160): a reader thread feeds framed messages into a channel;
+//! the dispatch drains what is queued, debounces a trailing `didChange` (100 ms —
+//! never once a request is pending), and COALESCES the batch (`coalesce`): a
+//! `didChange` superseded by a later change/close of the same doc only updates the
+//! stored text — the check runs once, on the LAST text. `textDocument/hover` serves a
+//! dep's contract VERBATIM from its defining file (the firewall, DEC-LLL-021/020) and
+//! a typed hole's repair menu from the stored report; the agent channel
+//! `lll/editContext` serves `lll context --format=json` for the LIVE buffer (loader +
+//! checker only — never Z3). Traced follow-ups (child REQs of 160): column-precise
+//! spans (thread columns through parser/checker; a hole fill re-derives its `?`
+//! column server-side for now) and import-aware INCREMENTAL re-check (REQ-141/149).
 
 use crate::diag;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// A hole-completion backend (REQ-LLL-161 slice 2b): given a buffer's text, returns
 /// for each typed hole its 1-based source line and the Z3-PROVED completions
@@ -32,17 +43,36 @@ use std::path::{Path, PathBuf};
 /// `handle`.
 type SuggestFn = dyn Fn(&str) -> Vec<(usize, Vec<String>)>;
 
+/// A hover-contract backend (REQ-LLL-160 T3): `(uri, buffer_text, word)` → the named
+/// part's contract header VERBATIM from its defining file (`Part.origin`, DEC-LLL-020),
+/// `None` when the word names no part. Boxed like `SuggestFn` so the pure harness can
+/// inject a stub; `run_stdio` installs `contract_backend`. Loader-only — never Z3.
+type HoverFn = dyn Fn(&str, &str, &str) -> Option<String>;
+
+/// An edit-context backend (REQ-LLL-160 T4): `(uri, buffer_text, part)` → the
+/// `lll context --format=json` payload for that part of the LIVE buffer, or `Err`
+/// (unknown part, unloadable buffer) which the dispatch maps to JSON-RPC `-32602`.
+/// Loader + checker only — never verify/Z3.
+type ContextFn = dyn Fn(&str, &str, &str) -> Result<Value, String>;
+
 /// Server state across one stdio session: the open documents (uri → current text)
 /// and the lifecycle latches the LSP spec mandates.
 #[derive(Default)]
 pub struct Server {
     docs: HashMap<String, String>,
+    /// Last computed report per open doc (REQ-LLL-160 T3): the hover HOLE path
+    /// answers from it without re-checking. Purged on `didClose`.
+    reports: HashMap<String, diag::Report>,
     shutdown: bool,
     /// Optional hole-completion backend (slice 2b). `None` in the pure unit harness
     /// (no synthesis wired); `run_stdio` installs the real one. Invoked ONLY from
     /// `code_actions` — a user-triggered request — never on `didChange`, so live
     /// diagnostics stay Z3-cheap.
     suggest: Option<Box<SuggestFn>>,
+    /// Optional hover-contract backend (T3). `None` in the pure harness.
+    hover: Option<Box<HoverFn>>,
+    /// Optional edit-context backend (T4). `None` in the pure harness.
+    context: Option<Box<ContextFn>>,
 }
 
 impl Server {
@@ -56,6 +86,28 @@ impl Server {
     pub fn with_suggest(mut self, suggest: Box<SuggestFn>) -> Server {
         self.suggest = Some(suggest);
         self
+    }
+
+    /// Install the hover-contract backend (REQ-LLL-160 T3) — same injection pattern
+    /// as `with_suggest`, keeping `handle` pure and testable without the loader.
+    pub fn with_hover(mut self, hover: Box<HoverFn>) -> Server {
+        self.hover = Some(hover);
+        self
+    }
+
+    /// Install the edit-context backend (REQ-LLL-160 T4) — same injection pattern.
+    pub fn with_context(mut self, context: Box<ContextFn>) -> Server {
+        self.context = Some(context);
+        self
+    }
+
+    /// Store the latest text of a document WITHOUT checking or publishing
+    /// (REQ-LLL-160 live loop): a `didChange` superseded within a drained batch
+    /// (see [`coalesce`]) still lands its text here so `codeAction`/`hover`/
+    /// `lll/editContext` see the current buffer, while the check runs once on the
+    /// batch's LAST text.
+    pub fn update_doc_only(&mut self, uri: &str, text: String) {
+        self.docs.insert(uri.to_string(), text);
     }
 
     /// Once a `shutdown` request has been honoured, the stdio loop stops on the
@@ -81,7 +133,11 @@ impl Server {
                         // Full-document sync: every didChange carries the whole text.
                         "textDocumentSync": 1,
                         // Quick-fixes that apply a Z3-VERIFIED repair (REQ-LLL-161).
-                        "codeActionProvider": true
+                        "codeActionProvider": true,
+                        // Contract-on-hover (REQ-LLL-160 T3): a dep's firewall, verbatim.
+                        "hoverProvider": true,
+                        // Agent channel (REQ-LLL-160 T4): live minimal edit context.
+                        "experimental": { "lll": { "editContext": true } }
                     },
                     "serverInfo": { "name": "lll-lsp", "version": env!("CARGO_PKG_VERSION") }
                 }),
@@ -114,10 +170,13 @@ impl Server {
                 }
             }
             "textDocument/codeAction" => vec![response(id, self.code_actions(msg))],
+            "textDocument/hover" => vec![response(id, self.hover(msg))],
+            "lll/editContext" => vec![self.edit_context(id, msg)],
             "textDocument/didClose" => match text_document_uri(msg) {
                 // Clear the editor's squiggles for a document no longer open.
                 Some(uri) => {
                     self.docs.remove(&uri);
+                    self.reports.remove(&uri);
                     vec![publish(&uri, vec![])]
                 }
                 None => vec![],
@@ -133,7 +192,7 @@ impl Server {
         }
     }
 
-    fn diagnose<F>(&self, uri: &str, text: &str, check: &F) -> Value
+    fn diagnose<F>(&mut self, uri: &str, text: &str, check: &F) -> Value
     where
         F: Fn(&str, &str) -> diag::Report,
     {
@@ -145,7 +204,73 @@ impl Server {
             .unwrap_or_else(|_| {
                 err_report("lsp: internal error while checking this document (checker panicked)")
             });
-        publish(uri, report_to_diagnostics(&report, text))
+        let diags = publish(uri, report_to_diagnostics(&report, text));
+        // Keep the report (REQ-LLL-160 T3): the hover HOLE path reads the typed-hole
+        // repair menu from it without re-running the checker. Purged on didClose.
+        self.reports.insert(uri.to_string(), report);
+        diags
+    }
+
+    /// Answer `textDocument/hover` (REQ-LLL-160 T3). Two paths, both over the LIVE
+    /// buffer: cursor on a `?` → the STORED report's typed-hole repair menu for that
+    /// line (expected type, goal, hypotheses, scope — no re-check); otherwise the word
+    /// under the cursor resolved through the injected backend to a part's contract,
+    /// VERBATIM from its defining file (the firewall is the contract, DEC-LLL-021;
+    /// the text is the truth, DEC-LLL-020). Anything unresolvable → `null` result.
+    fn hover(&self, msg: &Value) -> Value {
+        let answer = || -> Option<Value> {
+            let uri = text_document_uri(msg)?;
+            let text = self.docs.get(&uri)?;
+            let pos = msg.get("params")?.get("position")?;
+            let line0 = pos.get("line")?.as_u64()? as usize;
+            let char0 = pos.get("character")?.as_u64()? as usize;
+            if char_at(text, line0, char0) == Some('?') {
+                let report = self.reports.get(&uri)?;
+                let h = report
+                    .diagnostics
+                    .iter()
+                    .find(|d| d.severity == "hole" && d.line == Some(line0 + 1))?;
+                return Some(json!({ "contents": { "kind": "markdown", "value": hole_hover(h) } }));
+            }
+            let word = word_at(text, line0, char0)?;
+            let contract = (self.hover.as_deref()?)(&uri, text, &word)?;
+            Some(json!({
+                "contents": { "kind": "markdown", "value": format!("```lll\n{contract}\n```") }
+            }))
+        };
+        answer().unwrap_or(Value::Null)
+    }
+
+    /// Answer the agent request `lll/editContext` (REQ-LLL-160 T4): the minimal edit
+    /// context of `params.part` computed over the LIVE buffer via the injected backend
+    /// (`lll context --format=json` semantics — loader + checker, never Z3). An
+    /// unknown part / missing param / unopened doc is JSON-RPC `-32602` (InvalidParams).
+    fn edit_context(&self, id: Option<Value>, msg: &Value) -> Value {
+        let uri = match text_document_uri(msg) {
+            Some(u) => u,
+            None => return error_response(id, -32602, "lll/editContext: missing textDocument.uri"),
+        };
+        let part = match msg.get("params").and_then(|p| p.get("part")).and_then(Value::as_str) {
+            Some(p) => p,
+            None => return error_response(id, -32602, "lll/editContext: missing `part`"),
+        };
+        let text = match self.docs.get(&uri) {
+            Some(t) => t,
+            None => {
+                return error_response(
+                    id,
+                    -32602,
+                    &format!("lll/editContext: document not open: {uri}"),
+                )
+            }
+        };
+        match self.context.as_deref() {
+            None => error_response(id, -32603, "lll/editContext: no backend installed"),
+            Some(f) => match f(&uri, text, part) {
+                Ok(v) => response(id, v),
+                Err(e) => error_response(id, -32602, &e),
+            },
+        }
     }
 
     /// Answer a `textDocument/codeAction` request with quick-fixes that apply a
@@ -339,6 +464,95 @@ fn nth_line_len(text: &str, line0: usize) -> usize {
     text.lines().nth(line0).map(|l| l.chars().count()).unwrap_or(0)
 }
 
+/// Classification of one message in a drained batch (REQ-LLL-160 live loop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coalesced {
+    /// A superseded `didChange`: only update the stored text — no check, no publish.
+    DocUpdateOnly,
+    /// Handle fully (check + publish / respond).
+    Full,
+}
+
+fn is_did_change(msg: &Value) -> bool {
+    msg.get("method").and_then(Value::as_str) == Some("textDocument/didChange")
+}
+
+/// PURE batch coalescing (REQ-LLL-160 T2a): a `didChange` for uri U is
+/// [`Coalesced::DocUpdateOnly`] IFF a LATER `didChange`/`didClose` for the SAME U
+/// exists in the batch — its check would be dead work (the later message supersedes
+/// it), but its text still lands in the doc store so intermediate state is never
+/// lost. Everything else — requests, lifecycle, the batch's LAST change of each doc —
+/// is [`Coalesced::Full`]: last-wins, and a request is never skipped or reordered.
+pub fn coalesce(batch: &[Value]) -> Vec<Coalesced> {
+    (0..batch.len())
+        .map(|i| {
+            if !is_did_change(&batch[i]) {
+                return Coalesced::Full;
+            }
+            let uri = text_document_uri(&batch[i]);
+            let superseded = uri.is_some()
+                && batch[i + 1..].iter().any(|later| {
+                    let m = later.get("method").and_then(Value::as_str);
+                    (m == Some("textDocument/didChange") || m == Some("textDocument/didClose"))
+                        && text_document_uri(later) == uri
+                });
+            if superseded { Coalesced::DocUpdateOnly } else { Coalesced::Full }
+        })
+        .collect()
+}
+
+fn char_at(text: &str, line0: usize, char0: usize) -> Option<char> {
+    text.lines().nth(line0)?.chars().nth(char0)
+}
+
+/// The identifier under the cursor (REQ-LLL-160 T3): the maximal `[A-Za-z0-9_]` run
+/// covering `char0` on `line0` — accepting a cursor sitting just AFTER the last
+/// character, as editors commonly report. `None` when the cursor touches no word.
+fn word_at(text: &str, line0: usize, char0: usize) -> Option<String> {
+    let line: Vec<char> = text.lines().nth(line0)?.chars().collect();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut i = char0.min(line.len());
+    if i >= line.len() || !is_word(line[i]) {
+        if i > 0 && is_word(line[i - 1]) {
+            i -= 1;
+        } else {
+            return None;
+        }
+    }
+    let mut s = i;
+    while s > 0 && is_word(line[s - 1]) {
+        s -= 1;
+    }
+    let mut e = i;
+    while e < line.len() && is_word(line[e]) {
+        e += 1;
+    }
+    Some(line[s..e].iter().collect())
+}
+
+/// Markdown hover for a typed hole (REQ-LLL-160 T3), drawn from the STORED report's
+/// diagnostic — the same repair menu `data` carries, in prose: expected type, goal,
+/// hypotheses, in-scope binders.
+fn hole_hover(d: &diag::Diagnostic) -> String {
+    let mut s = match &d.expected_type {
+        Some(t) => format!("hole `?` — expected type: `{t}`"),
+        None => "hole `?`".to_string(),
+    };
+    if !d.goal.is_empty() {
+        s.push_str(&format!("\n\ngoal: {}", d.goal.join(" ∧ ")));
+    }
+    if !d.hypotheses.is_empty() {
+        s.push_str(&format!("\n\nhypotheses: {}", d.hypotheses.join(" ∧ ")));
+    }
+    if !d.scope.is_empty() {
+        s.push_str("\n\nscope:");
+        for a in &d.scope {
+            s.push_str(&format!("\n- `{}: {}`", a.var, a.value));
+        }
+    }
+    s
+}
+
 fn publish(uri: &str, diagnostics: Vec<Value>) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -459,6 +673,61 @@ pub fn suggest_buffer(text: &str) -> Vec<(usize, Vec<String>)> {
     }
 }
 
+/// Write `text` to a SIBLING temp of `path` (same directory ⇒ same manifest +
+/// relative import roots, exactly as `lll check` would see them), run `f` on the
+/// temp, remove it (RAII — also on unwind). `tag` keeps concurrent surfaces'
+/// temp names distinct. `None` only when the temp cannot be written.
+fn with_sibling_temp<T>(
+    path: &Path,
+    text: &str,
+    tag: &str,
+    f: impl FnOnce(&Path) -> T,
+) -> Option<T> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let base = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "buffer.lll".to_string());
+    let tmp = dir.join(format!(".lll-lsp-{tag}-{base}"));
+    std::fs::write(&tmp, text).ok()?;
+    let _guard = TmpFile(tmp.clone());
+    Some(f(&tmp))
+}
+
+/// The real hover backend (REQ-LLL-160 T3): resolve `word` as a part of the
+/// (possibly-unsaved) buffer's program and return its contract header VERBATIM from
+/// the file that DEFINES it — `Part.origin` names the imported file, `None` means the
+/// buffer itself (DEC-LLL-020: the text is the source of truth, never a re-render).
+/// Loader only — no checker, no Z3 — so hovering stays instant.
+pub fn contract_backend(uri: &str, text: &str, word: &str) -> Option<String> {
+    let path = uri_to_path(uri)?;
+    with_sibling_temp(&path, text, "hover", |tmp| {
+        let (_, module) = crate::loader::load_program(&tmp.to_string_lossy()).ok()?;
+        let part = module.parts.iter().find(|p| p.name == word)?;
+        match &part.origin {
+            Some(f) => crate::context::part_contract(&std::fs::read_to_string(f).ok()?, word),
+            None => crate::context::part_contract(text, word),
+        }
+    })
+    .flatten()
+}
+
+/// The real edit-context backend (REQ-LLL-160 T4): `lll context --format=json` over
+/// the LIVE buffer — sibling temp + `load_program` + `check_module`, NEVER verify/Z3.
+/// The context is computed against the buffer TEXT (the source of truth), so an
+/// unsaved edit is already reflected. `Err` for an unknown part (→ `-32602`).
+pub fn edit_context_backend(uri: &str, text: &str, part: &str) -> Result<Value, String> {
+    let path = uri_to_path(uri)
+        .ok_or_else(|| format!("unsupported document uri `{uri}` (only file:// is handled)"))?;
+    with_sibling_temp(&path, text, "ctx", |tmp| {
+        let (_, module) = crate::loader::load_program(&tmp.to_string_lossy())?;
+        let cm = crate::types::check_module(module)?;
+        let ctx = crate::context::edit_context(text, &cm, part)?;
+        Ok(crate::context::render_json(&ctx))
+    })
+    .unwrap_or_else(|| Err("lsp: cannot write buffer to a temp file for context".to_string()))
+}
+
 /// Removes its path on drop — including during unwind — so a panic in the checker
 /// never leaves a stray buffer temp behind.
 struct TmpFile(PathBuf);
@@ -478,27 +747,106 @@ fn err_report(msg: &str) -> diag::Report {
     }
 }
 
-/// The real stdio loop: read `Content-Length`-framed JSON-RPC from stdin, dispatch
-/// with `check`, write framed responses to stdout, until `exit`/EOF.
+/// The real stdio loop (REQ-LLL-160 live): a READER THREAD feeds framed JSON-RPC
+/// messages into a channel; the dispatch thread blocks on `recv` for the first
+/// message, DRAINS whatever else is already queued, DEBOUNCES a trailing `didChange`
+/// (`recv_timeout` 100 ms — extended only while didChanges keep arriving, and never
+/// entered while a request is pending: a debounce never delays a response), then
+/// COALESCES the batch (superseded changes update the doc only — the check runs once,
+/// on the LAST text), handles in order, writes + flushes. `exit`/EOF/`shutdown`
+/// semantics are unchanged from the sequential loop.
 pub fn run_stdio<F>(check: F) -> Result<(), String>
 where
     F: Fn(&str, &str) -> diag::Report,
 {
-    let stdin = std::io::stdin();
-    let mut reader = stdin.lock();
-    let stdout = std::io::stdout();
-    let mut server = Server::new().with_suggest(Box::new(suggest_buffer));
-    while let Some(msg) = read_message(&mut reader)? {
-        let is_exit = msg.get("method").and_then(Value::as_str) == Some("exit");
-        let out = server.handle(&msg, &check);
-        {
-            let mut w = stdout.lock();
-            for m in &out {
-                write_message(&mut w, m)?;
+    let (tx, rx) = mpsc::channel::<Result<Option<Value>, String>>();
+    let _reader = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut reader = stdin.lock();
+        loop {
+            let item = read_message(&mut reader);
+            let stop = !matches!(item, Ok(Some(_)));
+            if tx.send(item).is_err() || stop {
+                break;
             }
-            w.flush().map_err(|e| e.to_string())?;
         }
-        if is_exit {
+    });
+    let stdout = std::io::stdout();
+    let mut server = Server::new()
+        .with_suggest(Box::new(suggest_buffer))
+        .with_hover(Box::new(contract_backend))
+        .with_context(Box::new(edit_context_backend));
+    'session: loop {
+        let mut batch: Vec<Value> = Vec::new();
+        let mut eof = false;
+        match rx.recv() {
+            Ok(Ok(Some(v))) => batch.push(v),
+            Ok(Ok(None)) | Err(_) => break, // clean EOF (or reader gone)
+            Ok(Err(e)) => return Err(e),
+        }
+        // Drain everything already queued — no waiting, order preserved.
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(Some(v))) => batch.push(v),
+                Ok(Ok(None)) => {
+                    eof = true;
+                    break;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    eof = true;
+                    break;
+                }
+            }
+        }
+        // Debounce a TRAILING didChange: an editor streaming keystrokes sends the
+        // next full text within ~100 ms; waiting lets `coalesce` fold the burst into
+        // ONE check of the final text. Never once a request is pending (its response
+        // must not wait on a timer), never past EOF; a non-didChange arrival ends
+        // the wait immediately.
+        while !eof
+            && batch.last().is_some_and(is_did_change)
+            && !batch.iter().any(|m| m.get("id").is_some())
+        {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(Some(v))) => {
+                    let more = is_did_change(&v);
+                    batch.push(v);
+                    if !more {
+                        break;
+                    }
+                }
+                Ok(Ok(None)) => eof = true,
+                Ok(Err(e)) => return Err(e),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => eof = true,
+            }
+        }
+        let kinds = coalesce(&batch);
+        let mut w = stdout.lock();
+        for (msg, kind) in batch.iter().zip(&kinds) {
+            match kind {
+                Coalesced::DocUpdateOnly => {
+                    if let (Some(uri), Some(text)) = (text_document_uri(msg), doc_change_text(msg))
+                    {
+                        server.update_doc_only(&uri, text);
+                    }
+                }
+                Coalesced::Full => {
+                    let out = server.handle(msg, &check);
+                    for m in &out {
+                        write_message(&mut w, m)?;
+                    }
+                }
+            }
+            if msg.get("method").and_then(Value::as_str) == Some("exit") {
+                w.flush().map_err(|e| e.to_string())?;
+                break 'session;
+            }
+        }
+        w.flush().map_err(|e| e.to_string())?;
+        if eof {
             break;
         }
     }
@@ -659,7 +1007,8 @@ mod tests {
     fn unknown_request_is_method_not_found_unknown_notification_ignored() {
         let mut s = Server::new();
         // a REQUEST (has id) for an unknown method → JSON-RPC MethodNotFound.
-        let req = s.handle(&json!({"jsonrpc":"2.0","id":7,"method":"textDocument/hover"}), &fake_check);
+        let req =
+            s.handle(&json!({"jsonrpc":"2.0","id":7,"method":"textDocument/definition"}), &fake_check);
         assert_eq!(req.len(), 1);
         assert_eq!(req[0]["error"]["code"], json!(-32601));
         assert_eq!(req[0]["id"], json!(7));
@@ -894,5 +1243,172 @@ mod tests {
     fn uri_to_path_decodes_file_scheme() {
         assert_eq!(uri_to_path("file:///home/u/a%20b.lll"), Some(PathBuf::from("/home/u/a b.lll")));
         assert_eq!(uri_to_path("untitled:foo"), None);
+    }
+
+    // ---- REQ-LLL-160 live loop: coalescing, hover, agent channel ----
+
+    fn did_change(uri: &str, text: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [ { "text": text } ]
+            }
+        })
+    }
+
+    fn did_close(uri: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": { "textDocument": { "uri": uri } }
+        })
+    }
+
+    #[test]
+    fn coalesce_is_last_wins_per_document_req160() {
+        // Three changes to `a` interleaved with one to `b`: only each doc's LAST
+        // change is fully handled; the earlier `a` changes become doc-updates only.
+        let batch = vec![
+            did_change("file:///a.lll", "a1"),
+            did_change("file:///b.lll", "b1"),
+            did_change("file:///a.lll", "a2"),
+            did_change("file:///a.lll", "a3"),
+        ];
+        assert_eq!(
+            coalesce(&batch),
+            vec![
+                Coalesced::DocUpdateOnly,
+                Coalesced::Full,
+                Coalesced::DocUpdateOnly,
+                Coalesced::Full
+            ]
+        );
+    }
+
+    #[test]
+    fn coalesce_did_close_supersedes_and_non_changes_stay_full_req160() {
+        // A didClose supersedes an earlier didChange of the SAME doc (checking text
+        // that is being closed is dead work); a request in the middle stays Full and
+        // does not shield the change before it.
+        let batch = vec![
+            did_change("file:///a.lll", "a1"),
+            json!({"jsonrpc":"2.0","id":9,"method":"textDocument/codeAction","params":{}}),
+            did_close("file:///a.lll"),
+        ];
+        assert_eq!(
+            coalesce(&batch),
+            vec![Coalesced::DocUpdateOnly, Coalesced::Full, Coalesced::Full]
+        );
+        // a lone didChange (nothing later for its doc) is Full — never dropped.
+        assert_eq!(coalesce(&[did_change("file:///a.lll", "a1")]), vec![Coalesced::Full]);
+    }
+
+    #[test]
+    fn update_doc_only_stores_text_without_publishing_req160() {
+        let mut s = Server::new();
+        let _ = s.handle(&did_open("file:///m.lll", "fine\n"), &fake_check);
+        s.update_doc_only("file:///m.lll", "BAD\n".to_string());
+        // the doc store sees the new text (hover/codeAction would read it) …
+        assert_eq!(s.docs.get("file:///m.lll").map(String::as_str), Some("BAD\n"));
+        // … but no check ran: the stored report is still the CLEAN one.
+        assert!(s.reports.get("file:///m.lll").is_some_and(|r| r.ok));
+    }
+
+    #[test]
+    fn hover_on_part_call_serves_contract_from_backend_req160() {
+        let mut s = Server::new().with_hover(Box::new(|_uri, _text, word: &str| {
+            (word == "helper").then(|| {
+                "  part helper(a: Int) -> Int:\n    requires a >= 0\n    ensures result >= a"
+                    .to_string()
+            })
+        }));
+        let text = "module M:\n\n  part f(x: Int) -> Int:\n    yield helper(x)\n";
+        let _ = s.handle(&did_open("file:///m.lll", text), &fake_check);
+        // `    yield helper(x)` — char 12 sits inside `helper`.
+        let req = json!({"jsonrpc":"2.0","id":4,"method":"textDocument/hover","params":{
+            "textDocument": {"uri": "file:///m.lll"}, "position": {"line": 3, "character": 12}}});
+        let out = s.handle(&req, &fake_check);
+        assert_eq!(out.len(), 1);
+        let v = out[0]["result"]["contents"]["value"].as_str().expect("markdown hover");
+        assert!(v.contains("requires a >= 0") && v.contains("ensures result >= a"), "{v}");
+        // a word the backend does not resolve → null result, not an error.
+        let miss = json!({"jsonrpc":"2.0","id":5,"method":"textDocument/hover","params":{
+            "textDocument": {"uri": "file:///m.lll"}, "position": {"line": 3, "character": 5}}});
+        let out = s.handle(&miss, &fake_check);
+        assert_eq!(out[0]["result"], json!(null));
+    }
+
+    #[test]
+    fn hover_on_hole_answers_from_stored_report_req160() {
+        // A checker that reports a typed hole on line 4 (1-based) when text has a `?`.
+        fn holey_check(_uri: &str, text: &str) -> diag::Report {
+            if !text.contains('?') {
+                return diag::Report { ok: true, status: None, module: None, diagnostics: vec![] };
+            }
+            diag::Report {
+                ok: false,
+                status: Some("incomplete".to_string()),
+                module: Some("M".to_string()),
+                diagnostics: vec![diag::Diagnostic {
+                    code: "LLL-H0001".to_string(),
+                    severity: "hole".to_string(),
+                    category: "hole".to_string(),
+                    message: "hole `?` in part `f`".to_string(),
+                    line: Some(4),
+                    part: Some("f".to_string()),
+                    fix: None,
+                    counterexample: vec![],
+                    expected_type: Some("Int".to_string()),
+                    scope: vec![diag::Assignment { var: "acc".into(), value: "Int".into() }],
+                    goal: vec!["result >= acc".to_string()],
+                    hypotheses: vec!["n >= 0".to_string()],
+                    sufficient_hypotheses: vec![],
+                }],
+            }
+        }
+        let mut s = Server::new();
+        let text = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    yield ?\n";
+        let _ = s.handle(&did_open("file:///h.lll", text), &holey_check);
+        // `    yield ?` is line index 3, the `?` at char 10.
+        let req = json!({"jsonrpc":"2.0","id":6,"method":"textDocument/hover","params":{
+            "textDocument": {"uri": "file:///h.lll"}, "position": {"line": 3, "character": 10}}});
+        let out = s.handle(&req, &holey_check);
+        let v = out[0]["result"]["contents"]["value"].as_str().expect("markdown hover");
+        assert!(v.contains("Int") && v.contains("result >= acc") && v.contains("acc"), "{v}");
+        // didClose PURGES the stored report — the hole hover goes dark with the doc.
+        let _ = s.handle(&did_close("file:///h.lll"), &holey_check);
+        assert!(s.reports.is_empty(), "didClose must purge the stored report");
+    }
+
+    #[test]
+    fn edit_context_request_uses_backend_and_rejects_unknown_part_req160() {
+        let mut s = Server::new().with_context(Box::new(|_uri, _text, part: &str| {
+            if part == "f" {
+                Ok(json!({ "part": "f", "deps": [] }))
+            } else {
+                Err(format!("unknown part `{part}`"))
+            }
+        }));
+        let _ = s.handle(&did_open("file:///m.lll", "module M:\n"), &fake_check);
+        let ok = s.handle(
+            &json!({"jsonrpc":"2.0","id":5,"method":"lll/editContext",
+                "params":{"textDocument":{"uri":"file:///m.lll"},"part":"f"}}),
+            &fake_check,
+        );
+        assert_eq!(ok[0]["result"]["part"], json!("f"));
+        let bad = s.handle(
+            &json!({"jsonrpc":"2.0","id":6,"method":"lll/editContext",
+                "params":{"textDocument":{"uri":"file:///m.lll"},"part":"zz"}}),
+            &fake_check,
+        );
+        assert_eq!(bad[0]["error"]["code"], json!(-32602), "unknown part → InvalidParams");
+        // the capability is advertised so an agent can discover the channel.
+        let mut s2 = Server::new();
+        let init =
+            s2.handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}), &fake_check);
+        assert_eq!(init[0]["result"]["capabilities"]["experimental"]["lll"]["editContext"], json!(true));
+        assert_eq!(init[0]["result"]["capabilities"]["hoverProvider"], json!(true));
     }
 }
