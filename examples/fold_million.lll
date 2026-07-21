@@ -1,0 +1,24 @@
+module FoldMillion:
+
+  # REQ-LLL-163 — tripwire de prod permanent : le fold-par-accumulateur en GRAND.
+  # `sum` n'est PAS un appel terminal (`h + sum(t)` attend le retour) : sans la
+  # transformation fold→boucle, un million d'éléments déborde la pile — calcul,
+  # ET teardown (le drop de la liste doit être itératif lui aussi). Ce programme
+  # passe par le chemin `lll run` COMPLET (verify → optimize → codegen → run) et
+  # échoue au moindre abort, là où un oracle stdout ne voit rien.
+
+  part build(n: Int) -> List[Int]:
+    requires n >= 0
+    measure n
+    match n:
+      0 -> yield []
+      _ -> yield n :: build(n - 1)
+
+  part sum(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + sum(t)
+
+  part main() -> Int via IO:
+    let xs = build(1000000)
+    yield IO.print(sum(xs))

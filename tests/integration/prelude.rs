@@ -93,6 +93,53 @@ pub fn build_run(src: &str) -> String {
 }
 
 
+// ---- REQ-LLL-163 R1: the PROD compilation path, under test ----
+// `lll build` runs `optimize::optimize` BEFORE codegen (main.rs), so the fold-to-loop /
+// TCE recognizers must keep firing on the OPTIMIZER'S output — `build_run` above bypasses
+// that pass, which left the production pipeline without a test net.
+
+/// Emit the Rust of `src` through the REAL `lll build` pipeline: check → optimize → codegen.
+pub fn emit_rust_opt(src: &str) -> String {
+    let (cm, _) = full(src);
+    let opt = optimize::optimize(&cm);
+    codegen::emit_rust(&opt).expect("codegen (optimized)")
+}
+
+/// `build_run` through the PROD pipeline (optimize → codegen → rustc → run) — and STRICT:
+/// a non-zero exit FAILS the test. `build_run` only captures stdout, so a stack overflow
+/// AFTER the last print (e.g. a recursive list drop at scope exit) passed unseen; a
+/// "constant stack" claim must hold through teardown.
+pub fn build_run_opt(src: &str) -> String {
+    let rust = emit_rust_opt(src);
+    let n = BUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = tempdir().join(format!("opt-{n}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rs = dir.join("t.rs");
+    let bin = dir.join("t_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "-C", "overflow-checks=on", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "rustc failed:\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(
+        out.status.success(),
+        "the optimized binary exited non-zero (stack overflow mid-run or at teardown?)\n\
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+
 // ---- Token Sugar: implicit tail `yield` (REQ-LLL-057, CPT-LLL-003) ----
 // The `->` in a match arm / handle clause, and the tail statement of a block,
 // already mark a RESULT position, so the `yield` keyword is redundant surface.

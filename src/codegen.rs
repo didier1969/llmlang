@@ -3398,11 +3398,11 @@ fn is_associative(op: BinOp) -> bool {
 /// only speed (and the old stack behaviour); a wrong `Some` would be a miscompile.
 ///
 /// * **PURE only.** Reassociating an effectful body would reorder its OBSERVABLE effects.
-/// * one side of the associative operator is the self-call, the other contains NO self-call
-///   (otherwise the fold is not a fold).
-/// * a BORROWED parameter may only be rebound from a plain variable (a pattern binder such
-///   as a list tail, which is a reference of the same lifetime). Rebinding it from a
-///   computed value would try to store a reference to a temporary.
+/// * every tail arm is dispatched on `classify_tail_arm` — the SAME classifier `emit_body`
+///   rewrites with, so detection and emission can never drift apart (REQ-LLL-163
+///   hardening: a "fold!" verdict here IS the rewrite there, arm for arm).
+/// * one `Reject` arm (a fold shape whose rewrite would be unsound) refuses the whole part;
+///   so do two DIFFERENT fold kinds in one part.
 fn acc_rec_of(part: &Part, mask: Option<&Vec<bool>>, res: bool) -> Option<AccRec> {
     if res || !part.effects.is_empty() || part.params.is_empty() {
         return None;
@@ -3410,53 +3410,16 @@ fn acc_rec_of(part: &Part, mask: Option<&Vec<bool>>, res: bool) -> Option<AccRec
     let names: Vec<String> = part.params.iter().map(|(n, _)| n.clone()).collect();
     let mut found: Option<AccKind> = None;
     let mut ok = true;
-    scan_tail_yields(&part.body, &mut |e| {
-        let (kind, rec, other) = match e {
-            Expr::Bin(op, a, b) if is_associative(*op) => {
-                match (
-                    is_self_call(a, &part.name, names.len()),
-                    is_self_call(b, &part.name, names.len()),
-                ) {
-                    (true, false) => (AccKind::Op(*op), a.as_ref(), b.as_ref()),
-                    (false, true) => (AccKind::Op(*op), b.as_ref(), a.as_ref()),
-                    _ => return, // neither side, or BOTH — not a fold
-                }
-            }
-            // `E :: self(args')` — the list-producing recursion
-            Expr::Cons(h, t) if is_self_call(t, &part.name, names.len()) => {
-                (AccKind::Cons, t.as_ref(), h.as_ref())
-            }
-            // `str_cat(E, self(args'))` — the recursive concatenation. Only the RIGHT-
-            // recursive shape: concat is not commutative, so `str_cat(self(t), E)` would
-            // need the pieces replayed the other way and is left as a plain recursion.
-            Expr::Call(f, cargs)
-                if f == "str_cat"
-                    && cargs.len() == 2
-                    && is_self_call(&cargs[1], &part.name, names.len()) =>
-            {
-                (AccKind::Concat, &cargs[1], &cargs[0])
-            }
-            _ => return,
-        };
-        if contains_self_call(other, &part.name) {
-            ok = false;
-            return;
-        }
-        // a borrowed param can only be rebound from a variable (the list tail binder)
-        if let Expr::Call(_, args) = rec {
-            for (i, arg) in args.iter().enumerate() {
-                let borrowed = mask.and_then(|m| m.get(i)).copied().unwrap_or(false);
-                if borrowed && !matches!(arg, Expr::Var(_)) {
-                    ok = false;
-                    return;
-                }
-            }
-        }
-        match found {
+    scan_fold_arms(&part.body, &part.name, names.len(), mask, &mut |shape| match shape {
+        ArmShape::Fold { kind, .. } => match found {
             None => found = Some(kind),
             Some(prev) if prev == kind => {}
             Some(_) => ok = false, // two different folds in one part — refuse
-        }
+        },
+        // a "skip" arm constrains nothing, and a base arm is combined associatively —
+        // neither can make the rewrite unsound, so neither blocks it.
+        ArmShape::Neutral { .. } | ArmShape::Other => {}
+        ArmShape::Reject => ok = false,
     });
     if !ok {
         return None;
@@ -3464,28 +3427,181 @@ fn acc_rec_of(part: &Part, mask: Option<&Vec<bool>>, res: bool) -> Option<AccRec
     found.map(|kind| AccRec { name: part.name.clone(), params: names, kind })
 }
 
-/// If this tail expression IS the accumulator's recursive shape, return `(self_call, other)`.
-fn acc_rec_arm<'e>(e: &'e Expr, ar: &AccRec) -> Option<(&'e Expr, &'e Expr)> {
-    let n = ar.params.len();
-    match (e, ar.kind) {
-        (Expr::Bin(op, a, b), AccKind::Op(want)) if *op == want => {
-            if is_self_call(a, &ar.name, n) {
-                Some((a.as_ref(), b.as_ref()))
-            } else if is_self_call(b, &ar.name, n) {
-                Some((b.as_ref(), a.as_ref()))
-            } else {
-                None
+/// THE classifier of a tail arm under an accumulator fold — the single source of truth
+/// shared by detection (`acc_rec_of`) and emission (`emit_body`/`emit_acc_yield`).
+/// Detection promising a fold that emission then reads differently was the standing
+/// drift hazard of REQ-LLL-163; one classifier owned by both closes it.
+enum ArmShape<'e> {
+    /// `E ⊕ self(…)` / `E :: self(…)` / `str_cat(E, self(…))`, rewrite-safe: accumulate
+    /// `other`, rebind the parameters from the self-call's arguments, `continue`.
+    Fold { kind: AccKind, rec: &'e Expr, other: &'e Expr },
+    /// the BARE tail self-call — a "skip" arm (`sumpos` on a non-positive head): rebind
+    /// and `continue`, the accumulator untouched.
+    Neutral { rec: &'e Expr },
+    /// no rewrite here: emitted as a base case — `fold(__acc, E)` with REAL calls inside
+    /// `E`. Sound for ANY `E`: ⊕ is associative, and a fresh call restarts its own loop.
+    Other,
+    /// fold-shaped but UNSAFE to rewrite (a self-call inside `other`, or a borrowed
+    /// parameter rebound from a computed value): the whole part stays a plain recursion.
+    Reject,
+}
+
+fn classify_tail_arm<'e>(
+    e: &'e Expr,
+    name: &str,
+    arity: usize,
+    mask: Option<&Vec<bool>>,
+) -> ArmShape<'e> {
+    let (kind, rec, other) = match e {
+        Expr::Bin(op, a, b) if is_associative(*op) => {
+            match (is_self_call(a, name, arity), is_self_call(b, name, arity)) {
+                (true, false) => (AccKind::Op(*op), a.as_ref(), b.as_ref()),
+                (false, true) => (AccKind::Op(*op), b.as_ref(), a.as_ref()),
+                _ => return ArmShape::Other, // neither side, or BOTH — not a fold
             }
         }
-        (Expr::Cons(h, t), AccKind::Cons) if is_self_call(t, &ar.name, n) => {
-            Some((t.as_ref(), h.as_ref()))
-        }
-        (Expr::Call(f, cargs), AccKind::Concat)
-            if f == "str_cat" && cargs.len() == 2 && is_self_call(&cargs[1], &ar.name, n) =>
+        // `E :: self(args')` — the list-producing recursion
+        Expr::Cons(h, t) if is_self_call(t, name, arity) => (AccKind::Cons, t.as_ref(), h.as_ref()),
+        // `str_cat(E, self(args'))` — the recursive concatenation. Only the RIGHT-
+        // recursive shape: concat is not commutative, so `str_cat(self(t), E)` would
+        // need the pieces replayed the other way and is left as a plain recursion.
+        Expr::Call(f, cargs)
+            if f == "str_cat" && cargs.len() == 2 && is_self_call(&cargs[1], name, arity) =>
         {
-            Some((&cargs[1], &cargs[0]))
+            (AccKind::Concat, &cargs[1], &cargs[0])
         }
-        _ => None,
+        // REQ-LLL-163 R2a — the bare tail self-call, the "skip" arm. Loopable under the
+        // same borrowed-rebind rule as a fold arm; otherwise it stays a REAL call (sound:
+        // the fresh call restarts its own loop and the result is combined as a base case).
+        _ if is_self_call(e, name, arity) => {
+            return if rebind_args_ok(e, mask) {
+                ArmShape::Neutral { rec: e }
+            } else {
+                ArmShape::Other
+            };
+        }
+        _ => return ArmShape::Other,
+    };
+    if contains_self_call(other, name) {
+        return ArmShape::Reject;
+    }
+    if !rebind_args_ok(rec, mask) {
+        return ArmShape::Reject;
+    }
+    ArmShape::Fold { kind, rec, other }
+}
+
+/// A BORROWED parameter may only be rebound from a plain variable (a pattern binder such
+/// as a list tail, which is a reference of the same lifetime). Rebinding it from a
+/// computed value would try to store a reference to a temporary.
+fn rebind_args_ok(rec: &Expr, mask: Option<&Vec<bool>>) -> bool {
+    if let Expr::Call(_, args) = rec {
+        for (i, arg) in args.iter().enumerate() {
+            let borrowed = mask.and_then(|m| m.get(i)).copied().unwrap_or(false);
+            if borrowed && !matches!(arg, Expr::Var(_)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The LEAF tail positions of a tail expression: an `if`'s branches are tail positions
+/// themselves (REQ-LLL-163 R2b — mirror of `emit_tail`/`tail_expr_has_self_call`);
+/// anything else is one leaf.
+fn tail_leaves<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    if let Expr::If(_, a, b) = e {
+        tail_leaves(a, out);
+        tail_leaves(b, out);
+    } else {
+        out.push(e);
+    }
+}
+
+/// REQ-LLL-163 R3 — the let-bound spelling of a fold arm: `let s = self(args') ; yield
+/// E ⊕ s` (an LLM writes this as readily as the inline form). Classified as the SAME
+/// `Fold` the inline spelling gets iff `s` is bound to exactly the self-call and used
+/// EXACTLY ONCE, as one operand of one associative ⊕ whose other operand contains
+/// neither `s` nor a self-call, under the borrowed-rebind rule. Anything else (both
+/// operands, `s` reused inside `E`, a non-associative operator) keeps the real call.
+fn classify_let_fold<'e>(
+    s: &str,
+    rhs: &'e Expr,
+    yielded: &'e Expr,
+    name: &str,
+    arity: usize,
+    mask: Option<&Vec<bool>>,
+) -> Option<(AccKind, &'e Expr, &'e Expr)> {
+    if !is_self_call(rhs, name, arity) || !rebind_args_ok(rhs, mask) {
+        return None;
+    }
+    let Expr::Bin(op, a, b) = yielded else { return None };
+    if !is_associative(*op) {
+        return None;
+    }
+    let is_s = |x: &Expr| matches!(x, Expr::Var(v) if v == s);
+    let other = match (is_s(a), is_s(b)) {
+        (true, false) => b.as_ref(),
+        (false, true) => a.as_ref(),
+        _ => return None, // `s ⊕ s` (used twice) or neither side — not the pattern
+    };
+    if count_var(other, s) > 0 || contains_self_call(other, name) {
+        return None;
+    }
+    Some((AccKind::Op(*op), rhs, other))
+}
+
+fn count_var(e: &Expr, name: &str) -> usize {
+    let mut n = 0;
+    e.walk(&mut |x| {
+        if matches!(x, Expr::Var(v) if v == name) {
+            n += 1;
+        }
+    });
+    n
+}
+
+/// Visit every tail ARM of a body with its `ArmShape` — the trailing `yield`s under
+/// nested `match`es (skipping `handle`, whose clauses become closures), one arm PER
+/// BRANCH of a tail `if` (`tail_leaves`), and the let-bound pair, which CONSUMES its
+/// `yield`. Exactly the arms `emit_body` rewrites under an accumulator fold.
+fn scan_fold_arms<'e>(
+    body: &'e [Stmt],
+    name: &str,
+    arity: usize,
+    mask: Option<&Vec<bool>>,
+    f: &mut dyn FnMut(ArmShape<'e>),
+) {
+    let mut skip = false;
+    for (i, s) in body.iter().enumerate() {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
+        match s {
+            Stmt::Let(n, rhs) => {
+                if let Some(Stmt::Yield(y)) = body.get(i + 1) {
+                    if let Some((kind, rec, other)) =
+                        classify_let_fold(n, rhs, y, name, arity, mask)
+                    {
+                        f(ArmShape::Fold { kind, rec, other });
+                        skip = true;
+                    }
+                }
+            }
+            Stmt::Yield(e) => {
+                let mut leaves = Vec::new();
+                tail_leaves(e, &mut leaves);
+                for l in leaves {
+                    f(classify_tail_arm(l, name, arity, mask));
+                }
+            }
+            Stmt::Match(_, arms) => {
+                for a in arms {
+                    scan_fold_arms(&a.body, name, arity, mask, f);
+                }
+            }
+            Stmt::Handle(_) => {}
+        }
     }
 }
 
@@ -3501,22 +3617,6 @@ fn contains_self_call(e: &Expr, name: &str) -> bool {
         }
     });
     hit
-}
-
-/// Visit every expression in TAIL position (the `yield`s), skipping `handle` — exactly the
-/// positions `emit_body` will rewrite.
-fn scan_tail_yields(body: &[Stmt], f: &mut dyn FnMut(&Expr)) {
-    for s in body {
-        match s {
-            Stmt::Yield(e) => f(e),
-            Stmt::Match(_, arms) => {
-                for a in arms {
-                    scan_tail_yields(&a.body, f);
-                }
-            }
-            Stmt::Let(..) | Stmt::Handle(_) => {}
-        }
-    }
 }
 
 /// The self-recursion a part's body can loop back into (see `Cx::tail_self`).
@@ -3644,6 +3744,165 @@ fn emit_tail(
     }
 }
 
+/// Should this tail `yield` take the accumulator-rewrite path? True iff some tail LEAF
+/// classifies as an APPLICABLE `Fold`/`Neutral` arm. A yield with no such leaf falls
+/// through to the base-case arm of `emit_body` — exactly the emission it had before the
+/// REQ-LLL-163 hardening, so untransformed programs emit unchanged.
+fn acc_yield_transforms(e: &Expr, cx: &Cx) -> bool {
+    let Some(ar) = cx.acc_rec.as_ref() else {
+        return false;
+    };
+    let mask = cx.borrow_mask.get(&ar.name);
+    let mut leaves = Vec::new();
+    tail_leaves(e, &mut leaves);
+    leaves.into_iter().any(|l| match classify_tail_arm(l, &ar.name, ar.params.len(), mask) {
+        ArmShape::Fold { kind, .. } => kind == ar.kind,
+        // when the plain tail-call machinery is ALSO active it owns the bare self-call
+        // (identical rebind-and-continue) — mirror of the arm order in `emit_body`.
+        ArmShape::Neutral { .. } => cx.tail_self.is_none(),
+        ArmShape::Other | ArmShape::Reject => false,
+    })
+}
+
+/// Lower a tail `yield` under an accumulator fold by dispatching each tail position on
+/// `classify_tail_arm` — a tail `if` re-dispatches per branch (its branches are tail
+/// positions, REQ-LLL-163 R2b), a `Fold` leaf accumulates-and-loops, a `Neutral` leaf
+/// loops with the accumulator untouched (R2a), and anything else is the base case.
+fn emit_acc_yield(
+    out: &mut String,
+    e: &Expr,
+    depth: usize,
+    cx: &Cx,
+    res: bool,
+    ar: &AccRec,
+) -> Result<(), String> {
+    if let Expr::If(c, a, b) = e {
+        out.push_str(&format!("{}if {} {{\n", indent(depth), expr(c, cx, false)?));
+        emit_acc_yield(out, a, depth + 1, cx, res, ar)?;
+        out.push_str(&format!("{}}} else {{\n", indent(depth)));
+        emit_acc_yield(out, b, depth + 1, cx, res, ar)?;
+        out.push_str(&format!("{}}}\n", indent(depth)));
+        return Ok(());
+    }
+    match classify_tail_arm(e, &ar.name, ar.params.len(), cx.borrow_mask.get(&ar.name)) {
+        ArmShape::Fold { kind, rec, other } if kind == ar.kind => {
+            emit_acc_step(out, rec, Some(other), depth, cx, res, ar)
+        }
+        ArmShape::Neutral { rec } if cx.tail_self.is_none() => {
+            emit_acc_step(out, rec, None, depth, cx, res, ar)
+        }
+        // a bare tail self-call while the plain tail-call machinery is ALSO active:
+        // that machinery owns it (identical rebind-and-continue).
+        _ if cx.tail_self.as_ref().is_some_and(|ts| tail_expr_has_self_call(e, ts)) => {
+            let ts = cx.tail_self.clone().expect("guarded");
+            emit_tail(out, e, depth, cx, res, &ts)
+        }
+        _ => emit_acc_base(out, e, depth, cx, res, ar),
+    }
+}
+
+/// One loop STEP of the accumulator rewrite: accumulate `other` (a `Fold` arm) or nothing
+/// (a `Neutral` "skip" arm), then rebind the parameters from the self-call's arguments and
+/// `continue`. The operands are bound to temporaries FIRST, because the recursive
+/// arguments read the very parameters they are about to overwrite (and `E` reads them
+/// too); accumulating before rebinding keeps the update simultaneous, exactly as the real
+/// call's argument evaluation was.
+fn emit_acc_step(
+    out: &mut String,
+    rec: &Expr,
+    other: Option<&Expr>,
+    depth: usize,
+    cx: &Cx,
+    res: bool,
+    ar: &AccRec,
+) -> Result<(), String> {
+    let args = match rec {
+        Expr::Call(_, args) => args,
+        _ => unreachable!("classify_tail_arm proved this is a self-call"),
+    };
+    let xs = part_call_args(&ar.name, args, cx, res)?;
+    let mut s = format!("{}{{ ", indent(depth));
+    if let Some(other) = other {
+        s.push_str(&format!("let __ae = {}; ", expr(other, cx, false)?));
+    }
+    for (i, x) in xs.iter().take(ar.params.len()).enumerate() {
+        s.push_str(&format!("let __ac{i} = {x}; "));
+    }
+    if other.is_some() {
+        match ar.kind {
+            AccKind::Op(op) => {
+                let fold = if cx.fast {
+                    crate::opsem::form(op).rust_fast("__acc", "__ae")
+                } else {
+                    crate::opsem::form(op).rust("__acc", "__ae")
+                };
+                s.push_str(&format!("__acc = {fold}; "));
+            }
+            // collect the heads / pieces IN SOURCE ORDER; the list is rebuilt (or
+            // concatenated) from its END at the base case, so the result is identical
+            // to the recursion's — and each step stays O(|piece|), never O(|acc|).
+            AccKind::Cons | AccKind::Concat => s.push_str("__cons.push(__ae); "),
+        }
+    }
+    for (i, p) in ar.params.iter().enumerate() {
+        s.push_str(&format!("{} = __ac{i}; ", local(p)));
+    }
+    s.push_str("continue '__tail; }\n");
+    out.push_str(&s);
+    Ok(())
+}
+
+/// The BASE case of an accumulator fold: the answer is what we accumulated, combined
+/// with the base value (`acc + 0`, `acc * 1`, the collected heads consed back, …).
+fn emit_acc_base(
+    out: &mut String,
+    e: &Expr,
+    depth: usize,
+    cx: &Cx,
+    res: bool,
+    ar: &AccRec,
+) -> Result<(), String> {
+    let v = expr(e, cx, res)?;
+    match ar.kind {
+        AccKind::Op(op) => {
+            let fold = if cx.fast {
+                crate::opsem::form(op).rust_fast("__acc", &v)
+            } else {
+                crate::opsem::form(op).rust("__acc", &v)
+            };
+            if cx.fast {
+                out.push_str(&format!(
+                    "{}return ::core::option::Option::Some({fold});\n",
+                    indent(depth)
+                ));
+            } else {
+                out.push_str(&format!("{}return {fold};\n", indent(depth)));
+            }
+        }
+        AccKind::Cons => {
+            // rebuild from the END onto the base list: consing the collected
+            // heads in reverse restores exactly the recursion's result.
+            out.push_str(&format!(
+                "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
+                 __acc = Rc::new(LstI::Cons(__e, __acc)); }} return __acc; }}\n",
+                indent(depth)
+            ));
+        }
+        AccKind::Concat => {
+            // concatenate from the END onto the base string. Walking the pieces
+            // in REVERSE keeps every `str_cat` walking only its own piece — the
+            // whole point: a forward fold would re-walk the growing accumulator
+            // and turn a linear `join` into a quadratic one.
+            out.push_str(&format!(
+                "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
+                 __acc = __lll_str_cat(__e, __acc); }} return __acc; }}\n",
+                indent(depth)
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn emit_body(
     out: &mut String,
     body: &[Stmt],
@@ -3651,9 +3910,32 @@ fn emit_body(
     cx: &Cx,
     res: bool,
 ) -> Result<(), String> {
-    for s in body {
+    let mut skip = false;
+    for (si, s) in body.iter().enumerate() {
+        if std::mem::take(&mut skip) {
+            continue;
+        }
         match s {
             Stmt::Let(name, e) => {
+                // REQ-LLL-163 R3 — `let s = self(args') ; yield E ⊕ s`: the let-bound
+                // spelling of a fold arm. Same classifier as detection; the pair becomes
+                // ONE fold step (accumulate `E`, rebind, continue) and the `yield` is
+                // consumed. Any non-matching pair keeps the real call below.
+                if let Some(ar) = cx.acc_rec.as_ref() {
+                    if let Some(Stmt::Yield(y)) = body.get(si + 1) {
+                        let mask = cx.borrow_mask.get(&ar.name);
+                        if let Some((kind, rec, other)) =
+                            classify_let_fold(name, e, y, &ar.name, ar.params.len(), mask)
+                        {
+                            if kind == ar.kind {
+                                let ar = ar.clone();
+                                emit_acc_step(out, rec, Some(other), depth, cx, res, &ar)?;
+                                skip = true;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 out.push_str(&format!(
                     "{}let {} = {};\n",
                     indent(depth),
@@ -3661,85 +3943,20 @@ fn emit_body(
                     expr(e, cx, res)?
                 ));
             }
-            // REQ-LLL-163 — `E ⊕ self(args')` in tail position: ACCUMULATE and loop instead
-            // of recursing. The operands are bound to temporaries FIRST, because the
-            // recursive arguments read the very parameters they are about to overwrite (and
-            // `E` reads them too); accumulating before rebinding keeps the update
-            // simultaneous, exactly as the real call's argument evaluation was.
-            Stmt::Yield(e) if cx.acc_rec.as_ref().is_some_and(|ar| acc_rec_arm(e, ar).is_some()) => {
-                let ar = cx.acc_rec.clone().expect("guarded");
-                let (rec, other) = acc_rec_arm(e, &ar).expect("guarded");
-                let args = match rec {
-                    Expr::Call(_, args) => args,
-                    _ => unreachable!("is_self_call proved this is a Call"),
-                };
-                let xs = part_call_args(&ar.name, args, cx, res)?;
-                let mut s = format!("{}{{ let __ae = {}; ", indent(depth), expr(other, cx, false)?);
-                for (i, x) in xs.iter().take(ar.params.len()).enumerate() {
-                    s.push_str(&format!("let __ac{i} = {x}; "));
-                }
-                match ar.kind {
-                    AccKind::Op(op) => {
-                        let fold = if cx.fast {
-                            crate::opsem::form(op).rust_fast("__acc", "__ae")
-                        } else {
-                            crate::opsem::form(op).rust("__acc", "__ae")
-                        };
-                        s.push_str(&format!("__acc = {fold}; "));
-                    }
-                    // collect the heads / pieces IN SOURCE ORDER; the list is rebuilt (or
-                    // concatenated) from its END at the base case, so the result is identical
-                    // to the recursion's — and each step stays O(|piece|), never O(|acc|).
-                    AccKind::Cons | AccKind::Concat => s.push_str("__cons.push(__ae); "),
-                }
-                for (i, p) in ar.params.iter().enumerate() {
-                    s.push_str(&format!("{} = __ac{i}; ", local(p)));
-                }
-                s.push_str("continue '__tail; }\n");
-                out.push_str(&s);
+            // REQ-LLL-163 — a tail arm the accumulator loop rewrites (`E ⊕ self(args')`,
+            // the bare "skip" self-call, or a tail `if` with either in a branch):
+            // accumulate/rebind and loop instead of recursing. Dispatch is per tail leaf
+            // on `classify_tail_arm` — the SAME classifier detection used, so what
+            // `acc_rec_of` promised is exactly what is rewritten here.
+            Stmt::Yield(e) if acc_yield_transforms(e, cx) => {
+                let ar = cx.acc_rec.clone().expect("guarded by acc_yield_transforms");
+                emit_acc_yield(out, e, depth, cx, res, &ar)?;
             }
             // the BASE case of an accumulator fold: the answer is what we accumulated,
             // combined with the base value (`acc + 0`, `acc * 1`, …).
             Stmt::Yield(e) if cx.acc_rec.is_some() && !cx.tail_self.as_ref().is_some_and(|ts| tail_expr_has_self_call(e, ts)) => {
                 let ar = cx.acc_rec.clone().expect("guarded");
-                let v = expr(e, cx, res)?;
-                match ar.kind {
-                    AccKind::Op(op) => {
-                        let fold = if cx.fast {
-                            crate::opsem::form(op).rust_fast("__acc", &v)
-                        } else {
-                            crate::opsem::form(op).rust("__acc", &v)
-                        };
-                        if cx.fast {
-                            out.push_str(&format!(
-                                "{}return ::core::option::Option::Some({fold});\n",
-                                indent(depth)
-                            ));
-                        } else {
-                            out.push_str(&format!("{}return {fold};\n", indent(depth)));
-                        }
-                    }
-                    AccKind::Cons => {
-                        // rebuild from the END onto the base list: consing the collected
-                        // heads in reverse restores exactly the recursion's result.
-                        out.push_str(&format!(
-                            "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
-                             __acc = Rc::new(LstI::Cons(__e, __acc)); }} return __acc; }}\n",
-                            indent(depth)
-                        ));
-                    }
-                    AccKind::Concat => {
-                        // concatenate from the END onto the base string. Walking the pieces
-                        // in REVERSE keeps every `str_cat` walking only its own piece — the
-                        // whole point: a forward fold would re-walk the growing accumulator
-                        // and turn a linear `join` into a quadratic one.
-                        out.push_str(&format!(
-                            "{}{{ let mut __acc = {v}; for __e in __cons.into_iter().rev() {{ \
-                             __acc = __lll_str_cat(__e, __acc); }} return __acc; }}\n",
-                            indent(depth)
-                        ));
-                    }
-                }
+                emit_acc_base(out, e, depth, cx, res, &ar)?;
             }
             Stmt::Yield(e) if cx.tail_self.is_some() && {
                 let ts = cx.tail_self.clone().expect("guarded");
@@ -4780,6 +4997,28 @@ use std::rc::Rc;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LstI<T> { Nil, Cons(T, Lst<T>) }
 pub type Lst<T> = Rc<LstI<T>>;
+
+// REQ-LLL-163: dropping a long list must be CONSTANT-STACK too. The compiler-generated
+// drop recurses tail-first (one frame per node), so the million-element list the
+// fold-to-loop rewrite just made COMPUTABLE still aborted the process at scope exit —
+// after the last print, invisible to any stdout oracle. Unlink iteratively instead:
+// steal the tail, then walk it while this handle is the LAST owner (`Rc::get_mut`),
+// snapping each node's tail to Nil so its own drop stays shallow. A SHARED tail stops
+// the walk — its other owner keeps it alive, exactly what the recursive drop did.
+impl<T> Drop for LstI<T> {
+    fn drop(&mut self) {
+        let LstI::Cons(_, tail) = self else { return };
+        if matches!(&**tail, LstI::Nil) { return; }
+        let nil: Lst<T> = Rc::new(LstI::Nil);
+        let mut cur = std::mem::replace(tail, nil.clone());
+        while let Some(node) = Rc::get_mut(&mut cur) {
+            let LstI::Cons(_, t) = node else { break };
+            // the assignment drops the PREVIOUS node — its tail is already Nil, so that
+            // drop is shallow; depth stays constant however long the chain is.
+            cur = std::mem::replace(t, nil.clone());
+        }
+    }
+}
 
 // REQ-LLL-150: a Set (`Rc<BTreeMap<T, ()>>`) iterated to an ASCENDING `Lst<T>` of its
 // elements. Generic, so the empty-set case infers `T` from the argument (no annotation

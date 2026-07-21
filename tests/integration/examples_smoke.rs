@@ -76,6 +76,7 @@ fn flagship_examples_build_and_run() {
         "rational_demo.lll",          // exact Rational arithmetic
         "stdlib_breadth.lll",         // many stdlib combinators
         "erp_ledger.lll",             // records + accumulation
+        "fold_million.lll",           // REQ-LLL-163: 1M-element fold+drop, full prod path
     ];
     let mut failures = Vec::new();
     for name in flagship {
