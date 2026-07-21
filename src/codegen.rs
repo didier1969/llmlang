@@ -1509,21 +1509,19 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
                     .collect();
                 let call = format!("{path}({})", args.join(", "));
                 let key = format!("{}.{}", ed.name, op.name);
-                // REQ-LLL-191 (CPT-LLL-017): the optimization oracle's bespoke frontier.
+                // REQ-LLL-191/193 (CPT-LLL-017): the optimization oracle's bespoke frontier.
                 // The neutral-form model `List[Int]` marshals to `&[i64]`; the returned
-                // assignment (`Vec<i64>`) marshals to the fixed 2-variable `(Int, Int)`
-                // tuple the checker guarantees. Any oracle failure (empty/short vec) yields
-                // the sentinel `(-1, -1)`, which the verified witness-check rejects — the
-                // untrusted result is never used unchecked (DEC-LLL-017). No trace/replay
-                // channel: the result is havoc'd + re-verified, so replay determinism is
-                // established by the witness, not by recording (follow-up if ever needed).
+                // N-variable assignment (`Vec<i64>`) marshals to the `List[Int]` the checker
+                // guarantees (REQ-LLL-193 — the fixed 2-tuple is gone). Any oracle failure
+                // (empty vec: z3 missing, unsat, malformed) yields an EMPTY list, whose length
+                // fails the verified witness-check's `length(sol) == nvars` guard — the untrusted
+                // result is never used unchecked (DEC-LLL-017). No trace/replay channel: the
+                // result is havoc'd + re-verified, so replay determinism is established by the
+                // witness, not by recording (follow-up if ever needed).
                 if path == "lll_solver_runtime::solve" {
                     out.push_str(&format!(
                         "#[inline] fn {}({}) -> {} {{ \
-                         let __sol = lll_solver_runtime::solve(&__lll_ints_to_rust(&__a0)); \
-                         let __x = __sol.first().copied().unwrap_or(-1); \
-                         let __y = __sol.get(1).copied().unwrap_or(-1); \
-                         (LllInt::from(__x), LllInt::from(__y)) }}\n",
+                         __lll_ints_of_rust(&lll_solver_runtime::solve(&__lll_ints_to_rust(&__a0))) }}\n",
                         ffi_shim(&key),
                         params.join(", "),
                         rs_ty(&op.ret),
@@ -5873,6 +5871,19 @@ fn __lll_ints_to_rust(xs: &Lst<LllInt>) -> Vec<i64> {
         cur = t;
     }
     v
+}
+
+// REQ-LLL-193 (CPT-LLL-017): marshal the oracle's N-variable answer (`Vec<i64>`) back to a
+// `List[Int]` — the reverse of `__lll_ints_to_rust`, mirroring `__lll_bytes_of_rust` but with
+// full-range `LllInt::from` (a solver assignment is an exact `Int`, never a clamped byte). An
+// EMPTY vec (any oracle fault) becomes `[]`, whose length fails the witness-check's `nvars`
+// guard, so a faulted solve is rejected exactly like a wrong assignment (DEC-LLL-017).
+fn __lll_ints_of_rust(xs: &[i64]) -> Lst<LllInt> {
+    let mut acc: Lst<LllInt> = Rc::new(LstI::Nil);
+    for x in xs.iter().rev() {
+        acc = Rc::new(LstI::Cons(LllInt::from(*x), acc));
+    }
+    acc
 }
 
 // Verified array (REQ-LLL-037): an Rc-shared Vec — O(1) indexing, structural

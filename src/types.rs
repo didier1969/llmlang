@@ -760,23 +760,23 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                 if path.starts_with("lll_db_multi_runtime::") {
                     uses_db_multi_runtime = true;
                 }
-                // REQ-LLL-191 (CPT-LLL-017, "oracle au bord"): `solve` takes the neutral-form
+                // REQ-LLL-191/193 (CPT-LLL-017, "oracle au bord"): `solve` takes the neutral-form
                 // linear model as `List[Int]` (flat: nvars, nconstraints, sense, objective
-                // coeffs, then per-constraint rel/rhs/coeffs) and returns a FIXED 2-variable
-                // integer assignment `(Int, Int)` — the tracer's minimal, non-general shape (a
-                // general modelling surface would be the ERP feature, not this bullet). The
-                // result is havoc'd (UNTRUSTED oracle, DEC-LLL-017) and MUST be re-validated by
-                // a verified witness-check. Enforced here so codegen's bespoke shim
-                // (`Vec<i64>` → the 2-tuple) can rely on the shape, fail-closed (DEC-LLL-015).
+                // coeffs, then per-constraint rel/rhs/coeffs) and returns an N-variable integer
+                // assignment `List[Int]` (length = the model's nvars — REQ-LLL-193 generalises
+                // the REQ-LLL-191 tracer's fixed `(Int, Int)` to a variable-length solution, the
+                // real modelling surface). The result is havoc'd (UNTRUSTED oracle, DEC-LLL-017)
+                // and MUST be re-validated by a verified witness-check. Enforced here so codegen's
+                // bespoke shim (`Vec<i64>` → the `List[Int]`) can rely on the shape, fail-closed
+                // (DEC-LLL-015).
                 if path == "lll_solver_runtime::solve"
-                    && (op.params != [Ty::list(Ty::Int)]
-                        || op.ret != Ty::Tuple(vec![Ty::Int, Ty::Int]))
+                    && (op.params != [Ty::list(Ty::Int)] || op.ret != Ty::list(Ty::Int))
                 {
                     return Err(format!(
                         "effect `{}` op `{}`: `lll_solver_runtime::solve` must be declared \
-                         `(List[Int]) -> (Int, Int)` — the neutral-form model in, a 2-variable \
+                         `(List[Int]) -> List[Int]` — the neutral-form model in, an N-variable \
                          integer assignment out; the untrusted solution is re-checked by a \
-                         verified witness (REQ-LLL-191); found `({}) -> {}`",
+                         verified witness (REQ-LLL-191/193); found `({}) -> {}`",
                         ed.name,
                         op.name,
                         op.params.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "),
