@@ -2656,9 +2656,9 @@ impl<'a> Emit<'a> {
                 // a filter guard: sound for exactly the same reason (the body only ever runs
                 // at elements the loop actually produces). So `[10 div i for i in 1 .. n]`
                 // verifies with no guard at all — the bound IS the proof.
-                let (elem_sort, range_fact) = match iter {
+                let (elem_sort, range_fact, src_len) = match iter {
                     ComprIter::List(xs) => {
-                        self.tr(xs, env, None)?;
+                        let xs_term = self.tr(xs, env, None)?;
                         let list_sort = self.sort_of(xs, env).ok_or_else(|| {
                             format!(
                                 "part `{}`: cannot determine the element type of the \
@@ -2672,12 +2672,18 @@ impl<'a> Emit<'a> {
                                 self.part.name
                             )
                         })?;
-                        (es, None)
+                        // REQ-LLL-203: the source's length, so the result's can be RELATED to it
+                        // (a map preserves it, a filter shrinks it) once the result is havoc'd.
+                        let src_len = format!("({} {xs_term})", list_len_fn(&es));
+                        (es, None, Some(src_len))
                     }
                     ComprIter::Range(lo, hi) => {
                         let lo_s = self.tr(lo, env, Some(&Ty::Int))?;
                         let hi_s = self.tr(hi, env, Some(&Ty::Int))?;
-                        (smt_ty(&Ty::Int), Some((lo_s, hi_s)))
+                        // REQ-LLL-203: a `lo .. hi` range is half-open ascending, EMPTY when
+                        // hi <= lo, so it yields `max(0, hi - lo)` elements.
+                        let src_len = format!("(ite (<= {hi_s} {lo_s}) 0 (- {hi_s} {lo_s}))");
+                        (smt_ty(&Ty::Int), Some((lo_s, hi_s)), Some(src_len))
                     }
                 };
                 let felt = self.fresh(&elem_sort);
@@ -2704,7 +2710,21 @@ impl<'a> Emit<'a> {
                         self.sort_of(body, &env2).unwrap_or_else(|| smt_ty(&Ty::Int))
                     ),
                 };
-                self.fresh(&res_sort)
+                let r = self.fresh(&res_sort);
+                // REQ-LLL-203: relate the (havoc'd) result's LENGTH to the source's — the ONE
+                // structural fact a comprehension always satisfies. A filterless comprehension is a
+                // MAP: it preserves the count EXACTLY (even when it changes the element TYPE), so
+                // `len(result) == src_len`. A filtered one only ever KEEPS elements, so
+                // `len(result) <= src_len`. Both hold on EVERY run, so assuming them is sound and
+                // MONOTONE (it only adds a hypothesis, never breaks a passing proof). Without it,
+                // `length([f(x) for x in xs]) == length(xs)` — a basic, common obligation — is
+                // unprovable, the result being an otherwise unconstrained fresh list.
+                if let (Some(src_len), Some(res_elem)) = (src_len, lst_elem_sort(&res_sort)) {
+                    let res_len = format!("({} {r})", list_len_fn(&res_elem));
+                    let rel = if guard.is_some() { "<=" } else { "=" };
+                    self.hyps.push(format!("({rel} {res_len} {src_len})"));
+                }
+                r
             }
             // FUSED lazy sequences (REQ-LLL-159b). A `Seq` never appears in a CONTRACT
             // (rejected at check), so this only runs while collecting a BODY's obligations.

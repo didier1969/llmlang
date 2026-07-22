@@ -2131,3 +2131,27 @@ fn sum_spec_primitive_aggregates_rationals_req202() {
     let bad = "module M:\n\n  part rsum(xs: List[Rational]) -> Rational:\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0.0\n      h :: t -> yield rsum(t)\n";
     assert!(!verify_src(bad).ok(), "a Rational fold that forgets an element must NOT prove `== sum`");
 }
+
+
+// ─── REQ-LLL-203: a comprehension now carries its LENGTH relation to the enclosing contract — a
+// map (`[f(x) for x in xs]`) preserves the count, a filter (`… if g`) can only shrink it, a range
+// yields `max(0, hi-lo)`. Sound (a true fact of every run) and monotone; without it, the very
+// common `length([f(x) for x in xs]) == length(xs)` was unprovable (the result was havoc'd bare).
+#[test]
+fn comprehension_carries_length_relation_req203() {
+    // MAP: length preserved (even though it could change the element type).
+    let map = "module M:\n\n  part doubles(xs: List[Int]) -> List[Int]:\n    ensures length(result) == length(xs)\n    yield [x + x for x in xs]\n";
+    assert!(verify_src(map).ok(), "a map comprehension must preserve length: {:?}", failures(&verify_src(map)));
+    // FILTER: length can only shrink → `<=` proves.
+    let filt = "module M:\n\n  part pos(xs: List[Int]) -> List[Int]:\n    ensures length(result) <= length(xs)\n    yield [x for x in xs if x > 0]\n";
+    assert!(verify_src(filt).ok(), "a filter comprehension must prove length <= source: {:?}", failures(&verify_src(filt)));
+    // RANGE: `[f(i) for i in 0 .. n]` has exactly `n` elements when `n >= 0`.
+    let rng = "module M:\n\n  part rng(n: Int) -> List[Int]:\n    requires n >= 0\n    ensures length(result) == n\n    yield [i + i for i in 0 .. n]\n";
+    assert!(verify_src(rng).ok(), "a range comprehension must know its exact length: {:?}", failures(&verify_src(rng)));
+    // NEGATIVE (soundness): a map cannot grow the list → `length + 1` REJECTED.
+    let bad_map = "module M:\n\n  part f(xs: List[Int]) -> List[Int]:\n    ensures length(result) == length(xs) + 1\n    yield [x + x for x in xs]\n";
+    assert!(!verify_src(bad_map).ok(), "a map that claims to grow the list must be rejected");
+    // NEGATIVE (soundness): a FILTER only guarantees `<=`, never `==` → REJECTED.
+    let bad_filt = "module M:\n\n  part f(xs: List[Int]) -> List[Int]:\n    ensures length(result) == length(xs)\n    yield [x for x in xs if x > 0]\n";
+    assert!(!verify_src(bad_filt).ok(), "a filter cannot promise it keeps every element");
+}
