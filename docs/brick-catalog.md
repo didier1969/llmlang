@@ -69,14 +69,29 @@
   est gratuit (le programme ne peut rien prouver sur un résultat havocé sans re-vérifier).
 - **REQ** — `REQ-LLL-191` / `REQ-LLL-193`.
 
+## 5. Facturation exacte (capstone composé) — `examples/verified_invoice.lll`
+
+- **Prouve** — sur une facture de taille quelconque : « un montant par ligne » (compte préservé)
+  ET « total == somme exacte des montants » (aucun arrondi).
+- **Signature**
+  - `line_amounts(items: List[LineItem]) -> List[Int]` · `ensures length(result) == length(items)`.
+  - `invoice_total(amounts: List[Int]) -> Int` · `ensures result == sum(amounts)`.
+- **Quand** — totaliser une facture / un devis / un relevé à partir de lignes typées, avec la
+  garantie qu'aucune ligne n'est perdue et que le total est exact.
+- **Technique** — COMPOSE trois capacités : records à champs nommés, compréhension préservant le
+  compte (REQ-LLL-203), et fold prouvé égal à `sum` (REQ-LLL-194). Entiers exacts.
+- **REQ** — REQ-LLL-203 + REQ-LLL-194 (capstone).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
 
 | Mécanisme | Rôle | Réf |
 |---|---|---|
-| `sum` (spec, `List[Int]`) | énoncer/​prouver la conservation d'un agrégat de liste à N symbolique | REQ-LLL-194 |
+| `sum` (spec, `List[Int]`/`List[Rational]`) | énoncer/​prouver la conservation d'un agrégat de liste à N symbolique | REQ-LLL-194/202 |
 | `length` (spec, `List`/`Array`) | mesure de terminaison + tailles dans les contrats | REQ-LLL-101 |
+| relation de longueur d'une compréhension | map préserve / filtre réduit le compte, porté au contrat | REQ-LLL-203 |
+| ordre exact sur ℚ (`<`,`<=`,`>`,`>=`) | bornes/monotonie sur rationnels, contrats & code | REQ-LLL-202 |
 | if-expression portant l'IH | fonctions récursives contractées écrites en `if` (idiome LLM) | REQ-LLL-198 |
 | Int exact (bignum) | argent/quantités sans overflow ni arrondi | DEC-LLL-077 |
 | Mur de havoc | consommer un outil externe sans lui faire confiance | CPT-LLL-017 |

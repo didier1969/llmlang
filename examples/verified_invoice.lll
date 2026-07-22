@@ -1,0 +1,38 @@
+module VerifiedInvoice:
+
+  # ── BRIQUE VÉRIFIÉE : facturation exacte à faisabilité prouvée (catalogue CPT-LLL-018) ──
+  #
+  # Ce capstone COMPOSE trois capacités du langage — dont deux nouvelles — pour couvrir un flux
+  # ERP réel (totaliser une facture) avec des invariants PROUVÉS, pas testés :
+  #   1. records à champs nommés (`LineItem`) — la donnée métier (REQ-LLL-070) ;
+  #   2. une compréhension qui PRÉSERVE le compte (un montant par ligne, REQ-LLL-203) ;
+  #   3. un fold prouvé égal à la somme spec exacte (REQ-LLL-194), en entiers (aucun arrondi).
+  #
+  # AVANT (le réflexe) : on mappe les lignes vers des montants, on somme en flottants, et RIEN ne
+  # garantit qu'il y a autant de montants que de lignes, ni que le total est exact.
+  # APRÈS (ici) : « autant de montants que de lignes » et « total == somme exacte » sont des
+  # THÉORÈMES déchargés par Z3 pour une facture de taille quelconque.
+
+  type LineItem = {qty: Int, unit_price: Int}
+
+  # Un montant par ligne (qty × prix unitaire). La compréhension est un MAP : elle préserve le
+  # compte — `length(result) == length(items)` est prouvé (REQ-LLL-203), donc aucune ligne n'est
+  # perdue ni dupliquée en passant aux montants.
+  part line_amounts(items: List[LineItem]) -> List[Int]:
+    ensures length(result) == length(items)
+    yield [li.qty * li.unit_price for li in items]
+
+  # Le total d'une facture == la somme EXACTE de ses montants de ligne, prouvé pour un nombre de
+  # lignes quelconque (l'IH de l'appel récursif + les axiomes de `sum`, REQ-LLL-194). Entiers
+  # exacts : le total affiché ne peut pas diverger de la vraie somme par un arrondi flottant.
+  part invoice_total(amounts: List[Int]) -> Int:
+    ensures result == sum(amounts)
+    measure length(amounts)
+    match amounts:
+      [] -> yield 0
+      a :: rest -> yield a + invoice_total(rest)
+
+  part main() -> Int via IO:
+    # 2 × 500 + 1 × 300 = 1300. Deux lignes → deux montants (compte préservé) → total exact 1300.
+    let items = [LineItem(2, 500), LineItem(1, 300)]
+    yield IO.print(invoice_total(line_amounts(items)))

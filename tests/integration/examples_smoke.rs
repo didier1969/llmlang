@@ -81,6 +81,7 @@ fn flagship_examples_build_and_run() {
         "erp_planning_verified.lll",  // REQ-LLL-193: oracle-at-the-edge ERP planning, witness-checked (z3-opt)
         "verified_allocation.lll",    // CPT-LLL-018 brick: exact amount split, conservation proven at symbolic N (REQ-LLL-198)
         "verified_ledger.lll",        // CPT-LLL-018 brick: ledger total == sum, conservation over a symbolic-length list (REQ-LLL-194)
+        "verified_invoice.lll",       // CPT-LLL-018 capstone: records + count-preserving comprehension (REQ-203) + exact total == sum (REQ-194)
     ];
     let mut failures = Vec::new();
     for name in flagship {

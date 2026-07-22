@@ -2155,3 +2155,26 @@ fn comprehension_carries_length_relation_req203() {
     let bad_filt = "module M:\n\n  part f(xs: List[Int]) -> List[Int]:\n    ensures length(result) == length(xs)\n    yield [x for x in xs if x > 0]\n";
     assert!(!verify_src(bad_filt).ok(), "a filter cannot promise it keeps every element");
 }
+
+
+// ─── CPT-LLL-018 capstone: `verified_invoice.lll` COMPOSES three capabilities — records, a
+// count-preserving comprehension (REQ-203), and a fold proven equal to the exact spec `sum`
+// (REQ-194) — so "one amount per line" and "total == exact sum" are both theorems. Guards the
+// proof (verify) and the exact runtime total (2×500 + 1×300 == 1300).
+#[test]
+fn verified_invoice_capstone_composes_comprehension_and_sum_cpt018() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/verified_invoice.lll"),
+    )
+    .expect("read verified_invoice.lll");
+    assert!(
+        verify_src(&src).ok(),
+        "the invoice capstone must verify (length-preserving map + exact total): {:?}",
+        failures(&verify_src(&src))
+    );
+    assert!(
+        build_run(&src).contains("1300"),
+        "expected exact invoice total 1300, got: {}",
+        build_run(&src)
+    );
+}
