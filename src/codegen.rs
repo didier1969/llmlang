@@ -6362,6 +6362,20 @@ impl std::ops::Neg for Rat {
     type Output = Rat;
     fn neg(self) -> Rat { Rat { num: -self.num, den: self.den } } // canonical preserved
 }
+// REQ-LLL-202: exact ordering by CROSS-MULTIPLICATION. `den` is normalized POSITIVE by
+// `Rat::new`, so a/b ⋛ c/d reduces to a·d ⋛ c·b with the sense preserved (no denominator sign
+// flip), and `LllInt` multiplication/`cmp` are exact — so the order is total and matches ℚ. A
+// derived `Ord` would be WRONG (it compares num then den: 1/3 vs 1/2 → 3>2 → says 1/3>1/2). Ord's
+// `Equal` coincides with the derived `PartialEq` (two reduced, den>0 fractions are equal iff
+// a·d == c·b), so the impls are consistent.
+impl std::cmp::PartialOrd for Rat {
+    fn partial_cmp(&self, o: &Rat) -> Option<std::cmp::Ordering> { Some(self.cmp(o)) }
+}
+impl std::cmp::Ord for Rat {
+    fn cmp(&self, o: &Rat) -> std::cmp::Ordering {
+        (self.num.clone() * o.den.clone()).cmp(&(o.num.clone() * self.den.clone()))
+    }
+}
 
 // FFI string marshalling (REQ-LLL-042, DEC-LLL-045): a llmlang string is a List[Int]
 // of Unicode codepoints (DEC-LLL-030); an `= extern … as …` shim crosses it to/from

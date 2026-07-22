@@ -4181,10 +4181,19 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
             }
         }
         OpClass::IntCmp => {
-            if (ta == Ty::Int && tb == Ty::Int) || (ta == Ty::Big && tb == Ty::Big) {
+            if (ta == Ty::Int && tb == Ty::Int)
+                || (ta == Ty::Big && tb == Ty::Big)
+                // REQ-LLL-202: exact `Rational` ordering. Rationals are Z3 `Real` (the SMT `(< a
+                // b)` is decidable LRA) and the runtime `Rat` orders by cross-multiplication over a
+                // normalized `den > 0` (codegen), so `<`/`<=`/`>`/`>=` are total and exact — the
+                // list of admitted operand pairs is the ONLY place ordering was Int-restricted.
+                || (ta == Ty::Rational && tb == Ty::Rational)
+            {
                 Ok(Ty::Bool)
             } else {
-                Err(format!("comparison needs two Int or two Big operands, got {ta} and {tb}"))
+                Err(format!(
+                    "comparison needs two Int, two Big, or two Rational operands, got {ta} and {tb}"
+                ))
             }
         }
         OpClass::Equality => {

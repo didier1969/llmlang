@@ -67,3 +67,31 @@ fn the_float_trap_stays_closed_on_small_rationals() {
     let out = build_run(src);
     assert!(out.contains("111"), "0.1 + 0.2 must still equal 0.3 exactly, got: {out:?}");
 }
+
+
+// ─── REQ-LLL-202: exact ORDERING over ℚ (`<`/`<=`/`>`/`>=`), in contracts AND code. Rationals are
+// Z3 `Real` (decidable LRA) and the runtime `Rat` orders by cross-multiplication over a normalized
+// `den > 0` — total and exact, where a naive lexicographic `(num, den)` order would be WRONG.
+#[test]
+fn rational_ordering_in_contract_and_code_req202() {
+    // CONTRACT: a bound on rationals discharges (the else-branch proves x >= lo, path-sensitive).
+    let clamp = "module M:\n\n  part clamp_low(x: Rational, lo: Rational) -> Rational:\n    ensures result >= lo\n    yield if x < lo then lo else x\n";
+    assert!(
+        verify_src(clamp).ok(),
+        "a `>=` bound on Rational must discharge: {:?}",
+        failures(&verify_src(clamp))
+    );
+    // NEGATIVE (soundness): returning `x` unguarded cannot satisfy `result >= lo` → REJECTED.
+    let bad = "module M:\n\n  part bad(x: Rational, lo: Rational) -> Rational:\n    ensures result >= lo\n    yield x\n";
+    assert!(!verify_src(bad).ok(), "a false Rational bound must stay rejected");
+    // CODE + runtime, DISCRIMINATING: 0.5 (1/2) > 0.4 (2/5) is TRUE by cross-multiplication
+    // (5 > 4); a lexicographic (num, den) order would compare 1 < 2 and answer FALSE. Also a
+    // negative pair. Proves the runtime `Ord` is real ℚ order, not a struct-field order.
+    let run = "module M:\n\n  part gt(a: Rational, b: Rational) -> Int:\n    yield if a > b then 1 else 0\n  part lt(a: Rational, b: Rational) -> Int:\n    yield if a < b then 1 else 0\n  part main() -> Int via IO:\n    let p = IO.print(gt(0.5, 0.4))\n    let q = IO.print(lt(-0.5, -0.25))\n    yield IO.print(lt(0.25, -0.5))\n";
+    assert!(verify_src(run).ok(), "the ordering demo must verify: {:?}", failures(&verify_src(run)));
+    let out = build_run(run);
+    assert!(
+        out.contains("1\n1\n0"),
+        "expected 0.5>0.4 → 1 (cross-mult, not lexicographic), -0.5<-0.25 → 1, 0.25<-0.5 → 0; got: {out:?}"
+    );
+}
