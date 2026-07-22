@@ -686,6 +686,27 @@ fn if_expression_recursive_carries_induction_hypothesis_req198() {
     );
 }
 
+// REQ-LLL-198 completeness: the fix lives in the single `tr` `Expr::If` arm, so the IH must reach
+// the enclosing obligation from EVERY term position an if-expression can occupy — a `let` RHS, a
+// nested `else` (IH crossing two guards), and a call argument. One arm, but three distinct `tr`
+// recursion paths (walk_body let, nested If, the Call arg loop); a refactor could break just one.
+#[test]
+fn if_expression_carries_ih_in_all_term_positions_req198() {
+    // (1) if-expr recursion bound in a `let`, then yielded.
+    let via_let = "module M:\n\n  part f(n: Int, v: Int) -> Int:\n    requires n >= 0\n    ensures result == n * v\n    measure n\n    let r = if n == 0 then 0 else v + f(n - 1, v)\n    yield r\n";
+    // (2) nested if — the recursive call sits under ¬(n==0) ∧ ¬(n==1); the IH must survive both.
+    let nested = "module M:\n\n  part f(n: Int) -> Int:\n    requires n >= 0\n    ensures result == n\n    measure n\n    yield if n == 0 then 0 else if n == 1 then 1 else 1 + f(n - 1)\n";
+    // (3) if-expr recursion as an argument to another verified part.
+    let via_arg = "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n\n  part f(n: Int) -> Int:\n    requires n >= 1\n    ensures result == n\n    measure n\n    yield if n == 1 then 1 else inc(f(n - 1))\n";
+    for (tag, src) in [("let", via_let), ("nested", nested), ("call-arg", via_arg)] {
+        assert!(
+            verify_src(src).ok(),
+            "if-expression IH must reach the obligation from the {tag} position: {:?}",
+            failures(&verify_src(src))
+        );
+    }
+}
+
 // ─── CPT-LLL-018: the verified-brick payoff of REQ-LLL-198. `verified_allocation.lll` splits an
 // amount into N shares and PROVES conservation (Σ shares == total) at SYMBOLIC N — the property
 // floats lose. It only verifies because the recursive if-expression now carries its induction
