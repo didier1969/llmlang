@@ -440,6 +440,15 @@ struct Emit<'a> {
     /// arguments are never inserted. `requires`/`measure` are still discharged per call site
     /// (path-sensitive) — the memo only shares the havoc'd result + its assumed `ensures`.
     call_memo: HashMap<(String, Vec<String>), String>,
+    /// REQ-LLL-201: `forall x in <list>: body` is lowered to an abstract recursive predicate
+    /// `listall_<n>` over `(Lst E)`, axiomatized definitionally (`p(nil)=true`,
+    /// `p(cons h t)=(body[x:=h] ∧ p(t))`, E-matched — the list analogue of `sum`/`len`). Keyed by
+    /// (translated-body, elem-sort) so IDENTICAL forall bodies share one predicate and DISTINCT
+    /// ones never collide; the value is the assigned name. `list_forall_axioms` holds the decl +
+    /// axioms per name, emitted once in the prelude when referenced. Deterministic (name = current
+    /// map size), so the VC — and its content-hash (DEC-LLL-020) — is stable across runs.
+    list_forall_names: HashMap<(String, String), String>,
+    list_forall_axioms: std::collections::BTreeMap<String, String>,
 }
 
 /// Shared preamble: declare the part's params (and `given` methods) as fresh
@@ -465,6 +474,8 @@ fn setup_part_emit<'a>(
         forall_ens: HashMap::new(),
         instantiating: false,
         call_memo: HashMap::new(),
+        list_forall_names: HashMap::new(),
+        list_forall_axioms: std::collections::BTreeMap::new(),
     };
     // params
     let mut env: HashMap<String, String> = HashMap::new();
@@ -559,7 +570,19 @@ fn setup_part_emit<'a>(
     // instantiation of an already-registered `forall` regardless of which came first.
     let reqs = part.requires.clone();
     for r in &reqs {
-        if let Expr::Forall { domain, body, .. } = r {
+        if let Expr::Forall { var, domain, body } = r {
+            // REQ-LLL-201: a `forall x in <list>` requires is a plain hypothesis `(listall_N xs)`;
+            // the predicate's cons axiom unfolds it at a `h :: t` match into `body[x:=h] ∧
+            // (listall_N t)` — the head property + the recursive call's own requires. (Map/Set
+            // domains keep the index/member registration below.)
+            if let ForallDomain::In(coll) = domain {
+                if let Some(Ty::List(e)) = em.operand_ty(coll) {
+                    let elem = smt_ty(&e);
+                    let h = em.forall_list_term(var, coll, body, &env, &elem)?;
+                    em.hyps.push(h);
+                    continue;
+                }
+            }
             for cname in forall_container_vars(domain, body) {
                 if let Some(sym) = env.get(&cname) {
                     em.forall_ens
@@ -602,6 +625,30 @@ pub fn gen_part_obligations(cm: &CheckedModule, part: &Part) -> Result<Vec<Oblig
     //   requires(state₀) ∧ ensures(state₀, msg₀, result₀) ⇒ requires[state := result₀].
     if part.name == "step" && !part.requires.is_empty() && module_uses_actor_runtime(cm) {
         em.emit_actor_step_preservation()?;
+    }
+    // REQ-LLL-201: inject each `listall_N` predicate's decl+definitional-axioms into every
+    // obligation that references it (prepended to `decls`, so the predicate is declared before
+    // use). Per-push, like `len`/`sum`, but the axiom is BODY-dependent so it cannot be
+    // regenerated from a sort alone — it must travel with the obligation. Only referencing
+    // obligations pay for it; the `(Lst E)` datatype it needs is in the global prelude already.
+    if !em.list_forall_axioms.is_empty() {
+        let axioms = em.list_forall_axioms.clone();
+        for o in &mut em.obls {
+            let referenced: Vec<String> = axioms
+                .iter()
+                .filter(|(name, _)| {
+                    o.decls
+                        .iter()
+                        .chain(o.hyps.iter())
+                        .chain(std::iter::once(&o.goal))
+                        .any(|t| t.contains(&format!("({name} ")))
+                })
+                .map(|(_, ax)| ax.clone())
+                .collect();
+            for ax in referenced.into_iter().rev() {
+                o.decls.insert(0, ax);
+            }
+        }
     }
     Ok(em.obls)
 }
@@ -688,6 +735,8 @@ fn gen_instance_law_obligations(
             forall_ens: HashMap::new(),
             instantiating: false,
             call_memo: HashMap::new(),
+            list_forall_names: HashMap::new(),
+            list_forall_axioms: std::collections::BTreeMap::new(),
         };
         let mut env: HashMap<String, String> = HashMap::new();
         for (bn, bt) in &law.binders {
@@ -1728,6 +1777,70 @@ impl<'a> Emit<'a> {
     /// Shared by the two PROVE sites — a part's own `ensures` at `yield`, and a
     /// callee's `requires` at the call site (`env` binds the callee's params to the
     /// argument terms there, so it proves the property of the actual arguments).
+    /// REQ-LLL-201: is this `forall … in <coll>` domain a LIST (vs a Map/Set)?  Decided by the
+    /// checker's static type of `coll`, so it never depends on translation order.
+    fn is_list_domain(&self, coll: &Expr, _env: &HashMap<String, String>) -> bool {
+        matches!(self.operand_ty(coll), Some(Ty::List(_)))
+    }
+
+    /// REQ-LLL-201: lower `forall x in <list_expr>: body` to `(listall_N <list_term>)`, an abstract
+    /// recursive predicate axiomatized DEFINITIONALLY in the prelude (`p(nil)=true`,
+    /// `p(cons h t)=(body[x:=h] ∧ p(t))`, E-matched — the list analogue of `sum`/`len`). Sound by
+    /// construction (the unique function satisfying the axioms is "body holds for every element"),
+    /// conservative. v1: the body may reference ONLY the bound variable `var`; a free variable
+    /// would need the predicate to close over it (a follow-up), so it is rejected LOUD here rather
+    /// than silently dropped (dropping would encode a WEAKER property — an unsoundness).
+    fn forall_list_term(
+        &mut self,
+        var: &str,
+        list_expr: &Expr,
+        body: &Expr,
+        env: &HashMap<String, String>,
+        elem: &str,
+    ) -> Result<String, String> {
+        let xs = self.tr(list_expr, env, None)?;
+        let elem = elem.to_string();
+        // FREE-VAR restriction (v1): the body may mention only `var` (+ ctors/constants/operators).
+        let mut offending: Option<String> = None;
+        body.walk(&mut |e| {
+            if let Expr::Var(n) = e {
+                if n != var && !self.cm.ctors.contains_key(n) && offending.is_none() {
+                    offending = Some(n.clone());
+                }
+            }
+        });
+        if let Some(n) = offending {
+            return Err(format!(
+                "part `{}`: `forall {var} in <list>: …` may reference only the bound variable in \
+                 v1 (found `{n}`) — a body over a free variable is a follow-up (REQ-LLL-201)",
+                self.part.name
+            ));
+        }
+        // translate the body ONCE with `var := h` (the axiom's bound head) for the axiom text.
+        let mut benv: HashMap<String, String> = HashMap::new();
+        benv.insert(var.to_string(), "h".to_string());
+        self.sorts.insert("h".to_string(), elem.clone());
+        let body_smt = self.tr(body, &benv, Some(&Ty::Bool))?;
+        // one predicate per (body, elem): identical bodies share, distinct ones never collide.
+        let key = (body_smt.clone(), elem.clone());
+        let name = if let Some(n) = self.list_forall_names.get(&key) {
+            n.clone()
+        } else {
+            let n = format!("listall_{}", self.list_forall_names.len());
+            self.list_forall_names.insert(key, n.clone());
+            let axiom = format!(
+                "(declare-fun {n} ((Lst {elem})) Bool)\n\
+                 (assert (= ({n} (as nil (Lst {elem}))) true))\n\
+                 (assert (forall ((h {elem}) (t (Lst {elem}))) \
+                   (! (= ({n} (cons h t)) (and {body_smt} ({n} t))) \
+                   :pattern (({n} (cons h t))))))"
+            );
+            self.list_forall_axioms.insert(n.clone(), axiom);
+            n
+        };
+        Ok(format!("({name} {xs})"))
+    }
+
     fn prove_forall_fresh_const(
         &mut self,
         descr: String,
@@ -2077,6 +2190,19 @@ impl<'a> Emit<'a> {
                                 coll_def,
                             )?;
                         } else if let Expr::Forall { var, domain, body } = ens {
+                            // REQ-LLL-201 v1 is CONSUME-side only: a `forall x in <list>` in an
+                            // `ensures` (proving a function PRODUCES an all-P list) needs the
+                            // predicate unfolded on the result's cons structure + the callee's
+                            // ensures registered — a follow-up. Reject LOUD rather than mishandle.
+                            if let ForallDomain::In(coll) = domain {
+                                if self.is_list_domain(coll, &env2) {
+                                    return Err(format!(
+                                        "part `{}`: `forall … in <list>` in an `ensures` is not yet \
+                                         supported (REQ-LLL-201 v1 is consume-side/`requires` only)",
+                                        self.part.name
+                                    ));
+                                }
+                            }
                             // PROVE a bounded universal by FRESH-CONST universal
                             // generalization (REQ-LLL-087) — see `prove_forall_fresh_const`.
                             self.prove_forall_fresh_const(descr, var, domain, body, &env2)?;
@@ -3335,10 +3461,43 @@ impl<'a> Emit<'a> {
                             coll_def,
                         )?;
                     } else if let Expr::Forall { var, domain, body } = req {
-                        // PROVE a quantified `requires` by FRESH-CONST universal
-                        // generalization — the SAME sound encoding as a quantified `ensures`
-                        // proof (REQ-LLL-087 A1/A2); see `prove_forall_fresh_const`.
-                        self.prove_forall_fresh_const(descr, var, domain, body, &cenv)?;
+                        // REQ-LLL-201: a `forall x in <list>` requires at a call site is PROVED by
+                        // obliging `(listall_N arg)` — discharged from the caller's own
+                        // `(listall_N (cons h t))` hypothesis unfolded by the predicate axiom (the
+                        // recursion's inductive step). The domain `coll` names a callee param bound
+                        // in `cenv` to the argument list term. Map/Set/Range keep the fresh-const
+                        // universal-generalization proof below.
+                        // `coll` names a CALLEE param, so its element sort comes from the callee's
+                        // signature (not `operand_ty`, which resolves in the CALLER scope). The
+                        // argument list term is `tr(coll, cenv)` — `cenv` binds the callee param to
+                        // the actual argument.
+                        let list_elem = match domain {
+                            ForallDomain::In(c) => match c.as_ref() {
+                                Expr::Var(n) => callee.params.iter().find_map(|(pn, t)| {
+                                    match (pn == n, t) {
+                                        (true, Ty::List(e)) => Some(smt_ty(e)),
+                                        _ => None,
+                                    }
+                                }),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        let handled = if let (ForallDomain::In(coll), Some(elem)) =
+                            (domain, &list_elem)
+                        {
+                            let goal = self.forall_list_term(var, coll, body, &cenv, elem)?;
+                            self.oblige(descr.clone(), goal);
+                            true
+                        } else {
+                            false
+                        };
+                        if !handled {
+                            // PROVE a quantified `requires` by FRESH-CONST universal
+                            // generalization — the SAME sound encoding as a quantified `ensures`
+                            // proof (REQ-LLL-087 A1/A2); see `prove_forall_fresh_const`.
+                            self.prove_forall_fresh_const(descr, var, domain, body, &cenv)?;
+                        }
                     } else {
                         let goal = self.tr_contract(req, &cenv)?;
                         self.oblige(descr, goal);

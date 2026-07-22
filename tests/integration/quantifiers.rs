@@ -1918,3 +1918,39 @@ fn exists_auto_witness_candidate_cap_is_hard_and_deterministic_req158_s2() {
     assert!(!a, "the winning candidate lies beyond the hard cap — sound rejection");
     assert_eq!(a, b, "the capped candidate set must be deterministic across runs");
 }
+
+
+// ─── REQ-LLL-201: `forall x in <List>: P(x)` in a `requires` — a per-element property propagates
+// to the aggregate. Lowered to a recursive `all`-predicate (`p(nil)=true`, `p(cons h t)=(P(h) ∧
+// p(t))`, E-matched), consumed at a `h :: t` match: the head property + the recursive call's own
+// requires. v1 is consume-side, body over the bound variable only. Positives PROVE; a false bound,
+// a MISSING requires (proving the predicate is not over-assumed), a wrong direction, and a
+// free-variable body all REJECT.
+#[test]
+fn forall_over_list_elements_bounds_the_aggregate_req201() {
+    // one part `f` with the given requires-line and ensures-line, folding the sum.
+    let src = |req: &str, ens: &str| format!(
+        "module M:\n\n  part f(xs: List[Int]) -> Int:\n{req}    ensures {ens}\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + f(t)\n"
+    );
+    let nn = "    requires forall x in xs: x >= 0\n";
+
+    // POSITIVE: all elements >= 0 ⇒ the total is >= 0, at symbolic length.
+    let ok = src(nn, "result >= 0");
+    assert!(verify_src(&ok).ok(), "all-nonneg must prove total >= 0: {:?}", failures(&verify_src(&ok)));
+    // NEGATIVE: an empty list totals 0, so `result >= 1` is false → REJECTED.
+    assert!(!verify_src(&src(nn, "result >= 1")).ok(), "a false lower bound must be rejected");
+    // NEGATIVE (not over-assumed): WITHOUT the requires, `result >= 0` is unprovable → REJECTED.
+    assert!(!verify_src(&src("", "result >= 0")).ok(), "the predicate must not be assumed without its requires");
+    // NEGATIVE: wrong direction — a sum of non-negatives is not <= 0 → REJECTED.
+    assert!(!verify_src(&src(nn, "result <= 0")).ok(), "the wrong-direction bound must be rejected");
+
+    // NEGATIVE (v1 restriction): a body over a FREE variable is rejected LOUD at VC-gen (a hard
+    // compile error, not a failed obligation), so assert the CLI exits non-zero.
+    let freevar = "module M:\n\n  part f(xs: List[Int], lo: Int) -> Int:\n    requires forall x in xs: x >= lo\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + f(t, lo)\n";
+    assert!(check_lll_src("forall-freevar", freevar).0 != Some(0), "a free-variable body must be rejected in v1");
+
+    // NON-CONTAMINATION: two distinct bodies in one module keep distinct predicates — nonneg ⇒ >=0
+    // AND nonpos ⇒ <=0 both verify, neither leaking the other's meaning.
+    let two = "module M:\n\n  part pos(xs: List[Int]) -> Int:\n    requires forall x in xs: x >= 0\n    ensures result == sum(xs)\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + pos(t)\n  part neg(xs: List[Int]) -> Int:\n    requires forall x in xs: x <= 0\n    ensures result == sum(xs)\n    ensures result <= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + neg(t)\n";
+    assert!(verify_src(two).ok(), "distinct forall bodies must not contaminate: {:?}", failures(&verify_src(two)));
+}

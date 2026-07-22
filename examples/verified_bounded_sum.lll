@@ -1,0 +1,25 @@
+module VerifiedBoundedSum:
+
+  # ── BRIQUE VÉRIFIÉE : borne d'agrégat sous une contrainte par élément (CPT-LLL-018) ──
+  #
+  # La classe de briques débloquée par REQ-LLL-201 (`forall` sur les ÉLÉMENTS d'une liste) : une
+  # propriété de CHAQUE élément se propage à l'AGRÉGAT. Ici, l'invariant d'audit « si toutes les
+  # écritures sont positives, le total l'est aussi » — prouvé pour un nombre de lignes QUELCONQUE.
+  #
+  # AVANT (le réflexe) : on somme, puis on teste `total >= 0` sur quelques jeux de données.
+  # APRÈS (ici) : `requires (∀ e ∈ entries: e ≥ 0)` + `ensures result ≥ 0` est un THÉORÈME —
+  # Z3 le prouve par récurrence structurelle : au `e :: rest`, le prédicat récursif rend `e ≥ 0`
+  # (propriété de tête) et le `requires` de l'appel sur `rest`, et l'IH donne `total(rest) ≥ 0`.
+
+  part total(entries: List[Int]) -> Int:
+    requires forall e in entries: e >= 0
+    ensures result == sum(entries)
+    ensures result >= 0
+    measure length(entries)
+    match entries:
+      [] -> yield 0
+      e :: rest -> yield e + total(rest)
+
+  part main() -> Int via IO:
+    # 100 + 250 + 300 = 650 ; toutes les écritures ≥ 0 → total prouvé ≥ 0 (et exact).
+    yield IO.print(total([100, 250, 300]))

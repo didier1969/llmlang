@@ -111,6 +111,20 @@
   `lookup(insert(m,k,v),k) == v` sont des axiomes, aucune valeur par défaut silencieuse.
 - **REQ** — CPT-LLL-018 (Map builtins, DEC-LLL-043).
 
+## 8. Borne d'agrégat sous contrainte par élément — `examples/verified_bounded_sum.lll`
+
+- **Prouve** — une propriété de CHAQUE élément se propage à l'AGRÉGAT : `requires (∀ e ∈ entries:
+  e ≥ 0)` ⟹ `ensures result ≥ 0` (le total), pour un nombre de lignes quelconque.
+- **Signature**
+  - `total(entries: List[Int]) -> Int` · `requires forall e in entries: e >= 0` ·
+    `ensures result == sum(entries)` · `ensures result >= 0`.
+- **Quand** — invariants « toutes les lignes positives ⇒ solde positif », « toutes les quantités
+  bornées ⇒ … » ; le pont entre une contrainte par ligne et une garantie sur l'agrégat.
+- **Technique** — `forall x in <list>` (REQ-LLL-201) lowered en prédicat récursif
+  (`p(nil)=true`, `p(cons h t)=(body[x:=h] ∧ p(t))`, E-matché), consommé au `h :: t` : la
+  propriété de tête + le `requires` de l'appel récursif ; combiné à `sum` (REQ-LLL-194).
+- **REQ** — REQ-LLL-201 (v1 : consume-side, body sur la variable liée).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
@@ -119,6 +133,7 @@
 |---|---|---|
 | `sum` (spec, `List[Int]`/`List[Rational]`) | énoncer/​prouver la conservation d'un agrégat de liste à N symbolique | REQ-LLL-194/202 |
 | `length` (spec, `List`/`Array`) | mesure de terminaison + tailles dans les contrats | REQ-LLL-101 |
+| `forall x in <list>: P(x)` (spec, requires) | une propriété par élément → l'agrégat (bornes) | REQ-LLL-201 |
 | relation de longueur d'une compréhension | map préserve / filtre réduit le compte, porté au contrat | REQ-LLL-203 |
 | ordre exact sur ℚ (`<`,`<=`,`>`,`>=`) | bornes/monotonie sur rationnels, contrats & code | REQ-LLL-202 |
 | if-expression portant l'IH | fonctions récursives contractées écrites en `if` (idiome LLM) | REQ-LLL-198 |
@@ -128,7 +143,7 @@
 
 ## Frontières connues (prochaines briques à débloquer)
 
-- **Bornes d'agrégat** (`tous ≥ 0 ⇒ sum ≥ 0`, `total ≤ limite`) — bloqué : pas de `forall` sur les
-  ÉLÉMENTS d'une liste dans un contrat (`REQ-LLL-201`, cycle dédié).
+- **Bornes d'agrégat** (`tous ≥ 0 ⇒ sum ≥ 0`) — **LIVRÉ** (REQ-LLL-201 v1, brique 8). Reste en
+  suivi : body sur une variable LIBRE (`x ≥ lo`) et le prove-side (`ensures ∀ x ∈ result: P(x)`).
 - **Réutilisation Perceus sous `filter`** (drop-handling) — cycle dédié supervisé.
 - **Solveurs plus riches** (OR-Tools/cvc5) sous le même mur de havoc — gaté opérateur.

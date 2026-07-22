@@ -3747,11 +3747,16 @@ fn type_of_pure(
                     match coll_ty {
                         Ty::Map(k, _) => *k,
                         Ty::Set(e) => *e,
+                        // REQ-LLL-201: quantify over the ELEMENTS of a `List` — the binder ranges
+                        // over each element (the vc lowers it to a recursive `all`-predicate,
+                        // consumed at a cons match). v1: consume-side only (`requires`), body over
+                        // the bound variable only (the vc enforces the free-var restriction LOUD).
+                        Ty::List(e) => *e,
                         other => {
                             return Err(format!(
-                                "a `forall … in <coll>` domain must be a `Map` (keys) or a `Set` \
-                                 (members), got `{other:?}` — use `forall i in lo .. hi` to range \
-                                 over an `Int` index instead (REQ-LLL-087)"
+                                "a `forall … in <coll>` domain must be a `Map` (keys), a `Set` \
+                                 (members), or a `List` (elements), got `{other:?}` — use \
+                                 `forall i in lo .. hi` for an `Int` index (REQ-LLL-087/201)"
                             ))
                         }
                     }
