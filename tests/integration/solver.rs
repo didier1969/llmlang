@@ -213,3 +213,116 @@ fn solver_legacy_tuple_signature_now_rejected_req193() {
         "the rejection must name the new required signature, got: {err}"
     );
 }
+
+// ===================================================================
+// FLAGSHIP: examples/erp_planning_verified.lll — the SAME oracle-at-the-edge
+// surface applied to a realistic ERP production-planning problem: allocate
+// integer production quantities to 3 products sharing ONE machine (capacity
+// 100 machine-hours), each with a per-product demand cap, maximising total
+// profit (margin·quantity, in cents). It exercises a RICHER neutral-form model
+// than solver_lp — 7 constraints in 3 families (non-negativity, demand caps, a
+// weighted machine-capacity aggregate 2a+3b+c) — and re-verifies the solver's
+// plan with a proven witness before use. Optimum: Widget=20, Gadget=10,
+// Gizmo=30 -> 20·500 + 10·400 + 30·150 = 18500 cents. These two tests LOCK the
+// example into the gate: (2) the real z3-opt round-trip must yield the exact
+// optimal profit, and (3) an injected INFEASIBLE plan must be rejected fail-stop
+// and its (impossible) profit never produced. The smoke test only checks exit
+// code, so these stdout assertions are what actually pin the business result.
+// ===================================================================
+
+// The honest round-trip, mirroring examples/erp_planning_verified.lll. Flat model:
+//   3 vars ; sense=1 (max) ; obj = margins [500,400,150] ;
+//   C1..C3 non-neg (rel=1,rhs=0) ; C4..C6 demand caps a<=20,b<=15,c<=30 ;
+//   C7 machine capacity 2a+3b+c <= 100 (rel=0,rhs=100,coeffs 2,3,1).
+const ERP_ROUND_TRIP: &str = r#"module ErpPlanningVerified:
+
+  effect Solver:
+    solve(List[Int]) -> List[Int] = extern "lll_solver_runtime::solve"
+
+  part to_array(xs: List[Int], acc: Array[Int]) -> Array[Int]:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield to_array(t, push(acc, h))
+
+  part feasible(sol: Array[Int]) -> Bool:
+    requires length(sol) == 3
+    ensures result == (get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30 and get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100)
+    yield get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30 and get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100
+
+  part use_plan(sol: Array[Int]) -> Int:
+    requires length(sol) == 3
+    requires get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0
+    requires get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30
+    requires get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100
+    ensures result >= 0
+    yield get(sol, 0) * 500 + get(sol, 1) * 400 + get(sol, 2) * 150
+
+  part main() -> Int via Solver, IO:
+    let model = [3, 7, 1, 500, 400, 150, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 20, 1, 0, 0, 0, 15, 0, 1, 0, 0, 30, 0, 0, 1, 0, 100, 2, 3, 1]
+    let sol = to_array(Solver.solve(model), array())
+    match length(sol) == 3:
+      true ->
+        match feasible(sol):
+          true  -> yield IO.print(use_plan(sol))
+          false -> yield IO.print(0 - 1)
+      false -> yield IO.print(0 - 2)
+"#;
+
+#[test]
+fn solver_erp_planning_round_trip_yields_optimal_profit_req193() {
+    // (2) The real z3-opt round-trip over the ERP model returns the integer optimum
+    // (Widget=20, Gadget=10, Gizmo=30); the proven witness re-checks every constraint
+    // family and passes, so `use_plan` recomputes the exact optimal profit 18500 cents.
+    // This is the assertion that makes the flagship example's BUSINESS result part of the
+    // gate — the smoke test alone only checks exit code, so `=> -1`/`=> -2` would slip by.
+    let out = build_run(ERP_ROUND_TRIP);
+    assert!(out.contains("=> 18500"), "expected the used optimal profit 18500 cents, got: {out:?}");
+}
+
+// ADVERSARIAL — an INFEASIBLE plan `array(25, 20, 40)` is injected: it violates ALL three
+// demand caps (25>20, 20>15, 40>30) AND the machine capacity (2·25 + 3·20 + 40 = 150 > 100).
+// The verified witness catches it and aborts the plan-using path via `Reject.fail`; the
+// impossible profit (25·500 + 20·400 + 40·150 = 26500 cents) is NEVER produced. It still
+// COMPILES: on the `true` arm the witness `ensures` contradicts `feasible(bad) == true`, so
+// `use_plan(bad)`'s requires is vacuously discharged; at runtime the `false` arm fires.
+const ERP_ADVERSARIAL: &str = r#"module ErpAdversarial:
+
+  effect Reject:
+    fail(Int) -> Never
+
+  part feasible(sol: Array[Int]) -> Bool:
+    requires length(sol) == 3
+    ensures result == (get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30 and get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100)
+    yield get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30 and get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100
+
+  part use_plan(sol: Array[Int]) -> Int:
+    requires length(sol) == 3
+    requires get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0
+    requires get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30
+    requires get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100
+    yield get(sol, 0) * 500 + get(sol, 1) * 400 + get(sol, 2) * 150
+
+  part guarded(sol: Array[Int]) -> Int via Reject:
+    requires length(sol) == 3
+    match feasible(sol):
+      true  -> yield use_plan(sol)
+      false -> yield Reject.fail(0 - 777)
+
+  part main() -> Int via IO:
+    handle guarded(array(25, 20, 40)) with Reject:
+      fail(code) -> yield IO.print(code)
+      return r   -> yield IO.print(r)
+"#;
+
+#[test]
+fn solver_erp_planning_infeasible_plan_rejected_fail_stop_req193() {
+    // (3) The injected infeasible plan is rejected fail-stop: the distinct marker -777 is
+    // printed and the impossible profit 26500 is NEVER produced (`use_plan` never runs on
+    // the bad plan). A plan that violates capacity or demand is provably never consumed.
+    let out = build_run(ERP_ADVERSARIAL);
+    assert!(out.contains("-777"), "the infeasible plan must be rejected (marker -777), got: {out:?}");
+    assert!(
+        !out.contains("26500"),
+        "the rejected plan must NEVER reach use_plan (no 26500), got: {out:?}"
+    );
+}

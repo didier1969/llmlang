@@ -1,0 +1,92 @@
+module ErpPlanningVerified:
+
+  # ==========================================================================
+  # PLANIFICATION DE PRODUCTION ERP, À FAISABILITÉ PROUVÉE
+  # (REQ-LLL-193, CPT-LLL-017 « l'oracle au bord » — la surface produit
+  #  « planif no-code à faisabilité PROUVÉE »).
+  #
+  #   AVANT (planificateur ERP / APS classique) : un moteur d'ordonnancement
+  #   propose un plan de production « optimisé ». Rien ne GARANTIT que ce plan
+  #   respecte réellement la capacité machine ni les plafonds de demande — un
+  #   bug de solveur, un modèle mal traduit, ou une heuristique gloutonne peut
+  #   rendre un planning INFAISABLE que l'atelier ne découvre… qu'en production.
+  #
+  #   APRÈS (ici) : le solveur reste un ORACLE au bord (effet `Solver`, résultat
+  #   HAVOCÉ — le cœur vérifié ne lui fait AUCUNE confiance, DEC-LLL-017). Le
+  #   plan qu'il rend est RE-VÉRIFIÉ par un witness-check PROUVÉ (`feasible`)
+  #   avant d'être consommé : capacité et demandes sont re-contrôlées, contrainte
+  #   par contrainte. Un plan qui viole ne serait-ce qu'UNE contrainte est REJETÉ
+  #   fail-stop, et le mauvais profit n'est JAMAIS produit. La faisabilité n'est
+  #   plus espérée — elle est PROUVÉE.
+  #
+  # LE PROBLÈME MÉTIER (atelier à goulot machine unique). 3 produits partagent
+  # UNE machine (capacité = 100 heures-machine sur l'horizon). Chaque unité
+  # consomme des heures-machine, dégage une marge (en centimes), et sa demande
+  # marché est plafonnée :
+  #   • Widget (sol[0]) : 2 h/u,  marge 500 c (5,00 €),  demande max 20 u
+  #   • Gadget (sol[1]) : 3 h/u,  marge 400 c (4,00 €),  demande max 15 u
+  #   • Gizmo  (sol[2]) : 1 h/u,  marge 150 c (1,50 €),  demande max 30 u
+  # OBJECTIF : maximiser le profit total  Σ marge_i · quantité_i  (en centimes)
+  # SOUS :  quantité_i >= 0 ,  quantité_i <= demande_i ,
+  #         2·Widget + 3·Gadget + 1·Gizmo <= 100  (capacité machine partagée).
+  # Optimum ENTIER EXACT : Widget=20, Gadget=10, Gizmo=30 → 18 500 c (185,00 €).
+  #   (rendement/heure : Widget 250 c/h > Gizmo 150 c/h > Gadget 133 c/h — on sature
+  #    Widget et Gizmo à leur demande, Gadget absorbe les 30 h-machine restantes.)
+  # ==========================================================================
+
+  # L'ORACLE au bord : `solve` rend un plan (une allocation) de longueur variable.
+  # Son résultat est HAVOCÉ — c'est CE mur de havoc qui FORCE la re-vérification.
+  effect Solver:
+    solve(List[Int]) -> List[Int] = extern "lll_solver_runtime::solve"
+
+  # Reifie le plan havocé `List[Int]` en `Array[Int]` (accès indexé O(1), support
+  # de `length`/`get` pour les contrats). L'array reste OPAQUE au prouveur : aucun
+  # `ensures` de faisabilité ne franchit ce pont, donc le mur de havoc tient.
+  part to_array(xs: List[Int], acc: Array[Int]) -> Array[Int]:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield to_array(t, push(acc, h))
+
+  # WITNESS-CHECK vérifié : re-contrôle CHAQUE contrainte métier du plan (sol[0]=
+  # Widget, sol[1]=Gadget, sol[2]=Gizmo). Son `ensures result == <conjonction>`
+  # est un RÉSUMÉ EXÉCUTABLE : sur le bras `true` du match, le pare-feu de contrat
+  # l'ASSUME et la conjonction décharge le `requires` de `use_plan`.
+  #   • quantités non-négatives         : sol[i] >= 0
+  #   • plafonds de demande par produit : Widget<=20, Gadget<=15, Gizmo<=30
+  #   • capacité machine partagée       : 2·Widget + 3·Gadget + 1·Gizmo <= 100
+  part feasible(sol: Array[Int]) -> Bool:
+    requires length(sol) == 3
+    ensures result == (get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30 and get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100)
+    yield get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30 and get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100
+
+  # Consomme le plan PROUVÉ-FAISABLE et calcule le profit total (centimes). Ses
+  # `requires` (les contraintes métier) ne peuvent être déchargés QUE via le
+  # witness : `sol` sort de l'oracle havocé, donc rien n'est prouvable sans
+  # re-vérification. `ensures result >= 0` : le profit d'un plan faisable ne peut
+  # être négatif (marges et quantités non-négatives).
+  part use_plan(sol: Array[Int]) -> Int:
+    requires length(sol) == 3
+    requires get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0
+    requires get(sol, 0) <= 20 and get(sol, 1) <= 15 and get(sol, 2) <= 30
+    requires get(sol, 0) * 2 + get(sol, 1) * 3 + get(sol, 2) <= 100
+    ensures result >= 0
+    yield get(sol, 0) * 500 + get(sol, 1) * 400 + get(sol, 2) * 150
+
+  part main() -> Int via Solver, IO:
+    # Forme neutre à plat (AGNOSTIQUE du solveur — z3-opt et un futur CP-SAT n'en
+    # sont que deux adaptateurs) :
+    #   [nvars, ncons, sens, obj.., puis par contrainte: rel, rhs, coeffs..]
+    #   sens: 1=max ; rel: 0=`<=` 1=`>=` 2=`==`
+    # 3 variables (Widget, Gadget, Gizmo) ; 7 contraintes = 3 non-négativités +
+    # 3 plafonds de demande + 1 capacité machine ; objectif = marges (centimes).
+    let model = [3, 7, 1, 500, 400, 150, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 20, 1, 0, 0, 0, 15, 0, 1, 0, 0, 30, 0, 0, 1, 0, 100, 2, 3, 1]
+    let sol = to_array(Solver.solve(model), array())
+    # la longueur = nombre de produits est re-vérifiée à l'exécution (un oracle
+    # qui rend le mauvais N — ou vide sur échec z3 — prend le bras `false`, jamais
+    # `use_plan`).
+    match length(sol) == 3:
+      true ->
+        match feasible(sol):
+          true  -> yield IO.print(use_plan(sol))   # profit optimal = 18500 centimes (185,00 €)
+          false -> yield IO.print(0 - 1)           # plan infaisable rejeté — jamais utilisé
+      false -> yield IO.print(0 - 2)               # mauvais N — rejeté

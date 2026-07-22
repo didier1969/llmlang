@@ -78,6 +78,7 @@ fn flagship_examples_build_and_run() {
         "erp_ledger.lll",             // records + accumulation
         "fold_million.lll",           // REQ-LLL-163: 1M-element fold+drop, full prod path
         "mm_pricing_verified.lll",    // ERP migration §5: exact-money pricing, proven net>=0
+        "erp_planning_verified.lll",  // REQ-LLL-193: oracle-at-the-edge ERP planning, witness-checked (z3-opt)
     ];
     let mut failures = Vec::new();
     for name in flagship {
