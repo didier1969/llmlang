@@ -2178,3 +2178,45 @@ fn verified_invoice_capstone_composes_comprehension_and_sum_cpt018() {
         build_run(&src)
     );
 }
+
+
+// ─── Soundness of the COMPOSITION of the session's four VC-core changes (REQ-198 guarded hoisting
+// × REQ-194 `sum` × REQ-202 Rational order × REQ-203 comprehension length). Each was verified in
+// isolation; this locks their interaction — the case an LLM's "verified" code will actually hit,
+// and where a subtle leak would silently bless a wrong program. Positives must PROVE, false and
+// cross-branch-leak variants must be REJECTED. (Break-mode found no unsoundness; this keeps it so.)
+#[test]
+fn soundness_core_changes_compose_req198_194_202_203() {
+    let ok = |src: &str, why: &str| assert!(verify_src(src).ok(), "{why}: {:?}", failures(&verify_src(src)));
+    let no = |src: &str, why: &str| assert!(!verify_src(src).ok(), "{why}");
+
+    // 198 × 203: a comprehension-length hyp flows through the guarded hoisting of a recursive if.
+    ok("module M:\n\n  part f(xs: List[Int], n: Int) -> List[Int]:\n    requires n >= 0\n    ensures length(result) == length(xs)\n    measure n\n    yield if n == 0 then [x + x for x in xs] else f([x + x for x in xs], n - 1)\n",
+       "comprehension-length must survive REQ-198 guarded hoisting");
+    no("module M:\n\n  part f(xs: List[Int], n: Int) -> List[Int]:\n    requires n >= 0\n    ensures length(result) == length(xs) + 1\n    measure n\n    yield if n == 0 then [x + x for x in xs] else f([x + x for x in xs], n - 1)\n",
+       "a false length must stay rejected through the composition");
+
+    // 198 × 194: a `sum` fact flows through the guarded hoisting of a recursive if.
+    ok("module M:\n\n  part g(xs: List[Int], k: Int) -> List[Int]:\n    requires k >= 0\n    ensures sum(result) == sum(xs)\n    measure k\n    yield if k == 0 then xs else g(xs, k - 1)\n",
+       "sum-conservation must survive REQ-198 guarded hoisting");
+    no("module M:\n\n  part g(xs: List[Int], k: Int) -> List[Int]:\n    requires k >= 0\n    ensures sum(result) == sum(xs) + 1\n    measure k\n    yield if k == 0 then xs else g(xs, k - 1)\n",
+       "a false sum must stay rejected through the composition");
+
+    // 203 gives ONLY length, never sum: a doubling map must NOT prove sum-conservation.
+    no("module M:\n\n  part m(xs: List[Int]) -> List[Int]:\n    ensures sum(result) == sum(xs)\n    yield [x + x for x in xs]\n",
+       "a comprehension must not leak a false sum-preservation");
+
+    // Cross-branch leak: a fact true only on one branch must NOT prove an unconditional ensures.
+    no("module M:\n\n  part l(xs: List[Int], b: Bool) -> List[Int]:\n    ensures length(result) == length(xs)\n    yield if b then [x + x for x in xs] else []\n",
+       "a comprehension-length fact must not leak across if-branches (REQ-198 guard)");
+    no("module M:\n\n  part l(xs: List[Int], b: Bool) -> List[Int]:\n    ensures sum(result) == sum(xs)\n    yield if b then xs else []\n",
+       "a sum fact must not leak across if-branches (REQ-198 guard)");
+
+    // The contract boundary is intact: a comprehension is still forbidden INSIDE a contract.
+    // This is rejected at TYPE-CHECK (not the VC), so it never reaches `verify_src` — assert the
+    // CLI exits non-zero (a green `check` would mean REQ-203 opened a hole in the trusted surface).
+    assert!(
+        check_lll_src("compr-in-contract", "module M:\n\n  part c(xs: List[Int]) -> Int:\n    ensures result == length([x for x in xs])\n    yield 0\n").0 != Some(0),
+        "a comprehension in a contract must stay rejected (REQ-203 opened no hole)"
+    );
+}
