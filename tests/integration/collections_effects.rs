@@ -2220,3 +2220,26 @@ fn soundness_core_changes_compose_req198_194_202_203() {
         "a comprehension in a contract must stay rejected (REQ-203 opened no hole)"
     );
 }
+
+
+// ─── CPT-LLL-018 brick: referential integrity over a `Map` — the associative-data axis. Z3's
+// array theory proves that a registered key stays present, that distinct registrations coexist,
+// and that a read-back is exact — the guarantees a naive HashMap silently breaks. Positive path +
+// an adversarial read-back forgery.
+#[test]
+fn verified_registry_referential_integrity_cpt018() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/verified_registry.lll"),
+    )
+    .expect("read verified_registry.lll");
+    assert!(
+        verify_src(&src).ok(),
+        "referential-integrity invariants must verify: {:?}",
+        failures(&verify_src(&src))
+    );
+    assert!(build_run(&src).contains("999"), "read-back must return the registered value, got: {}", build_run(&src));
+
+    // NEGATIVE (soundness): a read-back cannot claim a value other than the one written.
+    let forge = "module M:\n\n  part bad(catalog: Map[Int, Int], item: Int, price: Int) -> Int:\n    ensures result == price + 1\n    let m = insert(catalog, item, price)\n    yield lookup(m, item)\n";
+    assert!(!verify_src(forge).ok(), "a read-back forgery (price + 1) must be rejected");
+}

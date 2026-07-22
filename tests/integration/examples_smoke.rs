@@ -83,6 +83,7 @@ fn flagship_examples_build_and_run() {
         "verified_ledger.lll",        // CPT-LLL-018 brick: ledger total == sum, conservation over a symbolic-length list (REQ-LLL-194)
         "verified_invoice.lll",       // CPT-LLL-018 capstone: records + count-preserving comprehension (REQ-203) + exact total == sum (REQ-194)
         "verified_doc_lifecycle.lll", // CPT-LLL-018 brick: ERP document state machine, illegal transitions unrepresentable + amount conserved
+        "verified_registry.lll",      // CPT-LLL-018 brick: referential integrity — insert keeps the key present, read-back is exact
     ];
     let mut failures = Vec::new();
     for name in flagship {

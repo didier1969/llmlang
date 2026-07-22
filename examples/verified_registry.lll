@@ -1,0 +1,38 @@
+module VerifiedRegistry:
+
+  # ── BRIQUE VÉRIFIÉE : registre de données maîtres à intégrité référentielle (CPT-LLL-018) ──
+  #
+  # Encore un axe DIFFÉRENT : les données associatives (catalogue articles→prix, clients→…, toute
+  # table de données maîtres d'un ERP). L'intégrité référentielle — « une clé enregistrée reste
+  # présente et se relit exactement » — est prouvée par la théorie des tableaux de Z3, pas testée.
+  #
+  # AVANT (le réflexe) : une `HashMap` où un `insert` maladroit écrase une autre clé, où un
+  # `lookup` d'une clé absente rend `null`/une valeur par défaut silencieuse.
+  # APRÈS (ici) : « après enregistrement, la clé EST présente », « deux enregistrements distincts
+  # coexistent », et « relire une clé qu'on vient d'écrire rend EXACTEMENT sa valeur » sont des
+  # THÉORÈMES.
+
+  # Enregistrer un article : après, la clé est PRÉSENTE — aucun enregistrement silencieusement perdu.
+  part register(catalog: Map[Int, Int], item: Int, price: Int) -> Map[Int, Int]:
+    ensures haskey(result, item)
+    yield insert(catalog, item, price)
+
+  # Deux enregistrements de clés DISTINCTES coexistent : un `insert` ne fait pas disparaître
+  # l'autre clé (la propriété qu'une implémentation naïve casse le plus souvent).
+  part register2(catalog: Map[Int, Int], a: Int, b: Int, pa: Int, pb: Int) -> Map[Int, Int]:
+    requires a != b
+    ensures haskey(result, a)
+    ensures haskey(result, b)
+    yield insert(insert(catalog, a, pa), b, pb)
+
+  # Relire un article qu'on vient d'enregistrer rend EXACTEMENT le prix enregistré (lecture sûre :
+  # la valeur lue est celle écrite, sans défaut silencieux).
+  part price_after_register(catalog: Map[Int, Int], item: Int, price: Int) -> Int:
+    ensures result == price
+    let m = insert(catalog, item, price)
+    yield lookup(m, item)
+
+  part main() -> Int via IO:
+    # Enregistrer l'article 42 à 1500, puis relire l'article 7 qu'on enregistre à 999 → 999.
+    let cat = register(map(), 42, 1500)
+    yield IO.print(price_after_register(cat, 7, 999))

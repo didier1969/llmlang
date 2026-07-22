@@ -97,6 +97,20 @@
   déchargée. Invariant de montant prouvé par les `ensures`.
 - **REQ** — CPT-LLL-018 (records + sum types + contrats).
 
+## 7. Registre de données maîtres (intégrité référentielle) — `examples/verified_registry.lll`
+
+- **Prouve** — sur une table associative (`Map`) : une clé enregistrée reste PRÉSENTE, deux
+  enregistrements distincts coexistent, et relire une clé qu'on vient d'écrire rend EXACTEMENT
+  sa valeur — les garanties qu'une `HashMap` naïve casse en silence.
+- **Signature**
+  - `register(catalog: Map[Int,Int], item, price) -> Map[Int,Int]` · `ensures haskey(result, item)`.
+  - `price_after_register(catalog, item, price) -> Int` · `ensures result == price`.
+- **Quand** — toute table de données maîtres (catalogue articles→prix, clients, référentiel) où
+  l'on veut garantir qu'un enregistrement n'est pas perdu et qu'une lecture est fidèle.
+- **Technique** — la théorie des tableaux de Z3 (`select`/`store`) : `haskey(insert(m,k,v),k)` et
+  `lookup(insert(m,k,v),k) == v` sont des axiomes, aucune valeur par défaut silencieuse.
+- **REQ** — CPT-LLL-018 (Map builtins, DEC-LLL-043).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
