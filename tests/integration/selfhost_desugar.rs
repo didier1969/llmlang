@@ -686,6 +686,29 @@ fn if_expression_recursive_carries_induction_hypothesis_req198() {
     );
 }
 
+// ─── CPT-LLL-018: the verified-brick payoff of REQ-LLL-198. `verified_allocation.lll` splits an
+// amount into N shares and PROVES conservation (Σ shares == total) at SYMBOLIC N — the property
+// floats lose. It only verifies because the recursive if-expression now carries its induction
+// hypothesis. Guards both the proof (verify) and the runtime conservation (Σ of 7 shares == 10000).
+#[test]
+fn verified_allocation_brick_conserves_at_symbolic_n_cpt018() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/verified_allocation.lll"),
+    )
+    .expect("read verified_allocation.lll");
+    assert!(
+        verify_src(&src).ok(),
+        "the verified-allocation brick must prove conservation at symbolic N: {:?}",
+        failures(&verify_src(&src))
+    );
+    // Runtime: first share 1428, and the 7 shares sum back to EXACTLY 10000 (no cent lost).
+    assert!(
+        build_run(&src).contains("1428\n10000"),
+        "expected first share 1428 then conserved total 10000, got: {}",
+        build_run(&src)
+    );
+}
+
 
 // ─── REQ-LLL-126: a LITERAL head in a cons arm (`0 :: t`, `True :: t`) — the same measured
 // friction as REQ-110's constructor heads, one class up. Generalises `coalesce_cons_heads`:

@@ -1,0 +1,46 @@
+module VerifiedAllocation:
+
+  # ── BRIQUE VÉRIFIÉE RÉUTILISABLE : répartition exacte d'un montant (CPT-LLL-018) ──
+  #
+  # LE PROBLÈME (universel en ERP/finance). Répartir un montant total sur N lignes, centres
+  # de coûts ou échéances — une remise ventilée sur les lignes d'une facture, des frais
+  # généraux sur des centres, un plan de paiement — SANS perdre ni créer d'unité par
+  # arrondi. Fait en FLOTTANTS (le réflexe), `total / n` par ligne fait que la somme des
+  # parts != total : des centimes disparaissent ou apparaissent. C'est la classe de bug que
+  # l'audit financier interdit.
+  #
+  # LA BRIQUE. Distribution « au plus juste » en ENTIERS EXACTS : chaque tranche vaut
+  # `reste div tranches_restantes`, ce qui absorbe le reliquat au fil de l'eau (les tranches
+  # ne diffèrent que d'une unité). L'invariant de CONSERVATION « la somme des tranches ==
+  # total » est PROUVÉ par Z3 pour un nombre de tranches N SYMBOLIQUE — pas testé sur
+  # quelques cas — via l'hypothèse d'induction portée par l'if-expression récursive
+  # (REQ-LLL-198). Réutilisable telle quelle dans n'importe quel projet : une brique
+  # conçue-prouvée-validée du catalogue (CPT-LLL-018).
+
+  # Une tranche : le montant attribué à la ligne courante. Prouvé dans [0, remaining] — donc
+  # jamais négatif, jamais plus que ce qui reste (l'ensures qui décharge la récursion).
+  part share(remaining: Int, parts_left: Int) -> Int:
+    requires parts_left >= 1
+    requires remaining >= 0
+    ensures result >= 0
+    ensures result <= remaining
+    yield remaining div parts_left
+
+  # CONSERVATION (le cœur de la brique) : la somme des `parts` tranches successives vaut
+  # EXACTEMENT `total`. Prouvé à `parts` symbolique — rien n'est perdu ni créé. La preuve
+  # compose deux parts vérifiées : l'ensures `share <= remaining` décharge `total - share >= 0`
+  # (le requires de l'appel récursif), et l'IH `distribute_sum(reste, parts-1) == reste`
+  # (portée hors de la branche `else` par REQ-LLL-198) donne `share + reste == total`.
+  part distribute_sum(total: Int, parts: Int) -> Int:
+    requires parts >= 1
+    requires total >= 0
+    ensures result == total
+    measure parts
+    yield if parts == 1 then total else share(total, parts) + distribute_sum(total - share(total, parts), parts - 1)
+
+  part main() -> Int via IO:
+    # Répartir 100,00 € (10000 centimes) sur 7 lignes : chaque part vaut 1428 ou 1429
+    # centimes, et la SOMME rendue est exactement 10000 — conservation prouvée, zéro
+    # centime perdu, pour un découpage de taille quelconque.
+    let s = IO.print(share(10000, 7))          # 1428 (première tranche)
+    yield IO.print(distribute_sum(10000, 7))   # 10000 (somme exacte des 7 tranches)
