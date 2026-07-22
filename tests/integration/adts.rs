@@ -886,3 +886,31 @@ fn unknown_verb_also_prints_usage_to_stderr_and_exits_nonzero() {
         "expected `error: usage:` prefix on stderr, got:\n{stderr}"
     );
 }
+
+
+// ─── CPT-LLL-018 brick: an ERP document STATE MACHINE — a workflow-correctness axis distinct from
+// the arithmetic bricks. A sum-typed `Status` + `requires` on each transition makes an illegal
+// transition (posting a Draft) UNPROVABLE (a compile error, not a runtime bug), and the amount is
+// PROVEN conserved through Draft → Approved → Posted. Guards the legal path, the runtime amount,
+// and the rejection of both an illegal transition and an amount forgery.
+#[test]
+fn verified_document_lifecycle_state_machine_cpt018() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/verified_doc_lifecycle.lll"),
+    )
+    .expect("read verified_doc_lifecycle.lll");
+    assert!(
+        verify_src(&src).ok(),
+        "the legal lifecycle path must verify (amount conserved, transitions gated): {:?}",
+        failures(&verify_src(&src))
+    );
+    assert!(build_run(&src).contains("1500"), "amount must survive the lifecycle, got: {}", build_run(&src));
+
+    // ILLEGAL transition: posting a Draft cannot discharge `post`'s `requires status == Approved`.
+    let illegal = "module M:\n\n  type Status = Draft | Approved | Posted | Cancelled\n  type Doc = {status: Status, amount: Int}\n  part post(d: Doc) -> Doc:\n    requires d.status == Approved\n    ensures result.status == Posted\n    yield Doc(Posted, d.amount)\n  part illegal(amt: Int) -> Doc:\n    yield post(Doc(Draft, amt))\n";
+    assert!(!verify_src(illegal).ok(), "posting a Draft must be rejected — the illegal transition is unrepresentable");
+
+    // AMOUNT forgery: `post` claims to preserve the amount but writes 0 → rejected.
+    let forge = "module M:\n\n  type Status = Draft | Approved | Posted | Cancelled\n  type Doc = {status: Status, amount: Int}\n  part post(d: Doc) -> Doc:\n    requires d.status == Approved\n    ensures result.amount == d.amount\n    yield Doc(Posted, 0)\n";
+    assert!(!verify_src(forge).ok(), "an amount forgery through posting must be rejected");
+}

@@ -1,0 +1,48 @@
+module VerifiedDocLifecycle:
+
+  # ── BRIQUE VÉRIFIÉE : cycle de vie d'un document ERP (catalogue CPT-LLL-018) ──
+  #
+  # Un axe DIFFÉRENT des briques arithmétiques : la correction d'un WORKFLOW. Le cycle de vie
+  # d'un document comptable (facture, commande) — Draft → Approved → Posted — est régi par des
+  # transitions légales et un invariant métier : « ce qu'on approuve est exactement ce qu'on
+  # poste » (aucune altération du montant entre l'approbation et la comptabilisation).
+  #
+  # AVANT (le réflexe) : un `status: String` + des `if status == "approved"` éparpillés ; rien
+  # n'empêche de poster un brouillon, et rien ne garantit que le montant n'a pas bougé.
+  # APRÈS (ici) : le statut est un type SOMME (états clos), chaque transition exige l'état de
+  # départ légal via `requires` — poster un `Draft` est une ERREUR DE COMPILATION, pas un bug
+  # runtime — et la préservation du montant est PROUVÉE par Z3.
+
+  type Status = Draft | Approved | Posted | Cancelled
+  type Doc = {status: Status, amount: Int}
+
+  # APPROUVER : seul un `Draft` peut l'être (`requires`) ; le montant est PRÉSERVÉ et reste ≥ 0.
+  part approve(d: Doc) -> Doc:
+    requires d.status == Draft
+    requires d.amount >= 0
+    ensures result.status == Approved
+    ensures result.amount == d.amount
+    yield Doc(Approved, d.amount)
+
+  # POSTER (comptabiliser) : seul un `Approved` peut l'être (`requires`) ; le montant posté est
+  # EXACTEMENT le montant approuvé. Un appelant qui tente `post` sur un `Draft` ne décharge pas
+  # ce `requires` → rejet à la compilation : la transition illégale est INEXPRIMABLE.
+  part post(d: Doc) -> Doc:
+    requires d.status == Approved
+    ensures result.status == Posted
+    ensures result.amount == d.amount
+    yield Doc(Posted, d.amount)
+
+  # Le chemin légal complet, composé : Draft → approve → post. Le type prouve que la séquence
+  # est valide (chaque `requires` déchargé par l'`ensures` de l'étape précédente) et que le
+  # montant traverse tout le cycle INCHANGÉ.
+  part process(amt: Int) -> Doc:
+    requires amt >= 0
+    ensures result.status == Posted
+    ensures result.amount == amt
+    yield post(approve(Doc(Draft, amt)))
+
+  part main() -> Int via IO:
+    # Un document de 15,00 € (1500 c) traverse Draft → Approved → Posted ; montant final = 1500.
+    let d = process(1500)
+    yield IO.print(d.amount)

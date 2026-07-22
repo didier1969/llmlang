@@ -82,6 +82,21 @@
   compte (REQ-LLL-203), et fold prouvé égal à `sum` (REQ-LLL-194). Entiers exacts.
 - **REQ** — REQ-LLL-203 + REQ-LLL-194 (capstone).
 
+## 6. Cycle de vie d'un document ERP (machine à états) — `examples/verified_doc_lifecycle.lll`
+
+- **Prouve** — un axe NON-arithmétique : la correction d'un workflow. Les transitions illégales
+  (poster un `Draft`) sont INEXPRIMABLES (erreur de compilation), et le montant est conservé à
+  travers `Draft → Approved → Posted` (« ce qu'on approuve == ce qu'on poste »).
+- **Signature**
+  - `type Status = Draft | Approved | Posted | Cancelled` + `type Doc = {status, amount}`.
+  - `post(d) -> Doc` · `requires d.status == Approved` · `ensures result.amount == d.amount`.
+- **Quand** — tout cycle de vie métier (facture, commande, ticket) où certaines transitions sont
+  interdites et où une donnée (montant, quantité) ne doit pas être altérée entre deux états.
+- **Technique** — un type SOMME pour les états clos + un `requires` par transition (l'état de
+  départ légal) : le vérificateur refuse au call site toute transition dont la garde n'est pas
+  déchargée. Invariant de montant prouvé par les `ensures`.
+- **REQ** — CPT-LLL-018 (records + sum types + contrats).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
