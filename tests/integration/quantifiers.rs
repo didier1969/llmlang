@@ -1944,10 +1944,17 @@ fn forall_over_list_elements_bounds_the_aggregate_req201() {
     // NEGATIVE: wrong direction — a sum of non-negatives is not <= 0 → REJECTED.
     assert!(!verify_src(&src(nn, "result <= 0")).ok(), "the wrong-direction bound must be rejected");
 
-    // NEGATIVE (v1 restriction): a body over a FREE variable is rejected LOUD at VC-gen (a hard
-    // compile error, not a failed obligation), so assert the CLI exits non-zero.
-    let freevar = "module M:\n\n  part f(xs: List[Int], lo: Int) -> Int:\n    requires forall x in xs: x >= lo\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + f(t, lo)\n";
-    assert!(check_lll_src("forall-freevar", freevar).0 != Some(0), "a free-variable body must be rejected in v1");
+    // FREE-VARIABLE body (REQ-LLL-204): the predicate closes over the body's parameters, so a
+    // RELATIVE bound works — `∀ x ∈ xs: x ≥ lo` with `lo ≥ 0` proves the total ≥ 0.
+    let rel_ok = "module M:\n\n  part f(xs: List[Int], lo: Int) -> Int:\n    requires forall x in xs: x >= lo\n    requires lo >= 0\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + f(t, lo)\n";
+    assert!(verify_src(rel_ok).ok(), "a relative bound (x >= lo, lo >= 0) must prove: {:?}", failures(&verify_src(rel_ok)));
+    // NEGATIVE: WITHOUT `lo >= 0`, the elements may be negative → the total is not >= 0 → REJECTED.
+    let rel_bad = "module M:\n\n  part f(xs: List[Int], lo: Int) -> Int:\n    requires forall x in xs: x >= lo\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + f(t, lo)\n";
+    assert!(!verify_src(rel_bad).ok(), "a relative bound with a possibly-negative lo must be rejected");
+    // NEGATIVE (the actual argument distinguishes a SHARED predicate): a caller holding
+    // `∀ x: x ≥ lo` cannot discharge a callee requiring `∀ x: x ≥ hi` — different second argument.
+    let cross = "module M:\n\n  part g(xs: List[Int], b: Int) -> Int:\n    requires forall x in xs: x >= b\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + g(t, b)\n  part caller(xs: List[Int], lo: Int, hi: Int) -> Int:\n    requires forall x in xs: x >= lo\n    yield g(xs, hi)\n";
+    assert!(!verify_src(cross).ok(), "the forall's actual argument must distinguish x>=lo from x>=hi");
 
     // NON-CONTAMINATION: two distinct bodies in one module keep distinct predicates — nonneg ⇒ >=0
     // AND nonpos ⇒ <=0 both verify, neither leaking the other's meaning.

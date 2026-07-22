@@ -122,8 +122,10 @@
   bornées ⇒ … » ; le pont entre une contrainte par ligne et une garantie sur l'agrégat.
 - **Technique** — `forall x in <list>` (REQ-LLL-201) lowered en prédicat récursif
   (`p(nil)=true`, `p(cons h t)=(body[x:=h] ∧ p(t))`, E-matché), consommé au `h :: t` : la
-  propriété de tête + le `requires` de l'appel récursif ; combiné à `sum` (REQ-LLL-194).
-- **REQ** — REQ-LLL-201 (v1 : consume-side, body sur la variable liée).
+  propriété de tête + le `requires` de l'appel récursif ; combiné à `sum` (REQ-LLL-194). Le
+  prédicat CLÔT sur les paramètres du body (REQ-LLL-204), donc les bornes RELATIVES marchent
+  aussi : `∀ x ∈ xs: x ≥ lo` avec `lo ≥ 0` prouve `total ≥ 0`.
+- **REQ** — REQ-LLL-201 (consume-side) + REQ-LLL-204 (body sur variable libre).
 
 ---
 
@@ -143,7 +145,8 @@
 
 ## Frontières connues (prochaines briques à débloquer)
 
-- **Bornes d'agrégat** (`tous ≥ 0 ⇒ sum ≥ 0`) — **LIVRÉ** (REQ-LLL-201 v1, brique 8). Reste en
-  suivi : body sur une variable LIBRE (`x ≥ lo`) et le prove-side (`ensures ∀ x ∈ result: P(x)`).
+- **Bornes d'agrégat** (`tous ≥ 0 ⇒ sum ≥ 0`, `tous ≥ lo ∧ lo ≥ 0 ⇒ total ≥ 0`) — **LIVRÉ**
+  (REQ-LLL-201 consume + REQ-LLL-204 body sur variable libre, brique 8). Reste : le prove-side
+  (`ensures ∀ x ∈ result: P(x)` — prouver qu'une fonction PRODUIT une liste all-P).
 - **Réutilisation Perceus sous `filter`** (drop-handling) — cycle dédié supervisé.
 - **Solveurs plus riches** (OR-Tools/cvc5) sous le même mur de havoc — gaté opérateur.

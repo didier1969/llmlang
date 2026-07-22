@@ -578,7 +578,7 @@ fn setup_part_emit<'a>(
             if let ForallDomain::In(coll) = domain {
                 if let Some(Ty::List(e)) = em.operand_ty(coll) {
                     let elem = smt_ty(&e);
-                    let h = em.forall_list_term(var, coll, body, &env, &elem)?;
+                    let h = em.forall_list_term(var, coll, body, &env, &elem, &part.params)?;
                     em.hyps.push(h);
                     continue;
                 }
@@ -1783,13 +1783,15 @@ impl<'a> Emit<'a> {
         matches!(self.operand_ty(coll), Some(Ty::List(_)))
     }
 
-    /// REQ-LLL-201: lower `forall x in <list_expr>: body` to `(listall_N <list_term>)`, an abstract
-    /// recursive predicate axiomatized DEFINITIONALLY in the prelude (`p(nil)=true`,
-    /// `p(cons h t)=(body[x:=h] ∧ p(t))`, E-matched — the list analogue of `sum`/`len`). Sound by
-    /// construction (the unique function satisfying the axioms is "body holds for every element"),
-    /// conservative. v1: the body may reference ONLY the bound variable `var`; a free variable
-    /// would need the predicate to close over it (a follow-up), so it is rejected LOUD here rather
-    /// than silently dropped (dropping would encode a WEAKER property — an unsoundness).
+    /// REQ-LLL-201/204: lower `forall x in <list_expr>: body` to `(listall_N <list_term> fv…)`, an
+    /// abstract recursive predicate axiomatized DEFINITIONALLY in the prelude (`p(nil,fv…)=true`,
+    /// `p(cons h t, fv…)=(body[x:=h] ∧ p(t,fv…))`, E-matched — the list analogue of `sum`/`len`).
+    /// Sound by construction (the unique function satisfying the axioms is "body holds for every
+    /// element"), conservative. The body's FREE variables (anything but the bound `var`) become
+    /// EXTRA predicate parameters, so `forall x in xs: x >= lo` closes over `lo` — resolved from
+    /// `params` (the current part's params at a `requires`, the callee's at a call site) and passed
+    /// as actual arguments translated under `env`. A free variable that is not a resolvable
+    /// parameter is rejected LOUD (never silently dropped — that would encode a WEAKER property).
     fn forall_list_term(
         &mut self,
         var: &str,
@@ -1797,48 +1799,77 @@ impl<'a> Emit<'a> {
         body: &Expr,
         env: &HashMap<String, String>,
         elem: &str,
+        params: &[(String, Ty)],
     ) -> Result<String, String> {
         let xs = self.tr(list_expr, env, None)?;
         let elem = elem.to_string();
-        // FREE-VAR restriction (v1): the body may mention only `var` (+ ctors/constants/operators).
-        let mut offending: Option<String> = None;
+        // free variables of the body, in first-occurrence order (deterministic).
+        let mut fvs: Vec<String> = Vec::new();
         body.walk(&mut |e| {
             if let Expr::Var(n) = e {
-                if n != var && !self.cm.ctors.contains_key(n) && offending.is_none() {
-                    offending = Some(n.clone());
+                if n != var && !self.cm.ctors.contains_key(n) && !fvs.contains(n) {
+                    fvs.push(n.clone());
                 }
             }
         });
-        if let Some(n) = offending {
-            return Err(format!(
-                "part `{}`: `forall {var} in <list>: …` may reference only the bound variable in \
-                 v1 (found `{n}`) — a body over a free variable is a follow-up (REQ-LLL-201)",
-                self.part.name
-            ));
+        // each free var → its sort (from `params`) + its actual term (translated under `env`).
+        let mut fv_sorts: Vec<String> = Vec::new();
+        let mut fv_actuals: Vec<String> = Vec::new();
+        for fv in &fvs {
+            let ty = params.iter().find(|(pn, _)| pn == fv).map(|(_, t)| t).ok_or_else(|| {
+                format!(
+                    "part `{}`: `forall {var} in <list>` body references `{fv}`, which is not a \
+                     parameter — v1 supports the bound variable + parameters only (REQ-LLL-201/204)",
+                    self.part.name
+                )
+            })?;
+            fv_sorts.push(smt_ty(ty));
+            fv_actuals.push(self.tr(&Expr::Var(fv.clone()), env, None)?);
         }
-        // translate the body ONCE with `var := h` (the axiom's bound head) for the axiom text.
+        // translate the body ONCE with `var := h` and each free var → its canonical param `fvI`.
         let mut benv: HashMap<String, String> = HashMap::new();
         benv.insert(var.to_string(), "h".to_string());
         self.sorts.insert("h".to_string(), elem.clone());
+        for (i, fv) in fvs.iter().enumerate() {
+            let pn = format!("fv{i}");
+            self.sorts.insert(pn.clone(), fv_sorts[i].clone());
+            benv.insert(fv.clone(), pn);
+        }
         let body_smt = self.tr(body, &benv, Some(&Ty::Bool))?;
-        // one predicate per (body, elem): identical bodies share, distinct ones never collide.
-        let key = (body_smt.clone(), elem.clone());
+        // one predicate per (canonical body, elem, fv-sorts): identical shapes share, distinct
+        // ones (different body OR different free-var sorts) never collide.
+        let key = (format!("{body_smt}\u{1}{}", fv_sorts.join(",")), elem.clone());
         let name = if let Some(n) = self.list_forall_names.get(&key) {
             n.clone()
         } else {
             let n = format!("listall_{}", self.list_forall_names.len());
             self.list_forall_names.insert(key, n.clone());
+            // SMT fragments for the extra parameters (empty when the body has no free variable).
+            let sig_extra: String = fv_sorts.iter().map(|s| format!(" {s}")).collect();
+            let binders_extra: String =
+                fv_sorts.iter().enumerate().map(|(i, s)| format!(" (fv{i} {s})")).collect();
+            let args_extra: String = (0..fvs.len()).map(|i| format!(" fv{i}")).collect();
+            let base = if fvs.is_empty() {
+                format!("(assert (= ({n} (as nil (Lst {elem}))) true))")
+            } else {
+                format!(
+                    "(assert (forall ({binders}) (= ({n} (as nil (Lst {elem})){args}) true)))",
+                    binders = binders_extra.trim_start(),
+                    args = args_extra,
+                )
+            };
             let axiom = format!(
-                "(declare-fun {n} ((Lst {elem})) Bool)\n\
-                 (assert (= ({n} (as nil (Lst {elem}))) true))\n\
-                 (assert (forall ((h {elem}) (t (Lst {elem}))) \
-                   (! (= ({n} (cons h t)) (and {body_smt} ({n} t))) \
-                   :pattern (({n} (cons h t))))))"
+                "(declare-fun {n} ((Lst {elem}){sig_extra}) Bool)\n\
+                 {base}\n\
+                 (assert (forall ((h {elem}) (t (Lst {elem})){binders_extra}) \
+                   (! (= ({n} (cons h t){args_extra}) (and {body_smt} ({n} t{args_extra}))) \
+                   :pattern (({n} (cons h t){args_extra})))))"
             );
             self.list_forall_axioms.insert(n.clone(), axiom);
             n
         };
-        Ok(format!("({name} {xs})"))
+        let actuals: String = fv_actuals.iter().map(|a| format!(" {a}")).collect();
+        Ok(format!("({name} {xs}{actuals})"))
     }
 
     fn prove_forall_fresh_const(
@@ -3486,7 +3517,8 @@ impl<'a> Emit<'a> {
                         let handled = if let (ForallDomain::In(coll), Some(elem)) =
                             (domain, &list_elem)
                         {
-                            let goal = self.forall_list_term(var, coll, body, &cenv, elem)?;
+                            let cparams = callee.params.clone();
+                            let goal = self.forall_list_term(var, coll, body, &cenv, elem, &cparams)?;
                             self.oblige(descr.clone(), goal);
                             true
                         } else {
