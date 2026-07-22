@@ -2268,14 +2268,33 @@ impl<'a> Emit<'a> {
             // branches in that position. Soundness gate = the div-in-then / div-in-else pair.
             Expr::If(c, a, b) => {
                 let cc = self.tr(c, env, Some(&Ty::Bool))?;
-                let saved = self.hyps.len();
+                // A branch's OWN hypotheses — a callee `ensures` assumed at a call inside the
+                // branch (INCLUDING a self-call's induction hypothesis), a Skolem witness, a
+                // record invariant — are pushed onto `self.hyps` DURING `tr` of that branch.
+                // They must survive to the ENCLOSING obligation (the `yield`'s `ensures`, emitted
+                // AFTER this `tr` returns), otherwise a recursive `if`-expression loses its IH and
+                // a valid program is rejected (REQ-LLL-198). The `match`-statement form never hit
+                // this: it emits its obligation INSIDE the arm scope, while the hyps are still
+                // live. But such a fact holds ONLY on its branch — the call's `requires` was
+                // discharged under the path condition — so we HOIST each guarded by that condition
+                // (`cc` / `¬cc`), never unconditionally (which would be unsound: the guarded
+                // implication assumes nothing off its branch). Guarded hoisting is MONOTONE — it
+                // only ADDS hypotheses, so it can unblock a proof but never break a passing one.
+                let base = self.hyps.len();
                 self.hyps.push(cc.clone());
                 let ta = self.tr(a, env, expected)?;
-                self.hyps.truncate(saved);
-                let saved = self.hyps.len();
+                let then_hyps: Vec<String> = self.hyps.split_off(base + 1);
+                self.hyps.truncate(base); // drop `cc`
                 self.hyps.push(format!("(not {cc})"));
                 let tb = self.tr(b, env, expected)?;
-                self.hyps.truncate(saved);
+                let else_hyps: Vec<String> = self.hyps.split_off(base + 1);
+                self.hyps.truncate(base); // drop `(not cc)`
+                for h in then_hyps {
+                    self.hyps.push(format!("(=> {cc} {h})"));
+                }
+                for h in else_hyps {
+                    self.hyps.push(format!("(=> (not {cc}) {h})"));
+                }
                 format!("(ite {cc} {ta} {tb})")
             }
             Expr::RecordLit(..) => {

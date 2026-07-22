@@ -658,6 +658,34 @@ fn if_expression_example_verifies_and_runs_req124() {
     assert!(build_run(&src).contains("0\n5\n-1\n1"), "expected 0,5,-1,1, got: {}", build_run(&src));
 }
 
+// ─── REQ-LLL-198: a recursive `if`-expression must carry its callee `ensures` — including a
+// self-call's INDUCTION HYPOTHESIS — out to the enclosing `yield` obligation. A branch's own
+// hypotheses were pushed onto the hyp stack DURING `tr` of the branch, then TRUNCATED on branch
+// exit, so they were gone when the `ensures` obligation cloned the stack — a recursive function
+// written with `if` lost its IH and a valid program was rejected, while the SAME logic in
+// `match`-statement form proved (the obligation there is emitted inside the arm scope). The fix
+// hoists each branch hypothesis GUARDED by its path condition (`cc` / `¬cc`) — sound (the callee
+// `requires` was discharged under that condition) and monotone (only adds hypotheses).
+#[test]
+fn if_expression_recursive_carries_induction_hypothesis_req198() {
+    // POSITIVE: an arg-dependent (here nonlinear) `ensures` discharges only if the self-call's IH
+    // `r == (n-1)*v` reaches the `yield` obligation. Before the fix: rejected (IH truncated away).
+    let ok = "module M:\n\n  part replicate_sum(n: Int, v: Int) -> Int:\n    requires n >= 0\n    ensures result == n * v\n    measure n\n    yield if n == 0 then 0 else v + replicate_sum(n - 1, v)\n";
+    assert!(
+        verify_src(ok).ok(),
+        "a recursive if-expression must carry its own induction hypothesis to the ensures: {:?}",
+        failures(&verify_src(ok))
+    );
+    // NEGATIVE (soundness): the fix must NOT make a FALSE `ensures` provable — the guarded
+    // hypothesis assumes nothing off its branch. `replicate_sum(0, v) = 0`, yet this claims
+    // `0 == 0*v + 1 == 1` → MUST be rejected.
+    let bad = "module M:\n\n  part bad_sum(n: Int, v: Int) -> Int:\n    requires n >= 0\n    ensures result == n * v + 1\n    measure n\n    yield if n == 0 then 0 else v + bad_sum(n - 1, v)\n";
+    assert!(
+        !verify_src(bad).ok(),
+        "a false ensures in an if-expression must stay REJECTED — guarded hoisting adds no unsound fact"
+    );
+}
+
 
 // ─── REQ-LLL-126: a LITERAL head in a cons arm (`0 :: t`, `True :: t`) — the same measured
 // friction as REQ-110's constructor heads, one class up. Generalises `coalesce_cons_heads`:
