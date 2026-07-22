@@ -1,0 +1,40 @@
+module VerifiedLedger:
+
+  # ── BRIQUE VÉRIFIÉE : conservation d'un grand livre sur un nombre de lignes QUELCONQUE ──
+  # Catalogue de briques réutilisables (CPT-LLL-018), débloquée par le primitive spec `sum`
+  # sur List[Int] (REQ-LLL-194) — le pendant LISTE de la répartition exacte (REQ-LLL-200).
+  #
+  # LE PROBLÈME (universel en compta/ERP). « Le total du grand livre est-il exactement la
+  # somme de ses écritures ? » et « cette réorganisation des lignes conserve-t-elle le
+  # solde ? » sont des invariants d'audit. Un ERP classique les TESTE sur quelques jeux de
+  # données ; il ne les PROUVE pas. Sur des montants flottants, une somme sur beaucoup de
+  # lignes accumule des erreurs d'arrondi — le total affiché diverge du vrai.
+  #
+  # LA BRIQUE. En ENTIERS EXACTS, `sum(...)` est un terme de spécification (axiomatisé
+  # `sum(nil)=0`, `sum(cons h t)=h+sum(t)`) : il permet d'ÉNONCER la conservation dans un
+  # contrat et de la PROUVER par récurrence structurelle pour une liste de longueur
+  # SYMBOLIQUE — pas testée, prouvée pour tout N.
+
+  # Le total calculé d'un grand livre == la somme VRAIE de ses écritures, EXACTEMENT, prouvé
+  # pour un nombre de lignes quelconque (l'IH de l'appel récursif + les axiomes de `sum`).
+  part ledger_total(entries: List[Int]) -> Int:
+    ensures result == sum(entries)
+    measure length(entries)
+    match entries:
+      [] -> yield 0
+      e :: rest -> yield e + ledger_total(rest)
+
+  # CONSERVATION : scinder la 1ʳᵉ écriture en deux parts qui la recomposent (k et montant−k)
+  # ne change PAS le total du grand livre — l'invariant d'audit d'une ventilation de ligne.
+  # Prouvé directement par les axiomes de `sum` (k + (e−k) + reste == e + reste).
+  part split_first(entries: List[Int], k: Int) -> List[Int]:
+    ensures sum(result) == sum(entries)
+    match entries:
+      [] -> yield []
+      e :: rest -> yield k :: (e - k) :: rest
+
+  part main() -> Int via IO:
+    # Grand livre : 100 + 250 − 50 + 300 = 600. Scinder la 1ʳᵉ ligne (100 → 40 + 60) laisse
+    # le total EXACTEMENT à 600 — conservation prouvée, vérifiée aussi à l'exécution.
+    let t = IO.print(ledger_total([100, 250, -50, 300]))
+    yield IO.print(ledger_total(split_first([100, 250, -50, 300], 40)))
