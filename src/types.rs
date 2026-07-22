@@ -593,7 +593,8 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                         || !(ctors.contains_key(n)
                             || is_array_spec_term(n)
                             || is_map_spec_term(n)
-                            || is_set_spec_term(n))
+                            || is_set_spec_term(n)
+                            || is_list_spec_term(n))
                 }
                 _ => false,
             };
@@ -3569,7 +3570,8 @@ fn check_contracts(
                         || !(ctors.contains_key(n)
                             || is_array_spec_term(n)
                             || is_map_spec_term(n)
-                            || is_set_spec_term(n))
+                            || is_set_spec_term(n)
+                            || is_list_spec_term(n))
                 }
                 _ => false,
             };
@@ -3937,6 +3939,21 @@ fn type_of_pure(
                 subst_ty(&fields[idx], &subst)
             }
             other => return Err(format!("field access `.{name}` needs a record, got {other}")),
+        },
+        // list spec aggregates admitted in contracts (REQ-LLL-194): `sum(xs: List[Int])` → Int,
+        // backed by an abstract, definitionally-axiomatized UF (vc.rs) — the list analogue of the
+        // `length` spec primitive. Spec-only (a `sum` in code has no lowering, rejected below).
+        Expr::Call(name, args) if is_list_spec_term(name) => match name.as_str() {
+            "sum" => {
+                if args.len() != 1 {
+                    return Err("`sum` takes 1 argument".into());
+                }
+                match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
+                    Ty::List(e) if matches!(*e, Ty::Int) => Ty::Int,
+                    other => return Err(format!("`sum` needs a List[Int], got {other}")),
+                }
+            }
+            _ => unreachable!("is_list_spec_term covers sum"),
         },
         // array spec primitives are admitted in contracts (DEC-LLL-017 amendment):
         // they are TERM constructors backed by a Z3 theory operator, not user calls.

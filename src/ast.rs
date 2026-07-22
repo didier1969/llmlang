@@ -555,6 +555,17 @@ pub fn is_array_spec_term(name: &str) -> bool {
     matches!(name, "array" | "length" | "get" | "contains")
 }
 
+/// SPEC-ONLY list aggregates admitted inside contracts (REQ-LLL-194): read-only
+/// terms over a `List[Int]` backed by an abstract, definitionally-axiomatized
+/// uninterpreted function (vc.rs), NOT a code operation. `sum(xs)` lets a contract
+/// state a CONSERVATION property (`sum(result) == sum(input)`) about a user fold whose
+/// own `ensures result == sum(xs)` links it to the spec term — the list analogue of the
+/// `length` spec primitive, unblocking induction over a symbolic-length list. Contract
+/// position only: a `sum` in CODE has no lowering and is rejected by the checker.
+pub fn is_list_spec_term(name: &str) -> bool {
+    matches!(name, "sum")
+}
+
 /// Reserved builtin names for the verified persistent map (REQ-LLL-037,
 /// DEC-LLL-043). Dispatched BY NAME in every fork, like the array builtins.
 /// `map` is the empty-map literal; `insert`/`lookup`/`haskey` are the v1 ops.

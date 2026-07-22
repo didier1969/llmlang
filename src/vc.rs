@@ -2763,6 +2763,26 @@ impl<'a> Emit<'a> {
                     }
                 }
             }
+            // REQ-LLL-194: `sum(xs)` over a `List[Int]` — a SPEC term (contract-only, the checker
+            // rejects it in code) — lowers to the abstract `sum_Int` uninterpreted function,
+            // constrained by definitional axioms (`sum(nil)=0`, `sum(cons h t)=h+sum(t)`) emitted
+            // in the prelude. The list analogue of `len_<E>`: it lets a fold's `ensures result ==
+            // sum(xs)` link user code to the spec term, so a CONSERVATION goal `sum(out)==sum(in)`
+            // discharges by structural induction over a symbolic-length list.
+            Expr::Call(name, args)
+                if is_list_spec_term(name)
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                match name.as_str() {
+                    "sum" => {
+                        let a = self.tr(&args[0], env, None)?;
+                        format!("({} {a})", list_sum_fn())
+                    }
+                    _ => unreachable!("is_list_spec_term covers sum"),
+                }
+            }
             Expr::Call(name, args)
                 if is_array_builtin(name)
                     && !env.contains_key(name)
@@ -3717,6 +3737,28 @@ fn list_len_decl_and_axioms(elem: &str, fname: &str) -> String {
     )
 }
 
+/// The abstract list-sum function name (REQ-LLL-194). Int-only — a sum needs `+` on its
+/// elements — so, unlike `len_<E>`, there is a single monomorphic function `sum_Int`.
+fn list_sum_fn() -> &'static str {
+    "sum_Int"
+}
+
+/// The abstract list-sum declaration and its DEFINITIONAL axioms (REQ-LLL-194). Conservative
+/// by construction — they are the structural recurrence of the runtime fold, which is EXACT
+/// (bignum `Int`, no overflow — DEC-LLL-077), so they add NO power to prove a false goal; they
+/// merely let a `sum(...)` spec term unfold one cons at a time. E-matched (`:pattern`) on the
+/// cons unfolding to stay in a tractable fragment, exactly like `len_<E>`. NO non-negativity
+/// axiom (a sum of `Int`s may be negative) — the sole facts are `sum(nil)=0` and the cons step.
+fn list_sum_decl_and_axioms() -> String {
+    let f = list_sum_fn();
+    format!(
+        "(declare-fun {f} ((Lst Int)) Int)\n\
+         (assert (= ({f} (as nil (Lst Int))) 0))\n\
+         (assert (forall ((h Int) (t (Lst Int))) \
+           (! (= ({f} (cons h t)) (+ h ({f} t))) :pattern (({f} (cons h t))))))"
+    )
+}
+
 // Parametric option datatype (REQ-LLL-037, DEC-LLL-043): a map is `(Array K
 // (Maybe V))`, so an absent key reads as `none` and a present one as `(some v)`.
 // Self-contained (references only its own param) — ordering vs Lst/user datatypes
@@ -4100,6 +4142,23 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
                 s.push_str(&list_len_decl_and_axioms(elem, &fname));
                 s.push('\n');
             }
+        }
+    }
+    // REQ-LLL-194: the abstract list-sum `sum_Int` and its definitional axioms — emitted once
+    // (globally, definitional truths) when any obligation references it. Placed right after the
+    // `len_<E>` block, so the parametric `(Lst Int)` datatype (LIST_DECL) is already declared.
+    {
+        let f = list_sum_fn();
+        let referenced = obls.iter().any(|o| {
+            o.decls
+                .iter()
+                .chain(o.hyps.iter())
+                .chain(std::iter::once(&o.goal))
+                .any(|t| t.contains(&format!("({f} ")))
+        });
+        if referenced {
+            s.push_str(&list_sum_decl_and_axioms());
+            s.push('\n');
         }
     }
     for o in obls {

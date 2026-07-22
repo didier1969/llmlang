@@ -2059,3 +2059,50 @@ fn ffi_mistyped_extern_binding_yields_frontier_diagnostic() {
     );
     assert!(!err.contains("compiler bug"), "must NOT blame the compiler for a boundary mismatch: {err}");
 }
+
+
+// ─── REQ-LLL-194: `sum` — a SPEC primitive over `List[Int]`, the list analogue of `length`.
+// It lets a contract STATE conservation (`sum(out) == sum(in)`) and llmlang PROVE it by
+// structural induction over a symbolic-length list (the missing piece for list-based verified
+// bricks, CPT-LLL-018). Backed by definitional axioms (sum(nil)=0, sum(cons h t)=h+sum(t)) that
+// match the exact-Int runtime fold — conservative, so a FALSE conservation stays rejected.
+#[test]
+fn sum_spec_primitive_proves_conservation_and_rejects_false_claims_req194() {
+    // POSITIVE: a user fold proves it computes the spec sum, at symbolic length (needs the IH).
+    let fold = "module M:\n\n  part lsum(xs: List[Int]) -> Int:\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + lsum(t)\n";
+    assert!(
+        verify_src(fold).ok(),
+        "a fold must prove `result == sum(xs)` at symbolic length: {:?}",
+        failures(&verify_src(fold))
+    );
+    // POSITIVE: CONSERVATION `sum(result) == sum(xs)` over a symbolic-length list.
+    let conserve = "module M:\n\n  part id_sum(xs: List[Int]) -> List[Int]:\n    ensures sum(result) == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield h :: id_sum(t)\n";
+    assert!(
+        verify_src(conserve).ok(),
+        "structural identity must prove sum-conservation at symbolic length: {:?}",
+        failures(&verify_src(conserve))
+    );
+    // NEGATIVE (soundness): a fold that drops `h` does NOT compute the sum → REJECTED.
+    let bad_fold = "module M:\n\n  part lsum(xs: List[Int]) -> Int:\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield lsum(t)\n";
+    assert!(!verify_src(bad_fold).ok(), "a fold that forgets an element must NOT prove `== sum`");
+    // NEGATIVE (soundness): a transform that doubles the head does NOT conserve → REJECTED.
+    let bad_conserve = "module M:\n\n  part dbl(xs: List[Int]) -> List[Int]:\n    ensures sum(result) == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield h :: (h :: dbl(t))\n";
+    assert!(!verify_src(bad_conserve).ok(), "a non-conserving transform must NOT prove sum-conservation");
+}
+
+// REQ-LLL-194 gating: `sum` is List[Int]-only and SPEC-only (no code lowering).
+#[test]
+fn sum_spec_primitive_is_int_only_and_spec_only_req194() {
+    // `sum` on a non-Int list is a type error in the contract.
+    let bad_ty = "module M:\n\n  part f(xs: List[Bool]) -> Int:\n    ensures result == sum(xs)\n    yield 0\n";
+    assert!(
+        check_lll_src("sum-bool", bad_ty).0 != Some(0),
+        "`sum` on List[Bool] must be rejected (Int-only)"
+    );
+    // `sum` in CODE position has no lowering → rejected (spec-only).
+    let in_code = "module M:\n\n  part f(xs: List[Int]) -> Int via IO:\n    yield IO.print(sum(xs))\n";
+    assert!(
+        check_lll_src("sum-code", in_code).0 != Some(0),
+        "`sum` in code position must be rejected (spec-only)"
+    );
+}
