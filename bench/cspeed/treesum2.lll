@@ -1,0 +1,23 @@
+module Bench.TreeSum2:
+
+  # Control for bench/cspeed/treeinc2.lll: build a bounded-depth `Leaf(Int) | Node` tree and
+  # sum it, with NO rebuild. `treeinc2_allocs - treesum2_allocs` is exactly `inc`'s own
+  # allocation cost — driven to ZERO by the REQ-LLL-196b reuse pass (nullary-free trees).
+
+  type Tree = Leaf(Int) | Node(Tree, Tree)
+
+  part build(d: Int, v: Int) -> Tree:
+    requires d >= 0
+    measure d
+    match d:
+      0 -> yield Leaf(v)
+      _ -> yield Node(build(d - 1, v + v), build(d - 1, v + v + 1))
+
+  part sumt(t: Tree) -> Int:
+    match t:
+      Leaf(x)    -> yield x
+      Node(l, r) -> yield sumt(l) + sumt(r)
+
+  part main() -> Int via IO:
+    let t = build(20, 1)
+    yield IO.print(sumt(t))

@@ -1,0 +1,37 @@
+module Bench.TreeInc2:
+
+  # REQ-LLL-196b — the SAME-SHAPE ADT/TREE REBUILD kernel for the MOST COMMON business-tree
+  # shape: a binary tree with NO nullary constructor (`Leaf(Int) | Node(Tree, Tree)`, the
+  # value in the leaves). `inc` deconstructs each cell at its last use and reconstructs a cell
+  # of IDENTICAL shape — the Perceus/FBIP reuse opportunity. REQ-LLL-196 handled only trees
+  # WITH a nullary base (`Tip | Node`) to blank the box in place; 196b reuses without one by
+  # writing a SYNTHESIZED zero-alloc scalar blank (`Leaf(S(0))`) while the children are stolen.
+  # When the tree is UNIQUELY owned (as here — `build` hands it over at its last use) each
+  # unique cell is OVERWRITTEN in place instead of allocating, guarded at runtime by
+  # `Rc::get_mut`. A SHARED cell falls back to a fresh copy. Bounded depth (recursion depth ==
+  # d), so the stack is safe at ~2M cells; the honest metric is the ALLOCATION count, not time.
+  # Measured with bench/cspeed/alloc_count.sh.
+
+  type Tree = Leaf(Int) | Node(Tree, Tree)
+
+  part build(d: Int, v: Int) -> Tree:
+    requires d >= 0
+    measure d
+    match d:
+      0 -> yield Leaf(v)
+      _ -> yield Node(build(d - 1, v + v), build(d - 1, v + v + 1))
+
+  part inc(t: Tree) -> Tree:
+    match t:
+      Leaf(x)    -> yield Leaf(x + 1)
+      Node(l, r) -> yield Node(inc(l), inc(r))
+
+  part sumt(t: Tree) -> Int:
+    match t:
+      Leaf(x)    -> yield x
+      Node(l, r) -> yield sumt(l) + sumt(r)
+
+  part main() -> Int via IO:
+    let t = build(20, 1)
+    let u = inc(t)
+    yield IO.print(sumt(u))

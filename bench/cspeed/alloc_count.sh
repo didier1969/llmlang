@@ -69,6 +69,14 @@ measure bench/cspeed/mapinc.lll
 #   inc's OWN allocations  =  treeinc_allocs - treesum_allocs
 # With the reuse pass, inc's unique cells are overwritten in place, so its per-node allocation
 # drops to ZERO. Same A/B recipe (build lllc at the merge-base, point $LLL at it, re-run).
-echo "# REQ-LLL-196 tree-rebuild reuse"
+echo "# REQ-LLL-196 tree-rebuild reuse (Tip | Node — nullary base)"
 measure bench/cspeed/treesum.lll
 measure bench/cspeed/treeinc.lll
+
+# REQ-LLL-196b — the NULLARY-FREE tree, the most common business shape: `Leaf(Int) | Node`.
+# 196 required a nullary ctor to blank the box; 196b synthesizes a zero-alloc scalar blank
+# (`Leaf(S(0))`) so the reuse fires here too. Same metric:
+#   treeinc2's OWN allocations  =  treeinc2_allocs - treesum2_allocs   → ZERO with the pass.
+echo "# REQ-LLL-196b tree-rebuild reuse (Leaf(Int) | Node — no nullary base)"
+measure bench/cspeed/treesum2.lll
+measure bench/cspeed/treeinc2.lll

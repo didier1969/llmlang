@@ -2252,3 +2252,86 @@ fn reuse_excludes_cross_type_rebuild_req196() {
         "REQ-196: cross-type conv must still be correct (expect 9), got: {stdout}"
     );
 }
+
+/// REQ-LLL-196b: the reuse now fires for the MOST COMMON business-tree shape — a binary tree
+/// with NO nullary constructor (`Leaf(Int) | Node(Tree, Tree)`, the value in the leaves).
+/// REQ-196 needed a nullary ctor to blank the box in place; 196b writes a SYNTHESIZED zero-alloc
+/// scalar blank (`Leaf(S(0))`) while the children are stolen, so both the `Leaf` and `Node`
+/// reconstructing arms reuse their cell. The whole tree is uniquely owned (built and consumed at
+/// its last use), so every cell is reused; the result must still be correct.
+#[test]
+fn reuse_tree_no_nullary_base_req196b() {
+    // build(2,1) = Node(Node(Leaf4,Leaf5), Node(Leaf6,Leaf7)); inc → leaves 5,6,7,8; sum 26.
+    let src = "module T:\n\n  \
+        type Tree = Leaf(Int) | Node(Tree, Tree)\n\n  \
+        part build(d: Int, v: Int) -> Tree:\n    requires d >= 0\n    measure d\n    \
+        match d:\n      0 -> yield Leaf(v)\n      \
+        _ -> yield Node(build(d - 1, v + v), build(d - 1, v + v + 1))\n\n  \
+        part inc(t: Tree) -> Tree:\n    \
+        match t:\n      Leaf(x) -> yield Leaf(x + 1)\n      \
+        Node(l, r) -> yield Node(inc(l), inc(r))\n\n  \
+        part sumt(t: Tree) -> Int:\n    \
+        match t:\n      Leaf(x) -> yield x\n      \
+        Node(l, r) -> yield sumt(l) + sumt(r)\n\n  \
+        part main() -> Int via IO:\n    \
+        let t = build(2, 1)\n    \
+        let u = inc(t)\n    \
+        yield IO.print(sumt(u))\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "nullary-free reuse kernel must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    // the pass fired for BOTH reconstructing arms, using the SYNTHESIZED scalar blank (there is
+    // no nullary ctor): the spine is OWNED, blanked to `Leaf(S(0))`, reused via the token.
+    assert!(
+        rust.contains("pub fn lll_inc(u_t: Rc<TreeI>)"),
+        "REQ-196b: inc's spine ADT param must be forced OWNED:\n{rust}"
+    );
+    assert!(
+        rust.contains("*Rc::get_mut(&mut u_t).unwrap() = TreeI::Leaf(LllInt::S(0))")
+            && rust.matches("return __lll_reuse_ctor(u_t,").count() == 2,
+        "REQ-196b: the synthesized scalar blank + a reuse per reconstructing arm must be emitted:\n{rust}"
+    );
+    let stdout = rustc_run(&rust, "reuse196b_unique");
+    assert!(
+        stdout.contains("26"),
+        "REQ-196b: nullary-free inc(build(2,1)) sum must be 26, got: {stdout}"
+    );
+}
+
+/// REQ-LLL-196b FAIL-SAFE: the runtime `Rc::get_mut` guard protects a SHARED nullary-free tree
+/// exactly as REQ-196 protects a `Tip | Node` one. `inc(t)` is called with `t` STILL LIVE, so
+/// the guard falls to a fresh allocation and the caller's aliased tree is left BIT-IDENTICAL —
+/// the copy, never a mutation through the alias (DEC-LLL-020).
+#[test]
+fn reuse_guarded_tree_no_nullary_copies_shared_req196b() {
+    // t = Node(Node(Leaf4,Leaf5), Node(Leaf6,Leaf7)); sumt(t) = 4+5+6+7 = 22 (intact).
+    // u = inc(t) → leaves 5,6,7,8; sumt(u) = 26. Had the reuse mutated the shared t, sumt(t)
+    // would read 26 too → 26026 instead of 22026.
+    let src = "module T:\n\n  \
+        type Tree = Leaf(Int) | Node(Tree, Tree)\n\n  \
+        part build(d: Int, v: Int) -> Tree:\n    requires d >= 0\n    measure d\n    \
+        match d:\n      0 -> yield Leaf(v)\n      \
+        _ -> yield Node(build(d - 1, v + v), build(d - 1, v + v + 1))\n\n  \
+        part inc(t: Tree) -> Tree:\n    \
+        match t:\n      Leaf(x) -> yield Leaf(x + 1)\n      \
+        Node(l, r) -> yield Node(inc(l), inc(r))\n\n  \
+        part sumt(t: Tree) -> Int:\n    \
+        match t:\n      Leaf(x) -> yield x\n      \
+        Node(l, r) -> yield sumt(l) + sumt(r)\n\n  \
+        part main() -> Int via IO:\n    \
+        let t = build(2, 1)\n    \
+        let u = inc(t)\n    \
+        let a = sumt(t)\n    \
+        let b = sumt(u)\n    \
+        yield IO.print(a * 1000 + b)\n";
+    let report = verify_src(src);
+    assert!(report.ok(), "nullary-free shared kernel must verify: {:?}", failures(&report));
+    let (cm, _) = full(src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let stdout = rustc_run(&rust, "reuse196b_shared");
+    assert!(
+        stdout.contains("22026"),
+        "REQ-196b: a SHARED nullary-free tree must be COPIED, alias intact (expect 22026), got: {stdout}"
+    );
+}

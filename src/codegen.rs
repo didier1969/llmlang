@@ -1858,7 +1858,7 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
     // (last-use) argument reaches the in-place reuse. Mutually exclusive with `cons_reuse_spine`
     // (that fires on a `List` spine, this on a `User` ADT spine), so the two flips never race.
     for part in &cm.module.parts {
-        if let Some(idx) = adt_reuse_spine(part) {
+        if let Some(idx) = adt_reuse_spine(part, &cm.ctors) {
             if let Some(mask) = borrow_mask.get_mut(&part.name) {
                 if let Some(b) = mask.get_mut(idx) {
                     *b = false;
@@ -1872,6 +1872,7 @@ fn emit_rust_inner(cm: &CheckedModule, require_main: bool) -> Result<String, Str
         fast_ok: &fast_ok,
         ctors: &ctors,
         ctor_ei: &ctor_ei,
+        ctor_sigs: &cm.ctors,
         parts: &parts,
         borrows: &borrows,
         borrow_mask: &borrow_mask,
@@ -3251,13 +3252,13 @@ fn emit_part(out: &mut String, part: &Part, g: &Globals) -> Result<(), String> {
         && cx.row_ev.is_empty()
         && !cx.row_abort
         && cx.row_fns.is_empty())
-        .then(|| adt_reuse_spine(part))
+        .then(|| adt_reuse_spine(part, g.ctor_sigs))
         .flatten()
         .filter(|&i| mask.and_then(|m| m.get(i)).copied() == Some(false));
     if let Some(spine) = reuse_spine {
         emit_cons_reuse_loop(out, part, spine, &cx, res)?;
     } else if let Some(spine) = adt_reuse {
-        emit_adt_reuse_rec(out, part, spine, &cx, res)?;
+        emit_adt_reuse_rec(out, part, spine, &cx, res, g.ctor_sigs)?;
     } else if looping {
         // The loop is LABELLED: a comprehension lowers to its own `loop`, so an unlabelled
         // `continue` in a tail call nested inside one would bind to the WRONG loop.
@@ -3472,6 +3473,10 @@ struct Globals<'a> {
     ctors: &'a Names,
     /// ctor name → inner-enum name `{Type}I`, for fully-qualified ctor emission
     ctor_ei: &'a std::collections::HashMap<String, String>,
+    /// ctor name → (owning ADT type name, its positional field types). REQ-LLL-196b — the
+    /// ADT/tree reuse pass reads this to synthesize a cheap, zero-alloc BLANK value for a
+    /// same-shape rebuild over a tree with NO nullary constructor (e.g. `Leaf(Int) | Node`).
+    ctor_sigs: &'a std::collections::HashMap<String, (String, Vec<Ty>)>,
     parts: &'a Names,
     /// parts that BORROW their List/ADT parameters (not used as a value) — DEC-LLL-031
     borrows: &'a Names,
@@ -3929,29 +3934,79 @@ fn cons_reuse_spine(part: &Part) -> Option<usize> {
     (saw_cons && saw_base).then_some(spine_idx)
 }
 
+/// REQ-LLL-196b — a cheap, ZERO-ALLOCATION scalar default for a user ADT field, used to
+/// synthesize the in-place BLANK of a tree with no nullary constructor. `Int`/`Big` are the
+/// `LllInt` fast path `S(0)` (a stack word, no heap), `Bool` is `false`. `None` for any field
+/// whose default would allocate or need a nested value (a `List`/`Map`/nested ADT/…): such a
+/// leaf ctor is NOT a usable blank, so the reuse is declined rather than made to allocate.
+fn scalar_default(t: &Ty) -> Option<String> {
+    match t {
+        Ty::Int | Ty::Big => Some("LllInt::S(0)".to_string()),
+        Ty::Bool => Some("false".to_string()),
+        _ => None,
+    }
+}
+
+/// REQ-LLL-196b — pick the constructor used to BLANK a uniquely-owned node of a user ADT while
+/// its recursive children are stolen out to recurse (Perceus/FBIP reuse without a nullary base,
+/// e.g. `Leaf(Int) | Node(Tree, Tree)`). Returns `(ctor, field_defaults)` — the field defaults
+/// are the zero-alloc scalars written for a non-nullary base (`Leaf` → `Leaf(LllInt::S(0))`).
+/// Preference: a NULLARY ctor first (freest — `Tip`, `[]`-like), else the first ctor whose
+/// fields are ALL zero-alloc scalars ([`scalar_default`]). `None` → the type has no cheap blank
+/// (its only base ctors carry heap/recursive fields), so the caller declines reuse. `all_ctors`
+/// are the ctor names appearing as arms — exhaustive over the type (the checker guarantees it),
+/// so they enumerate every constructor a blank could be built from.
+fn adt_blank_ctor<'a>(
+    all_ctors: &[&'a str],
+    ctor_sigs: &std::collections::HashMap<String, (String, Vec<Ty>)>,
+) -> Option<(&'a str, Vec<String>)> {
+    // a nullary ctor is the ideal blank: zero fields, a bare stack tag, drops nothing.
+    for c in all_ctors {
+        if ctor_sigs.get(*c).is_some_and(|(_, fs)| fs.is_empty()) {
+            return Some((c, Vec::new()));
+        }
+    }
+    // else the first ctor whose every field has a zero-alloc scalar default.
+    for c in all_ctors {
+        if let Some((_, fields)) = ctor_sigs.get(*c) {
+            if !fields.is_empty() {
+                if let Some(defs) = fields.iter().map(scalar_default).collect::<Option<Vec<_>>>() {
+                    return Some((c, defs));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// REQ-LLL-196 (Perceus/FBIP reuse for ADTs/trees) — the index of the SPINE parameter of a
 /// canonical same-shape ADT/tree rebuild under GENERAL recursion (not a fold). Matches EXACTLY
 ///
 /// ```text
 /// part f(.., t: T, ..):            # T a user ADT, and T == the return type
-///   match t:
-///     N            -> yield N               # identity NULLARY base(s): a nullary ctor rebuilt as itself
-///     C(b0, .., bk)-> yield C(g0, .., gk)   # the SAME ctor C, same arity; each gi over the binders / other params
+///   B            -> yield B                # identity NULLARY arm(s): a nullary ctor rebuilt as itself
+///   C(b0, .., bk)-> yield C(g0, .., gk)    # a RECONSTRUCTING arm: the SAME ctor C, same arity;
+///   D(..)        -> yield D(..)            # each gi over the binders / other params, NONE reading the spine
 /// ```
 ///
 /// i.e. a value of constructor `C` is DECONSTRUCTED at its last use and a `C` of identical
 /// shape is rebuilt in the continuation — the reuse opportunity, now for a TREE (`gi` may be a
-/// self-call on a child binder, so recursion is general, not tail: `inc`/`map`/`mirror`). The
-/// spine index is returned (`None` → the ordinary borrowed recursion, unchanged — always
+/// self-call on a child binder, so recursion is general, not tail: `inc`/`map`/`mirror`) and
+/// for MULTIPLE reconstructing arms (REQ-LLL-196b: `Leaf(Int) -> Leaf(x+1)` alongside
+/// `Node(l,r) -> Node(inc(l), inc(r))` — the most common business-tree shape, no nullary base).
+/// The spine index is returned (`None` → the ordinary borrowed recursion, unchanged — always
 /// sound). Deliberately narrow (as `cons_reuse_spine`): the emitter only knows this shape. The
-/// three requirements that make the in-place reuse sound: `T == ret` (same-constructor-TYPE —
-/// the reused `Rc<TI>` box can only carry another `TI`; rustc's type system backstops it, a
-/// cross-type reuse cannot even compile); a NULLARY identity base arm exists (its ctor is the
-/// zero-cost, zero-alloc in-place blank written to RELEASE the stolen children so each recurses
-/// UNIQUELY in turn); and the rebuilt ctor equals the matched one, with no `gi` reading the
-/// consumed spine. A `Tip | Node(..)`-shaped tree fits; a `Leaf(Int) | Node(..)` tree (no
-/// nullary base to blank with) and a type-changing map do not (see blockers).
-fn adt_reuse_spine(part: &Part) -> Option<usize> {
+/// requirements that make the in-place reuse sound: `T == ret` (same-constructor-TYPE — the
+/// reused `Rc<TI>` box can only carry another `TI`; rustc's type system backstops it, a
+/// cross-type reuse cannot even compile); each reconstructing arm rebuilds the ctor it matched
+/// with no `gi` reading the consumed spine; and the type has a synthesizable ZERO-ALLOC BLANK
+/// ([`adt_blank_ctor`] — a nullary ctor, or an all-scalar leaf like `Leaf(Int)`) to write in
+/// place while the recursive children are stolen out. A tree whose only base carries a heap
+/// field (no cheap blank) and a type-changing map do not fit (see blockers).
+fn adt_reuse_spine(
+    part: &Part,
+    ctor_sigs: &std::collections::HashMap<String, (String, Vec<Ty>)>,
+) -> Option<usize> {
     if !part.effects.is_empty() {
         return None; // pure only — reuse reorders nothing observable, keep the gate anyway
     }
@@ -3972,27 +4027,28 @@ fn adt_reuse_spine(part: &Part) -> Option<usize> {
     if arms.iter().any(|a| a.guard.is_some()) {
         return None;
     }
-    let mut reuse_ctor: Option<&str> = None;
-    let mut saw_nullary_base = false;
+    let mut reconstructing = 0usize;
+    let mut all_ctors: Vec<&str> = Vec::with_capacity(arms.len());
     for arm in arms {
         match &arm.pattern {
-            // the reuse arm: `C(b..) -> yield C(g..)` — SAME ctor, same arity, no `gi` reading
-            // the (consumed) spine variable. Only ONE reconstructing constructor is handled.
+            // a RECONSTRUCTING arm: `C(b..) -> yield C(g..)` — SAME ctor, same arity, no `gi`
+            // reading the (consumed) spine variable. Any number of these are handled now
+            // (REQ-LLL-196b), each reusing its own cell in place.
             Pattern::Ctor(cn, binders) if !binders.is_empty() => {
                 let [Stmt::Yield(Expr::Call(rc, rargs))] = &arm.body[..] else {
                     return None;
                 };
-                if rc != cn || rargs.len() != binders.len() || reuse_ctor.is_some() {
+                if rc != cn || rargs.len() != binders.len() {
                     return None;
                 }
                 if rargs.iter().any(|a| mentions_var(a, spine)) {
                     return None;
                 }
-                reuse_ctor = Some(cn);
+                reconstructing += 1;
+                all_ctors.push(cn);
             }
-            // an identity-NULLARY base: `N -> yield N` (a nullary ctor rebuilt unchanged). Its
-            // ctor names the zero-cost in-place blank; when the unique spine IS this nullary it
-            // is returned as-is (its own cell reused, zero alloc).
+            // an identity-NULLARY arm: `B -> yield B` (a nullary ctor rebuilt unchanged). Its
+            // own cell is already the right value, so the reuse recursion returns it as-is.
             Pattern::Ctor(cn, binders) if binders.is_empty() => {
                 let [Stmt::Yield(Expr::Var(n))] = &arm.body[..] else {
                     return None;
@@ -4000,12 +4056,17 @@ fn adt_reuse_spine(part: &Part) -> Option<usize> {
                 if n != cn {
                     return None;
                 }
-                saw_nullary_base = true;
+                all_ctors.push(cn);
             }
             _ => return None,
         }
     }
-    (reuse_ctor.is_some() && saw_nullary_base).then_some(spine_idx)
+    // at least one arm must actually rebuild (else the mask flip buys nothing), and the type
+    // must admit a zero-alloc blank the emitter can write while stealing children.
+    if reconstructing == 0 || adt_blank_ctor(&all_ctors, ctor_sigs).is_none() {
+        return None;
+    }
+    Some(spine_idx)
 }
 
 /// Detect the accumulator recursion a part can be folded into. Conservative: a `None` costs
@@ -4648,86 +4709,114 @@ fn emit_cons_reuse_loop(
 
 /// REQ-LLL-196 — the Perceus/FBIP reuse recursion for a same-shape ADT/tree rebuild whose SPINE
 /// param (`spine`) has been forced OWNED. The shape is guaranteed by [`adt_reuse_spine`]: a
-/// single `match` with one reconstructing constructor arm `C(b..) -> yield C(g..)` and identity
-/// nullary base arm(s) `N -> yield N`.
+/// single `match` whose arms are reconstructing constructors `C(b..) -> yield C(g..)` and/or
+/// identity nullary arms `B -> yield B`.
 ///
 /// When this frame SOLELY OWNS the node (`Rc::get_mut` → strong_count == 1, the RUNTIME
-/// uniqueness guard), it is reused with ZERO allocation: the fields are cloned out (an `Rc`
-/// child clone is an O(1) refcount bump), the box is BLANKED to the nullary variant IN PLACE
-/// (`*node = ei::N` — a stack write, no `Rc::new`), which drops the old node and so RELEASES its
-/// children — each child clone is now the sole owner and recurses UNIQUELY in turn — and finally
-/// the blanked box is OVERWRITTEN with the rebuilt `C(g..)` via [`__lll_reuse_ctor`]. A unique
-/// spine that IS the nullary is returned as-is (its own cell reused). When the node is SHARED
-/// (`get_mut` → `None`) the ORDINARY borrowed recursion runs (`emit_body` below) — a fresh
-/// `Rc::new`, i.e. a COPY, never a write through an alias. FAIL-SAFE BY CONSTRUCTION: a wrong
-/// uniqueness verdict can only downgrade to a fresh allocation. Same-constructor-TYPE is
-/// enforced by rustc (`sp: Rc<TI>`, the rebuilt value: `TI`) — a cross-type reuse cannot compile.
+/// uniqueness guard), it is reused with ZERO allocation, arm by arm: the matched ctor's fields
+/// are cloned out (an `Rc` child clone is an O(1) refcount bump), the box is BLANKED IN PLACE to
+/// a cheap zero-alloc value (`*node = ei::Blank` — a nullary tag `Tip`, or a scalar leaf
+/// `Leaf(S(0))` when the type has no nullary; a stack write, no `Rc::new`), which drops the old
+/// node and so RELEASES its children — each child clone is now the sole owner and recurses
+/// UNIQUELY in turn — and finally the blanked box is OVERWRITTEN with the rebuilt `C(g..)` via
+/// [`__lll_reuse_ctor`]. A node matching an identity NULLARY arm (nothing to rebuild) falls
+/// through to `return {sp}` — its own cell reused, zero alloc. REQ-LLL-196b generalizes to
+/// MULTIPLE reconstructing arms (`Leaf(Int) | Node(..)`): the arms are tried in a cascade, each
+/// a fresh `get_mut` probe, and the first whose ctor matches reuses and returns.
+///
+/// When the node is SHARED (`get_mut` → `None`) the ORDINARY borrowed recursion runs (`emit_body`
+/// below) — a fresh `Rc::new`, i.e. a COPY, never a write through an alias. FAIL-SAFE BY
+/// CONSTRUCTION: a wrong uniqueness verdict can only downgrade to a fresh allocation.
+/// Same-constructor-TYPE is enforced by rustc (`sp: Rc<TI>`, the rebuilt value: `TI`) — a
+/// cross-type reuse cannot compile.
 fn emit_adt_reuse_rec(
     out: &mut String,
     part: &Part,
     spine: usize,
     cx: &Cx,
     res: bool,
+    ctor_sigs: &std::collections::HashMap<String, (String, Vec<Ty>)>,
 ) -> Result<(), String> {
     let [Stmt::Match(_, arms)] = &part.body[..] else {
         unreachable!("adt_reuse_spine proved a single match body");
     };
-    // Re-extract the reuse arm (ctor, binders, reconstruction args) and the nullary blank ctor.
-    let mut reuse: Option<(&str, &[String], &[Expr])> = None;
-    let mut nullary: Option<&str> = None;
-    for arm in arms {
-        match &arm.pattern {
-            Pattern::Ctor(cn, binders) if !binders.is_empty() => {
-                let [Stmt::Yield(Expr::Call(_, rargs))] = &arm.body[..] else {
-                    unreachable!("reuse arm shape proven")
-                };
-                reuse = Some((cn.as_str(), binders.as_slice(), rargs.as_slice()));
-            }
-            Pattern::Ctor(cn, _) => nullary = Some(cn.as_str()),
-            _ => unreachable!("adt_reuse_spine proved ctor arms only"),
-        }
-    }
-    let (cn, binders, rargs) = reuse.expect("reuse arm proven");
-    let nullary = nullary.expect("nullary base proven");
     let sp = local(&part.params[spine].0);
-    let ei = cx.ctor_ei.get(cn).map(String::as_str).unwrap_or("");
 
-    // The field binders are OWNED clones here (NOT borrows) — they are not in `cx.refs`, so the
-    // reconstruction's self-calls MOVE each (now-unique) child at its last use (`part_call_args`
-    // → `move_if_last_use`), and scalar fields read their owned clone. Bind them to the source
-    // binder locals so the reconstruction, lowered by `expr`, reads them.
-    let names: Vec<String> = binders.iter().map(|b| local(b)).collect();
-    // clone every field out of the matched `&mut` node; the in-place blank below releases the
-    // originals so each `Rc` child clone becomes the sole owner.
-    let clones: Vec<String> = names.iter().map(|n| format!("{n}.clone()")).collect();
-    // a 1-arity tuple needs the trailing comma to stay a tuple (`(x,)`).
-    let comma = if binders.len() == 1 { "," } else { "" };
-
-    // Assemble the reconstruction as the SAME ctor WITHOUT `Rc::new` — the reuse helper wraps
-    // it, overwriting the blanked box in place (or allocating fresh if somehow shared). Lowering
-    // each `gi` via `expr` reuses the trusted path (self-calls move unique children, scalars
-    // read their clone).
-    let lowered: Result<Vec<String>, String> = rargs.iter().map(|a| expr(a, cx, res)).collect();
-    let recon = format!("{ei}::{cn}({})", lowered?.join(", "));
+    // The zero-alloc blank written to release the stolen children (nullary `Tip`, or a scalar
+    // leaf `Leaf(S(0))` for a tree with no nullary base — REQ-LLL-196b).
+    let all_ctors: Vec<&str> = arms
+        .iter()
+        .filter_map(|a| match &a.pattern {
+            Pattern::Ctor(cn, _) => Some(cn.as_str()),
+            _ => None,
+        })
+        .collect();
+    let (bctor, bdefs) = adt_blank_ctor(&all_ctors, ctor_sigs).expect("adt_reuse_spine proved a blank");
+    let bei = cx.ctor_ei.get(bctor).map(String::as_str).unwrap_or("");
+    let blank = if bdefs.is_empty() {
+        format!("{bei}::{bctor}")
+    } else {
+        format!("{bei}::{bctor}({})", bdefs.join(", "))
+    };
 
     out.push_str(&format!(
         "    let mut {sp} = {sp};\n\
-         \x20   if Rc::get_mut(&mut {sp}).is_some() {{\n\
-         \x20       let __rebuilt = match Rc::get_mut(&mut {sp}).unwrap() {{\n\
-         \x20           {ei}::{cn}({pat}) => ::core::option::Option::Some(({vals}{comma})),\n\
-         \x20           _ => ::core::option::Option::None,\n\
-         \x20       }};\n\
-         \x20       match __rebuilt {{\n\
-         \x20           ::core::option::Option::Some(({pat}{comma})) => {{\n\
-         \x20               *Rc::get_mut(&mut {sp}).unwrap() = {ei}::{nullary};\n\
-         \x20               return __lll_reuse_ctor({sp}, {recon});\n\
-         \x20           }}\n\
-         \x20           ::core::option::Option::None => return {sp},\n\
-         \x20       }}\n\
-         \x20   }}\n",
-        pat = names.join(", "),
-        vals = clones.join(", "),
+         \x20   if Rc::get_mut(&mut {sp}).is_some() {{\n"
     ));
+    // one reuse block per RECONSTRUCTING arm (a nullary identity arm needs no rebuild — its cell
+    // already holds the right value, so it falls through to `return {sp}` below).
+    for arm in arms {
+        let Pattern::Ctor(cn, binders) = &arm.pattern else {
+            unreachable!("adt_reuse_spine proved ctor arms only");
+        };
+        if binders.is_empty() {
+            continue;
+        }
+        let [Stmt::Yield(Expr::Call(_, rargs))] = &arm.body[..] else {
+            unreachable!("reuse arm shape proven");
+        };
+        let ei = cx.ctor_ei.get(cn).map(String::as_str).unwrap_or("");
+        // Only the binders actually read by the reconstruction are cloned out (the rest are
+        // wildcarded in the extraction match) — no clone of an unused field, and no unused-var
+        // warning in the generated Rust (GUI-LLL-001: zero warning).
+        let used: Vec<bool> =
+            binders.iter().map(|b| rargs.iter().any(|a| mentions_var(a, b))).collect();
+        // extraction pattern: `local(b)` for a used binder, `_` for an unused one.
+        let pat: Vec<String> = binders
+            .iter()
+            .zip(&used)
+            .map(|(b, &u)| if u { local(b) } else { "_".to_string() })
+            .collect();
+        // the used binders, bound as OWNED clones (NOT in `cx.refs`), so the reconstruction's
+        // self-calls MOVE each now-unique child at its last use (`part_call_args` →
+        // `move_if_last_use`) and scalar fields read their owned clone.
+        let used_locals: Vec<String> =
+            binders.iter().zip(&used).filter(|(_, &u)| u).map(|(b, _)| local(b)).collect();
+        let clones: Vec<String> = used_locals.iter().map(|n| format!("{n}.clone()")).collect();
+        // a 1-tuple needs the trailing comma to stay a tuple (`(x,)`); the 0-tuple is `()`.
+        let comma = if used_locals.len() == 1 { "," } else { "" };
+        // Assemble the reconstruction as the SAME ctor WITHOUT `Rc::new` — the reuse helper wraps
+        // it, overwriting the blanked box in place (or allocating fresh if somehow shared).
+        let lowered: Result<Vec<String>, String> =
+            rargs.iter().map(|a| expr(a, cx, res)).collect();
+        let recon = format!("{ei}::{cn}({})", lowered?.join(", "));
+        out.push_str(&format!(
+            "        let __rebuilt = match Rc::get_mut(&mut {sp}).unwrap() {{\n\
+             \x20           {ei}::{cn}({pat}) => ::core::option::Option::Some(({vals}{comma})),\n\
+             \x20           _ => ::core::option::Option::None,\n\
+             \x20       }};\n\
+             \x20       if let ::core::option::Option::Some(({bind}{comma})) = __rebuilt {{\n\
+             \x20           *Rc::get_mut(&mut {sp}).unwrap() = {blank};\n\
+             \x20           return __lll_reuse_ctor({sp}, {recon});\n\
+             \x20       }}\n",
+            pat = pat.join(", "),
+            vals = clones.join(", "),
+            bind = used_locals.join(", "),
+        ));
+    }
+    // a unique node matching a NULLARY identity arm (or falling past every reconstructing probe)
+    // is already its own result — return its cell as-is, zero alloc.
+    out.push_str(&format!("        return {sp};\n    }}\n"));
     // SHARED path: the ordinary borrowed recursion, unchanged (a correct COPY). The spine is
     // owned now, so its recursive self-calls pass an `Rc::clone` (`expr`'s deref-clone) — a
     // refcount bump, NOT an allocation, so this path stays allocation-identical to the borrowed

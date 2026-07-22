@@ -133,8 +133,33 @@ same-constructor-TYPE is enforced by rustc's type system (an `Rc<TI>` box can on
 `TI` — a cross-type reuse cannot compile), and the child-SWAP shape (`mirror`) reuses too.
 Scope (narrow, as REQ-195): the ADT must have a NULLARY identity base arm (the zero-cost
 in-place blank), one reconstructing constructor equal to the matched one, spine type == return
-type. Out of scope (blockers): a tree with no nullary base (`Leaf(Int) | Node(..)` — needs a
-synthesized field-default sentinel), a type-changing map, multiple reconstructing ctors.
+type. The two remaining shape restrictions were lifted by REQ-196b (below).
+
+## REQ-LLL-196b — reuse WITHOUT a nullary base (`Leaf(Int) | Node`), the most common tree
+
+REQ-196 required a nullary constructor (`Tip`) to blank the box in place — but the most common
+business tree/record has NO nullary variant: `type Tree = Leaf(Int) | Node(Tree, Tree)`, the
+value carried in the leaves. REQ-196b closes that gap by SYNTHESIZING a zero-alloc scalar blank
+(`adt_blank_ctor`: a nullary ctor if one exists, else the first all-scalar leaf → `Leaf(S(0))`,
+an `LllInt::S(0)` stack word, no heap) to write while the recursive children are stolen out.
+The same runtime `Rc::get_mut` guard applies — a SHARED node still falls to a fresh copy (proven
+by `reuse196b_shared`: a still-live tree reads 22026, not the 26026 alias corruption would give).
+It also lifts the single-reconstructing-ctor limit: BOTH the `Leaf(x) -> Leaf(x+1)` and
+`Node(l,r) -> Node(inc(l), inc(r))` arms reuse their own cell, tried in a cascade.
+
+| kernel (depth 20, ~2.1M cells)       | before (borrow+rebuild) | after (REQ-196b reuse) |
+|--------------------------------------|------------------------:|-----------------------:|
+| `treesum2` (build + sum, control)    |               2 097 154 |              2 097 154 |
+| `treeinc2` (build + **inc** + sum)   |               4 194 305 |          **2 097 154** |
+| ⇒ `inc`'s OWN allocations            |               2 097 151 |              **0**     |
+
+Identical to the nullary case: `inc`'s per-node allocation is eliminated **exactly to zero**
+(measured — A/B against the merge-base compiler, which emits 0 reuse call sites for this shape
+and so allocates 4 194 305; the new one emits 2 and allocates 2 097 154), a **2.0×** reduction in
+total heap allocations. Time 0.29s → 0.18s `%U`, not oversold. def_hash/proof_hash BYTE-IDENTICAL
+(codegen-only change; `vc.rs`/`hash.rs` untouched). Remaining out of scope (blockers): a tree
+whose ONLY base ctor carries a heap/recursive field (no cheap blank — reuse is declined, ordinary
+recursion, sound) and a type-changing map (same-constructor-TYPE rejects it).
 
 Method: min of 3–5 runs; `rustc -O` (edition 2021) for llmlang/Rust, `gcc -O2` for C.
 Reproduce: `bash bench/cspeed/run.sh`. Env: WSL2, Rust 1.93 (sub-second times are noisy
