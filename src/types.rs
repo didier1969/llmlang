@@ -3948,9 +3948,14 @@ fn type_of_pure(
                 if args.len() != 1 {
                     return Err("`sum` takes 1 argument".into());
                 }
+                // REQ-LLL-202: `sum` aggregates a `List[Int]` → Int OR a `List[Rational]` →
+                // Rational (Z3 `Real`); its result sort is the element sort, both admitting `+`.
                 match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
                     Ty::List(e) if matches!(*e, Ty::Int) => Ty::Int,
-                    other => return Err(format!("`sum` needs a List[Int], got {other}")),
+                    Ty::List(e) if matches!(*e, Ty::Rational) => Ty::Rational,
+                    other => {
+                        return Err(format!("`sum` needs a List[Int] or List[Rational], got {other}"))
+                    }
                 }
             }
             _ => unreachable!("is_list_spec_term covers sum"),

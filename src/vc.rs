@@ -2778,7 +2778,20 @@ impl<'a> Emit<'a> {
                 match name.as_str() {
                     "sum" => {
                         let a = self.tr(&args[0], env, None)?;
-                        format!("({} {a})", list_sum_fn())
+                        // dispatch on the element sort: List[Int] → `sum_Int` (Z3 Int),
+                        // List[Rational] → `sum_Real` (Z3 Real). Both axiomatized in the prelude.
+                        let elem = self
+                            .sort_of(&args[0], env)
+                            .as_deref()
+                            .and_then(lst_elem_sort)
+                            .ok_or_else(|| {
+                                format!(
+                                    "part `{}`: cannot recover the element sort of `sum(...)` — \
+                                     apply it to a `List[Int]` or `List[Rational]`",
+                                    self.part.name
+                                )
+                            })?;
+                        format!("({} {a})", list_sum_fn(&elem))
                     }
                     _ => unreachable!("is_list_spec_term covers sum"),
                 }
@@ -3737,24 +3750,27 @@ fn list_len_decl_and_axioms(elem: &str, fname: &str) -> String {
     )
 }
 
-/// The abstract list-sum function name (REQ-LLL-194). Int-only — a sum needs `+` on its
-/// elements — so, unlike `len_<E>`, there is a single monomorphic function `sum_Int`.
-fn list_sum_fn() -> &'static str {
-    "sum_Int"
+/// The abstract list-sum function name for an element sort (REQ-LLL-194/202): `sum_Int` over a
+/// `List[Int]`, `sum_Real` over a `List[Rational]`. Both element sorts admit `+`; the aggregate's
+/// result sort IS the element sort. Mirrors `len_<E>`'s per-sort naming.
+fn list_sum_fn(elem: &str) -> String {
+    format!("sum_{}", mangle_sort(elem))
 }
 
-/// The abstract list-sum declaration and its DEFINITIONAL axioms (REQ-LLL-194). Conservative
-/// by construction — they are the structural recurrence of the runtime fold, which is EXACT
-/// (bignum `Int`, no overflow — DEC-LLL-077), so they add NO power to prove a false goal; they
-/// merely let a `sum(...)` spec term unfold one cons at a time. E-matched (`:pattern`) on the
-/// cons unfolding to stay in a tractable fragment, exactly like `len_<E>`. NO non-negativity
-/// axiom (a sum of `Int`s may be negative) — the sole facts are `sum(nil)=0` and the cons step.
-fn list_sum_decl_and_axioms() -> String {
-    let f = list_sum_fn();
+/// The abstract list-sum declaration and its DEFINITIONAL axioms for one element sort
+/// (REQ-LLL-194/202). Conservative by construction — they are the structural recurrence of the
+/// runtime fold, which is EXACT (bignum `Int` / exact `Rational`, no overflow/rounding —
+/// DEC-LLL-077/051), so they add NO power to prove a false goal; they merely let a `sum(...)` spec
+/// term unfold one cons at a time. E-matched (`:pattern`) on the cons unfolding to stay tractable,
+/// exactly like `len_<E>`. NO non-negativity axiom (a sum may be negative) — the sole facts are
+/// `sum(nil)=0` and the cons step. `elem` is `Int` (Z3 Int) or `Real` (Z3 Real, from Rational).
+fn list_sum_decl_and_axioms(elem: &str) -> String {
+    let f = list_sum_fn(elem);
+    let zero = if elem == "Real" { "0.0" } else { "0" };
     format!(
-        "(declare-fun {f} ((Lst Int)) Int)\n\
-         (assert (= ({f} (as nil (Lst Int))) 0))\n\
-         (assert (forall ((h Int) (t (Lst Int))) \
+        "(declare-fun {f} ((Lst {elem})) {elem})\n\
+         (assert (= ({f} (as nil (Lst {elem}))) {zero}))\n\
+         (assert (forall ((h {elem}) (t (Lst {elem}))) \
            (! (= ({f} (cons h t)) (+ h ({f} t))) :pattern (({f} (cons h t))))))"
     )
 }
@@ -4144,11 +4160,12 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
             }
         }
     }
-    // REQ-LLL-194: the abstract list-sum `sum_Int` and its definitional axioms — emitted once
+    // REQ-LLL-194/202: the abstract list-sum `sum_<E>` and its definitional axioms — emitted once
     // (globally, definitional truths) when any obligation references it. Placed right after the
-    // `len_<E>` block, so the parametric `(Lst Int)` datatype (LIST_DECL) is already declared.
-    {
-        let f = list_sum_fn();
+    // `len_<E>` block, so the parametric `(Lst E)` datatype (LIST_DECL) is already declared. Only
+    // `Int` and `Real` (from Rational) admit `+`, so those are the only element sorts `sum` takes.
+    for elem in ["Int", "Real"] {
+        let f = list_sum_fn(elem);
         let referenced = obls.iter().any(|o| {
             o.decls
                 .iter()
@@ -4157,7 +4174,7 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
                 .any(|t| t.contains(&format!("({f} ")))
         });
         if referenced {
-            s.push_str(&list_sum_decl_and_axioms());
+            s.push_str(&list_sum_decl_and_axioms(elem));
             s.push('\n');
         }
     }

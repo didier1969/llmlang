@@ -2106,3 +2106,28 @@ fn sum_spec_primitive_is_int_only_and_spec_only_req194() {
         "`sum` in code position must be rejected (spec-only)"
     );
 }
+
+
+// ─── REQ-LLL-202: `sum` also aggregates a `List[Rational]` → Rational (Z3 Real), the exact-ℚ
+// analogue of the `List[Int]` case — conservation over rationals is proven at symbolic length,
+// and a fold that drops an element stays rejected. `sum_Int` is unaffected (regression net).
+#[test]
+fn sum_spec_primitive_aggregates_rationals_req202() {
+    // POSITIVE: a fold over List[Rational] proves it computes the spec sum at symbolic length.
+    let fold = "module M:\n\n  part rsum(xs: List[Rational]) -> Rational:\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0.0\n      h :: t -> yield h + rsum(t)\n";
+    assert!(
+        verify_src(fold).ok(),
+        "a Rational fold must prove `result == sum(xs)` at symbolic length: {:?}",
+        failures(&verify_src(fold))
+    );
+    // POSITIVE: exact-ℚ CONSERVATION over a symbolic-length list.
+    let conserve = "module M:\n\n  part id_rsum(xs: List[Rational]) -> List[Rational]:\n    ensures sum(result) == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield h :: id_rsum(t)\n";
+    assert!(
+        verify_src(conserve).ok(),
+        "Rational sum-conservation must prove at symbolic length: {:?}",
+        failures(&verify_src(conserve))
+    );
+    // NEGATIVE (soundness): a Rational fold that drops `h` must NOT prove `== sum`.
+    let bad = "module M:\n\n  part rsum(xs: List[Rational]) -> Rational:\n    ensures result == sum(xs)\n    measure length(xs)\n    match xs:\n      [] -> yield 0.0\n      h :: t -> yield rsum(t)\n";
+    assert!(!verify_src(bad).ok(), "a Rational fold that forgets an element must NOT prove `== sum`");
+}
