@@ -2789,6 +2789,19 @@ impl<'a> Emit<'a> {
             {
                 self.tr(&args[0], env, None)?
             }
+            // REQ-LLL-206: `rational(x: Int) -> Rational` is the exact embedding ℤ → ℚ — `(to_real
+            // x)` in SMT (Z3's exact Int→Real cast), no obligation. The proof reasons about it as
+            // the exact real value of the integer, so an Int amount and a Rational rate interoperate.
+            Expr::Call(name, args)
+                if name == "rational"
+                    && args.len() == 1
+                    && !env.contains_key(name)
+                    && !self.cm.index.contains_key(name)
+                    && !self.cm.ctors.contains_key(name) =>
+            {
+                let x = self.tr(&args[0], env, None)?;
+                format!("(to_real {x})")
+            }
             Expr::Call(name, args)
                 if (name == "str_of" || name == "str_cat")
                     && !env.contains_key(name)

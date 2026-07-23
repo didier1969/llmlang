@@ -116,3 +116,20 @@ fn exact_rational_division_req205() {
     // NEGATIVE: `/` on integers is a type error (integers use `div`/`mod`).
     assert!(check_lll_src("rdiv-on-int", "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    yield a / b\n").0 != Some(0), "`/` on Int must be rejected");
 }
+
+
+// ─── REQ-LLL-206: `rational(x: Int) -> Rational` — the exact ℤ → ℚ embedding, the only bridge that
+// lets an Int amount meet a Rational rate (`(to_real x)` in SMT, `x/1` at runtime). Admitted in
+// contracts as a pure spec term.
+#[test]
+fn int_to_rational_coercion_req206() {
+    // apply a rational rate to an integer amount — the contract mentions `rational(amount)`.
+    let rate = "module M:\n\n  part apply_rate(amount: Int, rate: Rational) -> Rational:\n    requires amount >= 0\n    requires rate >= 0.0\n    ensures result == rational(amount) * rate\n    ensures result >= 0.0\n    yield rational(amount) * rate\n  part main() -> Int via IO:\n    yield IO.print(if apply_rate(100, 0.15) == 15.0 then 111 else 222)\n";
+    assert!(verify_src(rate).ok(), "applying a rational rate to an int must verify: {:?}", failures(&verify_src(rate)));
+    assert!(build_run(rate).contains("111"), "100 * 0.15 must equal 15 exactly, got: {}", build_run(rate));
+    // an exact ratio of two integers composes coercion with rational division (REQ-205).
+    let ratio = "module M:\n\n  part ratio(a: Int, b: Int) -> Rational:\n    requires b != 0\n    ensures result * rational(b) == rational(a)\n    yield rational(a) / rational(b)\n";
+    assert!(verify_src(ratio).ok(), "an exact integer ratio must verify: {:?}", failures(&verify_src(ratio)));
+    // `rational` needs an Int — applying it to a Rational is a type error.
+    assert!(check_lll_src("rational-on-rat", "module M:\n\n  part f(x: Rational) -> Rational:\n    yield rational(x)\n").0 != Some(0), "rational(Rational) must be rejected");
+}

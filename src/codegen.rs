@@ -5898,6 +5898,15 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
         {
             format!("({})", expr(&args[0], cx, res)?)
         }
+        // REQ-LLL-206: `rational(x)` = the exact rational `x/1` (the runtime embedding ℤ → ℚ).
+        Expr::Call(name, args)
+            if name == "rational"
+                && !cx.parts.contains(name)
+                && !cx.ctors.contains(name)
+                && !cx.fns.contains(name) =>
+        {
+            format!("Rat::new({}, LllInt::S(1))", expr(&args[0], cx, res)?)
+        }
         // REQ-LLL-067: string-interpolation builtins. `str_of(n)` = decimal codepoints
         // of an Int; `str_cat(a, b)` = List[Int] concatenation. Name-based (no import),
         // matched only when NOT shadowed by a user part/ctor of the same name.

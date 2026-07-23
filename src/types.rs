@@ -595,7 +595,8 @@ pub fn check_module(module: Module) -> Result<CheckedModule, String> {
                             || is_array_spec_term(n)
                             || is_map_spec_term(n)
                             || is_set_spec_term(n)
-                            || is_list_spec_term(n))
+                            || is_list_spec_term(n)
+                            || n == "rational")
                 }
                 _ => false,
             };
@@ -3572,7 +3573,9 @@ fn check_contracts(
                             || is_array_spec_term(n)
                             || is_map_spec_term(n)
                             || is_set_spec_term(n)
-                            || is_list_spec_term(n))
+                            || is_list_spec_term(n)
+                            // REQ-LLL-206: `rational(x)` is a pure spec-safe conversion `(to_real x)`
+                            || n == "rational")
                 }
                 _ => false,
             };
@@ -3966,6 +3969,17 @@ fn type_of_pure(
             }
             _ => unreachable!("is_list_spec_term covers sum"),
         },
+        // REQ-LLL-206: `rational(x: Int) -> Rational` is a pure conversion admitted in contracts
+        // (the exact `(to_real x)`) — the bridge that lets an Int amount meet a Rational rate.
+        Expr::Call(name, args) if name == "rational" => {
+            if args.len() != 1 {
+                return Err("`rational` takes 1 argument".into());
+            }
+            match type_of_pure(&args[0], vars, result.clone(), ctors, records, typarams)? {
+                Ty::Int => Ty::Rational,
+                other => return Err(format!("`rational` needs an Int, got {other}")),
+            }
+        }
         // array spec primitives are admitted in contracts (DEC-LLL-017 amendment):
         // they are TERM constructors backed by a Z3 theory operator, not user calls.
         Expr::Call(name, args) if is_array_spec_term(name) => match name.as_str() {
@@ -5250,6 +5264,24 @@ fn check_expr_inner(
                 return Err(format!("part `{}`: `{name}` needs a {from}, got {ta}", ctx.part.name));
             }
             to
+        }
+        // REQ-LLL-206: `rational(x: Int) -> Rational` — the EXACT embedding ℤ → ℚ (`x/1`), the only
+        // bridge from an integer to a rational (no implicit coercion, DEC-LLL-051). Lets an Int
+        // amount mix with a Rational rate.
+        Expr::Call(name, args)
+            if name == "rational"
+                && !ctx.ctors.contains_key(name)
+                && !ctx.index.contains_key(name)
+                && ctx.lookup(name).is_none() =>
+        {
+            if args.len() != 1 {
+                return Err(format!("part `{}`: `rational` takes 1 argument", ctx.part.name));
+            }
+            let ta = check_expr(ctx, &args[0], Some(&Ty::Int))?;
+            if ta != Ty::Int {
+                return Err(format!("part `{}`: `rational` needs an Int, got {ta}", ctx.part.name));
+            }
+            Ty::Rational
         }
         Expr::Call(name, args)
             if (name == "str_of" || name == "str_cat")
