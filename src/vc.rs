@@ -2684,11 +2684,17 @@ impl<'a> Emit<'a> {
                 }
                 let f = crate::opsem::form(*op);
                 if f.nonzero_divisor {
-                    // only div/mod set this flag (opsem is the single source)
-                    let kw = if *op == BinOp::Div { "div" } else { "mod" };
+                    // div/mod (Int) and `/` (Rational) set this flag (opsem is the single source).
+                    // REQ-LLL-205: a Rational divisor compares against the `Real` zero `0.0` — the
+                    // Int `0` would be an ill-sorted comparison against a `Real` term.
+                    let (kw, zero) = match *op {
+                        BinOp::Div => ("div", "0"),
+                        BinOp::Mod => ("mod", "0"),
+                        _ => ("/", "0.0"),
+                    };
                     self.oblige(
                         format!("divisor is non-zero in `{kw}`"),
-                        format!("(not (= {tb} 0))"),
+                        format!("(not (= {tb} {zero}))"),
                     );
                 }
                 f.smt(&ta, &tb)

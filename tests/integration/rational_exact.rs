@@ -95,3 +95,24 @@ fn rational_ordering_in_contract_and_code_req202() {
         "expected 0.5>0.4 → 1 (cross-mult, not lexicographic), -0.5<-0.25 → 1, 0.25<-0.5 → 0; got: {out:?}"
     );
 }
+
+
+// ─── REQ-LLL-205: EXACT rational division `/` (distinct from euclidean `div`/`mod` on integers).
+// The float trap `(x/3)*3 == x` is a THEOREM over ℚ (false over floats). Its `b != 0` obligation
+// mirrors div-by-zero; `/` on `Int` is a clear type error.
+#[test]
+fn exact_rational_division_req205() {
+    // POSITIVE: `x / 2` halves exactly (`result + result == x`), and `(x/3)*3 == x` over ℚ.
+    let ok = "module M:\n\n  part half(x: Rational) -> Rational:\n    ensures result + result == x\n    yield x / 2.0\n  part id3(x: Rational) -> Rational:\n    ensures result == x\n    yield (x / 3.0) * 3.0\n";
+    assert!(verify_src(ok).ok(), "exact rational division must verify: {:?}", failures(&verify_src(ok)));
+    // Runtime: the float trap stays closed — (1/3)*3 == 1 exactly.
+    let run = "module M:\n\n  part id3(x: Rational) -> Rational:\n    ensures result == x\n    yield (x / 3.0) * 3.0\n  part main() -> Int via IO:\n    yield IO.print(if id3(1.0) == 1.0 then 111 else 222)\n";
+    assert!(build_run(run).contains("111"), "(1/3)*3 must equal 1 exactly, got: {}", build_run(run));
+
+    // NEGATIVE: an unguarded divisor is a div-by-zero → REJECTED; a guarded one proves.
+    assert!(!verify_src("module M:\n\n  part f(x: Rational, y: Rational) -> Rational:\n    yield x / y\n").ok(), "an unguarded rational divisor must be rejected");
+    assert!(!verify_src("module M:\n\n  part f(x: Rational) -> Rational:\n    yield x / 0.0\n").ok(), "division by 0.0 must be rejected");
+    assert!(verify_src("module M:\n\n  part f(x: Rational, y: Rational) -> Rational:\n    requires y != 0.0\n    ensures result * y == x\n    yield x / y\n").ok(), "a guarded rational division must prove result * y == x");
+    // NEGATIVE: `/` on integers is a type error (integers use `div`/`mod`).
+    assert!(check_lll_src("rdiv-on-int", "module M:\n\n  part f(a: Int, b: Int) -> Int:\n    yield a / b\n").0 != Some(0), "`/` on Int must be rejected");
+}

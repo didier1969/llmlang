@@ -6358,6 +6358,13 @@ impl std::ops::Mul for Rat {
     type Output = Rat;
     fn mul(self, o: Rat) -> Rat { Rat::new(self.num * o.num, self.den * o.den) }
 }
+// REQ-LLL-205: EXACT rational division `a/b = (a.num*b.den)/(a.den*b.num)`. The `b != 0`
+// obligation is discharged in verified code (mirrors div-by-zero), so `o.num != 0` and the new
+// denominator `self.den * o.num` is non-zero; `Rat::new` re-normalizes the sign (den > 0).
+impl std::ops::Div for Rat {
+    type Output = Rat;
+    fn div(self, o: Rat) -> Rat { Rat::new(self.num * o.den, self.den * o.num) }
+}
 impl std::ops::Neg for Rat {
     type Output = Rat;
     fn neg(self) -> Rat { Rat { num: -self.num, den: self.den } } // canonical preserved

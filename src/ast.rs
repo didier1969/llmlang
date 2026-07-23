@@ -527,6 +527,9 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    /// REQ-LLL-205: `/` — EXACT rational division (`Rational` only; integers use euclidean
+    /// `div`/`mod`). Its non-zero-divisor obligation mirrors `div`/`mod`.
+    RDiv,
     Lt,
     Le,
     Gt,

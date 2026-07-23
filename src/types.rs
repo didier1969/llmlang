@@ -171,6 +171,7 @@ pub fn render_contract_clause(e: &Expr) -> String {
                 BinOp::Mul => "*",
                 BinOp::Div => "div",
                 BinOp::Mod => "mod",
+                BinOp::RDiv => "/",
                 BinOp::Lt => "<",
                 BinOp::Le => "<=",
                 BinOp::Gt => ">",
@@ -4159,6 +4160,18 @@ pub fn bin_type(op: BinOp, ta: Ty, tb: Ty) -> Result<Ty, String> {
     // Typing discipline comes from the single operator-semantics source
     // (opsem.rs) — the same place vc.rs and codegen.rs read their forms.
     use crate::opsem::OpClass;
+    // REQ-LLL-205: `/` is EXACT rational division — `Rational` only. Integers use euclidean
+    // `div`/`mod` (a `/` on `Int` is a clear error, not silently a division). Handled before the
+    // generic IntArith dispatch so it never reads as an Int/Big arithmetic op.
+    if op == BinOp::RDiv {
+        return match (ta, tb) {
+            (Ty::Rational, Ty::Rational) => Ok(Ty::Rational),
+            (a, b) => Err(format!(
+                "`/` is exact rational division (needs two `Rational` operands, got {a} and {b}) — \
+                 use `div`/`mod` for integers"
+            )),
+        };
+    }
     match crate::opsem::form(op).class {
         OpClass::IntArith => {
             if ta == Ty::Int && tb == Ty::Int {

@@ -119,6 +119,11 @@ pub fn form(op: BinOp) -> OpForm {
         // total: no i64 trap can make the binary diverge from the proof.
         Div => (IntArith, true, SmtSym::Bin("div"), RustSym::Call("LllInt::div_euclid")),
         Mod => (IntArith, true, SmtSym::Bin("mod"), RustSym::Call("LllInt::rem_euclid")),
+        // REQ-LLL-205: EXACT rational division. SMT `/` is exact over Z3 `Real` (LRA); the runtime
+        // `impl Div for Rat` is exact (cross-multiply). `nonzero_divisor` = its `b != 0` obligation,
+        // exactly like `div`/`mod`. No i64 fast path (`Rational` is never on the speculative path),
+        // so `rust_fast` falls through to the infix `rust` form.
+        RDiv => (IntArith, true, SmtSym::Bin("/"), RustSym::Infix("/")),
         Lt => (IntCmp, false, SmtSym::Bin("<"), RustSym::Infix("<")),
         Le => (IntCmp, false, SmtSym::Bin("<="), RustSym::Infix("<=")),
         Gt => (IntCmp, false, SmtSym::Bin(">"), RustSym::Infix(">")),

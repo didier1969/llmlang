@@ -2051,6 +2051,7 @@ impl Parser {
                 Tok::Star => BinOp::Mul,
                 Tok::KwMod => BinOp::Mod,
                 Tok::KwDiv => BinOp::Div,
+                Tok::Slash => BinOp::RDiv,
                 _ => break,
             };
             self.pos += 1;

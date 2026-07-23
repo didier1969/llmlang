@@ -78,6 +78,7 @@ pub enum Tok {
     Plus,
     Minus,
     Star,
+    Slash, // REQ-LLL-205: exact rational division `/`
     Underscore,
     Backslash, // lambda: \(x: T) -> expr
     Pipe,      // sum-type alternative: C1 | C2
@@ -226,6 +227,10 @@ fn lex_line(s: &str, line: usize, offset: usize, out: &mut Vec<Sp>) -> Result<()
             }
             '*' => {
                 push(out, Tok::Star);
+                i += 1;
+            }
+            '/' => {
+                push(out, Tok::Slash);
                 i += 1;
             }
             '\\' => {
