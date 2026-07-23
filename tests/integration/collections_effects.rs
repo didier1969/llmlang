@@ -2243,3 +2243,25 @@ fn verified_registry_referential_integrity_cpt018() {
     let forge = "module M:\n\n  part bad(catalog: Map[Int, Int], item: Int, price: Int) -> Int:\n    ensures result == price + 1\n    let m = insert(catalog, item, price)\n    yield lookup(m, item)\n";
     assert!(!verify_src(forge).ok(), "a read-back forgery (price + 1) must be rejected");
 }
+
+
+// ─── REQ-LLL-155 tranche 2a (DEC-LLL-081 phase 2): a catalog brick in LIBRARY form
+// (`examples/lib/ledger.lll` — the verified parts, no `main`) is REUSED cross-module by a
+// consumer that `import`s it (`examples/uses_ledger_lib.lll`). Verification crosses the import
+// boundary (the loader merges into one flat namespace, DEC-LLL-019): the consumer's `report`
+// proves `result == sum(entries)` by relying on the imported `ledger_total`'s ensures, and the
+// program runs reusing the brick → 600. This is the same mechanism the `std/` modules use.
+#[test]
+fn library_brick_reused_via_import_req155() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/uses_ledger_lib.lll");
+    // load_program resolves the `import "lib/ledger.lll"`; the whole graph must verify.
+    let (_, module) = loader::load_program(path.to_str().unwrap()).expect("load consumer");
+    let cm = types::check_module(module).expect("check");
+    let hm = hash::hash_module(&cm).expect("hash");
+    let dir = tempdir();
+    let r = vc::verify(&cm, &hm, &dir, false).expect("verify");
+    assert!(r.ok(), "the importing consumer must verify across the boundary: {:?}", failures(&r));
+    // and it RUNS, reusing the imported brick's `ledger_total` → 600.
+    let out = verify_codegen_run(path.to_str().unwrap(), "usesledger");
+    assert!(out.contains("600"), "reused ledger_total must yield 600, got: {out}");
+}

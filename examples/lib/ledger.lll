@@ -1,0 +1,22 @@
+module LedgerLib:
+
+  # ── FORME BIBLIOTHÈQUE d'une brique du catalogue (CPT-LLL-018, REQ-LLL-155 tranche 2a) ──
+  # Les MÊMES `part` vérifiées que `examples/verified_ledger.lll`, mais SANS `part main` : un
+  # module importable par content-hash, réutilisable cross-module (comme les modules `std/`).
+  # Un consommateur fait `import "lib/ledger.lll"` et appelle ces parts ; la vérification
+  # traverse la frontière d'import (le loader fusionne en un namespace plat, DEC-LLL-019).
+
+  # Le total d'un grand livre == la somme EXACTE de ses écritures, à N lignes quelconque.
+  part ledger_total(entries: List[Int]) -> Int:
+    ensures result == sum(entries)
+    measure length(entries)
+    match entries:
+      [] -> yield 0
+      e :: rest -> yield e + ledger_total(rest)
+
+  # Scinder la 1ʳᵉ écriture en deux parts qui la recomposent conserve le total.
+  part split_first(entries: List[Int], k: Int) -> List[Int]:
+    ensures sum(result) == sum(entries)
+    match entries:
+      [] -> yield []
+      e :: rest -> yield k :: (e - k) :: rest

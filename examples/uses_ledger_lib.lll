@@ -1,0 +1,17 @@
+# RÉUTILISATION CROSS-MODULE d'une brique-bibliothèque vérifiée (REQ-LLL-155 tranche 2a) :
+# on IMPORTE la brique `lib/ledger.lll` (chemin relatif à ce fichier) et on appelle ses `part`
+# prouvées. La preuve du module importé fait foi ; le consommateur s'appuie dessus sans la
+# réécrire (le loader fusionne en un namespace plat, DEC-LLL-019).
+import "lib/ledger.lll"
+
+module UsesLedgerLib:
+
+  # Un rapport financier construit sur la brique : total, puis total après ventilation d'une
+  # ligne (prouvé égal — la garantie de conservation de la brique traverse l'import).
+  part report(entries: List[Int]) -> Int:
+    ensures result == sum(entries)
+    yield ledger_total(entries)
+
+  part main() -> Int via IO:
+    # 100 + 250 − 50 + 300 = 600, réutilisé depuis la brique importée.
+    yield IO.print(report([100, 250, -50, 300]))
