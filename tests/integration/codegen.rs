@@ -1461,6 +1461,11 @@ fn export_ist_emits_axon_extraction_result() {
     assert_eq!(inc["properties"]["purity"], "pure");
     assert!(inc["properties"]["content_hash"].as_str().unwrap().len() == 64);
     assert_eq!(inc["properties"]["contracts"], "requires=0,ensures=1,measure=0");
+    // REQ-LLL-208 1a: the contract PREDICATE TEXT is carried too (not just counts), so Axon can
+    // recover acceptance-criteria — `inc`'s single ensures renders `result == x + 1`.
+    assert_eq!(inc["properties"]["requires"], "");
+    let ens = inc["properties"]["ensures"].as_str().unwrap();
+    assert!(ens.contains("result") && ens.contains("=="), "ensures text must be rendered, got: {ens:?}");
     // the effectful entry point is flagged
     let main = syms.iter().find(|s| s["name"] == "main").expect("main symbol");
     assert_eq!(main["is_entry_point"], true);

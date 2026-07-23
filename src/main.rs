@@ -367,6 +367,14 @@ fn export_ist(file: &str) -> Result<String, String> {
                     "requires={},ensures={},measure={}",
                     p.requires.len(), p.ensures.len(), p.measure.len()
                 ),
+                // REQ-LLL-208 (DEC-LLL-081 tranche 1a): carry the contract PREDICATE TEXT, not
+                // just counts, so Axon can recover a REQ's acceptance-criteria from an exported
+                // symbol (the intention↔contract direction). Rendered by the single source-
+                // faithful renderer (`types::render_contract_clause`); clauses joined by newline.
+                // Additive — the existing `contracts` counts stay for backward compatibility.
+                "requires": p.requires.iter().map(types::render_contract_clause).collect::<Vec<_>>().join("\n"),
+                "ensures": p.ensures.iter().map(types::render_contract_clause).collect::<Vec<_>>().join("\n"),
+                "measure": p.measure.iter().map(types::render_contract_clause).collect::<Vec<_>>().join("\n"),
                 // REQ-LLL-172 (cross-repo REQ-AXO-902185): McCabe complexity as a
                 // string, same key/convention as Axon's 13 other language parsers.
                 "cyclomatic_complexity": cyclomatic_complexity(&p.body).to_string(),
