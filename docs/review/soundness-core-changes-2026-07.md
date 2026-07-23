@@ -103,3 +103,41 @@ Chaque changement a des tests POSITIFS (le valide prouve) ET NÉGATIFS (le faux 
 priorité de scrutin humain : **§3 (correction du produit croisé + invariant den>0)** et **§5–6
 (génération de prédicat + capture de free-vars)** — les deux endroits où une erreur de plumbing
 (pas de math) pourrait échapper aux tests.
+
+---
+
+## Durcissement adversarial (2026-07-23) — **0 trou** sur les 2 points prioritaires
+
+Passe adversariale automatisée (Workflow `harden-soundness-core` : 4 vérificateurs indépendants,
+effort high, ~12 programmes adversariaux chacun, chacun mandaté de CASSER). **Verdict : 4/4
+SOUND, 0 HOLE.** Ce qui a été attaqué et a RÉSISTÉ :
+
+- **§3a — invariant `den>0` de `Rat`** (`src/codegen.rs`). Tous les sites de construction énumérés
+  (RatLit→`Rat::new`, `rational(x)`→den=1, Add/Sub/Mul/Div→`Rat::new`, Neg garde den, graines
+  0/1·1/1) : `Rat::new` normalise TOUJOURS (flip signe si d<0, puis gcd-réduction par g≥1) →
+  den>0. Seul risque zéro-den = Div (`self.den*o.num`), fermé par l'obligation « divisor is
+  non-zero in `/` » — vérifié : `x/y` non gardé REJETÉ [sat, modèle y=0] ; `--unchecked` ne bypass
+  PAS (build-only, refuse quand même d'émettre). Bignum `LllInt` → aucun overflow ne peut flipper
+  un signe. Aucune construction `Rat{..}` brute avec den=0 dans `src/`.
+- **§3b — produit croisé + cohérence Ord/Eq** (`src/codegen.rs`). `cmp = (num·o.den).cmp(o.num·self.den)`
+  sur bignum exact ; correct pour négatifs, zéro signé, formes réduites égales (2/4 vs 1/2), le
+  **piège lexicographique** (1/3 vs 1/2 — num-puis-den dirait « plus grand », l'ordre rend
+  correctement « plus petit »), et les dénominateurs bignum (1/2^80/81/90) qui **déborderaient un
+  produit croisé i64**. `PartialEq` dérivé ≡ `cmp==Equal` (Ord/Eq cohérents, pas d'UB).
+- **§5–6a — clé de dédup du prédicat forall** (`src/vc.rs forall_list_term`). Clé = (body_smt
+  canonique + sortes free-vars + elem), actuels passés POSITIONNELLEMENT au site d'usage → deux
+  propriétés de même forme mais actuels différents = termes distincts. Attaques rejetées : bridge
+  same-body-different-actuals (10>y vs 5>y, contre-exemple élément=7) ; fuite d'actuels permutés
+  (a−b>e vs b−a>e) ; param littéralement nommé `fv0`/`h`/`t` (anti-capture par shadowing) ;
+  free-var droppée qui n'entraîne pas ; forall imbriqué rejeté fail-closed.
+- **§5–6b — soundness des axiomes** (`src/vc.rs`). Encodage définitionnel standard (base + cons
+  E-matché), anti-capture correcte, injection d'axiome conservative (au pire incomplète). 12
+  programmes adversariaux tous corrects (faux rejetés, vrais prouvés). **Attaque-clé** (un `call`
+  dans le corps quantifié pour smuggler un `requires` par-élément) → REJETÉE LOUD par le gate de
+  fragment de contrat (DEC-LLL-017 recurse dans le corps du forall, requires ET ensures).
+
+**Conclusion** : les 2 points de plus fort risque de plumbing tiennent sous attaque profonde. La
+review HUMAINE reste recommandée (le durcissement automatisé teste ce qu'il imagine ; l'œil humain
+sur les invariants `den>0` et l'anti-capture reste le filet ultime), mais la confiance est
+substantiellement renforcée. Preuve : Workflow `wf_ef020d4d-378`, journal
+`subagents/workflows/wf_ef020d4d-378/journal.jsonl`.
