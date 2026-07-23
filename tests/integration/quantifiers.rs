@@ -1980,3 +1980,22 @@ fn forall_over_list_prove_side_and_propagation_req204() {
     let bridge = "module M:\n\n  part keep(xs: List[Int]) -> List[Int]:\n    ensures forall y in result: y > 0\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield if h > 0 then h :: keep(t) else keep(t)\n  part sum_pos(ys: List[Int]) -> Int:\n    requires forall y in ys: y > 0\n    ensures result >= 0\n    measure length(ys)\n    match ys:\n      [] -> yield 0\n      h :: t -> yield h + sum_pos(t)\n  part safe(xs: List[Int]) -> Int:\n    ensures result >= 0\n    let clean = keep(xs)\n    yield sum_pos(clean)\n";
     assert!(verify_src(bridge).ok(), "the produced all-positive guarantee must discharge the consumer's requires: {:?}", failures(&verify_src(bridge)));
 }
+
+
+// ─── REQ-LLL-201/204 element-sort generality + cross-feature composition: `forall x in <list>`
+// works over List[Rational] (Z3 Real) exactly as over List[Int], and composes with the free-var
+// predicate and Rational ordering — a relative bound on ℚ. Hardens the trust-core surface: the
+// list-forall predicate, `sum`, and the Rational order all interlock without leaking.
+#[test]
+fn forall_over_list_composes_with_rational_req204() {
+    // forall over List[Rational] ⇒ the total is >= 0.0 (element sort = Real).
+    let rat = "module M:\n\n  part f(xs: List[Rational]) -> Rational:\n    requires forall x in xs: x >= 0.0\n    ensures result == sum(xs)\n    ensures result >= 0.0\n    measure length(xs)\n    match xs:\n      [] -> yield 0.0\n      h :: t -> yield h + f(t)\n";
+    assert!(verify_src(rat).ok(), "forall over List[Rational] must bound the sum: {:?}", failures(&verify_src(rat)));
+    // NEGATIVE: an empty list totals 0.0, so `result >= 1.0` is false → REJECTED.
+    let bad = "module M:\n\n  part f(xs: List[Rational]) -> Rational:\n    requires forall x in xs: x >= 0.0\n    ensures result == sum(xs)\n    ensures result >= 1.0\n    measure length(xs)\n    match xs:\n      [] -> yield 0.0\n      h :: t -> yield h + f(t)\n";
+    assert!(!verify_src(bad).ok(), "a false Rational bound must be rejected");
+    // COMPOSITION: forall over ℚ + free-variable predicate + Rational order — a relative bound.
+    let rel = "module M:\n\n  part f(xs: List[Rational], lo: Rational) -> Rational:\n    requires forall x in xs: x >= lo\n    requires lo >= 0.0\n    ensures result >= 0.0\n    measure length(xs)\n    match xs:\n      [] -> yield 0.0\n      h :: t -> yield h + f(t, lo)\n";
+    assert!(verify_src(rel).ok(), "a relative Rational bound must prove: {:?}", failures(&verify_src(rel)));
+    assert!(!verify_src(&rel.replace("    requires lo >= 0.0\n", "")).ok(), "without lo >= 0.0 the Rational bound must be rejected");
+}
