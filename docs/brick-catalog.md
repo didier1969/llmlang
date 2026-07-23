@@ -127,6 +127,22 @@
   aussi : `∀ x ∈ xs: x ≥ lo` avec `lo ≥ 0` prouve `total ≥ 0`.
 - **REQ** — REQ-LLL-201 (consume-side) + REQ-LLL-204 (body sur variable libre).
 
+## 9. Assainissement à garantie propagée — `examples/verified_sanitize.lll`
+
+- **Prouve** — une fonction PRODUIT une liste dont chaque élément satisfait une propriété
+  (`∀ y ∈ result: y > 0`), et cette garantie se PROPAGE : un consommateur en aval décharge son
+  `requires ∀` GRATUITEMENT, sans re-test à l'exécution.
+- **Signature**
+  - `keep_positive(xs) -> List[Int]` · `ensures forall y in result: y > 0` (prove-side).
+  - `safe_total(xs) -> Int` · `ensures result >= 0` — le pont : `keep_positive` décharge le
+    `requires forall y > 0` de `sum_positive`.
+- **Quand** — pipelines ERP « après filtrage, chaque montant est valide » : la garantie établie
+  une fois traverse les frontières de fonction (type-level), pas de garde runtime dupliquée.
+- **Technique** — prove-side de `forall x in <list>` (REQ-LLL-204) : le prédicat récursif est
+  déchargé sur la structure cons du résultat ; l'ensures-forall de l'appel récursif est assumé au
+  call-site, ce qui referme l'induction. Compose avec l'if-IH (REQ-LLL-198).
+- **REQ** — REQ-LLL-204 (prove-side).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
@@ -145,8 +161,8 @@
 
 ## Frontières connues (prochaines briques à débloquer)
 
-- **Bornes d'agrégat** (`tous ≥ 0 ⇒ sum ≥ 0`, `tous ≥ lo ∧ lo ≥ 0 ⇒ total ≥ 0`) — **LIVRÉ**
-  (REQ-LLL-201 consume + REQ-LLL-204 body sur variable libre, brique 8). Reste : le prove-side
-  (`ensures ∀ x ∈ result: P(x)` — prouver qu'une fonction PRODUIT une liste all-P).
+- **`forall` sur les éléments d'une liste** — **COMPLET** : consume-side (REQ-LLL-201, bornes
+  d'agrégat, brique 8), body sur variable libre (REQ-LLL-204, bornes relatives), et prove-side
+  (REQ-LLL-204, une fonction produit une liste all-P + propagation, brique 9).
 - **Réutilisation Perceus sous `filter`** (drop-handling) — cycle dédié supervisé.
 - **Solveurs plus riches** (OR-Tools/cvc5) sous le même mur de havoc — gaté opérateur.

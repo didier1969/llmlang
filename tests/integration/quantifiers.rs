@@ -1961,3 +1961,22 @@ fn forall_over_list_elements_bounds_the_aggregate_req201() {
     let two = "module M:\n\n  part pos(xs: List[Int]) -> Int:\n    requires forall x in xs: x >= 0\n    ensures result == sum(xs)\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + pos(t)\n  part neg(xs: List[Int]) -> Int:\n    requires forall x in xs: x <= 0\n    ensures result == sum(xs)\n    ensures result <= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + neg(t)\n";
     assert!(verify_src(two).ok(), "distinct forall bodies must not contaminate: {:?}", failures(&verify_src(two)));
 }
+
+
+// ─── REQ-LLL-204 PROVE-side: `ensures forall x in result: P(x)` — a function PROVES it PRODUCES an
+// all-P list, and the guarantee PROPAGATES to a consumer whose `requires forall` it discharges.
+// The prove goal `(listall_N result …)` unfolds on the result's cons structure (the kept head's
+// property + the recursive call's own ensures-forall, assumed as a hypothesis at its call site).
+#[test]
+fn forall_over_list_prove_side_and_propagation_req204() {
+    // POSITIVE: a filter proves its output is all-positive.
+    let keep = "module M:\n\n  part keep(xs: List[Int]) -> List[Int]:\n    ensures forall y in result: y > 0\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield if h > 0 then h :: keep(t) else keep(t)\n";
+    assert!(verify_src(keep).ok(), "a filter must prove its output is all-positive: {:?}", failures(&verify_src(keep)));
+    // NEGATIVE: keeping EVERY element cannot prove the output is all-positive → REJECTED.
+    let bad = "module M:\n\n  part f(xs: List[Int]) -> List[Int]:\n    ensures forall y in result: y > 0\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield h :: f(t)\n";
+    assert!(!verify_src(bad).ok(), "keeping every element cannot prove all-positive");
+    // PROPAGATION (prove-side ⇒ consume-side): the produced guarantee discharges a consumer's
+    // `requires forall`, so `safe_total` proves `result >= 0` with NO runtime re-check.
+    let bridge = "module M:\n\n  part keep(xs: List[Int]) -> List[Int]:\n    ensures forall y in result: y > 0\n    measure length(xs)\n    match xs:\n      [] -> yield []\n      h :: t -> yield if h > 0 then h :: keep(t) else keep(t)\n  part sum_pos(ys: List[Int]) -> Int:\n    requires forall y in ys: y > 0\n    ensures result >= 0\n    measure length(ys)\n    match ys:\n      [] -> yield 0\n      h :: t -> yield h + sum_pos(t)\n  part safe(xs: List[Int]) -> Int:\n    ensures result >= 0\n    let clean = keep(xs)\n    yield sum_pos(clean)\n";
+    assert!(verify_src(bridge).ok(), "the produced all-positive guarantee must discharge the consumer's requires: {:?}", failures(&verify_src(bridge)));
+}

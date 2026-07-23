@@ -1777,12 +1777,6 @@ impl<'a> Emit<'a> {
     /// Shared by the two PROVE sites — a part's own `ensures` at `yield`, and a
     /// callee's `requires` at the call site (`env` binds the callee's params to the
     /// argument terms there, so it proves the property of the actual arguments).
-    /// REQ-LLL-201: is this `forall … in <coll>` domain a LIST (vs a Map/Set)?  Decided by the
-    /// checker's static type of `coll`, so it never depends on translation order.
-    fn is_list_domain(&self, coll: &Expr, _env: &HashMap<String, String>) -> bool {
-        matches!(self.operand_ty(coll), Some(Ty::List(_)))
-    }
-
     /// REQ-LLL-201/204: lower `forall x in <list_expr>: body` to `(listall_N <list_term> fv…)`, an
     /// abstract recursive predicate axiomatized DEFINITIONALLY in the prelude (`p(nil,fv…)=true`,
     /// `p(cons h t, fv…)=(body[x:=h] ∧ p(t,fv…))`, E-matched — the list analogue of `sum`/`len`).
@@ -2221,22 +2215,35 @@ impl<'a> Emit<'a> {
                                 coll_def,
                             )?;
                         } else if let Expr::Forall { var, domain, body } = ens {
-                            // REQ-LLL-201 v1 is CONSUME-side only: a `forall x in <list>` in an
-                            // `ensures` (proving a function PRODUCES an all-P list) needs the
-                            // predicate unfolded on the result's cons structure + the callee's
-                            // ensures registered — a follow-up. Reject LOUD rather than mishandle.
-                            if let ForallDomain::In(coll) = domain {
-                                if self.is_list_domain(coll, &env2) {
-                                    return Err(format!(
-                                        "part `{}`: `forall … in <list>` in an `ensures` is not yet \
-                                         supported (REQ-LLL-201 v1 is consume-side/`requires` only)",
-                                        self.part.name
-                                    ));
-                                }
+                            // REQ-LLL-201/204 PROVE-side: `ensures forall x in result: P(x)` (the
+                            // function PRODUCES an all-P list) is proved by obliging
+                            // `(listall_N result fv…)`; the predicate axiom unfolds it on the
+                            // result's cons structure — `P(head)` (from the branch) ∧ `(listall_N
+                            // tail fv…)` (from the recursive call's OWN ensures-forall, registered
+                            // as a hypothesis at its call site). Map/Set/Range keep the fresh-const
+                            // universal generalization below.
+                            let list_elem = match domain {
+                                ForallDomain::In(coll) => match self.operand_ty(coll) {
+                                    Some(Ty::List(e)) => Some(smt_ty(&e)),
+                                    _ => match (coll.as_ref(), &self.part.ret) {
+                                        (Expr::Var(n), Ty::List(e)) if n == "result" => {
+                                            Some(smt_ty(e))
+                                        }
+                                        _ => None,
+                                    },
+                                },
+                                _ => None,
+                            };
+                            if let (ForallDomain::In(coll), Some(elem)) = (domain, &list_elem) {
+                                let params = self.part.params.clone();
+                                let goal =
+                                    self.forall_list_term(var, coll, body, &env2, elem, &params)?;
+                                self.oblige(descr, goal);
+                            } else {
+                                // PROVE a bounded universal by FRESH-CONST universal
+                                // generalization (REQ-LLL-087) — see `prove_forall_fresh_const`.
+                                self.prove_forall_fresh_const(descr, var, domain, body, &env2)?;
                             }
-                            // PROVE a bounded universal by FRESH-CONST universal
-                            // generalization (REQ-LLL-087) — see `prove_forall_fresh_const`.
-                            self.prove_forall_fresh_const(descr, var, domain, body, &env2)?;
                         } else {
                             let goal = self.tr(ens, &env2, None)?;
                             self.oblige(descr, goal);
@@ -3634,17 +3641,35 @@ impl<'a> Emit<'a> {
                         // + body as hypotheses — the sound dual of the `forall` on-demand ground
                         // instantiation just below. Never `assert exists` (DEC-LLL-015).
                         self.skolemize_exists(var, domain, body, &eenv)?;
-                    } else if matches!(ens, Expr::Forall { .. }) {
-                        // a quantified `ensures` is NOT assumed as a term (we never emit
-                        // `assert forall`): record it with the call-site env, keyed by the
-                        // havoc'd result `r`, and instantiate it on-demand at each
-                        // `get(r, k)` in the caller's goal (`instantiate_forall_at`) —
-                        // deterministic ground instantiation that keeps the range guard
-                        // (REQ-LLL-087 T1 consumption).
-                        self.forall_ens
-                            .entry(r.clone())
-                            .or_default()
-                            .push((ens, eenv.clone()));
+                    } else if let Expr::Forall { var, domain, body } = &ens {
+                        // REQ-LLL-201/204: a callee's `forall x in result: P(x)` ensures over a
+                        // LIST is assumed as the hypothesis `(listall_N r fv…)` (r = the havoc'd
+                        // result) — so a recursive caller gets `(listall_N tail …)` for the cons
+                        // step of ITS OWN ensures-forall. Map/Set foralls keep the on-demand
+                        // ground-instantiation registration below (a `get(r,k)`/`member(r,x)` has
+                        // no analogue for a cons-list, so the two mechanisms never overlap).
+                        let list_elem = match domain {
+                            ForallDomain::In(coll) => match (coll.as_ref(), &callee.ret) {
+                                (Expr::Var(n), Ty::List(e)) if n == "result" => Some(smt_ty(e)),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let (ForallDomain::In(coll), Some(elem)) = (domain, &list_elem) {
+                            let cparams = callee.params.clone();
+                            let h = self.forall_list_term(var, coll, body, &eenv, elem, &cparams)?;
+                            self.hyps.push(h);
+                        } else {
+                            // a quantified `ensures` is NOT assumed as a term (we never emit
+                            // `assert forall`): record it with the call-site env, keyed by the
+                            // havoc'd result `r`, and instantiate it on-demand at each `get(r, k)`
+                            // in the caller's goal (`instantiate_forall_at`) — deterministic ground
+                            // instantiation that keeps the range guard (REQ-LLL-087 T1 consumption).
+                            self.forall_ens
+                                .entry(r.clone())
+                                .or_default()
+                                .push((ens.clone(), eenv.clone()));
+                        }
                     } else {
                         let a = self.tr_contract(&ens, &eenv)?;
                         self.hyps.push(a);

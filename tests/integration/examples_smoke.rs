@@ -85,6 +85,7 @@ fn flagship_examples_build_and_run() {
         "verified_doc_lifecycle.lll", // CPT-LLL-018 brick: ERP document state machine, illegal transitions unrepresentable + amount conserved
         "verified_registry.lll",      // CPT-LLL-018 brick: referential integrity — insert keeps the key present, read-back is exact
         "verified_bounded_sum.lll",   // CPT-LLL-018 brick: forall-over-list — all entries >= 0 proves total >= 0 (REQ-LLL-201)
+        "verified_sanitize.lll",      // CPT-LLL-018 brick: prove-side forall — a filter PROVES its output is all-positive (REQ-LLL-204)
     ];
     let mut failures = Vec::new();
     for name in flagship {
