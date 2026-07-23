@@ -409,8 +409,53 @@ fn export_ist(file: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
 }
 
+/// Emit the module's PROOF EVIDENCE as JSON (REQ-LLL-208, DEC-LLL-081 tranche 1b): for each
+/// `part`, the tuple `{name, def_hash, contract_hash, proof_hash, vcgen_version, verdict,
+/// obligations, time_ms}` that Axon's GENERIC `soll_attach_evidence` attaches to a REQ. This is
+/// the "passif→actif" delta: llmlang exposes a **proof** (a proof-hash keyed to the vcgen epoch),
+/// not a test that can lie. `proof_hash` is precisely the "this proof still holds" key — editing
+/// a dependency's BODY does not change it, editing its CONTRACT does (hash.rs). Mirrors
+/// `export_ist`: llmlang stays the single source of truth; Axon only attaches the blob.
+fn export_evidence(file: &str) -> Result<String, String> {
+    let (_, cm, hm) = load(file)?;
+    // reflect the CURRENT verified state — the proof cache is a legitimate source (a
+    // cached-proved part IS proven, DEC-LLL-025); an uncached part re-runs Z3 for a real verdict.
+    let report = vc::verify_session(&cm, &hm, &cache_dir(), true, None)?;
+    let verdicts: std::collections::HashMap<&str, &vc::PartVerdict> =
+        report.parts.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    let mut evidence: Vec<serde_json::Value> = Vec::new();
+    for p in &cm.module.parts {
+        let (verdict, obligations, time_ms) = match verdicts.get(p.name.as_str()) {
+            Some(vc::PartVerdict::Proved { obligations, time_ms }) => {
+                ("proved", Some(*obligations as u64), Some(*time_ms as u64))
+            }
+            Some(vc::PartVerdict::CachedProved) => ("cached-proved", None, None),
+            Some(vc::PartVerdict::Failed { .. }) => ("failed", None, None),
+            Some(vc::PartVerdict::Incomplete { .. }) => ("incomplete", None, None),
+            None => ("unknown", None, None),
+        };
+        evidence.push(serde_json::json!({
+            "name": p.name,
+            "def_hash": hm.def_hash.get(&p.name),
+            "contract_hash": hm.contract_hash.get(&p.name),
+            "proof_hash": hm.proof_hash.get(&p.name),
+            "vcgen_version": vc::VCGEN_VERSION,
+            "verdict": verdict,
+            "obligations": obligations,
+            "time_ms": time_ms,
+        }));
+    }
+    let out = serde_json::json!({
+        "project_code": serde_json::Value::Null,
+        "module": cm.module.name,
+        "vcgen_version": vc::VCGEN_VERSION,
+        "evidence": evidence,
+    });
+    serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
+}
+
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll check --locked <file>       also verify every module + package pin against lll.lock (REQ-LLL-155)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fetch <file.lll>            materialize git [dependencies] into lll/store/ (the ONLY networked command)\n  lll lock <file.lll>             (re)generate lll.lock: module hashes + [[package]] pins (REQ-LLL-155)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll check --locked <file>       also verify every module + package pin against lll.lock (REQ-LLL-155)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fetch <file.lll>            materialize git [dependencies] into lll/store/ (the ONLY networked command)\n  lll lock <file.lll>             (re)generate lll.lock: module hashes + [[package]] pins (REQ-LLL-155)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll evidence <file.lll>         emit per-part proof evidence {def_hash, proof_hash, verdict} for Axon soll_attach_evidence (REQ-LLL-208)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
         .to_string()
 }
 
@@ -932,6 +977,13 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             // is the contract Axon's `parser/lll.rs` consumes (datalog shell-out
             // pattern) — llmlang stays the single source of truth for its grammar.
             println!("{}", export_ist(file)?);
+            Ok(())
+        }
+        ["evidence", file] => {
+            // REQ-LLL-208 (DEC-LLL-081 tranche 1b): emit the per-part proof-evidence tuple
+            // {def_hash, proof_hash, vcgen_version, verdict} for Axon's generic
+            // `soll_attach_evidence` — a proof, not a test that can lie.
+            println!("{}", export_evidence(file)?);
             Ok(())
         }
         ["ffi-import", rust_file, effect, prefix] => {

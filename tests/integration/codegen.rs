@@ -1477,6 +1477,55 @@ fn export_ist_emits_axon_extraction_result() {
     );
 }
 
+// REQ-LLL-208 (DEC-LLL-081 tranche 1b): `lll evidence` emits the per-part proof-evidence tuple
+// {def_hash, proof_hash, vcgen_version, verdict} for Axon's generic `soll_attach_evidence` — a
+// PROOF, not a test. A proved part carries a 64-hex proof_hash + verdict "proved"; a false module
+// yields verdict "failed"; the proof_hash is stable across runs (DEC-LLL-020).
+#[test]
+fn evidence_emits_proof_tuple_for_axon_req208() {
+    let z3 = std::env::var("LLL_Z3").unwrap_or_default();
+    let run = |src: &str, name: &str| -> serde_json::Value {
+        let dir = tempdir();
+        let path = dir.join(name);
+        std::fs::write(&path, src).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .args(["evidence", path.to_str().unwrap()])
+            .env("LLL_Z3", &z3)
+            // isolate the `.lll-cache` in this test's own tempdir so concurrent tests never
+            // race on a shared `proofs.json` (the path arg is absolute, so cwd only steers cache).
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "evidence failed: {}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice(&out.stdout).expect("valid JSON")
+    };
+
+    // A proved module: every part carries a proof_hash + verdict "proved".
+    let ok = "module T:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n";
+    let v = run(ok, "ok.lll");
+    assert_eq!(v["vcgen_version"].as_str().unwrap(), vc::VCGEN_VERSION);
+    let ev = v["evidence"].as_array().unwrap();
+    let inc = ev.iter().find(|e| e["name"] == "inc").expect("inc evidence");
+    assert_eq!(inc["verdict"], "proved");
+    assert_eq!(inc["proof_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(inc["def_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(inc["vcgen_version"].as_str().unwrap(), vc::VCGEN_VERSION);
+
+    // A false ensures → verdict "failed" (the proof identity is still emitted).
+    let bad = "module T:\n\n  part f(x: Int) -> Int:\n    ensures result > x\n    yield x\n";
+    let vb = run(bad, "bad.lll");
+    let f = vb["evidence"].as_array().unwrap().iter().find(|e| e["name"] == "f").expect("f evidence");
+    assert_eq!(f["verdict"], "failed");
+
+    // Stability (DEC-LLL-020): the same source yields the same proof_hash.
+    let again = run(ok, "ok2.lll");
+    assert_eq!(
+        again["evidence"].as_array().unwrap().iter().find(|e| e["name"] == "inc").unwrap()["proof_hash"],
+        inc["proof_hash"],
+        "proof_hash must be stable across runs"
+    );
+}
+
 #[test]
 fn export_ist_emits_cyclomatic_complexity() {
     // REQ-LLL-172 (cross-repo REQ-AXO-902185): `export-ist` carries a McCabe
