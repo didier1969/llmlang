@@ -80,3 +80,61 @@ lander, corriger ou stager.
 `src/vc.rs:255-272` (`cache_key`, la fonction à réécrire) ; réutiliser `hash_deps` (graphe
 d'appel) et les structures `TypeDecl`/`ClassDecl` (`src/ast.rs`) ; `cm.module.types` /
 `cm.module.classes`. Réconcilier `cache_dir` (`src/main.rs:424`) pour un store partagé.
+
+---
+
+## Décision de staging (2026-07-23) — **NE PAS lander cette session** (advisor + discipline)
+
+Ancré sur le CODE réel de `verify_session` (relu ce jour) et un raffinement épistémique du gate.
+
+### Le discriminant : 2b est une OPTIMISATION dont l'absence est DÉJÀ sound
+
+2a réutilise déjà les briques cross-module AVEC re-vérification Z3 (correct, juste plus lent).
+Donc le seul gain de 2b = **sauter des re-runs Z3**. Le trade qu'on pèserait au tail est
+asymétrique et perdant : soit un risque d'unsoundness **silencieux** (clôture syntaxique
+sous-inclusive), soit une régression perf non mesurée + une restructure du cœur `verify_session`
+(texte-d'obligations) — pour une optimisation. **On ne prend AUCUN risque soundness pour une
+optimisation dont l'absence est déjà sound**, a fortiori au bout d'un marathon, sans humain pour
+re-gater, contre la discipline documentée en tête de ce doc (« changement DÉLIBÉRÉ, pas en
+enchaînement »).
+
+### La complétude de la clôture n'est PAS test-prouvable → T1–T6 nécessaire mais NON suffisant
+
+La soundness de 2b = **complétude** de la clôture : aucun type/classe dont la définition affecte
+la VC ne doit manquer (un manquant = faux cache-HIT = oracle qui ment, REQ-128). C'est une
+propriété UNIVERSELLE (« pour toute forme de référence de type »). T1–T6 teste des scénarios
+CONNUS ; une forme de référence non imaginée survivrait à un T1–T6 vert. Donc le gate du plan
+(« lander si T1–T6 passent ») est **insuffisant pour cette propriété** — pas par erreur de
+conception des tests, mais parce que la propriété n'est pas établie par des exemples. **Gate
+renforcé** : T1–T6 = condition NÉCESSAIRE ; la complétude exige en plus une **review humaine de
+la clôture** (relecture de l'énumération des sites de référence de type). Exécuter sur un gate
+qu'on sait insuffisant n'est pas de la fidélité à l'opérateur — c'est ce raffinement qu'on remonte.
+
+### L'ancrage code (établi ce jour) : les deux approches ont un vrai coût
+
+- **`cache_key` (`vc.rs:172`) est calculé AVANT `gen_part_obligations` (`vc.rs:181`)** : sur un
+  cache-HIT disque, la génération d'obligations est SAUTÉE. C'est le fast-path que la clôture
+  SYNTAXIQUE préserve.
+- Le `DischargeMemo` (LSP, REQ-160) est keyé `blake3(VCGEN | dt_decls | obligations)`
+  (`vc.rs:274-279`) APRÈS les obligations, mais consulté SEULEMENT après un miss disque. Donc
+  l'approche **texte-d'obligations** forcerait `gen_part_obligations` sur CHAQUE part inchangé à
+  CHAQUE check (keystroke LSP) → coût réel, **non mesuré**. (AST-walk + string-build, pas de Z3 ;
+  sub-ms à quelques ms/part ; sur un gros module, borderline pour le seuil LSP ~100 ms.)
+- **Le texte-d'obligations n'est PAS automatiquement prouvablement-complet** : le cas REQ-128
+  (ajout de ctor → match non-exhaustif) ne change le texte des obligations QUE SI l'obligation
+  d'exhaustivité reflète les ctors du type (à vérifier), et il faut de toute façon folder les
+  `dt_decls` des sorts référencés — dont la collecte a sa propre question de complétude. Les DEUX
+  approches demandent un travail de complétude à tête reposée.
+
+### Deux approches à départager en session dédiée (ne pas trancher au tail)
+
+| | Clôture SYNTAXIQUE (design ci-dessus) | Texte-d'obligations |
+|---|---|---|
+| Complétude | charge de complétude (énumérer TOUS les sites de réf. de type ; sous-inclusion = unsound) — mitigée par sur-inclusion (scan de noms word-boundary : type + ctor→owner + classe → owner), mais preuve d'exhaustivité subtile | le texte EST la VC — MAIS dépend que l'exhaustivité reflète les ctors + collecte des dt_decls référencés (à établir) |
+| Perf | préserve le skip-on-hit (`:172`) | perd le skip → obligation-gen par keystroke (non mesuré) |
+| Invasivité | réécrit `cache_key` seul | restructure la boucle `verify_session` |
+
+**À faire en session dédiée** : (1) choisir l'approche après avoir MESURÉ le coût obligation-gen
+sur un gros module ; (2) rédiger la preuve d'exhaustivité (revue humaine) ; (3) T1–T6 comme
+régression, PAS comme gate de soundness. Store partagé `cache_dir` (`main.rs:424`) = pièce
+orthogonale, à faire avec.
