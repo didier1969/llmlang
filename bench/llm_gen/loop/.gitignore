@@ -1,0 +1,4 @@
+# Artefacts transitoires du banc (loop_run.py + delta_run.py) — jamais commités.
+runs/
+results.jsonl
+delta_results.jsonl

@@ -1,0 +1,14 @@
+{
+  "comment": "Tâches DELTA (REQ-LLL-192) : MODIFIER un module llmlang vérifié, mesurer si le contexte focalisé (`lll context`, bras LIVE) aide vs le dump complet seul (bras DARK). Chaque tâche = un module de base VÉRIFIÉ + une instruction de changement à BLAST-RADIUS (le changement correct exige un fait porté par le contrat d'une dépendance — exactement ce que `lll context` surface et qu'un dump complet enfouit). Le gate = `lll check` vert + le(s) marqueur(s) de changement présent(s) + `lll run` marche encore. `reference.lll` = une modification correcte de référence (valide que la tâche est solvable ; sert au dry-run gratuit du gate). Le run PAYANT est gated par BENCH_GO=1 + budget (comme loop_run).",
+  "tasks": [
+    {
+      "id": "d01_subtotal_upper_bound",
+      "base": "examples/erp_order_pipeline_verified.lll",
+      "target": "order_subtotal",
+      "instruction": "Renforce `order_subtotal` avec une garantie de BORNE HAUTE : ajoute une clause `ensures` disant que le sous-total ne dépasse jamais le brut des deux lignes, c.-à-d. `result <= q1 * p1 + q2 * p2`. Garde tout le reste IDENTIQUE. Le module doit toujours vérifier (`lll check` vert). Indice : cette borne se décharge grâce au contrat de `line_net`.",
+      "change_markers": ["result <= q1 * p1 + q2 * p2"],
+      "reference": "delta_tasks/d01_subtotal_upper_bound/reference.lll",
+      "blast_radius": "order_subtotal (la cible) a besoin du `ensures result <= qty * unit_price` de line_net pour se décharger ; `lll context order_subtotal` surface CE contrat (le firewall des deps), un dump complet l'enfouit dans 90 lignes."
+    }
+  ]
+}
