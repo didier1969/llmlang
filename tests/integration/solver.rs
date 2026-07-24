@@ -326,3 +326,52 @@ fn solver_erp_planning_infeasible_plan_rejected_fail_stop_req193() {
         "the rejected plan must NEVER reach use_plan (no 26500), got: {out:?}"
     );
 }
+
+
+// MINIMIZE round-trip (sense=0) — the sourcing agent (examples/erp_sourcing_verified.lll) is the
+// FIRST in-repo user of the solver's minimize path; every prior model uses sense=1 (max). A compact
+// 2-supplier procurement LP: prices [5,8], caps [10,10], cover demand >= 15, MINIMIZE cost. The
+// integer optimum buys the cheapest first — 10 @ 5 + 5 @ 8 = 90 cents — and the proven witness
+// re-checks it. Locks that sense=0 attains the true MINIMUM: a wrong-but-feasible plan would slip
+// past the flagship smoke (which only checks the exit code, not the business value).
+const SOURCING_MIN_ROUND_TRIP: &str = r#"module SourcingMin:
+
+  effect Solver:
+    solve(List[Int]) -> List[Int] = extern "lll_solver_runtime::solve"
+
+  part to_array(xs: List[Int], acc: Array[Int]) -> Array[Int]:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield to_array(t, push(acc, h))
+
+  part feasible(sol: Array[Int]) -> Bool:
+    requires length(sol) == 2
+    ensures result == (get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 0) <= 10 and get(sol, 1) <= 10 and get(sol, 0) + get(sol, 1) >= 15)
+    yield get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 0) <= 10 and get(sol, 1) <= 10 and get(sol, 0) + get(sol, 1) >= 15
+
+  part min_cost(sol: Array[Int]) -> Int:
+    requires length(sol) == 2
+    requires get(sol, 0) >= 0 and get(sol, 1) >= 0
+    ensures result >= 0
+    yield get(sol, 0) * 5 + get(sol, 1) * 8
+
+  part main() -> Int via Solver, IO:
+    let model = [2, 5, 0, 5, 8, 1, 0, 1, 0, 1, 0, 0, 1, 0, 10, 1, 0, 0, 10, 0, 1, 1, 15, 1, 1]
+    let sol = to_array(Solver.solve(model), array())
+    match length(sol) == 2:
+      true ->
+        match feasible(sol):
+          true  -> yield IO.print(min_cost(sol))
+          false -> yield IO.print(0 - 1)
+      false -> yield IO.print(0 - 2)
+"#;
+
+#[test]
+fn solver_minimize_sense_round_trip_yields_optimal_cost_req211() {
+    // sense=0 (minimize) exercised for the first time in-repo. z3-opt returns the integer
+    // minimum-cost plan (buy 10 from the cheaper supplier, 5 from the other); the witness passes
+    // and min_cost recomputes 10*5 + 5*8 = 90. Asserts the MINIMIZE path attains the true optimum
+    // (not merely a feasible plan) — the sense=0 branch of emit_solver_runtime under real z3-opt.
+    let out = build_run(SOURCING_MIN_ROUND_TRIP);
+    assert!(out.contains("=> 90"), "expected the optimal minimized cost 90 cents, got: {out:?}");
+}

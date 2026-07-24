@@ -1,0 +1,119 @@
+module ErpSourcingVerified:
+
+  # ==========================================================================
+  # APPROVISIONNEMENT ERP À COÛT MINIMAL, À FAISABILITÉ PROUVÉE
+  # (2ᵉ agent critique du terrain-de-preuve ERP, REQ-LLL-211 suite ; oracle-au-
+  #  bord CPT-LLL-017 ; solveur witness-checké REQ-LLL-191/193.)
+  #
+  # POURQUOI CET AGENT (non-redondant avec erp_planning_verified). erp_planning
+  # MAXIMISE un profit de production ; ici on MINIMISE un coût d'achat — sens
+  # objectif OPPOSÉ (le solveur `sens = 0`, minimize, jusqu'ici jamais exercé en
+  # repo — cet agent en est le premier utilisateur). Et surtout : le plan
+  # d'achat COMPOSE avec le chemin-argent — son coût minimal alimente une MARGE
+  # prouvée ≥ 0.
+  #
+  #   AVANT (agent d'appro ERP classique). Un moteur propose un plan « au moins
+  #   cher », mais rien ne GARANTIT qu'il respecte la capacité des fournisseurs,
+  #   couvre la demande, NI qu'il tienne dans le budget. Un bug de solveur ou un
+  #   modèle mal traduit fait dépenser au-delà du budget — la marge devient
+  #   négative sans que personne ne le voie avant la clôture.
+  #
+  #   APRÈS (ici). Le solveur reste un ORACLE au bord (effet `Solver`, résultat
+  #   HAVOCÉ — le cœur vérifié ne lui fait AUCUNE confiance, DEC-LLL-017). Le
+  #   plan qu'il rend est RE-VÉRIFIÉ par un witness-check PROUVÉ (`feasible`) :
+  #   non-négativité, capacité par fournisseur, demande couverte, ET le COÛT ≤
+  #   BUDGET. Un plan qui viole ne serait-ce qu'UNE contrainte est REJETÉ
+  #   fail-stop. Puis la MARGE = budget − coût est prouvée ≥ 0 — POINT CLÉ : cette
+  #   preuve porte sur le WITNESS, pas sur le modèle. Le plafond de coût mis DANS
+  #   le tableau-modèle du solveur ne prouve RIEN (le résultat est havocé) ; c'est
+  #   le conjonct `coût ≤ budget` DANS l'`ensures` de `feasible` qui décharge le
+  #   `requires` de la marge. « L'appro ne dépasse jamais le budget » n'est plus
+  #   espéré — c'est PROUVÉ.
+  #
+  # LE PROBLÈME MÉTIER. 3 fournisseurs d'une matière première partagent la
+  # couverture d'une demande de 60 unités. Chacun a un PRIX unitaire (centimes) et
+  # une CAPACITÉ max :
+  #   • Fournisseur A (sol[0]) : prix  8 c/u,  capacité 40 u
+  #   • Fournisseur B (sol[1]) : prix  5 c/u,  capacité 30 u   ← le moins cher
+  #   • Fournisseur C (sol[2]) : prix 11 c/u,  capacité 50 u
+  # OBJECTIF : MINIMISER le coût total  Σ prix_i · quantité_i  (centimes)
+  # SOUS :  quantité_i >= 0 ,  quantité_i <= capacité_i ,
+  #         Σ quantité_i >= 60  (demande couverte) ,
+  #         Σ prix_i · quantité_i <= 700  (budget).
+  # Optimum ENTIER EXACT : acheter le moins cher d'abord — B=30 (saturé), A=30 →
+  # 60 u, coût 30·5 + 30·8 = 390 c. Marge = 700 − 390 = 310 c (C, le plus cher,
+  # inutilisé). Coût 390 ≤ budget 700 : la marge est prouvée non-négative.
+  # ==========================================================================
+
+  # L'ORACLE au bord : `solve` rend un plan d'achat `List[Int]`. Résultat HAVOCÉ —
+  # c'est CE mur de havoc qui FORCE la re-vérification.
+  effect Solver:
+    solve(List[Int]) -> List[Int] = extern "lll_solver_runtime::solve"
+
+  # Reifie le plan havocé `List[Int]` en `Array[Int]` (accès indexé O(1), support
+  # de `length`/`get` pour les contrats). L'array reste OPAQUE au prouveur : aucun
+  # `ensures` de faisabilité ne franchit ce pont, donc le mur de havoc tient.
+  part to_array(xs: List[Int], acc: Array[Int]) -> Array[Int]:
+    match xs:
+      []     -> yield acc
+      h :: t -> yield to_array(t, push(acc, h))
+
+  # WITNESS-CHECK vérifié : re-contrôle CHAQUE contrainte métier (sol[0]=A, sol[1]=
+  # B, sol[2]=C). Son `ensures result == <conjonction>` est un RÉSUMÉ EXÉCUTABLE :
+  # sur le bras `true` du match, le pare-feu de contrat l'ASSUME et la conjonction
+  # décharge les `requires` de `procurement_cost`. Le DERNIER conjonct — le coût ≤
+  # budget 700 — est ce qui rend la marge prouvable (le budget entre dans la portée
+  # du witness ; le modèle du solveur, lui, ne prouve rien).
+  #   • quantités non-négatives         : sol[i] >= 0
+  #   • plafonds de capacité fournisseur : A<=40, B<=30, C<=50
+  #   • demande couverte                : sol[0] + sol[1] + sol[2] >= 60
+  #   • budget (le conjonct de coût)     : 8·A + 5·B + 11·C <= 700
+  part feasible(sol: Array[Int]) -> Bool:
+    requires length(sol) == 3
+    ensures result == (get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 40 and get(sol, 1) <= 30 and get(sol, 2) <= 50 and get(sol, 0) + get(sol, 1) + get(sol, 2) >= 60 and get(sol, 0) * 8 + get(sol, 1) * 5 + get(sol, 2) * 11 <= 700)
+    yield get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 40 and get(sol, 1) <= 30 and get(sol, 2) <= 50 and get(sol, 0) + get(sol, 1) + get(sol, 2) >= 60 and get(sol, 0) * 8 + get(sol, 1) * 5 + get(sol, 2) * 11 <= 700
+
+  # Consomme le plan PROUVÉ-FAISABLE et calcule le coût d'achat total (centimes).
+  # Ses `requires` (non-négativité + le plafond de budget) ne peuvent être déchargés
+  # QUE via le witness : `sol` sort de l'oracle havocé. `ensures result >= 0` (un
+  # coût de quantités non-négatives est non-négatif) ET `ensures result <= 700` (le
+  # plafond de budget re-vérifié) — ce second `ensures` est ce qui, à son tour,
+  # décharge le `requires` de la marge.
+  part procurement_cost(sol: Array[Int]) -> Int:
+    requires length(sol) == 3
+    requires get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0
+    requires get(sol, 0) * 8 + get(sol, 1) * 5 + get(sol, 2) * 11 <= 700
+    ensures result >= 0
+    ensures result <= 700
+    yield get(sol, 0) * 8 + get(sol, 1) * 5 + get(sol, 2) * 11
+
+  # LA COMPOSITION AVEC LE CHEMIN-ARGENT : marge = budget/revenu − coût. Prouvée
+  # ≥ 0 SANS jamais rouvrir le corps de `procurement_cost` — seulement via ses
+  # `ensures` (coût dans [0, 700]). Même discipline que le pipeline de facturation
+  # (erp_order_pipeline_verified) : entiers exacts, invariant métier « on ne perd
+  # pas d'argent » PROUVÉ.
+  part margin(revenue: Int, cost: Int) -> Int:
+    requires revenue >= cost
+    requires cost >= 0
+    ensures result >= 0
+    yield revenue - cost
+
+  part main() -> Int via Solver, IO:
+    # Forme neutre à plat (AGNOSTIQUE du solveur) :
+    #   [nvars, ncons, sens, obj.., puis par contrainte: rel, rhs, coeffs..]
+    #   sens: 0=MIN (minimize — ce que cet agent exerce) ; rel: 0=`<=` 1=`>=` 2=`==`
+    # 3 variables (A, B, C) ; 8 contraintes = 3 non-négativités + 3 capacités +
+    # 1 demande + 1 budget ; objectif = prix (centimes) à MINIMISER.
+    let model = [3, 8, 0, 8, 5, 11, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 40, 1, 0, 0, 0, 30, 0, 1, 0, 0, 50, 0, 0, 1, 1, 60, 1, 1, 1, 0, 700, 8, 5, 11]
+    let sol = to_array(Solver.solve(model), array())
+    # La longueur = nombre de fournisseurs est re-vérifiée à l'exécution (un oracle
+    # qui rend le mauvais N — ou vide si z3 échoue / demande infaisable dans le
+    # budget — prend le bras `false`, jamais `procurement_cost`).
+    match length(sol) == 3:
+      true ->
+        match feasible(sol):
+          true  ->
+            let cost = procurement_cost(sol)   # coût optimal = 390 centimes
+            yield IO.print(margin(700, cost))  # marge = 700 − 390 = 310 centimes
+          false -> yield IO.print(0 - 1)       # plan infaisable rejeté — jamais utilisé
+      false -> yield IO.print(0 - 2)           # mauvais N — rejeté
