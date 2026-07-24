@@ -79,6 +79,7 @@ fn flagship_examples_build_and_run() {
         "fold_million.lll",           // REQ-LLL-163: 1M-element fold+drop, full prod path
         "mm_pricing_verified.lll",    // ERP migration §5: exact-money pricing, proven net>=0
         "erp_planning_verified.lll",  // REQ-LLL-193: oracle-at-the-edge ERP planning, witness-checked (z3-opt)
+        "erp_order_pipeline_verified.lll", // ERP proof-ground: multi-def money-path slice (call graph line_net→order_subtotal→invoice + with_tax + share→installments), modular contract composition + conservation at symbolic N (REQ-LLL-192 delta substrate)
         "verified_allocation.lll",    // CPT-LLL-018 brick: exact amount split, conservation proven at symbolic N (REQ-LLL-198)
         "verified_ledger.lll",        // CPT-LLL-018 brick: ledger total == sum, conservation over a symbolic-length list (REQ-LLL-194)
         "verified_invoice.lll",       // CPT-LLL-018 capstone: records + count-preserving comprehension (REQ-203) + exact total == sum (REQ-194)

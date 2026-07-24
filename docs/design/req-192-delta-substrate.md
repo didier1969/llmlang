@@ -49,3 +49,16 @@ verify⇄repair, tokens-jusqu'au-vert, ablation Z3/primer — déjà mesurés) �
 - Séquencer : item 4 (slice ERP multi-def) d'abord → puis item 3 (delta sur ce slice).
 - Le harnais `loop_run.py` (gates + boucle + stats) reste le socle ; on ajoute des tâches
   multi-def + la condition live/dark au-dessus.
+
+## Statut : le substrat EXISTE (2026-07-24)
+
+`examples/erp_order_pipeline_verified.lll` (item 4, livré) EST le substrat multi-def voulu : un
+vrai graphe d'appel `invoice → order_subtotal → line_net`, `invoice → with_tax`,
+`installments → share` (7 `part`, invariants métier prouvés + conservation à N symbolique). Une
+modification d'intention sur ce module a un blast-radius réel (changer le contrat de `line_net`
+impacte `order_subtotal` puis `invoice`) — exactement ce qu'`impact`/`why` d'Axon savent
+restreindre. **Le delta (item 3) peut donc se construire dessus** : LIVE = injecter
+`impact`/`why`/`context` de la définition-cible de ce module ; DARK = primer + spec seuls ;
+métrique = tokens-jusqu'au-vert appariés (via le socle `loop_run.py`). Reste avant un run payant :
+définir la/les tâche(s) de modification sur ce module + câbler la condition à
+`gen_prompt`/`repair_prompt` + `BENCH_GO` + budget opérateur.
