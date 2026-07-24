@@ -1999,3 +1999,29 @@ fn forall_over_list_composes_with_rational_req204() {
     assert!(verify_src(rel).ok(), "a relative Rational bound must prove: {:?}", failures(&verify_src(rel)));
     assert!(!verify_src(&rel.replace("    requires lo >= 0.0\n", "")).ok(), "without lo >= 0.0 the Rational bound must be rejected");
 }
+
+
+// ─── HARDENING (durcissement adversarial 2026-07-24, verdict forall-axiomes du Workflow
+// harden-soundness-core). An operation with an IMPLICIT side-obligation inside a list-`forall`
+// body — `div`/`mod` (divisor-non-zero), array indexing (bounds) — carries a per-element
+// obligation over the BOUND variable, whose scope is only the axiom's inner quantifier. Emitted at
+// part level, that variable is FREE → malformed SMT. Historically this fail-CLOSED only by accident
+// (Z3 erroring on the malformed term → REAL_EXIT=1, no false ensures ever accepted). Relying on Z3
+// rejecting a malformed term for SOUNDNESS is fragile — a future change making it accidentally
+// well-formed would SILENTLY drop the per-element obligation under the quantifier. The VC-gen now
+// rejects it LOUD with a helpful diagnostic: soundness by construction, not by luck.
+#[test]
+fn forall_over_list_body_with_side_obligation_is_rejected_cleanly_req201() {
+    // `div` in the body: the per-element `k div x` carries a divisor-non-zero obligation.
+    let div_body = "module M:\n\n  part f(xs: List[Int], k: Int) -> Bool:\n    requires forall x in xs: (k div x) > 0\n    ensures result == true\n    yield true\n";
+    let (code, _out, err) = check_lll_src("forall_div_body", div_body);
+    assert_ne!(code, Some(0), "a `div` in a list-forall body must be rejected LOUD, never proved");
+    assert!(
+        err.contains("implicit side-condition"),
+        "the rejection must name the implicit side-condition (not a raw Z3 error), got: {err}"
+    );
+    // CONTROL: a plain-predicate body (no side-obligation) is UNAFFECTED — it still proves at
+    // symbolic length. The guard keys on "the body pushed an obligation", so it is not overbroad.
+    let ok = "module M:\n\n  part f(xs: List[Int]) -> Int:\n    requires forall x in xs: x >= 0\n    ensures result == sum(xs)\n    ensures result >= 0\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      h :: t -> yield h + f(t)\n";
+    assert!(verify_src(ok).ok(), "a plain-predicate body must still prove: {:?}", failures(&verify_src(ok)));
+}

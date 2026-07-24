@@ -97,6 +97,25 @@ fn rational_ordering_in_contract_and_code_req202() {
 }
 
 
+/// HARDENING (durcissement adversarial 2026-07-24, verdict Ord-cross-mult du Workflow
+/// harden-soundness-core). STRICT ordering on denominators past i64: `(1/2)^81 < (1/2)^80` is TRUE,
+/// but the runtime cross-multiplication compares `1·2^80` against `1·2^81` — BOTH ≈10²⁴, ~10⁵×
+/// i64::MAX. A machine-int cross-mult overflows and could FLIP the sign; only the arbitrary-
+/// precision `LllInt` keeps the comparison exact. Equality on big denominators is tested above; this
+/// locks the STRICT-ordering sign, the case the adversarial pass singled out.
+#[test]
+fn rational_strict_ordering_survives_i64_overflow_cross_mult_req202() {
+    let src = "module M:\n\n  part half_pow(n: Int) -> Rational:\n    requires n >= 0\n    measure n\n    match n:\n      0 -> yield 1.0\n      _ -> yield 0.5 * half_pow(n - 1)\n  part main() -> Int via IO:\n    let big = half_pow(80)\n    let smaller = half_pow(81)\n    yield IO.print(if smaller < big then 111 else 222)\n";
+    assert!(verify_src(src).ok(), "Z3 `Real` proves (1/2)^81 < (1/2)^80: {:?}", failures(&verify_src(src)));
+    let out = build_run(src);
+    assert!(
+        out.contains("111"),
+        "(1/2)^81 < (1/2)^80 must hold at runtime — the cross-mult of 2^80 vs 2^81 overflows i64, \
+         bignum keeps the sign, got: {out:?}"
+    );
+}
+
+
 // ─── REQ-LLL-205: EXACT rational division `/` (distinct from euclidean `div`/`mod` on integers).
 // The float trap `(x/3)*3 == x` is a THEOREM over ℚ (false over floats). Its `b != 0` obligation
 // mirrors div-by-zero; `/` on `Int` is a clear type error.

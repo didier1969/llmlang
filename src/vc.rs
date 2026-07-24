@@ -1829,7 +1829,29 @@ impl<'a> Emit<'a> {
             self.sorts.insert(pn.clone(), fv_sorts[i].clone());
             benv.insert(fv.clone(), pn);
         }
+        let obl_before = self.obls.len();
         let body_smt = self.tr(body, &benv, Some(&Ty::Bool))?;
+        // HARDENING (durcissement adversarial 2026-07-24, verdict forall-axiomes). An operation
+        // with an IMPLICIT side-obligation inside the body — `div`/`mod` (divisor-non-zero),
+        // array indexing (bounds) — would emit that obligation over the bound variable `h`, whose
+        // scope is only the axiom's inner `forall`. Emitted at part level, `h` is FREE → malformed
+        // SMT. Today that fail-CLOSES by accident (Z3 errors → REAL_EXIT=1, no false ensures is
+        // ever accepted, DEC-LLL-015), but relying on Z3 rejecting malformed SMT for SOUNDNESS is
+        // fragile: a future change making the term accidentally well-formed would SILENTLY drop the
+        // per-element obligation under the quantifier. Detect it generically — the body pushed an
+        // obligation — and reject LOUD with a helpful diagnostic instead. Pure comparison bodies
+        // (`> lo`, `>= 0`, …) push nothing and are unaffected.
+        if self.obls.len() > obl_before {
+            return Err(format!(
+                "part `{}`: the body of `forall {var} in <list>` uses an operation with an \
+                 implicit side-condition (e.g. `div`/`mod` divisor-non-zero, or array bounds). \
+                 That per-element obligation would reference the bound variable outside its \
+                 scope — unsupported in a list-`forall` body (REQ-LLL-201/204). Hoist the \
+                 operation out of the quantifier, or guard the elements so the body is a plain \
+                 predicate.",
+                self.part.name
+            ));
+        }
         // one predicate per (canonical body, elem, fv-sorts): identical shapes share, distinct
         // ones (different body OR different free-var sorts) never collide.
         let key = (format!("{body_smt}\u{1}{}", fv_sorts.join(",")), elem.clone());

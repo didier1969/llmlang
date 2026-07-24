@@ -136,8 +136,27 @@ SOUND, 0 HOLE.** Ce qui a été attaqué et a RÉSISTÉ :
   dans le corps quantifié pour smuggler un `requires` par-élément) → REJETÉE LOUD par le gate de
   fragment de contrat (DEC-LLL-017 recurse dans le corps du forall, requires ET ensures).
 
-**Conclusion** : les 2 points de plus fort risque de plumbing tiennent sous attaque profonde. La
-review HUMAINE reste recommandée (le durcissement automatisé teste ce qu'il imagine ; l'œil humain
-sur les invariants `den>0` et l'anti-capture reste le filet ultime), mais la confiance est
-substantiellement renforcée. Preuve : Workflow `wf_ef020d4d-378`, journal
+### Trouvaille INCORPORÉE (2026-07-24) — durcissement `div`/`mod` dans un corps `forall`-liste
+
+Le verdict forall-axiomes a relevé une FRAGILITÉ LATENTE (pas un trou actuel) : une op à obligation
+IMPLICITE dans le corps d'un `forall x in xs` — `div`/`mod` (diviseur-non-nul), indexation d'array
+(bornes) — émet cette obligation sur la variable liée `h`, dont la portée est le seul `forall`
+interne de l'axiome. Émise au niveau part, `h` est LIBRE → SMT malformé. Ça fail-CLOSAIT par
+ACCIDENT (Z3 erre sur le terme malformé → `REAL_EXIT=1`, aucun `ensures` faux accepté), mais
+s'appuyer sur « Z3 rejette un terme malformé » pour la SOUNDNESS est fragile : un futur changement
+le rendant accidentellement bien-formé DROPPERAIT silencieusement l'obligation par-élément sous le
+quantificateur. **Corrigé** (`src/vc.rs` `forall_list_term`, ancre `:1832`) : on snapshotte le
+compteur d'obligations autour de la traduction du corps ; s'il a grossi, le corps a produit une
+obligation-latérale → **rejet LOUD** avec diagnostic utile (générique : attrape `div`/`mod`/bornes
++ toute future op à obligation implicite). Les corps-prédicats purs (`> lo`, `>= 0`) n'en poussent
+aucune → intacts. Tests de régression : `forall_over_list_body_with_side_obligation_is_rejected_
+cleanly_req201` (quantifiers.rs) + `rational_strict_ordering_survives_i64_overflow_cross_mult_req202`
+(rational_exact.rs, verrouille l'ordre strict bignum que la passe a confirmé). **Soundness par
+construction, plus par chance.**
+
+**Conclusion** : les 2 points de plus fort risque de plumbing tiennent sous attaque profonde, et la
+seule fragilité relevée (div-dans-forall) est désormais un rejet propre testé. La review HUMAINE
+reste recommandée (le durcissement automatisé teste ce qu'il imagine ; l'œil humain sur les
+invariants `den>0` et l'anti-capture reste le filet ultime), mais la confiance est substantiellement
+renforcée. Preuve : Workflow `wf_ef020d4d-378`, journal
 `subagents/workflows/wf_ef020d4d-378/journal.jsonl`.
