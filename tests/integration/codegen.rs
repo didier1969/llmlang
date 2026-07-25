@@ -1509,6 +1509,9 @@ fn evidence_emits_proof_tuple_for_axon_req208() {
     let ok = "module T:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n";
     let v = run(ok, "ok.lll");
     assert_eq!(v["vcgen_version"].as_str().unwrap(), vc::VCGEN_VERSION);
+    // REQ-LLL-155 tranche 2c : l'attestation porte la version du SOLVEUR (part de l'identité).
+    assert_eq!(v["z3_version"].as_str().unwrap(), vc::z3_version());
+    assert!(!v["z3_version"].as_str().unwrap().is_empty(), "z3_version non-vide dans l'évidence");
     let ev = v["evidence"].as_array().unwrap();
     let inc = ev.iter().find(|e| e["name"] == "inc").expect("inc evidence");
     assert_eq!(inc["verdict"], "proved");

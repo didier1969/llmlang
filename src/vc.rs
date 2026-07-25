@@ -259,7 +259,7 @@ pub fn discharge_part(
 /// when the vcgen LOGIC changes, but Z3 is EXTERNAL and invisible to it; this closes that gap.
 /// Failure (no binary / empty output) → a stable sentinel, so the key stays deterministic (and
 /// a different install just re-verifies once — over-invalidation, always fail-SAFE).
-fn z3_version() -> &'static str {
+pub fn z3_version() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| {
         find_z3()
