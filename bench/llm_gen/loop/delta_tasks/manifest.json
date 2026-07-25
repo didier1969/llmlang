@@ -1,14 +1,55 @@
 {
-  "comment": "Tâches DELTA (REQ-LLL-192) : MODIFIER un module llmlang vérifié, mesurer si le contexte focalisé (`lll context`, bras LIVE) aide vs le dump complet seul (bras DARK). Chaque tâche = un module de base VÉRIFIÉ + une instruction de changement à BLAST-RADIUS (le changement correct exige un fait porté par le contrat d'une dépendance — exactement ce que `lll context` surface et qu'un dump complet enfouit). Le gate = `lll check` vert + le(s) marqueur(s) de changement présent(s) + `lll run` marche encore. `reference.lll` = une modification correcte de référence (valide que la tâche est solvable ; sert au dry-run gratuit du gate). Le run PAYANT est gated par BENCH_GO=1 + budget (comme loop_run).",
+  "comment": "Tâches DELTA (REQ-LLL-192) 3-WAY : MODIFIER un module llmlang vérifié, mesurer 3 conditions de contexte. DARK = dump complet. LIVE_CTX = + `lll context` (source cible + contrats des CALLEES, le firewall — calculé en direct depuis le graphe d'appel). LIVE_AXON = LIVE_CTX + le blast-radius Axon `impact` (les CALLERS/symboles impactés — ce que lll context n'a PAS). `axon_affects` = les symboles que `impact <target>` (project=LLL) renvoie ; VIDE quand Axon ne résout pas la cible (indexation .lll inégale : le pipeline résout, sourcing/planning non aujourd'hui — LIVE_AXON dégrade alors gracieusement vers LIVE_CTX). Gate = `lll check` vert + marqueur(s) présent(s) + `lll run` marche. reference.lll = modif correcte prouvée (valide la solvabilité + dry-run du gate). Run PAYANT gated par BENCH_GO=1 + budget. d05 est la tâche RIPPLE : c'est là que le blast-radius LIVE_AXON (invoice, main) différencie de LIVE_CTX (callees seuls).",
   "tasks": [
     {
       "id": "d01_subtotal_upper_bound",
       "base": "examples/erp_order_pipeline_verified.lll",
       "target": "order_subtotal",
+      "axon_affects": ["invoice", "main"],
       "instruction": "Renforce `order_subtotal` avec une garantie de BORNE HAUTE : ajoute une clause `ensures` disant que le sous-total ne dépasse jamais le brut des deux lignes, c.-à-d. `result <= q1 * p1 + q2 * p2`. Garde tout le reste IDENTIQUE. Le module doit toujours vérifier (`lll check` vert). Indice : cette borne se décharge grâce au contrat de `line_net`.",
       "change_markers": ["result <= q1 * p1 + q2 * p2"],
       "reference": "delta_tasks/d01_subtotal_upper_bound/reference.lll",
-      "blast_radius": "order_subtotal (la cible) a besoin du `ensures result <= qty * unit_price` de line_net pour se décharger ; `lll context order_subtotal` surface CE contrat (le firewall des deps), un dump complet l'enfouit dans 90 lignes."
+      "kind": "localized (dep-contract) — favorise LIVE_CTX"
+    },
+    {
+      "id": "d02_max_profit_ceiling",
+      "base": "examples/erp_planning_verified.lll",
+      "target": "use_plan",
+      "axon_affects": [],
+      "instruction": "Renforce `use_plan` avec un plafond de profit : ajoute `ensures result <= 20500` (le profit maximal sous les plafonds de demande). Garde tout le reste identique ; `lll check` doit rester vert. Indice : ça se décharge des plafonds de demande déjà en `requires` de use_plan (a<=20, b<=15, c<=30).",
+      "change_markers": ["result <= 20500"],
+      "reference": "delta_tasks/d02_max_profit_ceiling/reference.lll",
+      "kind": "localized — Axon non-résolu (LIVE_AXON=LIVE_CTX)"
+    },
+    {
+      "id": "d03_margin_le_revenue",
+      "base": "examples/erp_sourcing_verified.lll",
+      "target": "margin",
+      "axon_affects": [],
+      "instruction": "Renforce `margin` avec une borne haute : ajoute `ensures result <= revenue`. Garde tout le reste identique ; `lll check` doit rester vert. Indice : la marge est `revenue - cost` avec `requires cost >= 0`.",
+      "change_markers": ["result <= revenue"],
+      "reference": "delta_tasks/d03_margin_le_revenue/reference.lll",
+      "kind": "localized — Axon non-résolu (LIVE_AXON=LIVE_CTX)"
+    },
+    {
+      "id": "d04_tax_upper_bound",
+      "base": "examples/erp_order_pipeline_verified.lll",
+      "target": "with_tax",
+      "axon_affects": ["invoice", "main"],
+      "instruction": "Renforce `with_tax` avec une borne haute : ajoute `ensures result <= subtotal + subtotal * tax_bps`. Garde tout le reste identique ; `lll check` doit rester vert. Indice : `x div 10000 <= x` pour x = subtotal*tax_bps >= 0.",
+      "change_markers": ["result <= subtotal + subtotal * tax_bps"],
+      "reference": "delta_tasks/d04_tax_upper_bound/reference.lll",
+      "kind": "localized (div) — favorise LIVE_CTX"
+    },
+    {
+      "id": "d05_third_order_line_ripple",
+      "base": "examples/erp_order_pipeline_verified.lll",
+      "target": "order_subtotal",
+      "axon_affects": ["invoice", "main"],
+      "instruction": "Ajoute une 3ᵉ ligne de commande à `order_subtotal` : de nouveaux paramètres `q3: Int, p3: Int, d3: Int` (avec les MÊMES requires de non-négativité/bps que les autres lignes), et somme une 3ᵉ `line_net(q3, p3, d3)`. Tu DOIS aussi mettre à jour son CALLER `invoice` (ajoute q3/p3/d3 + leurs requires, passe-les à order_subtotal) ET l'appel dans `main` (passe q3=p3=d3=0). Le module doit rester vérifié (`lll check` vert) et exécutable (`lll run`).",
+      "change_markers": ["q3: Int", "line_net(q3, p3, d3)", "order_subtotal(q1, p1, d1, q2, p2, d2, q3, p3, d3)"],
+      "reference": "delta_tasks/d05_third_order_line_ripple/reference.lll",
+      "kind": "RIPPLE (signature → callers) — c'est ICI que LIVE_AXON (blast-radius invoice/main) différencie de LIVE_CTX"
     }
   ]
 }

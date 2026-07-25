@@ -59,7 +59,7 @@ from loop_run import (  # noqa: E402
     LLL_PRIMER,
 )
 
-ARMS = ("LIVE", "DARK")
+ARMS = ("DARK", "LIVE_CTX", "LIVE_AXON")
 TASKS_DIR = os.path.join(HERE, "delta_tasks")
 RUNS_DIR = os.path.join(HERE, "runs")
 RESULTS = os.path.join(HERE, "delta_results.jsonl")
@@ -81,9 +81,26 @@ def base_src(task):
 
 
 def lll_context(task):
-    """Le payload LIVE : `lll context <base> <target> --format=json`."""
+    """Le payload LIVE_CTX : `lll context <base> <target> --format=json` (source cible +
+    contrats des CALLEES, le firewall)."""
     out = run_cmd([LLL, "context", base_path(task), task["target"], "--format=json"])
     return out.stdout if out.returncode == 0 else ""
+
+
+def axon_block(task):
+    """Le SUPPLÉMENT LIVE_AXON : le blast-radius `impact` d'Axon = les CALLERS/symboles
+    impactés (ce que `lll context`, callee-only, n'a PAS). `axon_affects` est pré-capturé
+    depuis `impact <target>` (project=LLL). VIDE quand Axon ne résout pas la cible
+    (indexation .lll inégale) → LIVE_AXON dégrade alors vers LIVE_CTX."""
+    affects = task.get("axon_affects", [])
+    if not affects:
+        return ""
+    return (
+        "# Axon impact analysis — changing `" + task["target"] + "` structurally AFFECTS these "
+        "dependent symbols (CALLERS you must keep consistent; the `lll context` read-set above "
+        "only shows the target's CALLEES): "
+        + ", ".join(affects) + "\n\n"
+    )
 
 
 # ---------------------------------------------------------------- prompts --
@@ -94,13 +111,15 @@ def gen_prompt(arm, task):
         + "\n\n# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
         + "# Change to make\n\n" + task["instruction"] + "\n\n"
     )
-    if arm == "LIVE":
+    if arm in ("LIVE_CTX", "LIVE_AXON"):
         core += (
             "# Focused context — what to read to change the target safely "
             "(`lll context`: the target's source + the CONTRACTS of its direct "
             "dependencies, the verification firewall)\n\n```json\n"
             + lll_context(task) + "\n```\n\n"
         )
+    if arm == "LIVE_AXON":
+        core += axon_block(task)
     core += (
         "Emit the COMPLETE modified llmlang module in ONE fenced code block. "
         "No prose outside the block."
@@ -194,15 +213,18 @@ def cmd_validate(_args):
 
 
 def cmd_dryrun(_args):
-    """Assemble les prompts LIVE/DARK, rapporte le surcoût du contexte, et exerce
-    le gate sur la référence correcte + le module inchangé. AUCUNE API."""
+    """Assemble les prompts des 3 bras, rapporte le surcoût de chaque étage de contexte,
+    et exerce le gate sur la référence correcte + le module inchangé. AUCUNE API."""
     for task in load_tasks():
-        print(f"\n=== task {task['id']}  (base {task['base']}, target `{task['target']}`) ===")
+        print(f"\n=== task {task['id']}  (base {task['base']}, target `{task['target']}`, kind: {task.get('kind', '?')}) ===")
         dark = gen_prompt("DARK", task)
-        live = gen_prompt("LIVE", task)
-        ctx = lll_context(task)
-        print(f"  DARK prompt : {len(dark):6d} chars")
-        print(f"  LIVE prompt : {len(live):6d} chars  (+{len(live) - len(dark)} = le payload `lll context`, {len(ctx)} chars)")
+        ctx = gen_prompt("LIVE_CTX", task)
+        axn = gen_prompt("LIVE_AXON", task)
+        affects = task.get("axon_affects", [])
+        print(f"  DARK      : {len(dark):6d} chars")
+        print(f"  LIVE_CTX  : {len(ctx):6d} chars  (+{len(ctx) - len(dark)} = `lll context`, callees+contrats)")
+        axon_note = f"impact→{', '.join(affects)}" if affects else "VIDE → dégrade vers LIVE_CTX (Axon ne résout pas la cible)"
+        print(f"  LIVE_AXON : {len(axn):6d} chars  (+{len(axn) - len(ctx)} = blast-radius Axon : {axon_note})")
         # Gate demo — SANS API : correct → VERT ; inchangé → ROUGE (l'édition n'a pas atterri).
         ref = read_file(os.path.join(HERE, task["reference"]))
         ok_ref, msg_ref = gate_modify(ref, f"dryrun_{task['id']}_reference", task)
@@ -211,8 +233,9 @@ def cmd_dryrun(_args):
         verdict_base = "ROUGE (correctement)" if not ok_base else "VERT — INATTENDU"
         print(f"  gate(base inchangée)     : {verdict_base}  ({msg_base[:70] if not ok_base else ''})")
         assert ok_ref and not ok_base, "invariant dry-run : référence→vert, inchangée→rouge"
-    print("\n✔ dry-run OK — prompts LIVE/DARK assemblés, surcoût contexte rapporté, gate changement-présent")
-    print("  distingue correct vs inchangé. ZÉRO appel API. Pour le chiffre : BENCH_GO=1 delta_run.py run.")
+    print("\n✔ dry-run OK — prompts DARK/LIVE_CTX/LIVE_AXON assemblés, surcoût de chaque étage rapporté,")
+    print("  gate changement-présent distingue correct vs inchangé. ZÉRO appel API.")
+    print("  Pour les 2 ratios (LIVE_CTX/DARK, LIVE_AXON/DARK) : BENCH_GO=1 delta_run.py run ; puis score.")
 
 
 def cmd_run(_args):
@@ -249,15 +272,16 @@ def cmd_score(_args):
         n = sum(1 for r in rows if r.get("arm") == arm and "error" not in r)
         green = sum(1 for r in rows if r.get("arm") == arm and r.get("correct"))
         print(f"  {arm}: {green}/{n} vert")
-    pair_medians, excluded, total = paired_ratio_stats(rows, "LIVE", "DARK")
-    if not pair_medians:
-        print(f"  aucune unité LIVE/DARK appariée & toutes-deux-correctes (exclues {excluded}/{total}) — non concluant.")
-        return
     import statistics
-    med = statistics.median(pair_medians)
-    lo, hi = bootstrap_ci(pair_medians)
-    print(f"  ratio tokens LIVE/DARK apparié : médiane {med:.3f}  IC95% [{lo:.3f}, {hi:.3f}]  (exclues {excluded}/{total})")
-    print("  → LIVE consomme MOINS de tokens (delta positif)" if hi < 1.0 else "  → non concluant (l'IC inclut 1.0)")
+    for num in ("LIVE_CTX", "LIVE_AXON"):
+        pair_medians, excluded, total = paired_ratio_stats(rows, num, "DARK")
+        if not pair_medians:
+            print(f"  {num}/DARK : aucune unité appariée & toutes-deux-correctes (exclues {excluded}/{total}) — non concluant.")
+            continue
+        med = statistics.median(pair_medians)
+        lo, hi = bootstrap_ci(pair_medians)
+        verdict = "MOINS de tokens (delta +)" if hi < 1.0 else "non concluant (IC inclut 1.0)"
+        print(f"  {num}/DARK : ratio tokens médian {med:.3f}  IC95% [{lo:.3f}, {hi:.3f}]  (exclues {excluded}/{total}) → {verdict}")
 
 
 def main():

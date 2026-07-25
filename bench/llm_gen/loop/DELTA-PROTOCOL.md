@@ -1,61 +1,88 @@
-# Harnais DELTA de contexte (REQ-LLL-192) — `delta_run.py`
+# Harnais DELTA de contexte 3-WAY (REQ-LLL-192) — `delta_run.py`
 
-Mesure : **le contexte focalisé d'une définition aide-t-il un LLM à faire une MODIFICATION
-VÉRIFIÉE d'un module llmlang avec moins de tokens que le dump complet ?** C'est la « valeur du
-contexte structurel » que le langage vérifié rend possible (les contrats donnent un read-set serré).
+Mesure : **quel niveau de contexte aide un LLM à faire une MODIFICATION VÉRIFIÉE d'un module
+llmlang avec moins de tokens ?** Trois conditions, du plus pauvre au plus riche :
+
+- **DARK** = primer + **source complète** du module + instruction de changement. (Aucun contexte
+  focalisé — le LLM lit tout.)
+- **LIVE_CTX** = DARK + `lll context <file> <part> --format=json` : la source de la cible + les
+  **contrats de ses CALLEES** (le firewall DEC-LLL-017), calculés en direct depuis le graphe
+  d'appel. La valeur du **langage vérifié** (les contrats donnent un read-set serré).
+- **LIVE_AXON** = LIVE_CTX + le **blast-radius `impact` d'Axon** : les **CALLERS/symboles
+  impactés** (ce que `lll context`, callee-only, n'a PAS). La valeur de l'**intelligence
+  structurelle** d'Axon (le graphe complet, amont inclus).
+
+Deux ratios appariés : `LIVE_CTX/DARK` (le contexte du langage aide-t-il ?) et `LIVE_AXON/DARK`
+(l'ajout du blast-radius Axon aide-t-il davantage ?). Delta positif ssi `IC_haut < 1.0`.
 
 ## Le design (pré-enregistré)
 
 - **Tâche** = *modifier-un-module-sous-contexte* : un module de base VÉRIFIÉ + une instruction de
-  changement à **blast-radius** (le changement correct exige un fait porté par le contrat d'une
-  dépendance). Distincte du banc spec→fonction de `loop_run.py`.
-- **Deux bras** (modélisés comme VALEURS du slot `arm`, PAS un cross langue×contexte) :
-  - `DARK` = primer + **source complète** du module + instruction.
-  - `LIVE` = DARK + `lll context <file> <part> --format=json` (source de la cible + les
-    **contrats** de ses dépendances directes — le firewall DEC-LLL-017 — calculés EN DIRECT depuis
-    le graphe d'appel).
+  changement. `reference.lll` = une modif correcte PROUVÉE (valide la solvabilité + sert au dry-run
+  du gate).
+- **Trois bras** modélisés comme VALEURS du slot `arm` (PAS un cross langue×contexte). La machinerie
+  appariée de `loop_run.py` est réutilisée VERBATIM (`call_model`, `paired_ratio_stats` ×2,
+  `bootstrap_ci`).
 - **Gate** (`gate_modify`) = `lll check --no-cache` VERT **et** marqueur(s) de changement
   présent(s) **et** `lll run` marche encore. Le prédicat « changement présent » est la seule pièce
   vraiment neuve (rien dans `loop_run` ne vérifie qu'une édition a atterri).
-- **Métrique** = ratio apparié `tokens_total(LIVE) / tokens_total(DARK)` par (tâche, modèle,
-  échantillon), médiane + **IC95% bootstrap** (par cluster de tâche). **Delta positif ssi
-  `IC_haut < 1.0`** (LIVE consomme strictement moins). Machinerie appariée réutilisée VERBATIM de
-  `loop_run.py` (`paired_ratio_stats`, `bootstrap_ci`, `call_model`).
+- **Métrique** = ratio apparié `tokens_total(num)/tokens_total(DARK)` par (tâche, modèle,
+  échantillon), médiane + **IC95% bootstrap** par cluster de tâche.
 
 ## Pourquoi c'est un VRAI test (pas gagné d'avance)
 
-Le prompt LIVE est **PLUS GROS** que DARK (il AJOUTE le payload `lll context` — mesuré ~+1300
-chars sur la tâche d01). Donc LIVE ne peut gagner QUE si le contexte focalisé fait converger le LLM
-en **moins de rounds de réparation** (`R_MAX=5`, réparation conditionnée-sur-échec) : moins de
-tokens de sortie + moins de re-prompts, malgré un 1ᵉʳ prompt plus lourd. Si le contexte n'aide pas,
-LIVE est plus cher et le delta est ≥ 1.0. Rien n'est gagné par construction.
+Chaque étage AJOUTE des tokens au 1ᵉʳ prompt (mesuré : LIVE_CTX +500…1300 chars, LIVE_AXON encore
++200 sur le pipeline). Un bras ne gagne QUE s'il fait converger le LLM en **moins de rounds de
+réparation** (`R_MAX=5`), assez pour compenser son prompt plus lourd. Si le contexte n'aide pas, le
+bras est plus cher et son ratio ≥ 1.0. Rien n'est gagné par construction.
 
-## La tâche d01 (blast-radius illustré)
+## Les 5 tâches (et où chaque bras est censé briller)
 
-`d01_subtotal_upper_bound` : dans `examples/erp_order_pipeline_verified.lll`, ajouter à
-`order_subtotal` un `ensures result <= q1 * p1 + q2 * p2`. Cette borne ne se décharge QUE via le
-contrat de `line_net` (`ensures result <= qty * unit_price`). `lll context order_subtotal` surface
-CE contrat (le firewall des deps) ; un dump de 90 lignes l'enfouit. `reference.lll` = la modif
-correcte (prouvée — valide que la tâche est solvable + sert au dry-run du gate).
+| id | base / cible | genre | LIVE_AXON |
+|---|---|---|---|
+| d01 | pipeline / `order_subtotal` | localisé (borne ← contrat de `line_net`) | impact→invoice,main |
+| d02 | planning / `use_plan` | localisé (plafond profit) | VIDE (=LIVE_CTX) |
+| d03 | sourcing / `margin` | localisé (marge ≤ revenu) | VIDE (=LIVE_CTX) |
+| d04 | pipeline / `with_tax` | localisé (borne taxe, `div`) | impact→invoice,main |
+| **d05** | **pipeline / `order_subtotal`** | **RIPPLE : +3ᵉ ligne → callers `invoice`+`main`** | **impact→invoice,main** |
+
+**d05 est la tâche décisive pour LIVE_AXON** : ajouter une 3ᵉ ligne à `order_subtotal` change sa
+signature → il faut aussi mettre à jour ses CALLERS `invoice` et `main`. `lll context` (callees
+seuls) ne les montre PAS ; le blast-radius Axon (`invoice, main`) SI. Les tâches localisées
+(d01-d04) favorisent LIVE_CTX (le fait clé est dans un callee) — LIVE_AXON y ≈ LIVE_CTX.
+
+## Caveats HONNÊTES (constatés, pas balayés)
+
+- **Couverture Axon INÉGALE.** `impact` résout les symboles du **pipeline** (`order_subtotal`,
+  `with_tax` → callers `invoice, main`) mais PAS ceux de **sourcing/planning** (`margin`,
+  `use_plan` = *not-found* aujourd'hui — indexation `.lll` partielle/en cours dans Axon). Là,
+  `axon_affects` est VIDE et **LIVE_AXON dégrade GRACIEUSEMENT vers LIVE_CTX** (mesuré : +0 char).
+- **`axon_affects` est PRÉ-CAPTURÉ** (gelé) depuis `impact <target>` (project=LLL) au moment de
+  l'écriture des tâches — reproductible, pas d'appel Axon au runtime du harnais (le serveur MCP
+  n'est pas un CLI). À rafraîchir si le graphe change.
+- **`inspect --mode=source` est mince pour les `.lll`** (pas de corps source) → LIVE_AXON s'appuie
+  sur `impact` (le blast-radius), pas sur les signatures voisines d'`inspect`.
+- **`why`/l'intention** : le planner `why` d'un symbole `.lll` titre encore sur `vc.rs` (artefact
+  de ranking, tuning AXO découplé) — donc la jambe « intention SOLL » n'est PAS injectée ici ;
+  LIVE_AXON = contexte STRUCTUREL (callers), pas encore le POURQUOI. Suivi possible.
 
 ## Commandes
 
 | commande | coût | ce qu'elle fait |
 |---|---|---|
-| `python3 delta_run.py validate` | gratuit | manifest + fixtures présents, champs complets |
-| `python3 delta_run.py dryrun` | gratuit | assemble prompts LIVE/DARK, rapporte le surcoût contexte, exerce le gate sur la référence (VERT) + le module inchangé (ROUGE). **Zéro API.** |
-| `BENCH_GO=1 OPENROUTER_API_KEY=… python3 delta_run.py run` | **PAYANT** | run apparié LIVE/DARK sur tâches×modèles×échantillons ; gated (budget-go opérateur) |
-| `python3 delta_run.py score` | gratuit | ratio apparié LIVE/DARK + IC bootstrap + verdict |
+| `python3 delta_run.py validate` | gratuit | manifest + fixtures présents, champs complets (5 tâches) |
+| `python3 delta_run.py dryrun` | gratuit | assemble les 3 prompts/tâche, rapporte le surcoût de chaque étage, exerce le gate sur la référence (VERT) + le module inchangé (ROUGE). **Zéro API.** |
+| `BENCH_GO=1 OPENROUTER_API_KEY=… python3 delta_run.py run` | **PAYANT** | run apparié 3-bras sur tâches×modèles×échantillons ; gated (budget-go opérateur) |
+| `python3 delta_run.py score` | gratuit | 2 ratios (LIVE_CTX/DARK, LIVE_AXON/DARK) + IC bootstrap + verdicts |
 
 `LLL_BIN` pointe le binaire `lll` (défaut `target/debug/lll`) ; `LLL_Z3` le solveur vendorisé.
 
-## Statut & suivi
+## Statut
 
-- **FAIT (gratuit)** : harnais + tâche d01 + dry-run démontré (prompts assemblés, gate distingue
-  correct/inchangé). Le run payant attend un **budget-go opérateur**.
-- **SUIVI (2ᵉ temps, la vraie thèse DEC-LLL-081)** : un bras `LIVE-AXON` qui injecte AUSSI Axon
-  `impact`/`why` + l'**intention SOLL** (le POURQUOI). Prérequis : indexer l'IST `.lll` dans Axon —
-  aujourd'hui Axon MCP n'indexe PAS les `.lll` (impact/why sur un `part` = not-found / faux-positifs
-  vers le compilateur Rust), donc LIVE utilise `lll context` (le COMMENT structurel). Ce 1ᵉʳ delta
-  mesure la valeur du **contexte du langage vérifié** ; l'étape Axon mesurera la valeur de
-  l'**intention**.
+- **FAIT (gratuit)** : harnais 3-bras + 5 tâches (dont d05 ripple) + dry-run démontré (prompts
+  assemblés, surcoût par étage rapporté, gate distingue correct/inchangé). Le run payant attend un
+  **budget-go opérateur**.
+- **CE QUE LA MESURE ÉTABLIRA** : `LIVE_CTX/DARK` = valeur du contexte du langage vérifié ;
+  `LIVE_AXON/DARK` = valeur ajoutée du blast-radius Axon — attendue surtout sur d05 (ripple), ~nulle
+  sur les tâches localisées (finding en soi). Étendre la couverture Axon (sourcing/planning) et la
+  jambe intention = suivis.
