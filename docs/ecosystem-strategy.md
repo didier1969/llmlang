@@ -71,6 +71,36 @@ Trois axes, tous rattachés à CPT-LLL-013 / REQ-LLL-119. **Baseline = stack mai
 
 > Discipline : tout ce qui n'est pas rattaché à (1)/(2)/(3) reste **[HYPOTHÈSE]** dans ce document, pas « delta ».
 
+### RÉSULTATS MESURÉS (2026-07-25) — le delta n'est plus prédit, il est chiffré
+
+Harnais `bench/llm_gen/loop/delta_run.py` (3 bras : DARK=dump complet / LIVE_CTX=`lll context` /
+LIVE_AXON=+blast-radius), tâches = modifier un `part` d'un module ERP vérifié, gate = compilateur-
+oracle (`lll check` vert + changement présent). Détail complet : `DELTA-PROTOCOL.md`. Quatre runs :
+
+1. **Run full-module (raté INSTRUCTIF).** LIVE=dump+contexte → +4 % tokens. Faux : c'était un défaut
+   de design (donner le module ENTIER *plus* le contexte). La vraie valeur = fiabilité (0 vs 2
+   échecs), invisible dans le ratio apparié.
+2. **Run SPLICE (le vrai test « focus AU LIEU du dump »).** Le modèle n'émet que la `part` changée ;
+   les bras LIVE reçoivent le FOCUS SEUL. **LIVE_CTX/DARK = 0.695, IC95% [0.614, 0.730] → ~30 % de
+   tokens en MOINS, IC entièrement sous 1.0, à 100 % de réussite** (d01–d04). Le read-set contract-
+   firewall du langage vérifié SUFFIT et est plus serré → économie réelle.
+3. **Run d05 ripple (le blast-radius).** Changement qui se propage aux callers. Le contexte
+   caller-aware évite le round de découverte que le focus callee-only doit payer : **rounds moyens
+   DARK 1.50 / callee-only 1.83 / caller-aware 1.33 ; ratio caller-aware/callee-only 0.850**
+   (~15 % de plus sur un ripple).
+4. **`lll context --with-callers` LIVRÉ** (commit `610e81e`) : le gain ripple productisé en capacité
+   LANGAGE (clôture transitive du graphe d'appel inverse, intra-module, SANS Axon).
+
+**Ce que la mesure a CLARIFIÉ (correction honnête de la prédiction ci-dessus).** Le contexte
+**STRUCTUREL** (callees, callers, blast-radius) est **dérivable du CODE** → c'est une capacité du
+**LANGAGE VÉRIFIÉ**, pas d'Axon (llmlang le fournit : `lll context` + `--with-callers`). Les gains
+mesurés (~30 % focus + ~15 % ripple) sont des gains **LANGAGE**. La valeur **irréductiblement
+distincte d'Axon** n'est PAS la structure — c'est l'**INTENTION** (SOLL : le POURQUOI, le REQ, les
+acceptance-criteria), un savoir **qui n'est pas dans le code**. Elle reste **NON MESURÉE**, bloquée
+par : (a) extraction de symboles `.lll` partielle côté AXO (certains modules résolvent, d'autres
+non — chantier AXO), (b) `why` bruite vers `vc.rs`, (c) intention par-part pas granulaire dans SOLL.
+→ **Prochain chantier propre = mesurer la valeur INTENTION d'Axon** (session dédiée, repo AXO).
+
 ---
 
 ## 4. Comment RUNNER le delta (décision opérateur)
