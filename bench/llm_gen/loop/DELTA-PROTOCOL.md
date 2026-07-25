@@ -152,6 +152,34 @@ C'est la valeur mesurée du langage vérifié pour le dev-via-LLM. LIVE_AXON ≈
 changements localisés, le blast-radius Axon est neutre (il compterait sur un ripple — d05 — qui
 exige la source des callers, non encore fournie).
 
+## RÉSULTATS — d05 ripple (2026-07-25) : la VALEUR mesurée d'Axon
+
+**Le test.** d05 = ajouter une 3ᵉ ligne à `order_subtotal` → le changement SE PROPAGE à ses callers
+`invoice` + `main` (il faut les mettre à jour). Bras LIVE_AXON enrichi : Axon `impact` dit QUELS
+callers sont affectés → on lit EXACTEMENT leur source (pas tout le module). LIVE_CTX reste
+callee-only (ne voit pas les callers). Mode splice, 2 modèles × 3 échantillons × 3 bras = 18 unités.
+
+| bras | réussite | rounds moyen | tokens médian | ratio /DARK |
+|---|---|---|---|---|
+| DARK | 6/6 | 1.50 | 7297 | — |
+| LIVE_CTX | 6/6 | 1.83 | 6788 | 0.931 |
+| **LIVE_AXON** | 6/6 | **1.33** | **5790** | **0.811** |
+
+**LIVE_AXON / LIVE_CTX = 0.850** (~15 % moins cher que le focus seul).
+
+**Mécanisme (honnête — différent de la prédiction « LIVE_CTX échoue »).** LIVE_CTX ne PLANTE pas :
+le focus callee-only cache les callers → le modèle rate le round 1 (arité `invoice`/`main`), MAIS le
+feedback du compilateur-oracle (`lll check`) révèle les callers → il **RÉCUPÈRE au round 2**. Il paie
+donc un **round de DÉCOUVERTE** (1.83 rounds moyens). LIVE_AXON reçoit les callers d'emblée (le
+blast-radius d'Axon) → **aucun round raté** (1.33) → ~15 % moins cher que LIVE_CTX, ~19 % que DARK.
+
+**Ce que ça DÉMONTRE (la thèse DEC-081).** Sur un changement qui RIPPLE, l'intelligence structurelle
+d'Axon (le blast-radius) apporte une valeur MESURÉE **au-dessus** du contexte llmlang seul : elle
+évite le round de découverte des callers. Sur les changements localisés (d01–d04), Axon est neutre
+(pas de ripple). **Le tableau complet** : le langage vérifié donne le FOCUS (~30 % d'économie sur
+localisé) ; Axon ajoute le BLAST-RADIUS (~15 % de plus sur ripple). Les deux se composent — c'est la
+valeur chiffrée de l'écosystème llmlang×Axon pour le dev-via-LLM.
+
 ## Statut
 
 - **FAIT** : harnais 3-bras + 5 tâches + DEUX runs payants. **Run 1 (full-module)** : contexte ⇒
@@ -159,7 +187,13 @@ exige la source des callers, non encore fournie).
   bon design (LIVE=focus AU LIEU du dump, modèle émet la part, harnais re-splice) → **économie
   MESURÉE ~30 % de tokens à 100 % de réussite** (LIVE_CTX/DARK 0.695 [0.614, 0.730]). C'est la
   valeur du langage vérifié : son read-set contract-firewall SUFFIT et est plus serré que le dump.
-- **SUIVIS** : (a) `lll context --with-callers` → débloquer d05 (ripple) où LIVE_AXON doit briller
-  (blast-radius = quels callers modifier) ; (b) plus d'échantillons/modèles (robustesse) ; (c)
-  couverture Axon des symboles à `effect Solver` (planning/sourcing not-found — LllParser d'Axon
-  échoue dessus) ; (d) ID `google/gemini-2.0-flash-001` périmé (404) ; (e) jambe intention SOLL.
+- **Run 3 (d05 ripple, splice)** : la VALEUR d'Axon démontrée — sur un changement qui se propage
+  aux callers, LIVE_AXON (blast-radius révèle les callers) évite le round de découverte que
+  LIVE_CTX (focus callee-only) doit payer → LIVE_AXON/LIVE_CTX 0.850, /DARK 0.811. **Tableau
+  complet** : langage vérifié = FOCUS (~30 % sur localisé) ; Axon = BLAST-RADIUS (~15 % de plus
+  sur ripple) ; ça se compose.
+- **SUIVIS** : (a) `lll context --with-callers` = rendre le focus caller-aware une vraie capacité
+  llmlang PRODUIT (ici c'était de la logique de banc guidée par `impact`) ; (b) plus
+  d'échantillons/modèles (robustesse, n=6 sur d05) ; (c) couverture Axon des symboles à `effect
+  Solver` (planning/sourcing not-found — LllParser d'Axon échoue dessus) ; (d) ID
+  `google/gemini-2.0-flash-001` périmé (404) ; (e) jambe intention SOLL.

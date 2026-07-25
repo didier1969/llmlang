@@ -232,12 +232,23 @@ def axon_block(task):
     affects = task.get("axon_affects", [])
     if not affects:
         return ""
-    return (
+    block = (
         "# Axon impact analysis — changing `" + task["target"] + "` structurally AFFECTS these "
-        "dependent symbols (CALLERS you must keep consistent; the `lll context` read-set above "
-        "only shows the target's CALLEES): "
-        + ", ".join(affects) + "\n\n"
+        "CALLERS (Axon's blast-radius; the `lll context` read-set above only shows the target's "
+        "CALLEES). Keep them consistent: " + ", ".join(affects) + "\n\n"
     )
+    if SPLICE:
+        # Axon dit QUELS callers sont affectés → on lit EXACTEMENT ceux-là (pas tout le module).
+        # C'est la valeur du blast-radius : un contexte focalisé COMPLET pour un changement qui
+        # se propage. `lll context` (callee-only) ne les révèle pas → LIVE_CTX les rate.
+        base = base_src(task)
+        srcs = [s for c in affects if (s := extract_part(base, c))]
+        if srcs:
+            block += (
+                "Their current source (edit these too if the change ripples to them):\n\n```\n"
+                + "\n\n".join(srcs) + "\n```\n\n"
+            )
+    return block
 
 
 # ---------------------------------------------------------------- prompts --
