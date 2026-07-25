@@ -62,3 +62,20 @@ restreindre. **Le delta (item 3) peut donc se construire dessus** : LIVE = injec
 métrique = tokens-jusqu'au-vert appariés (via le socle `loop_run.py`). Reste avant un run payant :
 définir la/les tâche(s) de modification sur ce module + câbler la condition à
 `gen_prompt`/`repair_prompt` + `BENCH_GO` + budget opérateur.
+
+## LIVRÉ + CORRECTION (2026-07-25) — harnais 3-way, l'IST `.lll` EST indexé dans Axon
+
+**Livré** : `bench/llm_gen/loop/delta_run.py` (harnais 3 bras) + 5 tâches (dont d05 ripple), commit
+`180d172`. Voir `bench/llm_gen/loop/DELTA-PROTOCOL.md` (source à jour).
+
+**CORRECTION d'un fait affirmé plus tôt dans ce doc et ailleurs.** Une exploration antérieure avait
+conclu « Axon MCP n'indexe PAS les `.lll` → `impact`/`why` = not-found ». **C'est FAUX pour
+`impact`/`inspect`** (vérifié à la main) : l'IST des `.lll` EST indexé et vivant (`impact
+order_subtotal` → blast-radius réel `invoice`/`main`, confidence=high, scope 425/425 ; le parser
+`LllParser` est wiré dans `axon/src/axon-core/src/parser/mod.rs`). Le bras **LIVE_AXON est donc
+gratuit/disponible**, pas un pré-travail — il injecte le blast-radius `impact` (les CALLERS, ce que
+`lll context` callee-only n'a pas). Nuances RÉELLES restantes : couverture INÉGALE (le pipeline
+résout ; `sourcing`/`planning` = not-found aujourd'hui → LIVE_AXON dégrade vers LIVE_CTX) ;
+`inspect --mode=source` mince pour `.lll` ; le planner **`why`** d'un `.lll` titre encore sur
+`vc.rs` (artefact de ranking, tuning AXO découplé) → la jambe **intention SOLL n'est pas encore
+injectée**. Le 3-way mesure DARK / LIVE_CTX(langage) / LIVE_AXON(structure Axon).
