@@ -249,7 +249,7 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
                 .ok_or("missing required argument `part`")?;
             let (_, cm, _) = load(file)?;
             let raw = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
-            let mut ctx = crate::context::edit_context(&raw, &cm, part)?;
+            let mut ctx = crate::context::edit_context(&raw, &cm, part, false)?;
             ctx.file = file.to_string();
             Ok(crate::context::render_text(&ctx))
         }

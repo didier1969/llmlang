@@ -63,3 +63,6 @@ mod seq;
 
 #[path = "integration/solver.rs"]
 mod solver;
+
+#[path = "integration/context.rs"]
+mod context;

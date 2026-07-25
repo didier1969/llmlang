@@ -722,7 +722,7 @@ pub fn edit_context_backend(uri: &str, text: &str, part: &str) -> Result<Value, 
     with_sibling_temp(&path, text, "ctx", |tmp| {
         let (_, module) = crate::loader::load_program(&tmp.to_string_lossy())?;
         let cm = crate::types::check_module(module)?;
-        let ctx = crate::context::edit_context(text, &cm, part)?;
+        let ctx = crate::context::edit_context(text, &cm, part, false)?;
         Ok(crate::context::render_json(&ctx))
     })
     .unwrap_or_else(|| Err("lsp: cannot write buffer to a temp file for context".to_string()))

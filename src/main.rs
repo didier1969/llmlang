@@ -1299,16 +1299,26 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             print!("{}", explain::rationale_show(Path::new("."), &hm, part)?);
             Ok(())
         }
-        ["context", file, part] | ["context", file, part, "--format=json"] => {
+        ["context", file, part, rest @ ..] => {
             // REQ-LLL-142 — the minimal EDIT CONTEXT of a part: its own source + the CONTRACTS
             // (never the bodies) of its direct deps + the types it references, plus the byte
             // reduction vs the whole file (the INPUT half of the token economy, VIS-LLL-001 #1).
+            // `--with-callers` (REQ-LLL-192) ALSO includes the reverse call graph (parts that
+            // CALL the target) with their FULL source — for a change that ripples to callers.
             // Read-only; reads the file VERBATIM (mono-file proto, DEC-LLL-020).
+            for f in rest {
+                if *f != "--format=json" && *f != "--with-callers" {
+                    return Err(format!(
+                        "lll context: unknown flag `{f}` (use `--with-callers`, `--format=json`)"
+                    ));
+                }
+            }
+            let with_callers = rest.contains(&"--with-callers");
             let raw = std::fs::read_to_string(*file).map_err(|e| format!("{file}: {e}"))?;
             let (_, cm, _) = load(file)?;
-            let mut ctx = context::edit_context(&raw, &cm, part)?;
+            let mut ctx = context::edit_context(&raw, &cm, part, with_callers)?;
             ctx.file = (*file).to_string();
-            if matches!(a.as_slice(), [.., "--format=json"]) {
+            if rest.contains(&"--format=json") {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&context::render_json(&ctx))

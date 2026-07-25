@@ -192,8 +192,14 @@ valeur chiffrée de l'écosystème llmlang×Axon pour le dev-via-LLM.
   LIVE_CTX (focus callee-only) doit payer → LIVE_AXON/LIVE_CTX 0.850, /DARK 0.811. **Tableau
   complet** : langage vérifié = FOCUS (~30 % sur localisé) ; Axon = BLAST-RADIUS (~15 % de plus
   sur ripple) ; ça se compose.
-- **SUIVIS** : (a) `lll context --with-callers` = rendre le focus caller-aware une vraie capacité
-  llmlang PRODUIT (ici c'était de la logique de banc guidée par `impact`) ; (b) plus
-  d'échantillons/modèles (robustesse, n=6 sur d05) ; (c) couverture Axon des symboles à `effect
-  Solver` (planning/sourcing not-found — LllParser d'Axon échoue dessus) ; (d) ID
-  `google/gemini-2.0-flash-001` périmé (404) ; (e) jambe intention SOLL.
+- **Run 4 (feature) — `lll context --with-callers` LIVRÉ.** Le gain ripple d05 (la source des
+  callers) est devenu une vraie capacité llmlang PRODUIT : `lll context <f> <part> --with-callers`
+  ajoute le blast-radius TRANSITIF (parts qui appellent la cible, direct ou via d'autres) avec leur
+  source complète, calculé depuis le graphe d'appel intra-module de llmlang (SANS Axon). Honnêteté :
+  pour un ripple INTRA-module, llmlang fournit les callers seul → la valeur d05 est une valeur
+  LANGAGE, pas d'Axon. La valeur DISTINCTE d'Axon = CROSS-module (un caller dans un autre fichier
+  que le single-module `lll context` rate) + intention SOLL — **non encore mesurée** (suivi).
+- **SUIVIS** : (a) mesurer la valeur CROSS-module d'Axon (isole ce qu'Axon ajoute au-delà du graphe
+  propre de llmlang) ; (b) plus d'échantillons/modèles (robustesse, n=6 sur d05) ; (c) couverture
+  Axon des symboles à `effect Solver` (planning/sourcing not-found — LllParser d'Axon échoue dessus) ;
+  (d) ID `google/gemini-2.0-flash-001` périmé (404) ; (e) jambe intention SOLL.

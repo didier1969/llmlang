@@ -21,6 +21,15 @@ pub struct Dep {
     pub header: String,
 }
 
+/// A caller of the target part, in THIS file (reverse call graph): its FULL source. A change
+/// that ripples to callers (e.g. a signature change) must EDIT them, so the body is needed —
+/// not just the contract. Populated only with `with_callers` (opt-in). REQ-LLL-192 (le run
+/// delta d05 a mesuré ~15 % d'économie quand le contexte inclut les callers d'un ripple).
+pub struct Caller {
+    pub name: String,
+    pub source: String,
+}
+
 /// The minimal, sufficient context to edit one part.
 pub struct EditContext {
     pub part: String,
@@ -31,6 +40,9 @@ pub struct EditContext {
     /// Direct part deps resolved elsewhere (import / stdlib) — their contract is the
     /// firewall in their own module; here we only name them.
     pub external_deps: Vec<String>,
+    /// Parts in THIS file that CALL the target (reverse call graph) — FULL source, for a
+    /// change that ripples to them. Empty unless `with_callers` (opt-in: bigger context).
+    pub callers: Vec<Caller>,
     /// Type / class declarations the part (or a dep header) references, verbatim.
     pub types_in_scope: Vec<String>,
     /// Bytes an editor must READ (part source + dep headers + types), vs the whole file.
@@ -50,7 +62,12 @@ impl EditContext {
 /// Compute the edit context of `part` within `src` (the raw text of the file that defines
 /// it; mono-file proto — REQ-LLL-142). `cm` is the checked module (which may span imports)
 /// used only to tell a genuine part dep from a builtin.
-pub fn edit_context(src: &str, cm: &CheckedModule, part: &str) -> Result<EditContext, String> {
+pub fn edit_context(
+    src: &str,
+    cm: &CheckedModule,
+    part: &str,
+    with_callers: bool,
+) -> Result<EditContext, String> {
     let idx = *cm
         .index
         .get(part)
@@ -88,8 +105,40 @@ pub fn edit_context(src: &str, cm: &CheckedModule, part: &str) -> Result<EditCon
         .map(|(_, text)| text)
         .collect();
 
+    // Reverse call graph (opt-in): the TRANSITIVE blast-radius — every part that reaches the
+    // target through calls (direct or via other parts), with its FULL source, so a change that
+    // RIPPLES to callers (e.g. a signature change: `A` → its caller `B` → `B`'s caller `C`) can
+    // edit them all. `hash_deps(p)` gives `p`'s callees; BFS over the reverse edges. Same
+    // semantics as Axon `impact` but computed from llmlang's OWN intra-module call graph.
+    let mut callers = Vec::new();
+    if with_callers {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut frontier = vec![part.to_string()];
+        while let Some(tgt) = frontier.pop() {
+            for p in &cm.module.parts {
+                if p.name == part || seen.contains(&p.name) {
+                    continue;
+                }
+                let mut cs = Vec::new();
+                crate::hash_deps(p, &mut cs);
+                if cs.contains(&tgt) {
+                    seen.insert(p.name.clone());
+                    frontier.push(p.name.clone());
+                }
+            }
+        }
+        let mut names: Vec<String> = seen.into_iter().collect();
+        names.sort();
+        for nm in names {
+            if let Some((block, _)) = extract_part_block(src, &nm) {
+                callers.push(Caller { name: nm, source: block });
+            }
+        }
+    }
+
     let context_bytes = part_source.len()
         + deps.iter().map(|d| d.header.len() + 1).sum::<usize>()
+        + callers.iter().map(|c| c.source.len() + 1).sum::<usize>()
         + types_in_scope.iter().map(|t| t.len() + 1).sum::<usize>();
 
     Ok(EditContext {
@@ -98,6 +147,7 @@ pub fn edit_context(src: &str, cm: &CheckedModule, part: &str) -> Result<EditCon
         part_source,
         deps,
         external_deps,
+        callers,
         types_in_scope,
         context_bytes,
         file_bytes: src.len(),
@@ -218,6 +268,13 @@ pub fn render_text(ctx: &EditContext) -> String {
             s.push_str("\n\n");
         }
     }
+    if !ctx.callers.is_empty() {
+        s.push_str("\n## callers (reverse call graph) — FULL source, for a change that ripples\n\n");
+        for c in &ctx.callers {
+            s.push_str(&c.source);
+            s.push_str("\n\n");
+        }
+    }
     if !ctx.types_in_scope.is_empty() {
         s.push_str("## types in scope\n\n");
         for t in &ctx.types_in_scope {
@@ -248,6 +305,7 @@ pub fn render_json(ctx: &EditContext) -> Value {
         "part_source": ctx.part_source,
         "deps": ctx.deps.iter().map(|d| json!({ "name": d.name, "contract": d.header })).collect::<Vec<_>>(),
         "external_deps": ctx.external_deps,
+        "callers": ctx.callers.iter().map(|c| json!({ "name": c.name, "source": c.source })).collect::<Vec<_>>(),
         "types_in_scope": ctx.types_in_scope,
         "bytes": {
             "context": ctx.context_bytes,

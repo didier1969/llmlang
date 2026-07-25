@@ -197,7 +197,7 @@ fn char_literal_hash_and_quote_are_data_not_comment_or_string_req137() {
 fn edit_context_is_part_plus_dep_contracts_not_bodies_req142() {
     let src = "module M:\n\n  type Color = Red | Green | Blue\n\n  part hue(c: Color) -> Int:\n    ensures result >= 0\n    match c:\n      Red -> yield 0\n      Green -> yield 1\n      Blue -> yield 2\n\n  part helper(n: Int) -> Int:\n    requires n >= 0\n    ensures result >= n\n    yield n + 100\n\n  part target(c: Color, n: Int) -> Int:\n    requires n >= 0\n    yield helper(n) + hue(c)\n";
     let (cm, _) = full(src);
-    let ctx = context::edit_context(src, &cm, "target").expect("edit context");
+    let ctx = context::edit_context(src, &cm, "target", false).expect("edit context");
     let out = context::render_text(&ctx);
 
     // (1) the edited part's OWN body is present.
