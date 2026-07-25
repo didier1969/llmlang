@@ -116,15 +116,50 @@ LIVE_AXON 1.15.
    (ripple)** — les modèles ont retrouvé les callers seuls sur une tâche assez petite. Finding en
    soi : sur ce périmètre, l'info « qui appelle qui » d'Axon est redondante avec le module complet.
 
-**Ce qu'il faudrait pour tester l'économie** : des tâches **plus dures / un module plus gros**
-(où DARK brûle plusieurs rounds ou se noie dans le dump), + plus d'échantillons/modèles pour que
-le gap de FIABILITÉ (le vrai signal) ait du poids. Run étendu = suivi.
+**Ce qu'il faudrait pour tester l'économie** : voir le run SPLICE ci-dessous — le problème était le
+DESIGN, pas la thèse.
+
+## RÉSULTATS — run SPLICE (2026-07-25) : le VRAI test « focus AU LIEU du dump »
+
+**Le fix de design.** Le 1ᵉʳ run donnait LIVE = dump COMPLET **+** contexte → forcément plus gros
+(+4 %). Mais en usage réel, un LLM à qui on donne le focus n'a PAS aussi besoin du dump. Mode
+`DELTA_SPLICE=1` : (a) le modèle n'émet QUE la/les `part` changée(s) (pas tout le module), le
+harnais les re-splice dans la base puis `lll check` (self-checké : splicer la part de la référence
+RE-produit la référence prouvée, les 5 tâches) ; (b) **les bras LIVE reçoivent le FOCUS SEUL
+(`lll context`) AU LIEU du dump** — DARK garde le dump complet.
+
+**Config** : d01–d04 (single-part ; d05 ripple exclu — modifier les callers exige leur SOURCE, que
+ni `lll context` callee-only ni Axon ne donnent → un `lll context --with-callers` = suivi) ; 2
+modèles × 2 échantillons × 3 bras = 48 unités.
+
+**Réussite** : DARK 16/16, LIVE_CTX 16/16, LIVE_AXON 16/16. **Le focus SUFFIT** — le modèle édite
+correctement SANS le module complet (le read-set contract-firewall du langage vérifié est complet).
+
+**Ratio tokens apparié (IC entièrement SOUS 1.0 = économie significative)** :
+
+| ratio | médiane | IC95% | lecture |
+|---|---|---|---|
+| **LIVE_CTX / DARK** | **0.695** | **[0.614, 0.730]** | **~30 % de tokens en MOINS** |
+| LIVE_AXON / DARK | 0.699 | [0.614, 0.739] | idem (blast-radius neutre ici) |
+
+Tokens médians : DARK 6434, LIVE_CTX 4337. Par tâche : d01 0.730 · d02 0.701 · d03 0.614 ·
+d04 0.688 — **économie de 27–39 % partout**, 100 % de réussite.
+
+**Ce que ça DÉMONTRE** : le contexte focalisé que le langage vérifié permet (source cible + contrats
+des dépendances, le firewall DEC-LLL-017) **SUFFIT** pour faire un changement vérifié — donc on peut
+donner ce read-set serré AU LIEU du dump complet → **~30 % de tokens économisés à correction égale**.
+C'est la valeur mesurée du langage vérifié pour le dev-via-LLM. LIVE_AXON ≈ LIVE_CTX : sur des
+changements localisés, le blast-radius Axon est neutre (il compterait sur un ripple — d05 — qui
+exige la source des callers, non encore fournie).
 
 ## Statut
 
-- **FAIT** : harnais 3-bras + 5 tâches + **premier run payant mesuré** (ci-dessus). Correctif
-  `max_tokens` appliqué. Finding : contexte ⇒ fiabilité (petit n), pas économie de tokens sur
-  tâches faciles ; Axon-blast-radius redondant à ce périmètre.
-- **SUIVIS** : tâches plus dures / module plus gros (tester l'économie) ; plus d'échantillons
-  (fiabilité robuste) ; couverture Axon sourcing/planning (les symboles à `effect Solver` ne
-  résolvent pas — LllParser d'Axon échoue sur eux, à corriger) ; jambe intention SOLL.
+- **FAIT** : harnais 3-bras + 5 tâches + DEUX runs payants. **Run 1 (full-module)** : contexte ⇒
+  fiabilité (0 vs 2 échecs), pas d'économie (design LIVE=dump+contexte). **Run 2 (SPLICE)** : le
+  bon design (LIVE=focus AU LIEU du dump, modèle émet la part, harnais re-splice) → **économie
+  MESURÉE ~30 % de tokens à 100 % de réussite** (LIVE_CTX/DARK 0.695 [0.614, 0.730]). C'est la
+  valeur du langage vérifié : son read-set contract-firewall SUFFIT et est plus serré que le dump.
+- **SUIVIS** : (a) `lll context --with-callers` → débloquer d05 (ripple) où LIVE_AXON doit briller
+  (blast-radius = quels callers modifier) ; (b) plus d'échantillons/modèles (robustesse) ; (c)
+  couverture Axon des symboles à `effect Solver` (planning/sourcing not-found — LllParser d'Axon
+  échoue dessus) ; (d) ID `google/gemini-2.0-flash-001` périmé (404) ; (e) jambe intention SOLL.

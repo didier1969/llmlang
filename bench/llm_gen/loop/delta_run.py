@@ -113,17 +113,100 @@ def clean_code(reply):
         lines = lines[:-1]
     return "\n".join(lines)
 
+
+# ── MODE SPLICE (DELTA_SPLICE=1) : le modèle n'émet QUE la/les `part` changée(s), pas tout le
+# module — et les bras LIVE reçoivent le FOCUS SEUL (`lll context`) AU LIEU du dump complet. C'est
+# le vrai test « focus économise des tokens » (le module vérifié permet un read-set serré qui
+# SUFFIT). Le harnais re-splice la/les part émise(s) dans la base, puis `lll check`. Self-checké :
+# splicer la part de la référence dans la base RE-produit la référence prouvée (les 5 tâches).
+# (`SPLICE` est défini dans le bloc de config en tête.) ──
+
+
+def _part_span(lines, name):
+    start = None
+    for i, l in enumerate(lines):
+        s = l.strip()
+        if s.startswith(f"part {name}(") or s.startswith(f"part {name} "):
+            start = i
+            break
+    if start is None:
+        return None
+    end = start + 1
+    for j in range(start + 1, len(lines)):
+        l = lines[j]
+        if l.strip() == "":
+            end = j + 1
+            continue
+        if (len(l) - len(l.lstrip())) > 2:
+            end = j + 1
+        else:
+            break
+    while end > start + 1 and lines[end - 1].strip() == "":
+        end -= 1
+    return (start, end)
+
+
+def extract_part(src, name):
+    lines = src.split("\n")
+    sp = _part_span(lines, name)
+    return "\n".join(lines[sp[0]:sp[1]]) if sp else None
+
+
+def split_emitted_parts(code):
+    """Extrait chaque bloc `part X…:` d'un snippet émis (peut en contenir plusieurs)."""
+    lines = code.split("\n")
+    out, cur, ind = [], None, None
+    for l in lines:
+        s = l.strip()
+        if s.startswith("part ") and (len(l) - len(l.lstrip())) <= 2:
+            if cur is not None:
+                out.append("\n".join(cur).rstrip())
+            cur, ind = [l], len(l) - len(l.lstrip())
+        elif cur is not None:
+            cur.append(l)
+    if cur is not None:
+        out.append("\n".join(cur).rstrip())
+    return out
+
+
+def splice_parts(base_src, blocks):
+    """Remplace dans `base_src` chaque `part` nommée par le bloc émis correspondant."""
+    lines = base_src.split("\n")
+    for blk in blocks:
+        nm = None
+        for bl in blk.split("\n"):
+            s = bl.strip()
+            if s.startswith("part "):
+                nm = s[5:].split("(")[0].split()[0]
+                break
+        if nm is None:
+            continue
+        sp = _part_span(lines, nm)
+        if sp is None:
+            continue
+        lines = lines[:sp[0]] + blk.split("\n") + lines[sp[1]:]
+    return "\n".join(lines)
+
 ARMS = ("DARK", "LIVE_CTX", "LIVE_AXON")
 TASKS_DIR = os.path.join(HERE, "delta_tasks")
 RUNS_DIR = os.path.join(HERE, "runs")
-RESULTS = os.path.join(HERE, "delta_results.jsonl")
+# MODE SPLICE (DELTA_SPLICE=1) : le modèle n'émet QUE les part(s) changée(s), et les bras LIVE
+# reçoivent le FOCUS SEUL (`lll context`) au lieu du dump complet — le vrai test « focus économise
+# des tokens ». Résultats dans un fichier SÉPARÉ (mêmes unit_keys que le mode full-module).
+SPLICE = os.environ.get("DELTA_SPLICE") == "1"
+RESULTS = os.path.join(HERE, "delta_results_splice.jsonl" if SPLICE else "delta_results.jsonl")
 
 
 # ------------------------------------------------------------------ tasks --
 
 def load_tasks():
     with open(os.path.join(TASKS_DIR, "manifest.json")) as fh:
-        return json.load(fh)["tasks"]
+        tasks = json.load(fh)["tasks"]
+    only = os.environ.get("DELTA_ONLY")  # sous-ensemble d'ids, séparés par virgule
+    if only:
+        keep = set(only.split(","))
+        tasks = [t for t in tasks if t["id"] in keep]
+    return tasks
 
 
 def base_path(task):
@@ -159,19 +242,39 @@ def axon_block(task):
 
 # ---------------------------------------------------------------- prompts --
 
+def _ctx_block(task):
+    return (
+        "# Focused context — what to read to change the target safely "
+        "(`lll context`: the target's source + the CONTRACTS of its direct "
+        "dependencies, the verification firewall)\n\n```json\n"
+        + lll_context(task) + "\n```\n\n"
+    )
+
+
 def gen_prompt(arm, task):
+    primer = read_file(LLL_PRIMER)
+    if SPLICE:
+        # DARK reçoit le module COMPLET ; LIVE reçoit le FOCUS SEUL (le read-set serré) au lieu du
+        # dump — c'est LÀ que le focus économise des tokens. Tous émettent SEULEMENT les parts changées.
+        if arm == "DARK":
+            ctx = "# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
+        else:
+            ctx = _ctx_block(task)
+            if arm == "LIVE_AXON":
+                ctx += axon_block(task)
+        return (
+            primer + "\n\n" + ctx + "# Change to make\n\n" + task["instruction"] + "\n\n"
+            + "Emit ONLY the complete `part` definition(s) you change — the full "
+            "`part NAME(...): … yield …` block(s), nothing else (NOT the whole module). "
+            "One fenced code block, no prose outside it."
+        )
+    # ── mode module-complet (LIVE = DARK + contexte) ──
     core = (
-        read_file(LLL_PRIMER)
-        + "\n\n# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
+        primer + "\n\n# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
         + "# Change to make\n\n" + task["instruction"] + "\n\n"
     )
     if arm in ("LIVE_CTX", "LIVE_AXON"):
-        core += (
-            "# Focused context — what to read to change the target safely "
-            "(`lll context`: the target's source + the CONTRACTS of its direct "
-            "dependencies, the verification firewall)\n\n```json\n"
-            + lll_context(task) + "\n```\n\n"
-        )
+        core += _ctx_block(task)
     if arm == "LIVE_AXON":
         core += axon_block(task)
     core += (
@@ -182,13 +285,14 @@ def gen_prompt(arm, task):
 
 
 def repair_prompt(arm, task, code, feedback):
+    what = ("ONLY the corrected `part` block(s) you change (NOT the whole module)"
+            if SPLICE else "the corrected, COMPLETE modified module")
     return (
         "Your previous attempt FAILED verification or did not make the change.\n\n"
         "# Change to make\n\n" + task["instruction"] + "\n\n"
         "# Your previous attempt\n\n```\n" + code + "\n```\n\n"
         "# Failure\n\n```\n" + clip(feedback) + "\n```\n\n"
-        "Emit the corrected, COMPLETE modified module in ONE fenced code block. "
-        "No prose outside the block."
+        "Emit " + what + " in ONE fenced code block. No prose outside the block."
     )
 
 
@@ -200,9 +304,15 @@ def change_present(code, task):
 
 
 def gate_modify(code, tag, task):
-    """VERT ssi : `lll check` exit 0 ET changement présent ET `lll run` marche."""
+    """VERT ssi : `lll check` exit 0 ET changement présent ET `lll run` marche.
+    En mode SPLICE, `code` = les part(s) émise(s) → on les re-splice dans la base d'abord."""
     os.makedirs(RUNS_DIR, exist_ok=True)
     path = os.path.join(RUNS_DIR, tag + ".lll")
+    if SPLICE:
+        blocks = split_emitted_parts(code)
+        if not blocks:
+            return False, "aucun bloc `part` émis (mode splice)"
+        code = splice_parts(base_src(task), blocks)  # module COMPLET après splice
     with open(path, "w") as fh:
         fh.write(code)
     chk = run_cmd([LLL, "check", "--no-cache", "--format=json", path])
