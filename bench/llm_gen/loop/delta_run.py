@@ -37,13 +37,20 @@ import argparse
 import json
 import os
 import sys
+import time
+import urllib.request
+import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 # Réutilise la machinerie task-agnostique du banc spec→fonction (loop_run garde
-# son `if __name__ == "__main__"`, donc l'import n'exécute que sa config).
+# son `if __name__ == "__main__"`, donc l'import n'exécute que sa config). `loop_run`
+# lui-même est importé comme module pour partager sa BORNE d'appels globale (`_calls`
+# / `MAX_CALLS`) et son endpoint, tout en utilisant un `call_model` local à plus gros
+# `max_tokens` (la tâche modify émet un module ENTIER ~2000 tokens, où le 2000 de
+# loop_run TRONQUE → faux-censored).
+import loop_run  # noqa: E402
 from loop_run import (  # noqa: E402
-    call_model,
     extract_code,
     clip,
     read_file,
@@ -58,6 +65,53 @@ from loop_run import (  # noqa: E402
     REPO,
     LLL_PRIMER,
 )
+
+# Budget de sortie : le module modifié complet (~2000 tokens) + marge. loop_run.call_model
+# plafonne à 2000 (adapté à une fonction unique, PAS à un module) → on le remplace localement.
+MAX_OUT_TOKENS = int(os.environ.get("DELTA_MAX_TOKENS", "6000"))
+
+
+def call_model(model, prompt, key):
+    """Complétion isolée, budget de sortie adapté au module ENTIER. Partage la BORNE
+    d'appels globale de loop_run (`_calls`/`MAX_CALLS`) — garde de coût commune."""
+    if loop_run._calls >= loop_run.MAX_CALLS:
+        raise SystemExit(f"hard call cap reached ({loop_run.MAX_CALLS}) — stopping before spend")
+    loop_run._calls += 1
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": MAX_OUT_TOKENS,
+    }).encode()
+    req = urllib.request.Request(loop_run.ENDPOINT, data=body, headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://llmlang.local/bench",
+        "X-Title": "llmlang-delta-bench",
+    })
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=240) as r:
+                data = json.load(r)
+            return data["choices"][0]["message"]["content"], data.get("usage", {})
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt == 0:
+                time.sleep(5)
+                continue
+            raise
+    raise RuntimeError("unreachable")
+
+
+def clean_code(reply):
+    """`extract_code` + robustesse : strip un fence résiduel (```lang en tête / ``` en queue)
+    qu'une extraction imparfaite aurait laissé (défense ; avec un max_tokens correct c'est rare)."""
+    code = extract_code(reply)
+    lines = code.splitlines()
+    while lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    while lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines)
 
 ARMS = ("DARK", "LIVE_CTX", "LIVE_AXON")
 TASKS_DIR = os.path.join(HERE, "delta_tasks")
@@ -176,7 +230,7 @@ def run_unit(task, model, sample, arm, key):
         tokens_in += usage["prompt_tokens"]
         tokens_out += usage["completion_tokens"]
         cost += usage.get("cost", 0.0)
-        code = extract_code(reply)
+        code = clean_code(reply)
         with open(os.path.join(RUNS_DIR, base_tag + f"__r{rnd}.raw"), "w") as fh:
             fh.write(reply)
         correct, feedback = gate_modify(code, base_tag + f"__r{rnd}", task)

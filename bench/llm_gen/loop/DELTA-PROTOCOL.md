@@ -77,12 +77,54 @@ seuls) ne les montre PAS ; le blast-radius Axon (`invoice, main`) SI. Les tâche
 
 `LLL_BIN` pointe le binaire `lll` (défaut `target/debug/lll`) ; `LLL_Z3` le solveur vendorisé.
 
+## RÉSULTATS — premier run (2026-07-25)
+
+**Config** : 2 modèles (`claude-haiku-4.5`, `gpt-4o-mini`) × 2 échantillons × 5 tâches × 3 bras =
+60 unités ; `R_MAX=5` ; `DELTA_MAX_TOKENS=6000` (correctif : le 2000 de loop_run TRONQUAIT le
+module → faux-censored ; portée à 6000).
+
+**Taux de réussite (un changement VÉRIFIÉ obtenu en ≤ 5 rounds)** :
+
+| bras | vert / total |
+|---|---|
+| DARK (dump seul) | **18/20** |
+| LIVE_CTX (`lll context`) | **20/20** |
+| LIVE_AXON (+ blast-radius) | **20/20** |
+
+Les 2 seuls échecs = **DARK sur d04** (borne `div`) avec le modèle faible `gpt-4o-mini` (5 rounds,
+jamais réussi). Avec contexte : réussi.
+
+**Ratio tokens apparié (sur les unités où les DEUX bras réussissent)** :
+
+| ratio | médiane | IC95% | lecture |
+|---|---|---|---|
+| LIVE_CTX / DARK | 1.044 | [1.017, 1.059] | contexte = ~+4 % tokens |
+| LIVE_AXON / DARK | 1.048 | [1.017, 1.066] | +blast-radius ≈ pareil |
+
+Par tâche (LIVE_CTX / LIVE_AXON vs DARK) : d01 1.056/1.061 · d02 1.037/1.039 · d03 1.017/1.017 ·
+d04 1.044/1.048 · d05 1.059/1.066. Rounds moyens quand réussi : DARK 1.00, LIVE_CTX 1.10,
+LIVE_AXON 1.15.
+
+**Interprétation HONNÊTE** :
+1. **Tâches trop faciles pour l'économie de tokens.** DARK converge en **1 round** quand il
+   réussit → pas de boucle de réparation à raccourcir. Ajouter du contexte ne fait que grossir le
+   prompt → **~+4 %** tokens. La thèse « contexte ⇒ moins de tokens » n'est PAS démontrée ici.
+2. **La vraie valeur du contexte = FIABILITÉ, pas tokens.** 0 échec avec contexte vs 2 sans. Mais
+   ce gain est **invisible dans le ratio** (qui n'apparie que les cas où les DEUX réussissent → il
+   EXCLUT les 2 sauvetages). Donc le +4 % **sous-estime** le contexte.
+3. **LIVE_AXON ≈ LIVE_CTX.** Le blast-radius Axon n'a rien ajouté de mesurable, **même sur d05
+   (ripple)** — les modèles ont retrouvé les callers seuls sur une tâche assez petite. Finding en
+   soi : sur ce périmètre, l'info « qui appelle qui » d'Axon est redondante avec le module complet.
+
+**Ce qu'il faudrait pour tester l'économie** : des tâches **plus dures / un module plus gros**
+(où DARK brûle plusieurs rounds ou se noie dans le dump), + plus d'échantillons/modèles pour que
+le gap de FIABILITÉ (le vrai signal) ait du poids. Run étendu = suivi.
+
 ## Statut
 
-- **FAIT (gratuit)** : harnais 3-bras + 5 tâches (dont d05 ripple) + dry-run démontré (prompts
-  assemblés, surcoût par étage rapporté, gate distingue correct/inchangé). Le run payant attend un
-  **budget-go opérateur**.
-- **CE QUE LA MESURE ÉTABLIRA** : `LIVE_CTX/DARK` = valeur du contexte du langage vérifié ;
-  `LIVE_AXON/DARK` = valeur ajoutée du blast-radius Axon — attendue surtout sur d05 (ripple), ~nulle
-  sur les tâches localisées (finding en soi). Étendre la couverture Axon (sourcing/planning) et la
-  jambe intention = suivis.
+- **FAIT** : harnais 3-bras + 5 tâches + **premier run payant mesuré** (ci-dessus). Correctif
+  `max_tokens` appliqué. Finding : contexte ⇒ fiabilité (petit n), pas économie de tokens sur
+  tâches faciles ; Axon-blast-radius redondant à ce périmètre.
+- **SUIVIS** : tâches plus dures / module plus gros (tester l'économie) ; plus d'échantillons
+  (fiabilité robuste) ; couverture Axon sourcing/planning (les symboles à `effect Solver` ne
+  résolvent pas — LllParser d'Axon échoue sur eux, à corriger) ; jambe intention SOLL.
