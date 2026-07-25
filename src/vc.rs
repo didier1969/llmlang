@@ -13,10 +13,10 @@
 //! Structural recursion (list tail descent) is checked syntactically and
 //! needs no solver.
 //!
-//! Incremental proof cache (DEC-LLL-017): key = blake3(vcgen-version ‖
-//! def_hash ‖ sorted contract-hashes of direct dependencies). Editing a body
-//! re-verifies that part only; editing a contract re-verifies the part and its
-//! direct callers only.
+//! Incremental proof cache (DEC-LLL-017): key = blake3(vcgen-version ‖ z3-version ‖
+//! proof_hash ‖ env_hash). Editing a body re-verifies that part only; editing a contract
+//! re-verifies the part and its direct callers only; a Z3 upgrade re-verifies everything
+//! (fail-safe — a proof is the joint product of the vcgen logic AND the solver, REQ-LLL-155 2c).
 
 use crate::ast::*;
 use crate::hash::HashedModule;
@@ -252,7 +252,32 @@ pub fn discharge_part(
     discharge(z3, &obligations, &dt_decls)
 }
 
+/// The Z3 SOLVER version string, computed ONCE per process. The proof cache binds it
+/// (REQ-LLL-155 tranche 2c) so a proof discharged by Z3 vX is NEVER reused under Z3 vY: a
+/// soundness bug in vX that vY fixes would otherwise leave a stale `proved (cache hit)` — the
+/// oracle lying (DEC-LLL-015/025). `VCGEN_VERSION` is a blake3 of `src/` (build.rs) so it moves
+/// when the vcgen LOGIC changes, but Z3 is EXTERNAL and invisible to it; this closes that gap.
+/// Failure (no binary / empty output) → a stable sentinel, so the key stays deterministic (and
+/// a different install just re-verifies once — over-invalidation, always fail-SAFE).
+fn z3_version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        find_z3()
+            .ok()
+            .and_then(|z3| Command::new(z3).arg("--version").output().ok())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "z3-version-unknown".to_string())
+    })
+}
+
 pub fn cache_key(part: &Part, cm: &CheckedModule, hm: &HashedModule) -> String {
+    cache_key_with(part, cm, hm, z3_version())
+}
+
+/// `cache_key` with the Z3 version threaded in — the testable seam (a version change must
+/// change the key, provable without swapping the actual solver binary).
+fn cache_key_with(part: &Part, cm: &CheckedModule, hm: &HashedModule, z3_ver: &str) -> String {
     // proof_hash already folds in the part's own body+contract AND the
     // CONTRACT hashes of every direct dependency (calls are normalized to
     // them) — exactly the modular-proof footprint of DEC-LLL-017.
@@ -265,9 +290,14 @@ pub fn cache_key(part: &Part, cm: &CheckedModule, hm: &HashedModule) -> String {
     // Fable-5, reproduced). Fold a hash of that environment into the key. Over-invalidation
     // (a type edit re-checks the module's parts) is CORRECT and cheap; a source with an
     // unchanged type environment still hits.
+    //
+    // `z3_ver` (REQ-LLL-155 tranche 2c) binds the SOLVER version: a proof is the JOINT product of
+    // the vcgen logic (VCGEN_VERSION) AND the solver that discharged it — a Z3 upgrade must
+    // re-verify (fail-safe over-invalidation). It is also the trust basis of the attestation
+    // tuple `{def_hash, proof_hash, Z3-version}`.
     let env = format!("{:?}|{:?}", cm.module.types, cm.module.classes);
     let env_hash = blake3::hash(env.as_bytes()).to_hex().to_string();
-    let input = format!("{VCGEN_VERSION}|{}|{env_hash}", hm.proof_hash[&part.name]);
+    let input = format!("{VCGEN_VERSION}|{z3_ver}|{}|{env_hash}", hm.proof_hash[&part.name]);
     blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
@@ -4728,6 +4758,29 @@ fn parse_declare_const(decl: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // REQ-LLL-155 tranche 2c : la clé du cache de preuve BINDE la version du solveur Z3 — un
+    // changement de version doit invalider (une preuve par Z3 vX n'est PAS réutilisée sous vY).
+    // Prouvable sans deux solveurs en injectant la version via `cache_key_with`. FAIL-SAFE :
+    // ajouter à la clé = sur-invalidation, jamais un faux hit.
+    #[test]
+    fn cache_key_binds_the_z3_solver_version_req155_2c() {
+        let src = "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n";
+        let m = crate::parser::parse_module(src).expect("parse");
+        let cm = crate::types::check_module(m).expect("check");
+        let hm = crate::hash::hash_module(&cm).expect("hash");
+        let part = &cm.module.parts[0];
+        let ka = cache_key_with(part, &cm, &hm, "Z3 version 4.13.0");
+        let kb = cache_key_with(part, &cm, &hm, "Z3 version 4.14.0");
+        assert_ne!(ka, kb, "une version Z3 différente DOIT changer la clé (re-vérif fail-safe)");
+        assert_eq!(
+            ka,
+            cache_key_with(part, &cm, &hm, "Z3 version 4.13.0"),
+            "même version → même clé (un vrai cache-HIT tient quand le solveur est inchangé)"
+        );
+        assert!(!z3_version().is_empty(), "la version Z3 réelle est non-vide");
+        assert_eq!(z3_version(), z3_version(), "z3_version calculée 1× et stable");
+    }
 
     #[test]
     fn z3_error_during_discharge_is_a_hard_failure_never_a_silent_proof() {
