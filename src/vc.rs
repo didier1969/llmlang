@@ -142,8 +142,11 @@ pub fn verify_session(
     mut memo: Option<&mut DischargeMemo>,
 ) -> Result<VerifyReport, String> {
     let z3 = find_z3()?;
-    // user-ADT datatype declarations (REQ-LLL-011) — module-global, prepended to
-    // every script that references a user sort
+    // user-ADT datatype declarations (REQ-LLL-011), module-global. Used for the INSTANCE-law
+    // discharge below — which is UNCACHED (no cache key to match) and whose law obligations
+    // INLINE the instance body (the one place a body reaches Z3), so it keeps the full type
+    // environment. PARTS instead get a per-part closure preamble matching their portable cache
+    // key (REQ-LLL-155 2b), computed inside the loop — see `part_dt_decls`.
     let dt_decls = user_datatype_decls(&cm.module.types);
     let cache_path = cache_dir.join("proofs.json");
     let mut cache: HashMap<String, CacheEntry> = if use_cache {
@@ -169,7 +172,13 @@ pub fn verify_session(
             parts.push((part.name.clone(), PartVerdict::Incomplete { holes: n }));
             continue;
         }
-        let key = cache_key(part, cm, hm);
+        // Generate this part's obligations FIRST: the cache key folds the obligation TEXT
+        // (REQ-LLL-155 2b portable key), so it is derived from them. Cheap (~40-70 µs/part,
+        // measured) — negligible on a HIT, dwarfed by Z3 on a miss. The soundness path keys
+        // on the SAME obligations it discharges — no re-generation, no drift.
+        let mut obligations = gen_part_obligations(cm, part)?;
+        obligations.extend(gen_part_example_obligations(cm, part)?);
+        let key = cache_key_with(part, cm, hm, &obligations, z3_version());
         if use_cache {
             if let Some(e) = cache.get(&key) {
                 if e.verdict == "proved" {
@@ -178,11 +187,17 @@ pub fn verify_session(
                 }
             }
         }
-        let mut obligations = gen_part_obligations(cm, part)?;
-        obligations.extend(gen_part_example_obligations(cm, part)?);
         let n = obligations.len();
+        // The datatype preamble for THIS part = the SAME referenced closure its cache key
+        // folds (REQ-LLL-155 2b): script and key derive from ONE type set, so a closure that
+        // omits a referenced type fails LOUDLY here (Z3 `undeclared sort`) — never a silent
+        // stale HIT. Unreferenced types (including a non-well-founded one declared elsewhere)
+        // are simply absent from this script and cannot poison it — closing the records /
+        // mutual-recursion false-HIT the adversarial pass found (docs/review/req-155-2b-…).
+        let part_dt_decls =
+            user_datatype_decls(&referenced_closure_types(&obligations, &cm.module.types));
         let t0 = std::time::Instant::now();
-        let failures = discharge_memoised(&z3, &obligations, &dt_decls, &mut memo)?;
+        let failures = discharge_memoised(&z3, &obligations, &part_dt_decls, &mut memo)?;
         let time_ms = t0.elapsed().as_millis();
         if failures.is_empty() {
             cache.insert(
@@ -272,33 +287,239 @@ pub fn z3_version() -> &'static str {
 }
 
 pub fn cache_key(part: &Part, cm: &CheckedModule, hm: &HashedModule) -> String {
-    cache_key_with(part, cm, hm, z3_version())
+    // Display / lookup callers (`mcp`, `explain`, self-host tests) recompute the SAME key
+    // the verify loop stored. The key now folds the obligation TEXT (REQ-LLL-155 2b), so it
+    // must see this part's obligations — regenerate them (cheap, ~40-70 µs/part measured). A
+    // generation error (never expected on an already-checked part) degrades to an empty set
+    // → a non-matching key → "not verified", never a panic: soundness lives on the WRITE
+    // side (`verify_session`, which propagates the error with `?`); a display miss is inert.
+    let obligations = obligations_for_key(cm, part);
+    cache_key_with(part, cm, hm, &obligations, z3_version())
 }
 
-/// `cache_key` with the Z3 version threaded in — the testable seam (a version change must
-/// change the key, provable without swapping the actual solver binary).
-fn cache_key_with(part: &Part, cm: &CheckedModule, hm: &HashedModule, z3_ver: &str) -> String {
-    // proof_hash already folds in the part's own body+contract AND the
-    // CONTRACT hashes of every direct dependency (calls are normalized to
-    // them) — exactly the modular-proof footprint of DEC-LLL-017.
-    //
-    // But a part's obligations ALSO depend on the module's TYPE ENVIRONMENT — the ADT
-    // declarations (exhaustivity coverage, ctor selectors, sorts) and the classes — which
-    // `proof_hash` does NOT fold. Without this, editing a `type` (e.g. adding a constructor)
-    // leaves a stale cache HIT on a now-non-exhaustive match, so `lll check` returns a false
-    // "proved (cache hit)" — the oracle lying, against DEC-LLL-015/020 (REQ-LLL-128, audit
-    // Fable-5, reproduced). Fold a hash of that environment into the key. Over-invalidation
-    // (a type edit re-checks the module's parts) is CORRECT and cheap; a source with an
-    // unchanged type environment still hits.
-    //
-    // `z3_ver` (REQ-LLL-155 tranche 2c) binds the SOLVER version: a proof is the JOINT product of
-    // the vcgen logic (VCGEN_VERSION) AND the solver that discharged it — a Z3 upgrade must
-    // re-verify (fail-safe over-invalidation). It is also the trust basis of the attestation
-    // tuple `{def_hash, proof_hash, Z3-version}`.
-    let env = format!("{:?}|{:?}", cm.module.types, cm.module.classes);
-    let env_hash = blake3::hash(env.as_bytes()).to_hex().to_string();
-    let input = format!("{VCGEN_VERSION}|{z3_ver}|{}|{env_hash}", hm.proof_hash[&part.name]);
-    blake3::hash(input.as_bytes()).to_hex().to_string()
+/// This part's obligations for keying — the production VC set (`gen_part_obligations` + the
+/// example obligations), identical to what the verify loop discharges. Errors degrade to an
+/// empty set for the infallible display path; the soundness path in `verify_session`
+/// generates them with `?` and passes them straight to `cache_key_with`, never via here.
+fn obligations_for_key(cm: &CheckedModule, part: &Part) -> Vec<Obligation> {
+    let mut o = gen_part_obligations(cm, part).unwrap_or_default();
+    o.extend(gen_part_example_obligations(cm, part).unwrap_or_default());
+    o
+}
+
+/// The proof-cache key (REQ-LLL-155 tranche 2b): a PORTABLE, per-part identity for "this
+/// proof still holds". It folds exactly what makes the verdict what it is:
+///   • the obligation TEXT Z3 discharges — every decl/hyp/goal of this part's VCs. That is
+///     the part's body, contracts, the assumed contracts of its callees, the class-method
+///     signatures it uses, and any instance body inlined into its VC — all captured BY
+///     CONSTRUCTION, because the key IS what Z3 sees.
+///   • the DATATYPE declarations of the referenced-type closure (`referenced_datatype_decls`)
+///     — the one influence NOT visible in the obligation text: adding a constructor to a
+///     matched ADT can leave the match text unchanged yet make it non-exhaustive
+///     (REQ-LLL-128, audit Fable-5, reproduced). Folding the referenced types' decls catches
+///     every such definition change. Restricted to the closure (not the whole program) so an
+///     unrelated ambient type does not perturb the key → the SAME brick keys the SAME
+///     cross-project (the portability this tranche unlocks).
+///   • the class environment (`class_env_fold`) — a sound guard on the class/law channel a
+///     part may assume opaquely. Folded WHOLESALE for now (see that helper).
+///   • `VCGEN_VERSION` (the vcgen logic), the Z3 solver version (2c), and `proof_hash` (the
+///     DEC-LLL-017 modular footprint — redundant given the obligation fold, kept because
+///     over-inclusion is free and never a false hit).
+///
+/// COMPLETENESS — the soundness claim, review THIS paragraph (reviewable by reading two lines
+/// of `verify_session`): the part's discharge SCRIPT contains EXACTLY the closure this key
+/// folds — both are `referenced_closure_types(&obligations, …)`, one rendered sorted for the
+/// key, one in SCC order for the script. A type outside the closure is in NEITHER. So if the
+/// closure ever omits a type the obligations reference, the script lacks its declaration and
+/// Z3 fails LOUDLY (`undeclared sort`) → the part is rejected, never falsely proved. Closure
+/// incompleteness is therefore fail-CLOSED by construction — not a silent false HIT. (The
+/// earlier claim here — "a type absent from the obligation text cannot affect the verdict" —
+/// was FALSIFIED by the adversarial pass: the discharge script actually carried ALL module
+/// types, so an unreferenced non-well-founded type poisoned it while the key missed it. The
+/// fix couples script to key; see docs/review/req-155-2b-obligation-text-key.md.) The whole
+/// suite is now the completeness test for the seed scan: every example proving = the closure
+/// covered every type reference across the corpus.
+///
+/// `z3_ver` is threaded (not read from `z3_version()`) so a version change is provably a key
+/// change without swapping the solver binary — the testable seam.
+fn cache_key_with(
+    part: &Part,
+    cm: &CheckedModule,
+    hm: &HashedModule,
+    obligations: &[Obligation],
+    z3_ver: &str,
+) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(b"vcgen:");
+    h.update(VCGEN_VERSION.as_bytes());
+    h.update(b"|z3:");
+    h.update(z3_ver.as_bytes());
+    h.update(b"|proof:");
+    h.update(hm.proof_hash[&part.name].as_bytes());
+    // OBLS — exactly what Z3 discharges for this part, field-tagged like `memo_key`.
+    for o in obligations {
+        h.update(b"|ob:");
+        h.update(o.part.as_bytes());
+        h.update(b"|dsc:");
+        h.update(o.descr.as_bytes());
+        for d in &o.decls {
+            h.update(b"|d:");
+            h.update(d.as_bytes());
+        }
+        for hy in &o.hyps {
+            h.update(b"|hy:");
+            h.update(hy.as_bytes());
+        }
+        h.update(b"|g:");
+        h.update(o.goal.as_bytes());
+    }
+    // TYPES — datatype declarations of the referenced-type closure (portable).
+    for d in referenced_datatype_decls(obligations, &cm.module.types) {
+        h.update(b"|dt:");
+        h.update(d.as_bytes());
+    }
+    // CLASSES — sound guard on the class/law channel (folded wholesale; see helper).
+    h.update(b"|cls:");
+    h.update(class_env_fold(&cm.module.classes).as_bytes());
+    h.finalize().to_hex().to_string()
+}
+
+/// The user types RELEVANT to this part's obligations (the referenced-type CLOSURE). Seed =
+/// every user type one of whose SMT symbols — its sort name, a constructor name, or a selector
+/// `cn_i` — appears as a whole token in the obligation text Z3 will see; then transitively
+/// closed over constructor-field user-type references (`collect_user_type_refs`, the same edge
+/// that orders `user_datatype_decls`). Returned in the module's declaration order.
+///
+/// This SAME set drives BOTH the cache KEY (rendered + sorted, `referenced_datatype_decls`)
+/// AND the discharge SCRIPT (rendered in SCC order, `verify_session`) — the coupling that makes
+/// the key sound (REQ-LLL-155 2b): a type outside the closure is in NEITHER, so a closure that
+/// omits a referenced type makes Z3 fail loudly (`undeclared sort`), never a silent stale HIT.
+///
+/// It is an OVER-approximation: scanning constructor AND selector tokens (not just the type
+/// name) means a type referenced only through `MkFoo`/`MkFoo_0` — never by the bare name `Foo`
+/// — is still pulled in; when in doubt it includes.
+fn referenced_closure_types(obligations: &[Obligation], types: &[TypeDecl]) -> Vec<TypeDecl> {
+    if types.is_empty() {
+        return Vec::new();
+    }
+    // Whole-token set of everything Z3 sees for this part (descr is diagnostic-only but
+    // harmless to include — it can only widen the over-approximation).
+    let mut tokens: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for o in obligations {
+        for field in std::iter::once(&o.descr)
+            .chain(o.decls.iter())
+            .chain(o.hyps.iter())
+            .chain(std::iter::once(&o.goal))
+        {
+            for tok in field.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                if !tok.is_empty() {
+                    tokens.insert(tok);
+                }
+            }
+        }
+    }
+    let by_name: HashMap<&str, &TypeDecl> =
+        types.iter().map(|t| (t.name.as_str(), t)).collect();
+    // Seed: sort name OR any ctor name OR any selector `cn_i` present as a token.
+    let mut selected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for td in types {
+        let mut hit = tokens.contains(td.name.as_str());
+        if !hit {
+            'ctors: for (cn, fields) in &td.ctors {
+                if tokens.contains(cn.as_str()) {
+                    hit = true;
+                    break;
+                }
+                for i in 0..fields.len() {
+                    if tokens.contains(format!("{cn}_{i}").as_str()) {
+                        hit = true;
+                        break 'ctors;
+                    }
+                }
+            }
+        }
+        if hit {
+            selected.insert(td.name.clone());
+        }
+    }
+    // Transitive closure over constructor-field user-type references (a selected type's
+    // ctor fields may name further user types whose DEFINITION Z3 must declare).
+    let mut frontier: Vec<String> = selected.iter().cloned().collect();
+    while let Some(n) = frontier.pop() {
+        if let Some(td) = by_name.get(n.as_str()) {
+            let mut refs: std::collections::BTreeSet<String> = Default::default();
+            for (_, fields) in &td.ctors {
+                for ft in fields {
+                    collect_user_type_refs(ft, &mut refs);
+                }
+            }
+            for r in refs {
+                if by_name.contains_key(r.as_str()) && selected.insert(r.clone()) {
+                    frontier.push(r);
+                }
+            }
+        }
+    }
+    types.iter().filter(|t| selected.contains(&t.name)).cloned().collect()
+}
+
+/// The referenced closure rendered as SORTED datatype-decl strings — the cache KEY's TYPES
+/// fold. Sorted for hash determinism (independent of SCC emission order); the discharge
+/// SCRIPT renders the SAME `referenced_closure_types` in SCC order (`verify_session`). Over-
+/// approximating (see that function): its only error mode is a missed cache hit, never a false
+/// HIT.
+fn referenced_datatype_decls(obligations: &[Obligation], types: &[TypeDecl]) -> Vec<String> {
+    let mut decls = user_datatype_decls(&referenced_closure_types(obligations, types));
+    decls.sort();
+    decls
+}
+
+/// A deterministic, auditable fold of the module's typeclasses for the proof-cache key
+/// (REQ-LLL-155 2b): each class' name, type variable, every method (name, parameter types,
+/// return type, effects) and every law (name, binders, body), sorted by class then
+/// method/law name. Folds the SEMANTIC content with EXPLICIT field tags — never
+/// derive-`Debug` on the whole struct, which would silently include the diagnostic-only
+/// `line` (a re-indent would wrongly invalidate) and could weaken if a field were later
+/// added invisibly.
+///
+/// Slice-1 folds ALL classes wholesale: SOUND (any class or law change invalidates every
+/// part's key), at the cost of cross-project cache hits for class-USING bricks. Per-class
+/// filtering by referenced method — the class analogue of `referenced_datatype_decls` — is a
+/// deliberate follow-up (REQ-LLL-155 2b-classes). The ERP bricks carry no classes
+/// (`cm.module.classes` empty, verified), so the portability win lands regardless.
+fn class_env_fold(classes: &[Class]) -> String {
+    let mut cs: Vec<&Class> = classes.iter().collect();
+    cs.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut s = String::new();
+    for c in cs {
+        s.push_str("|class:");
+        s.push_str(&c.name);
+        s.push_str("|tyvar:");
+        s.push_str(&c.tyvar);
+        let mut ms: Vec<&(String, Vec<Ty>, Ty, Vec<String>)> = c.methods.iter().collect();
+        ms.sort_by(|a, b| a.0.cmp(&b.0));
+        for (mn, params, ret, effs) in ms {
+            s.push_str("|m:");
+            s.push_str(mn);
+            s.push_str("|p:");
+            s.push_str(&format!("{params:?}"));
+            s.push_str("|r:");
+            s.push_str(&format!("{ret:?}"));
+            s.push_str("|e:");
+            s.push_str(&format!("{effs:?}"));
+        }
+        let mut ls: Vec<&Law> = c.laws.iter().collect();
+        ls.sort_by(|a, b| a.name.cmp(&b.name));
+        for law in ls {
+            s.push_str("|law:");
+            s.push_str(&law.name);
+            s.push_str("|bnd:");
+            s.push_str(&format!("{:?}", law.binders));
+            s.push_str("|body:");
+            s.push_str(&format!("{:?}", law.body));
+        }
+    }
+    s
 }
 
 /// Session-memo key (REQ-LLL-160 T1): `blake3(VCGEN_VERSION | dt_decls | obligations)`,
@@ -4770,16 +4991,171 @@ mod tests {
         let cm = crate::types::check_module(m).expect("check");
         let hm = crate::hash::hash_module(&cm).expect("hash");
         let part = &cm.module.parts[0];
-        let ka = cache_key_with(part, &cm, &hm, "Z3 version 4.13.0");
-        let kb = cache_key_with(part, &cm, &hm, "Z3 version 4.14.0");
+        let obls = obligations_for_key(&cm, part);
+        let ka = cache_key_with(part, &cm, &hm, &obls, "Z3 version 4.13.0");
+        let kb = cache_key_with(part, &cm, &hm, &obls, "Z3 version 4.14.0");
         assert_ne!(ka, kb, "une version Z3 différente DOIT changer la clé (re-vérif fail-safe)");
         assert_eq!(
             ka,
-            cache_key_with(part, &cm, &hm, "Z3 version 4.13.0"),
+            cache_key_with(part, &cm, &hm, &obls, "Z3 version 4.13.0"),
             "même version → même clé (un vrai cache-HIT tient quand le solveur est inchangé)"
         );
         assert!(!z3_version().is_empty(), "la version Z3 réelle est non-vide");
         assert_eq!(z3_version(), z3_version(), "z3_version calculée 1× et stable");
+    }
+
+    // REQ-LLL-155 tranche 2b — la clé de preuve PORTABLE (texte-d'obligations + clôture des
+    // types référencés + fold explicite des classes). Invariants : SOUND (MISS dès qu'une
+    // définition VC-pertinente change — le côté REQ-128) ET portable (même brique → MÊME clé
+    // malgré des types ambiants sans rapport — le gain de 2b). `z3_ver` fixe pour découpler des
+    // versions réelles du solveur.
+    fn key_of(src: &str, part: &str) -> String {
+        let m = crate::parser::parse_module(src).expect("parse");
+        let cm = crate::types::check_module(m).expect("check");
+        let hm = crate::hash::hash_module(&cm).expect("hash");
+        let p = cm
+            .module
+            .parts
+            .iter()
+            .find(|p| p.name == part)
+            .expect("part introuvable");
+        let obls = obligations_for_key(&cm, p);
+        cache_key_with(p, &cm, &hm, &obls, "z3-fixed-for-test")
+    }
+
+    // T3 — LE CŒUR de 2b : une brique dont les obligations ne référencent AUCUN type ambiant a
+    // la MÊME clé, qu'un type sans rapport existe ou non dans le module fusionné. C'est ce que
+    // l'ancien fold `{:?}` du programme entier CASSAIT (chaque type ambiant contaminait la clé).
+    #[test]
+    fn t3_portable_same_brick_ignores_unrelated_ambient_types_req155_2b() {
+        let bare = "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n";
+        let with_junk = "module M:\n\n  type Junk = Ja | Jb(Int)\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n";
+        assert_eq!(
+            key_of(bare, "inc"),
+            key_of(with_junk, "inc"),
+            "2b portabilité : inc ne référence pas Junk → MÊME clé cross-projet"
+        );
+    }
+
+    // T2 — ajouter un type NON référencé à côté d'un type RÉFÉRENCÉ n'altère pas la clé.
+    #[test]
+    fn t2_unreferenced_type_addition_keeps_the_key_req155_2b() {
+        let one = "module M:\n\n  type Foo = Fa | Fb\n\n  part pick(c: Foo) -> Int:\n    ensures result >= 0\n    match c:\n      Fa -> yield 0\n      Fb -> yield 1\n";
+        let plus_bar = "module M:\n\n  type Foo = Fa | Fb\n  type Bar = Ba | Bb\n\n  part pick(c: Foo) -> Int:\n    ensures result >= 0\n    match c:\n      Fa -> yield 0\n      Fb -> yield 1\n";
+        assert_eq!(
+            key_of(one, "pick"),
+            key_of(plus_bar, "pick"),
+            "2b : ajouter un type non référencé (Bar) ne change PAS la clé de pick"
+        );
+    }
+
+    // T1 — REQ-128 : ajouter un ctor à un ADT matché invalide. Corps IDENTIQUE (wildcard) sous
+    // les deux définitions → seule la déf de Foo change ; la clôture de types la capte.
+    #[test]
+    fn t1_adding_a_constructor_to_a_matched_adt_misses_req128() {
+        let two = "module M:\n\n  type Foo = Fa | Fb\n\n  part pick(c: Foo) -> Int:\n    ensures result >= 0\n    match c:\n      Fa -> yield 0\n      _ -> yield 1\n";
+        let three = "module M:\n\n  type Foo = Fa | Fb | Fc\n\n  part pick(c: Foo) -> Int:\n    ensures result >= 0\n    match c:\n      Fa -> yield 0\n      _ -> yield 1\n";
+        assert_ne!(
+            key_of(two, "pick"),
+            key_of(three, "pick"),
+            "REQ-128 : un ctor ajouté à un ADT référencé DOIT invalider (jamais un faux HIT)"
+        );
+    }
+
+    // T5 — transitif via callee : `use_tag` appelle `tag`, tous deux sur Foo ; changer la déf de
+    // Foo invalide la clé de use_tag (son texte d'obligations porte les symboles de Foo).
+    #[test]
+    fn t5_type_change_reachable_through_a_callee_misses_req155_2b() {
+        let two = "module M:\n\n  type Foo = Fa | Fb\n\n  part tag(c: Foo) -> Int:\n    ensures result >= 0\n    match c:\n      Fa -> yield 0\n      _ -> yield 1\n\n  part use_tag(c: Foo) -> Int:\n    ensures result >= 0\n    yield tag(c)\n";
+        let three = "module M:\n\n  type Foo = Fa | Fb | Fc\n\n  part tag(c: Foo) -> Int:\n    ensures result >= 0\n    match c:\n      Fa -> yield 0\n      _ -> yield 1\n\n  part use_tag(c: Foo) -> Int:\n    ensures result >= 0\n    yield tag(c)\n";
+        assert_ne!(
+            key_of(two, "use_tag"),
+            key_of(three, "use_tag"),
+            "2b : un changement de type atteint via un callee DOIT invalider le caller"
+        );
+    }
+
+    // T4 — canal classe/loi : ajouter une loi à la classe change la clé de tout part (fold
+    // wholesale des classes, slice-1). `same` ne s'appuie pas sur la loi mais la clé invalide
+    // quand même — sur-conservateur, sound (le canal classe est GARDÉ).
+    #[test]
+    fn t4_class_change_invalidates_the_key_req155_2b() {
+        let base = "module M:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n";
+        let changed = "module M:\n\n  class Eq[a]:\n    eq(a, a) -> Bool\n    law reflexive(x: a): eq(x, x)\n    law reflexive2(x: a): eq(x, x)\n\n  instance Eq[Int]:\n    eq = \\(x: Int, y: Int) -> x == y\n\n  part same(x: a, y: a) -> Bool given Eq[a]:\n    yield eq(x, y)\n";
+        assert_ne!(
+            key_of(base, "same"),
+            key_of(changed, "same"),
+            "2b : un changement de classe/loi DOIT invalider la clé (canal classe gardé)"
+        );
+    }
+
+    // T7 (advisor) — le scan de graine sème sur les tokens CTOR/SÉLECTEUR, pas seulement le nom
+    // de type. Testé DIRECTEMENT sur `referenced_datatype_decls` (isolé du lowering SMT, qui
+    // pourrait par ailleurs émettre le nom de sort) : un texte d'obligations nommant `Fa` mais
+    // JAMAIS `Foo` doit quand même folder Foo — sinon ajouter un ctor à Foo serait un faux HIT.
+    // ET l'exclusion : un texte ne référençant pas Foo ne le folde pas (la base de la portabilité).
+    #[test]
+    fn t7_seed_scan_matches_ctor_tokens_not_only_type_name_req155_2b() {
+        let m = crate::parser::parse_module(
+            "module M:\n\n  type Foo = Fa | Fb\n\n  part d() -> Int:\n    ensures result >= 0\n    yield 0\n",
+        )
+        .expect("parse");
+        let cm = crate::types::check_module(m).expect("check");
+        let foo = cm.module.types.iter().find(|t| t.name == "Foo").expect("Foo").clone();
+
+        // le token ctor `Fa` seul (le nom `Foo` n'apparaît nulle part) → Foo est foldé.
+        let via_ctor = Obligation {
+            part: "p".into(),
+            descr: "cover".into(),
+            decls: vec![],
+            hyps: vec!["(assert (= v Fa))".into()],
+            goal: "(assert true)".into(),
+        };
+        let decls = referenced_datatype_decls(&[via_ctor], std::slice::from_ref(&foo));
+        assert!(
+            decls.iter().any(|d| d.contains("Foo")),
+            "Foo doit être foldé via le token ctor `Fa` seul (scan ctor/sélecteur, pas juste le nom)"
+        );
+
+        // aucun symbole de Foo → non foldé (portabilité : une brique qui ne le touche pas l'ignore).
+        let unrelated = Obligation {
+            part: "p".into(),
+            descr: "cover".into(),
+            decls: vec![],
+            hyps: vec!["(assert (> x 0))".into()],
+            goal: "(assert true)".into(),
+        };
+        assert!(
+            referenced_datatype_decls(&[unrelated], std::slice::from_ref(&foo)).is_empty(),
+            "un part ne référençant aucun symbole de Foo ne doit PAS le folder"
+        );
+    }
+
+    // T8 (verrou du fix adversarial) — le hole trouvé par la passe adversariale : un type NON
+    // référencé mal-fondé (`Bad = {b: Bad}`) empoisonnait le préambule PARTAGÉ (tous les types)
+    // tout en laissant la clé de `f` inchangée → `lll check` acceptait (cache hit) un module qu'un
+    // check frais rejetait (Z3 error global). Le fix couple le SCRIPT à la clôture : `f` ne
+    // référence pas Bad → Bad HORS de sa clôture → jamais dans son script → ne peut plus
+    // l'empoisonner. Si quelqu'un « ré-optimise » le script en tous-les-types, ce test casse.
+    #[test]
+    fn t8_unreferenced_ill_founded_type_excluded_from_part_closure_req155_2b() {
+        let src = "module M:\n\n  type Point = {x: Int, y: Int}\n  type Bad = {b: Bad}\n\n  part f(p: Point) -> Int:\n    requires p.x >= 0\n    ensures result >= 0\n    yield p.x\n";
+        let m = crate::parser::parse_module(src).expect("parse");
+        let cm = crate::types::check_module(m).expect("check");
+        let p = cm.module.parts.iter().find(|p| p.name == "f").expect("f");
+        let obls = obligations_for_key(&cm, p);
+        let names: Vec<String> = referenced_closure_types(&obls, &cm.module.types)
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "Point"),
+            "Point (référencé via p.x) doit être dans la clôture de f — sinon son script SMT est incomplet : {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "Bad"),
+            "Bad (non référencé, mal-fondé) NE doit PAS être dans la clôture de f — sinon il empoisonne son script (le faux HIT adversarial) : {names:?}"
+        );
     }
 
     #[test]
