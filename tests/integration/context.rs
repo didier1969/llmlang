@@ -135,3 +135,38 @@ fn publish_then_verify_attest_roundtrips_and_is_fail_stop_req155() {
         "verify-attest signale un mismatch d'identité, obtenu: {e3}"
     );
 }
+
+// Le flux de DISTRIBUTION de bout en bout (Phase 2 DoD, part réalisable) : une brique-BIBLIOTHÈQUE
+// vérifiée (2a, sans `main`) → `lll publish` écrit son attestation (2c) → `lll verify-attest` la
+// confirme → un CONSOMMATEUR l'importe et l'utilise (`lll check` vert). Une altération de la brique
+// est attrapée par l'attestation (fail-stop). Le palier « preuve réutilisée SANS re-Z3 » = 2b
+// (stagé, soundness-critique) ; ici on démontre 2a + 2c bout-à-bout.
+#[test]
+fn distribution_e2e_lib_brick_published_attested_and_consumed_req155() {
+    let dir = tempdir();
+    let lib = dir.join("lib.lll");
+    let app = dir.join("app.lll");
+    std::fs::write(&lib, "module Lib:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n").unwrap();
+    std::fs::write(
+        &app,
+        "import \"lib.lll\"\n\nmodule App:\n\n  part twice(x: Int) -> Int:\n    ensures result == x + 2\n    yield inc(inc(x))\n\n  part main() -> Int via IO:\n    yield IO.print(twice(0))\n",
+    )
+    .unwrap();
+
+    // producteur : publier l'attestation de la brique + la vérifier
+    let (cp, op, ep) = lll_in(&dir, &["publish", "lib.lll"]);
+    assert_eq!(cp, Some(0), "publish de la brique-lib: {op}{ep}");
+    let (cv, ov, _) = lll_in(&dir, &["verify-attest", "lib.lll"]);
+    assert_eq!(cv, Some(0), "verify-attest de la brique publiée: {ov}");
+
+    // consommateur : importe la brique vérifiée et l'utilise (son propre ensures s'appuie sur le
+    // contrat de `inc`) → `lll check` vert.
+    let (cc, oc, ec) = lll_in(&dir, &["check", "app.lll"]);
+    assert_eq!(cc, Some(0), "le consommateur qui importe la brique doit vérifier: {oc}{ec}");
+
+    // altérer la brique → l'attestation la détecte (fail-stop).
+    std::fs::write(&lib, "module Lib:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 3\n    yield x + 3\n").unwrap();
+    let (ct, _ot, et) = lll_in(&dir, &["verify-attest", "lib.lll"]);
+    assert_ne!(ct, Some(0), "une brique altérée DOIT échouer verify-attest");
+    assert!(et.to_lowercase().contains("mismatch"), "détecte l'altération: {et}");
+}
