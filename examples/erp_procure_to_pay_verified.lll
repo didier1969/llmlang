@@ -1,0 +1,47 @@
+module ErpProcureToPayVerified:
+
+  # ── CAPSTONE COMPOSÉ #2 : procure-to-pay — INVENTAIRE + PARTIE DOUBLE ensemble (CPT-LLL-018) ──
+  #
+  # Un flux métier DISTINCT d'order-to-cash : recevoir du stock ET comptabiliser l'achat, en prouvant
+  # que les deux invariants tiennent SIMULTANÉMENT sur le résultat — le stock croît d'exactement la
+  # quantité reçue (jamais ne rétrécit à une réception) ET l'écriture d'achat ÉQUILIBRE (débit stock
+  # == crédit fournisseur → net 0, partie double). Aucune garantie n'en casse une autre. Réutilise les
+  # formes de preuve des agents inventaire (REQ-213) et partie double (REQ-214).
+
+  type Receipt = {new_on_hand: Int, entry_net: Int}
+
+  # INVENTAIRE : recevoir `qty` fait croître le stock d'EXACTEMENT `qty` (une réception ne rétrécit
+  # jamais le stock).
+  part receive(on_hand: Int, qty: Int) -> Int:
+    requires on_hand >= 0
+    requires qty >= 0
+    ensures result == on_hand + qty
+    ensures result >= on_hand
+    yield on_hand + qty
+
+  # PARTIE DOUBLE : une écriture d'achat est LÉGALE seulement si équilibrée (débit stock == crédit
+  # fournisseur) ; sa contribution nette au grand livre est alors 0.
+  part purchase_posting(inventory_debit: Int, payable_credit: Int) -> Int:
+    requires inventory_debit >= 0
+    requires inventory_debit == payable_credit
+    ensures result == 0
+    yield inventory_debit - payable_credit
+
+  # LE COMPOSITE : procure = recevoir le stock + poster l'achat équilibré, en prouvant les DEUX
+  # invariants sur le même reçu. Poster un achat déséquilibré est impossible (requires débit==crédit).
+  part procure(on_hand: Int, qty: Int, unit_debit: Int, unit_credit: Int) -> Receipt:
+    requires on_hand >= 0
+    requires qty >= 0
+    requires unit_debit >= 0
+    requires unit_debit == unit_credit
+    ensures result.new_on_hand == on_hand + qty     # 1. STOCK reçu exactement
+    ensures result.new_on_hand >= on_hand           # 2. jamais de rétrécissement à la réception
+    ensures result.entry_net == 0                   # 3. ACHAT équilibré (partie double)
+    yield Receipt(receive(on_hand, qty), purchase_posting(unit_debit, unit_credit))
+
+  part main() -> Int via IO:
+    # Recevoir 50 unités dans un stock de 100 (→150) ; poster un achat équilibré (débit 600 == crédit
+    # 600 → net 0). Les deux garanties composées, prouvées ensemble.
+    let r = procure(100, 50, 600, 600)
+    let a = IO.print(r.new_on_hand)
+    yield IO.print(r.entry_net)

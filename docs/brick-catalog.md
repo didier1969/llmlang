@@ -225,6 +225,21 @@
   (REQ-LLL-212). Composition inline (les modules-agents portent un `main`).
 - **REQ** — `REQ-LLL-211` (capstone du batch d'agents ERP 213-216).
 
+## 15. Capstone procure-to-pay (2ᵉ composition, flux distinct) — `examples/erp_procure_to_pay_verified.lll`
+
+- **Prouve** — que la composition tient sur un flux métier DIFFÉRENT d'order-to-cash : recevoir du
+  stock (INVENTAIRE) + comptabiliser l'achat (PARTIE DOUBLE) → le stock croît d'exactement la quantité
+  reçue ET l'écriture d'achat équilibre (net 0), les deux **simultanément**.
+- **Signature**
+  - `type Receipt = {new_on_hand, entry_net}`.
+  - `procure(on_hand, qty, unit_debit, unit_credit) -> Receipt` · `ensures result.new_on_hand ==
+    on_hand + qty` · `ensures result.entry_net == 0` (avec `requires unit_debit == unit_credit`).
+- **Quand** — approvisionnement, réception de marchandises, comptabilisation d'achat : partout où une
+  réception physique et une écriture comptable doivent rester cohérentes.
+- **Technique** — réutilise les formes inventaire (REQ-213) + partie double (REQ-214) via un record ;
+  test de REJET : un achat déséquilibré (débit ≠ crédit) NE COMPILE PAS, même composé.
+- **REQ** — `REQ-LLL-211` (2ᵉ capstone du batch ERP).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles

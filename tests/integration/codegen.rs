@@ -434,6 +434,27 @@ fn erp_sequence_gap_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_procure_unbalanced_purchase_fails_to_verify_req211() {
+    // The procure-to-pay capstone (examples/erp_procure_to_pay_verified.lll) still enforces the
+    // double-entry guard when composed with inventory: an unbalanced purchase posting
+    // (inventory_debit != payable_credit) cannot discharge `purchase_posting`'s requires → the module
+    // FAILS to verify. Composition never weakens a guarantee.
+    let src = "module Bad:\n\n  \
+        part purchase_posting(inventory_debit: Int, payable_credit: Int) -> Int:\n    \
+            requires inventory_debit >= 0\n    requires inventory_debit == payable_credit\n    \
+            ensures result == 0\n    yield inventory_debit - payable_credit\n\n  \
+        part bad_procure(d: Int) -> Int:\n    requires d >= 0\n    \
+            yield purchase_posting(d, d + 1)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "an unbalanced purchase posting (debit != credit) MUST fail to verify — even composed"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {

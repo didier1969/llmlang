@@ -92,6 +92,7 @@ fn flagship_examples_build_and_run() {
         "erp_discount_floor_verified.lll", // ERP proof-ground: margin floor — a discount bounded by price-cost keeps net_price >= cost (never sell at a loss); a FLOOR on a derived value under a guard, distinct from capacity/balance, batch margin >= 0 via forall+sum (REQ-LLL-211)
         "erp_sequence_verified.lll",  // ERP proof-ground: gap-free audit numbering — record guards num == last+1 (immediate successor), span proves N issuances advance by exactly N (contiguous); an ORDERING/successor invariant, distinct from capacity/balance/floor (REQ-LLL-211)
         "erp_order_to_cash_verified.lll", // ERP proof-ground CAPSTONE: composes the capacity (no-oversell), ordering (contiguous invoice number) and floor (margin-protected price) bricks into one order-fulfillment, proving all three invariants hold SIMULTANEOUSLY on the result record — composition never weakens a guarantee (REQ-LLL-211)
+        "erp_procure_to_pay_verified.lll", // ERP proof-ground CAPSTONE #2: a DISTINCT flow composing inventory (receive stock) + double-entry (balanced purchase posting), proving stock grows by exactly qty AND the purchase balances (net 0) together (REQ-LLL-211)
         "verified_sanitize.lll",      // CPT-LLL-018 brick: prove-side forall — a filter PROVES its output is all-positive (REQ-LLL-204)
     ];
     let mut failures = Vec::new();
