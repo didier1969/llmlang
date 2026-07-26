@@ -342,6 +342,31 @@ fn no_cache_run_never_erases_another_projects_proof_req212() {
     );
 }
 
+#[test]
+fn erp_inventory_oversell_fails_to_verify_req211() {
+    // The CRUX of a VERIFIED ERP agent (examples/erp_inventory_verified.lll): overselling is
+    // UNREPRESENTABLE in a proved program. `reserve` guards `requires qty <= on_hand - committed`
+    // (available). A caller that reserves the FULL on_hand while stock is already committed asks
+    // for qty > available → Z3 finds the counterexample (committed > 0) → the requires cannot be
+    // discharged → the module FAILS to verify. No test data, no runtime check: the no-oversell
+    // invariant is a THEOREM the compiler enforces, not a case the tests happen to cover.
+    let src = "module Bad:\n\n  \
+        part reserve(on_hand: Int, committed: Int, qty: Int) -> Int:\n    \
+            requires 0 <= committed\n    requires committed <= on_hand\n    requires 0 <= qty\n    \
+            requires qty <= on_hand - committed\n    ensures result <= on_hand\n    \
+            yield committed + qty\n\n  \
+        part oversell(on_hand: Int, committed: Int) -> Int:\n    \
+            requires 0 <= committed\n    requires committed <= on_hand\n    \
+            yield reserve(on_hand, committed, on_hand)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "overselling (reserve qty > available) MUST fail to verify — no-oversell is a theorem"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
