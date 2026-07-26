@@ -15,8 +15,10 @@
 //! `unknown`/`timeout`/`(error …)` are fail-CLOSED by `discharge` (DEC-LLL-015).
 //!
 //! v1 is enumerate-and-check, depth 1, type-directed (the D2 goal is displayed, not used to
-//! guide the search — the full VC set subsumes it). Out of scope: depth ≥ 2 / n-ary
-//! applications, goal-guided search, lambda/match/conditional synthesis, function-typed or
+//! guide the search — the full VC set subsumes it). D1 covers unary applications (part/ctor) AND
+//! binary operators (`a op b`, REQ-LLL-220 — arithmetic `+ - *` to an Int hole, comparisons and
+//! `&& ||` to a Bool hole), both with operands drawn only from D0. Out of scope: depth ≥ 2 /
+//! nested applications, goal-guided search, lambda/match/conditional synthesis, function-typed or
 //! polymorphic holes, joint multi-hole synthesis, cache pre-warming, text auto-editing.
 
 use crate::ast::*;
@@ -174,6 +176,49 @@ fn enumerate(t: &Ty, h: &HoleInfo, cm: &CheckedModule) -> Vec<Expr> {
                 }
             }
         }
+    }
+    // D1c: a BINARY operator `a op b` with both operands drawn only from D0 (no recursion, so the
+    // set stays finite and bounded by MAX_CANDIDATES). These are the completions LLMs write most —
+    // `x + 1`, `n - 1`, `x > 0` — which D0/D1-unary miss entirely (REQ-LLL-220). Every candidate is
+    // still discharged by the production oracle (soundness: propose ≠ accept); ops that need a
+    // side-condition Z3 can't meet (e.g. `x div 0`) are simply rejected, never emitted.
+    match t {
+        // arithmetic to an Int hole: +, -, * over the Int atoms (div/mod excluded — their
+        // non-zero-divisor obligation makes a bare `a div b` candidate usually fail, adding noise).
+        Ty::Int => {
+            let mut atoms = Vec::new();
+            d0(&Ty::Int, h, cm, &mut atoms);
+            for op in [BinOp::Add, BinOp::Sub, BinOp::Mul] {
+                for a in &atoms {
+                    for b in &atoms {
+                        out.push(Expr::Bin(op, Box::new(a.clone()), Box::new(b.clone())));
+                    }
+                }
+            }
+        }
+        // to a Bool hole: comparisons of Int atoms (`x > 0`, `a == b`) then boolean combinations of
+        // Bool atoms (`p && q`). Comparisons first — the more common LLM completion.
+        Ty::Bool => {
+            let mut ints = Vec::new();
+            d0(&Ty::Int, h, cm, &mut ints);
+            for op in [BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge, BinOp::Eq, BinOp::Ne] {
+                for a in &ints {
+                    for b in &ints {
+                        out.push(Expr::Bin(op, Box::new(a.clone()), Box::new(b.clone())));
+                    }
+                }
+            }
+            let mut bools = Vec::new();
+            d0(&Ty::Bool, h, cm, &mut bools);
+            for op in [BinOp::And, BinOp::Or] {
+                for a in &bools {
+                    for b in &bools {
+                        out.push(Expr::Bin(op, Box::new(a.clone()), Box::new(b.clone())));
+                    }
+                }
+            }
+        }
+        _ => {}
     }
     out
 }

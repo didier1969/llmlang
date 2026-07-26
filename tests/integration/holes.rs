@@ -492,14 +492,27 @@ fn lambda_body_hole_is_rejected_so_no_path_fact_can_leak_req059() {
 #[test]
 fn suggest_returns_only_z3_proved_completions_req086() {
     // REQ-LLL-086: enumerate-and-check returns ONLY completions Z3 PROVES satisfy the part's
-    // FULL contract. Here `ensures result >= acc`: of the in-scope Ints {n, acc} and literals
-    // {0, 1}, only `acc` is provable (result == acc ⇒ acc >= acc); `n`, `0`, `1` are plausible
-    // but FALSE and MUST be absent — soundness (propose ≠ accept).
+    // FULL contract. Here `ensures result >= acc`: of the in-scope atoms {n, acc, 0, 1}, only `acc`
+    // proves as a bare atom (`n`, `0`, `1` are plausible but FALSE and MUST be absent — soundness,
+    // propose ≠ accept). REQ-LLL-220 adds binary forms that ALSO prove (`acc + 1`, `acc + 0`, …),
+    // so the assertion is on the soundness PROPERTY — `acc` proved and first (atoms before binary),
+    // the false bare atoms absent — not an exact list.
     let src = "module M:\n\n  part f(n: Int, acc: Int) -> Int:\n    ensures result >= acc\n    yield ?\n";
     let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("check");
     let sugs = synth::suggest(&cm, None, 16).expect("suggest runs");
     assert_eq!(sugs.len(), 1, "one hole");
-    assert_eq!(sugs[0].candidates, vec!["acc".to_string()], "only `acc` is proved (n/0/1 absent)");
+    let cands = &sugs[0].candidates;
+    assert_eq!(
+        cands.first().map(String::as_str),
+        Some("acc"),
+        "the atom `acc` is proved and, atoms enumerated before binary ops, comes first: {cands:?}"
+    );
+    for false_atom in ["n", "0", "1"] {
+        assert!(
+            !cands.iter().any(|c| c == false_atom),
+            "the plausible-but-FALSE bare atom `{false_atom}` must be absent (soundness): {cands:?}"
+        );
+    }
 }
 
 
@@ -512,6 +525,32 @@ fn suggest_synthesises_unary_constructor_application_req086() {
     let cm = types::check_module(parser::parse_module(src).expect("parse")).expect("check");
     let sugs = synth::suggest(&cm, None, 16).expect("suggest");
     assert_eq!(sugs[0].candidates, vec!["Some(n)".to_string()], "only `Some(n)` is proved");
+}
+
+#[test]
+fn suggest_synthesises_binary_arithmetic_and_comparison_req220() {
+    // REQ-LLL-220 D1c: BINARY operators — the completions an LLM writes most (`x + 1`, `x > 0`) that
+    // D0/D1-unary miss entirely. Each is still discharged by the production oracle; only proved
+    // completions are kept (propose ≠ accept).
+    // (1) an Int hole whose ensures is `result == x + 1` → `x + 1` is proposed (`x + 0`, `x - 1`,
+    //     the unary/atom candidates are all rejected — they don't satisfy the ensures).
+    let inc = "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(inc).expect("parse")).expect("check");
+    let sugs = synth::suggest(&cm, None, 16).expect("suggest");
+    assert!(
+        sugs[0].candidates.iter().any(|c| c == "x + 1"),
+        "the binary completion `x + 1` must be proposed: {:?}",
+        sugs[0].candidates
+    );
+    // (2) a Bool hole whose ensures is `result == (x > 0)` → a comparison completion is proved.
+    let pos = "module M:\n\n  part is_pos(x: Int) -> Bool:\n    ensures result == (x > 0)\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(pos).expect("parse")).expect("check");
+    let sugs = synth::suggest(&cm, None, 16).expect("suggest");
+    assert!(
+        sugs[0].candidates.iter().any(|c| c == "x > 0"),
+        "the comparison completion `x > 0` must be proposed: {:?}",
+        sugs[0].candidates
+    );
 }
 
 
