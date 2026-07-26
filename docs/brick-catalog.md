@@ -208,6 +208,23 @@
   l'if-expression (REQ-LLL-198). Test de REJET : enregistrer un numéro qui saute NE COMPILE PAS.
 - **REQ** — `REQ-LLL-216` (refine `REQ-LLL-211`).
 
+## 14. Capstone order-to-cash (composition des invariants) — `examples/erp_order_to_cash_verified.lll`
+
+- **Prouve** — que les briques ERP S'ASSEMBLENT sans qu'une garantie n'en casse une autre : un flux
+  « commande → facture » compose CAPACITÉ (pas de survente) + ORDERING (n° contigu) + PLANCHER (prix
+  ≥ coût), et les TROIS invariants tiennent **simultanément** sur le résultat d'une commande honorée.
+- **Signature**
+  - `type Order = {committed, invoice, net}`.
+  - `fulfill(on_hand, committed, qty, last, price, cost, discount) -> Order` ·
+    `ensures result.committed <= on_hand` · `ensures result.invoice == last + 1` ·
+    `ensures result.net >= cost` — les trois garanties composées en un contrat.
+- **Quand** — tout scénario métier réel qui enchaîne plusieurs invariants (order-to-cash,
+  procure-to-pay) : la preuve montre que la composition PRÉSERVE chaque garantie.
+- **Technique** — chaque `requires` de brique déchargé par les `requires` du flux ; les `ensures`
+  composés via les sélecteurs de record. `net_price` réutilise sa preuve depuis le store partagé
+  (REQ-LLL-212). Composition inline (les modules-agents portent un `main`).
+- **REQ** — `REQ-LLL-211` (capstone du batch d'agents ERP 213-216).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
