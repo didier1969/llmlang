@@ -143,6 +143,55 @@
   call-site, ce qui referme l'induction. Compose avec l'if-IH (REQ-LLL-198).
 - **REQ** — REQ-LLL-204 (prove-side).
 
+## 10. Inventaire — jamais de survente (capacité conservée) — `examples/erp_inventory_verified.lll`
+
+- **Prouve** — une quantité PHYSIQUE sous contrainte de capacité : le stock engagé ne dépasse jamais
+  l'en-main (`committed <= on_hand`), donc le disponible reste **≥ 0** ; et `reserve` PRÉSERVE
+  l'invariant. Le stock négatif est un théorème d'impossibilité.
+- **Signature**
+  - `reserve(on_hand, committed, qty) -> Int` · `requires qty <= on_hand - committed` ·
+    `ensures result <= on_hand` — réserver sans survendre.
+  - `available_after(on_hand, reservations: List[Int]) -> Int` · `requires sum(reservations) <= on_hand`
+    · `ensures result >= 0` — disponible après une vague de N réservations.
+- **Quand** — gestion de stock, réservations, capacité (sièges, créneaux) : partout où « promettre plus
+  qu'on a » corrompt en silence.
+- **Technique** — préservation d'invariant sous opération gardée (le `requires` = la place restante),
+  + forall-sur-liste (REQ-LLL-201) et `sum` (REQ-LLL-194) pour le carnet entier. Vérifié par un test
+  de REJET : une survente NE COMPILE PAS.
+- **REQ** — `REQ-LLL-213` (refine `REQ-LLL-211`).
+
+## 11. Comptabilité en partie double (grand livre balancé) — `examples/erp_double_entry_verified.lll`
+
+- **Prouve** — l'invariant comptable canonique : toute écriture équilibre débits et crédits
+  (`sum(debits) == sum(credits)`) et le grand livre reste BALANCÉ (`net = Σd − Σc == 0`) après chaque
+  écriture. Un bilan non-balancé est inexprimable.
+- **Signature**
+  - `post(net, debits, credits) -> Int` · `requires net == 0` · `requires sum(debits) == sum(credits)`
+    · `ensures result == 0` — poster une écriture équilibrée reconduit net == 0.
+  - `imbalance(debits, credits) -> Int` · `requires sum(debits) == sum(credits)` · `ensures result == 0`.
+- **Quand** — cœur de tout système comptable ; grand livre, journal, écritures dont l'équilibre est
+  l'invariant de soundness.
+- **Technique** — ÉGALITÉ de deux agrégats préservée sous op gardée (distinct d'une simple somme
+  conservée) ; `sum` (REQ-LLL-194) + fold→sum. Test de REJET : une écriture déséquilibrée NE COMPILE PAS.
+- **REQ** — `REQ-LLL-214` (refine `REQ-LLL-211`).
+
+## 12. Plancher de marge — ne jamais vendre à perte — `examples/erp_discount_floor_verified.lll`
+
+- **Prouve** — un PLANCHER sur une valeur dérivée sous garde : une remise bornée par `price − cost`
+  garde le prix net **≥ coût** ; et la marge totale d'un lot reste ≥ 0 si chaque ligne respecte son
+  plancher. Vendre à perte est irreprésentable.
+- **Signature**
+  - `net_price(price, cost, discount) -> Int` · `requires discount <= price - cost` ·
+    `ensures result >= cost`.
+  - `total_margin(margins: List[Int]) -> Int` · `requires forall m in margins: m >= 0` ·
+    `ensures result >= 0` — marge de lot ≥ 0 à N lignes.
+- **Quand** — tarification, remises, promotions : garantir qu'aucune vente ne passe sous le coût
+  (protection de la profitabilité).
+- **Technique** — plancher (floor) sur une valeur dérivée, distinct de la capacité (ceiling) et de
+  l'équilibre ; forall (REQ-LLL-201) + `sum` (REQ-LLL-194). Test de REJET : remiser sous le coût NE
+  COMPILE PAS.
+- **REQ** — `REQ-LLL-215` (refine `REQ-LLL-211`).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
