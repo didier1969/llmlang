@@ -258,6 +258,21 @@
   liable par Axon = sa valeur DISTINCTE cross-module (DEC-LLL-081).
 - **REQ** — `REQ-LLL-155` (2a) + `REQ-LLL-217` (fixture cross-module).
 
+## 17. Enforcement IDEMPOTENT d'une limite — `examples/erp_idempotent_limit_verified.lll`
+
+- **Prouve** — une 5ᵉ forme distincte : l'IDEMPOTENCE, `f(f(x)) == f(x)`. Ré-appliquer un plafond de
+  crédit sur une valeur déjà bornée est un no-op — la différence entre une et deux applications est
+  prouvée **0**. L'invariant qui protège tout traitement REJOUÉ (retry, message dupliqué, batch relancé).
+- **Signature**
+  - `enforce_limit(exposure, limit) -> Int` · `ensures 0 <= result <= limit` (= min).
+  - `idempotent_diff(exposure, limit) -> Int` · `ensures result == 0` (une application − deux = 0).
+- **Quand** — plafonds/normalisations rejouables ; partout où un doublon de message ou un retry ne
+  doit pas altérer un état déjà correct.
+- **Technique** — `reapply` sur une sortie de `enforce_limit` (déjà ≤ limit) rend l'entrée inchangée
+  (ensures result == limited) ; le call-site le décharge → différence 0. Test de REJET : prétendre
+  l'idempotence d'une op qui ne l'est pas (soustraire un paiement) NE COMPILE PAS.
+- **REQ** — `REQ-LLL-211` (agent ERP, forme idempotence).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles

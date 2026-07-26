@@ -1,0 +1,40 @@
+module ErpIdempotentLimitVerified:
+
+  # ── AGENT CRITIQUE ERP VÉRIFIÉ : ENFORCEMENT IDEMPOTENT d'une limite (CPT-LLL-018) ──
+  #
+  # 5ᵉ forme de preuve, DISTINCTE (capacité / équilibre / plancher / ordering) : l'IDEMPOTENCE —
+  # appliquer une opération deux fois == une fois, f(f(x)) == f(x). Invariant critique dès qu'un
+  # traitement peut être REJOUÉ (retry réseau, message dupliqué, batch relancé) : plafonner une
+  # exposition au crédit une 2ᵉ fois ne doit RIEN changer. « Silencieusement faux » ici = un rejeu
+  # qui altère un solde déjà correct. Formalisé : ré-appliquer `enforce_limit` sur sa propre sortie
+  # est un no-op, prouvé (la différence est 0).
+
+  # Plafonner une exposition à la limite = min(exposure, limit), borné par les deux.
+  part enforce_limit(exposure: Int, limit: Int) -> Int:
+    requires exposure >= 0
+    requires limit >= 0
+    ensures result >= 0
+    ensures result <= limit
+    ensures result <= exposure
+    yield if exposure <= limit then exposure else limit
+
+  # RÉ-APPLIQUER sur une valeur DÉJÀ bornée (≤ limit) : no-op prouvé (result == l'entrée). C'est la
+  # demi-preuve d'idempotence : f sur une sortie de f ne bouge plus.
+  part reapply(limited: Int, limit: Int) -> Int:
+    requires 0 <= limited
+    requires limited <= limit
+    ensures result == limited
+    yield if limited <= limit then limited else limit
+
+  # IDEMPOTENCE prouvée : la différence entre une application et deux applications est 0. `capped`
+  # est borné (enforce_limit), donc `reapply` le rend inchangé → capped − capped == 0.
+  part idempotent_diff(exposure: Int, limit: Int) -> Int:
+    requires exposure >= 0
+    requires limit >= 0
+    ensures result == 0
+    let capped = enforce_limit(exposure, limit)
+    yield capped - reapply(capped, limit)
+
+  part main() -> Int via IO:
+    # Exposition 900, limite 500 → plafonné à 500 ; re-plafonner 500 → 500 (no-op). Différence 0.
+    yield IO.print(idempotent_diff(900, 500))

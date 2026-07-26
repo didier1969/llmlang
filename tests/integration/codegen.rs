@@ -455,6 +455,27 @@ fn erp_procure_unbalanced_purchase_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_false_idempotence_claim_fails_to_verify_req211() {
+    // Idempotence is a THEOREM, not a hope (examples/erp_idempotent_limit_verified.lll proves the
+    // real one: re-enforcing a limit is a no-op, difference 0). Claiming f(f(x)) == f(x) for a
+    // NON-idempotent operation — subtracting a payment reduces TWICE, not once — cannot be
+    // discharged (the difference is `p`, not 0), so the module FAILS to verify.
+    let src = "module Bad:\n\n  \
+        part deduct(x: Int, p: Int) -> Int:\n    requires x >= 0\n    requires p >= 0\n    \
+            requires p <= x\n    ensures result == x - p\n    yield x - p\n\n  \
+        part bad_idem(x: Int, p: Int) -> Int:\n    requires x >= 0\n    requires p >= 0\n    \
+            requires p + p <= x\n    ensures result == 0\n    \
+            let once = deduct(x, p)\n    yield once - deduct(once, p)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "a false idempotence claim (difference != 0 for a non-idempotent op) MUST fail to verify"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
