@@ -391,6 +391,29 @@ fn erp_double_entry_unbalanced_post_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_discount_below_cost_fails_to_verify_req211() {
+    // The CRUX of the verified margin floor (examples/erp_discount_floor_verified.lll): you cannot
+    // sell below cost. `net_price` guards `requires discount <= price - cost`. A caller that
+    // discounts to zero (100% off) while cost > 0 breaches the floor → the requires cannot be
+    // discharged → the module FAILS to verify. Selling at a loss is unrepresentable in a proof.
+    let src = "module Bad:\n\n  \
+        part net_price(price: Int, cost: Int, discount: Int) -> Int:\n    \
+            requires 0 <= cost\n    requires cost <= price\n    requires 0 <= discount\n    \
+            requires discount <= price - cost\n    ensures result >= cost\n    \
+            yield price - discount\n\n  \
+        part sell_at_loss(price: Int, cost: Int) -> Int:\n    \
+            requires 0 <= cost\n    requires cost <= price\n    \
+            yield net_price(price, cost, price)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "discounting below cost (net < cost) MUST fail to verify — the margin floor is a theorem"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
