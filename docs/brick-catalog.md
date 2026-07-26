@@ -192,6 +192,22 @@
   COMPILE PAS.
 - **REQ** — `REQ-LLL-215` (refine `REQ-LLL-211`).
 
+## 13. Numérotation sans trou (audit) — `examples/erp_sequence_verified.lll`
+
+- **Prouve** — un invariant d'audit de forme ORDERING/successeur : les numéros de pièce sont CONTIGUS
+  (chaque numéro est le successeur immédiat), donc émettre N numéros fait avancer le compteur
+  d'**exactement N** — aucun trou, aucun doublon. Un trou (pièce manquante) est inexprimable.
+- **Signature**
+  - `record(last, num) -> Int` · `requires num == last + 1` · `ensures result == num` — enregistrer
+    seulement le successeur immédiat (garde anti-trou).
+  - `span(start, n) -> Int` · `requires n >= 0` · `ensures result == start + n` — N émissions
+    avancent d'exactement N (contiguïté à N symbolique).
+- **Quand** — numérotation de factures/écritures/pièces où un trou ou un doublon est un signal
+  d'audit/fraude ; séquences continues garanties.
+- **Technique** — garde de contiguïté (`num == last + 1`) au call site + récurrence Int portée par
+  l'if-expression (REQ-LLL-198). Test de REJET : enregistrer un numéro qui saute NE COMPILE PAS.
+- **REQ** — `REQ-LLL-216` (refine `REQ-LLL-211`).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles

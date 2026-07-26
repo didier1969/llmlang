@@ -414,6 +414,26 @@ fn erp_discount_below_cost_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_sequence_gap_fails_to_verify_req211() {
+    // The CRUX of gap-free audit numbering (examples/erp_sequence_verified.lll): you cannot record a
+    // number that leaves a gap. `record` guards `requires num == last + 1`. A caller that records
+    // last + 2 (skipping a number) cannot discharge it → the module FAILS to verify. A gap in the
+    // sequence — a missing invoice number, the classic audit red flag — is unrepresentable in a proof.
+    let src = "module Bad:\n\n  \
+        part record(last: Int, num: Int) -> Int:\n    requires last >= 0\n    \
+            requires num == last + 1\n    ensures result == num\n    yield num\n\n  \
+        part skip(last: Int) -> Int:\n    requires last >= 0\n    \
+            yield record(last, last + 2)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "recording a gap (num != last + 1) MUST fail to verify — gap-free numbering is a theorem"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {

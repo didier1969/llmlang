@@ -1,0 +1,41 @@
+module ErpSequenceVerified:
+
+  # ── AGENT CRITIQUE ERP VÉRIFIÉ : NUMÉROTATION SANS TROU (audit) (CPT-LLL-018) ──
+  #
+  # Invariant d'AUDIT de forme ORDERING/SUCCESSEUR (distinct de la capacité, de l'équilibre et du
+  # plancher) : les numéros de pièce (facture, écriture) sont CONTIGUS — chaque numéro est le
+  # successeur immédiat du précédent. Un TROU dans la numérotation = une pièce manquante = un signal
+  # de fraude / un échec d'audit. Formalisé : `record` porte un `requires num == last + 1` (le numéro
+  # doit être le suivant) → enregistrer un numéro qui SAUTE est IMPOSSIBLE dans un programme prouvé.
+
+  # Émettre le prochain numéro : le successeur immédiat, strictement croissant (aucun saut).
+  part issue(last: Int) -> Int:
+    requires last >= 0
+    ensures result == last + 1
+    ensures result > last
+    yield last + 1
+
+  # Enregistrer un numéro sur le registre : LÉGAL seulement s'il est le successeur immédiat du
+  # dernier (pas de trou, pas de doublon). Le `requires` est la garde d'audit anti-trou.
+  part record(last: Int, num: Int) -> Int:
+    requires last >= 0
+    requires num == last + 1
+    ensures result == num
+    ensures result == last + 1
+    yield num
+
+  # Émettre N numéros depuis `start` fait avancer le compteur d'EXACTEMENT N — donc N numéros
+  # distincts et contigus (aucun trou, aucun doublon), pour N quelconque (récurrence Int + if-IH).
+  part span(start: Int, n: Int) -> Int:
+    requires start >= 0
+    requires n >= 0
+    ensures result == start + n
+    ensures result >= start
+    measure n
+    yield if n == 0 then start else span(start, n - 1) + 1
+
+  part main() -> Int via IO:
+    # Émettre le suivant après 1000 (=1001) puis l'enregistrer (garde contiguïté déchargée) ;
+    # puis émettre 5 numéros depuis 1000 → dernier = 1005 (1001..1005, contigus, prouvé sans trou).
+    let a = IO.print(record(1000, issue(1000)))
+    yield IO.print(span(1000, 5))
