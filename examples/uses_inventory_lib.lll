@@ -1,0 +1,24 @@
+import "lib/inventory_lib.lll"
+
+module UsesInventoryLib:
+
+  # ── CONSOMMATEUR CROSS-MODULE de la brique inventaire vérifiée ──
+  # Importe `lib/inventory_lib.lll` et compose ses garanties SANS les redémontrer : la borne
+  # « pas de survente » de `can_fulfill` se DÉCHARGE du contrat de `stock_reserve` (frontière
+  # d'import, DEC-LLL-019 + DEC-LLL-017). C'est le fixture cross-module : `can_fulfill` (ici) appelle
+  # `stock_reserve` (défini dans lib/inventory_lib.lll, un AUTRE fichier) — l'arête que `lll context`
+  # mono-fichier rate mais qu'Axon relie via le `source_file` de export-ist (REQ-LLL-217 / la valeur
+  # DISTINCTE cross-module d'Axon, DEC-LLL-081).
+
+  # Honorer une commande en réservant sur le stock : la garantie « engagé ≤ en-main » vient de la lib.
+  part can_fulfill(on_hand: Int, committed: Int, order: Int) -> Int:
+    requires 0 <= committed
+    requires committed <= on_hand
+    requires 0 <= order
+    requires order <= on_hand - committed
+    ensures result <= on_hand
+    yield stock_reserve(on_hand, committed, order)
+
+  part main() -> Int via IO:
+    # Stock 100, engagé 30 (dispo 70), commander 40 → engagé 70 ≤ 100 (invariant de lib tenu).
+    yield IO.print(can_fulfill(100, 30, 40))

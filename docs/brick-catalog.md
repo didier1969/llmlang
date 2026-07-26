@@ -240,6 +240,24 @@
   test de REJET : un achat déséquilibré (débit ≠ crédit) NE COMPILE PAS, même composé.
 - **REQ** — `REQ-LLL-211` (2ᵉ capstone du batch ERP).
 
+## 16. Distribution cross-module (brique lib importée) — `examples/lib/inventory_lib.lll` + `examples/uses_inventory_lib.lll`
+
+- **Prouve** — qu'une brique vérifiée en FORME BIBLIOTHÈQUE (sans `main`, importable par content-hash)
+  est réutilisée par un consommateur d'un AUTRE fichier, l'invariant traversant la frontière d'import :
+  la borne « pas de survente » de `can_fulfill` se DÉCHARGE du contrat de `stock_reserve` importé, sans
+  re-preuve.
+- **Signature**
+  - lib : `stock_available` / `stock_reserve(on_hand, committed, qty)` · `ensures result <= on_hand`.
+  - consommateur : `import "lib/inventory_lib.lll"` + `can_fulfill(…)` · `ensures result <= on_hand`
+    (déchargé de la lib).
+- **Quand** — publier une brique métier vérifiée pour qu'un autre module/projet l'importe et compose
+  ses garanties ; le socle de la distribution (REQ-LLL-155 2a).
+- **Technique** — le loader fusionne l'import en namespace plat (DEC-LLL-019) ; la vérification traverse
+  la frontière (DEC-LLL-017). C'est aussi le FIXTURE cross-module d'Axon : `export-ist` porte le
+  `source_file` réel (REQ-LLL-217) → l'appel `can_fulfill → stock_reserve` (fichiers différents) est
+  liable par Axon = sa valeur DISTINCTE cross-module (DEC-LLL-081).
+- **REQ** — `REQ-LLL-155` (2a) + `REQ-LLL-217` (fixture cross-module).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles

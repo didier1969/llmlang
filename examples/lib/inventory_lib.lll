@@ -1,0 +1,27 @@
+module InventoryLib:
+
+  # ── FORME BIBLIOTHÈQUE de la brique inventaire (CPT-LLL-018, REQ-LLL-155 tranche 2a) ──
+  # Les part vérifiées de l'agent inventaire, SANS `part main` : un module importable par
+  # content-hash, réutilisable cross-module. Fonctions UNIQUEMENT nommées (`stock_*`) pour un
+  # référencement cross-fichier propre : un consommateur les appelle depuis un AUTRE fichier, et
+  # `export-ist` porte le `source_file` réel de chaque symbole (REQ-LLL-217) → Axon lie l'appel à
+  # cette lib, pas à une copie aplatie. L'invariant no-oversell traverse la frontière d'import.
+
+  # Le disponible = en-main − engagé, prouvé non-négatif (pas de survente déjà présente).
+  part stock_available(on_hand: Int, committed: Int) -> Int:
+    requires 0 <= committed
+    requires committed <= on_hand
+    ensures result >= 0
+    ensures result == on_hand - committed
+    yield on_hand - committed
+
+  # Réserver `qty` : légal seulement si qty ≤ disponible ; l'ensures reconduit l'invariant
+  # (nouvel engagé ≤ en-main) → un consommateur décharge sa propre borne depuis celle-ci.
+  part stock_reserve(on_hand: Int, committed: Int, qty: Int) -> Int:
+    requires 0 <= committed
+    requires committed <= on_hand
+    requires 0 <= qty
+    requires qty <= on_hand - committed
+    ensures committed <= result
+    ensures result <= on_hand
+    yield committed + qty
