@@ -345,19 +345,25 @@ fn export_ist(file: &str) -> Result<String, String> {
     let (_, cm, hm) = load(file)?;
     let mut symbols: Vec<serde_json::Value> = Vec::new();
     let mut relations: Vec<serde_json::Value> = Vec::new();
+    // The absolute path of the file being exported — the `source_file` of this file's OWN parts.
+    let exported_abs = std::fs::canonicalize(file)
+        .map(|c| c.display().to_string())
+        .unwrap_or_else(|_| file.to_string());
     for p in &cm.module.parts {
-        // Emit as a SYMBOL only the parts DEFINED in THIS file (`origin == None` = the root/exported
-        // file; imported parts carry `origin = Some(other file)`, loader.rs). Emitting an imported
-        // part here would create a DUPLICATE definition of that name in every importing file's
-        // extraction, so Axon's cross-file call resolution (REQ-AXO-140: a callee name with exactly
-        // ONE definition binds to its real defining file, >1 falls back to a file-LOCAL edge) sees
-        // the name as AMBIGUOUS and collapses the call to an intra-file edge — the cross-module call
-        // graph (the DISTINCT value of Axon, DEC-LLL-081) is lost. Skipping imports keeps a library
-        // function to its single defining file, so a consumer's call resolves cross-file. Calls FROM
-        // this file's own parts TO imported callees are still emitted below (REQ-LLL-217).
-        if p.origin.is_some() {
-            continue;
-        }
+        // Every part carries `source_file` = the file where it is REALLY defined (`origin`, or the
+        // exported file for this file's own parts, loader.rs). Axon uses it to attribute an IMPORTED
+        // symbol to its DEFINING file — not the flattened consumer copy — and to build the import
+        // graph, instead of guessing from name uniqueness (REQ-AXO-140). Without it, a library
+        // function has a duplicate definition in every importer's extraction → Axon's cross-file
+        // call resolution sees the name as AMBIGUOUS → collapses the call to a file-LOCAL edge, and
+        // the cross-module call graph (the DISTINCT value of Axon, DEC-LLL-081) is lost. This is
+        // Axon's requested additive field (REQ-LLL-217 / Axon REQ-AXO-902259): a defect → a feature.
+        let source_file = match &p.origin {
+            Some(o) => std::fs::canonicalize(o)
+                .map(|c| c.display().to_string())
+                .unwrap_or_else(|_| o.clone()),
+            None => exported_abs.clone(),
+        };
         let effectful = p.effects.iter().any(|e| e == "IO");
         symbols.push(serde_json::json!({
             "name": p.name,
@@ -373,6 +379,8 @@ fn export_ist(file: &str) -> Result<String, String> {
             "embedding": serde_json::Value::Null,
             "properties": {
                 "content_hash": hm.def_hash[&p.name],
+                // REQ-LLL-217 / Axon REQ-AXO-902259 — the file where this part is REALLY defined.
+                "source_file": source_file,
                 "purity": if effectful { "effectful" } else { "pure" },
                 "effects": p.effects.join(","),
                 "contracts": format!(
@@ -418,7 +426,11 @@ fn export_ist(file: &str) -> Result<String, String> {
             "is_nif": false,
             "is_unsafe": false,
             "embedding": serde_json::Value::Null,
-            "properties": { "constructors": ctors.join(",") },
+            // NOTE (REQ-LLL-217): user types are attributed best-effort to the exported file —
+            // `TypeDecl` carries no `origin`, so an IMPORTED type can't yet be traced to its lib
+            // (a follow-up = thread origin through type merges). Call edges (the cross-module goal)
+            // are unaffected: they are function→function.
+            "properties": { "constructors": ctors.join(","), "source_file": exported_abs.clone() },
         }));
     }
     let out = serde_json::json!({

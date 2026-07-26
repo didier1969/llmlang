@@ -1635,14 +1635,14 @@ fn export_ist_emits_axon_extraction_result() {
 }
 
 #[test]
-fn export_ist_keeps_imported_calls_cross_file_not_flattened_req217() {
-    // REQ-LLL-217 (DEC-LLL-081): a file that IMPORTS another must NOT re-emit the imported symbols
-    // as its OWN. Emitting them would create a DUPLICATE definition of that name in every importer's
-    // extraction, so Axon's cross-file call resolution (REQ-AXO-140: a callee name with exactly ONE
-    // definition binds to its real defining file; >1 falls back to a file-LOCAL edge) sees the name
-    // as AMBIGUOUS and collapses the call to an intra-file edge — the cross-module call graph (the
-    // DISTINCT value of Axon) is lost. export-ist emits only THIS file's own definitions, but KEEPS
-    // the call to the imported callee so Axon can bind it to the callee's real defining file.
+fn export_ist_attributes_imported_symbols_to_their_defining_file_req217() {
+    // REQ-LLL-217 (DEC-LLL-081, Axon REQ-AXO-902259): every symbol carries `properties.source_file`
+    // = the file where it is REALLY defined. Without it, the loader's import-flattening (DEC-019)
+    // makes a library symbol appear as a LOCAL definition in every importer's extraction, so Axon
+    // (which resolved calls by name-uniqueness, REQ-AXO-140) saw the name as AMBIGUOUS and collapsed
+    // the cross-file call to a file-LOCAL edge — the cross-module call graph (Axon's DISTINCT value)
+    // was lost. With `source_file`, Axon attributes the imported symbol to its lib and builds the
+    // import graph, and the preserved call edge binds cross-file — a defect turned into a feature.
     let dir = tempdir();
     let lib = dir.join("lib.lll");
     let app = dir.join("app.lll");
@@ -1662,20 +1662,29 @@ fn export_ist_keeps_imported_calls_cross_file_not_flattened_req217() {
         .unwrap();
     assert!(out.status.success(), "export-ist failed: {}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
-    let fns: Vec<&str> = v["symbols"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|s| s["kind"] == "function")
-        .map(|s| s["name"].as_str().unwrap())
-        .collect();
-    // app.lll's OWN part is emitted; the IMPORTED lib_helper is NOT (it belongs to lib.lll).
-    assert!(fns.contains(&"use_it"), "own part emitted: {fns:?}");
+    let syms = v["symbols"].as_array().unwrap();
+    let source_file = |name: &str| -> String {
+        syms.iter()
+            .find(|s| s["name"] == name && s["kind"] == "function")
+            .unwrap_or_else(|| panic!("function symbol `{name}` missing"))["properties"]["source_file"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // Both symbols are emitted, but each carries its REAL defining file: the imported `lib_helper`
+    // is attributed to lib.lll — NOT the importer app.lll (the anti-flattening). Axon binds the
+    // call and the import graph from `source_file`, instead of a duplicate-name guess.
     assert!(
-        !fns.contains(&"lib_helper"),
-        "an imported symbol must NOT be re-emitted as the importer's own (that flattens the call graph): {fns:?}"
+        source_file("use_it").ends_with("app.lll"),
+        "own part attributed to its file, got: {}",
+        source_file("use_it")
     );
-    // but the cross-file CALL is preserved, so Axon binds it to lib.lll's lib_helper.
+    assert!(
+        source_file("lib_helper").ends_with("lib.lll"),
+        "an IMPORTED symbol must carry its DEFINING file (lib.lll), not the importer — got: {}",
+        source_file("lib_helper")
+    );
+    // the cross-file CALL is preserved, so Axon binds use_it → lib.lll::lib_helper.
     let rels = v["relations"].as_array().unwrap();
     assert!(
         rels.iter().any(|r| r["from"] == "use_it" && r["to"] == "lib_helper" && r["rel_type"] == "calls"),
