@@ -1634,6 +1634,55 @@ fn export_ist_emits_axon_extraction_result() {
     );
 }
 
+#[test]
+fn export_ist_keeps_imported_calls_cross_file_not_flattened_req217() {
+    // REQ-LLL-217 (DEC-LLL-081): a file that IMPORTS another must NOT re-emit the imported symbols
+    // as its OWN. Emitting them would create a DUPLICATE definition of that name in every importer's
+    // extraction, so Axon's cross-file call resolution (REQ-AXO-140: a callee name with exactly ONE
+    // definition binds to its real defining file; >1 falls back to a file-LOCAL edge) sees the name
+    // as AMBIGUOUS and collapses the call to an intra-file edge — the cross-module call graph (the
+    // DISTINCT value of Axon) is lost. export-ist emits only THIS file's own definitions, but KEEPS
+    // the call to the imported callee so Axon can bind it to the callee's real defining file.
+    let dir = tempdir();
+    let lib = dir.join("lib.lll");
+    let app = dir.join("app.lll");
+    std::fs::write(
+        &lib,
+        "module Lib:\n\n  part lib_helper(x: Int) -> Int:\n    ensures result >= x\n    yield x + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &app,
+        "import \"lib.lll\"\n\nmodule App:\n\n  part use_it(x: Int) -> Int:\n    ensures result >= x\n    yield lib_helper(x)\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["export-ist", app.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "export-ist failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let fns: Vec<&str> = v["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["kind"] == "function")
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    // app.lll's OWN part is emitted; the IMPORTED lib_helper is NOT (it belongs to lib.lll).
+    assert!(fns.contains(&"use_it"), "own part emitted: {fns:?}");
+    assert!(
+        !fns.contains(&"lib_helper"),
+        "an imported symbol must NOT be re-emitted as the importer's own (that flattens the call graph): {fns:?}"
+    );
+    // but the cross-file CALL is preserved, so Axon binds it to lib.lll's lib_helper.
+    let rels = v["relations"].as_array().unwrap();
+    assert!(
+        rels.iter().any(|r| r["from"] == "use_it" && r["to"] == "lib_helper" && r["rel_type"] == "calls"),
+        "the call to the imported callee must be kept for cross-file resolution: {rels:?}"
+    );
+}
+
 // REQ-LLL-208 (DEC-LLL-081 tranche 1b): `lll evidence` emits the per-part proof-evidence tuple
 // {def_hash, proof_hash, vcgen_version, verdict} for Axon's generic `soll_attach_evidence` — a
 // PROOF, not a test. A proved part carries a 64-hex proof_hash + verdict "proved"; a false module

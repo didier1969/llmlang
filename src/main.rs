@@ -346,6 +346,18 @@ fn export_ist(file: &str) -> Result<String, String> {
     let mut symbols: Vec<serde_json::Value> = Vec::new();
     let mut relations: Vec<serde_json::Value> = Vec::new();
     for p in &cm.module.parts {
+        // Emit as a SYMBOL only the parts DEFINED in THIS file (`origin == None` = the root/exported
+        // file; imported parts carry `origin = Some(other file)`, loader.rs). Emitting an imported
+        // part here would create a DUPLICATE definition of that name in every importing file's
+        // extraction, so Axon's cross-file call resolution (REQ-AXO-140: a callee name with exactly
+        // ONE definition binds to its real defining file, >1 falls back to a file-LOCAL edge) sees
+        // the name as AMBIGUOUS and collapses the call to an intra-file edge — the cross-module call
+        // graph (the DISTINCT value of Axon, DEC-LLL-081) is lost. Skipping imports keeps a library
+        // function to its single defining file, so a consumer's call resolves cross-file. Calls FROM
+        // this file's own parts TO imported callees are still emitted below (REQ-LLL-217).
+        if p.origin.is_some() {
+            continue;
+        }
         let effectful = p.effects.iter().any(|e| e == "IO");
         symbols.push(serde_json::json!({
             "name": p.name,
