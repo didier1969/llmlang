@@ -367,6 +367,30 @@ fn erp_inventory_oversell_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_double_entry_unbalanced_post_fails_to_verify_req211() {
+    // The CRUX of the verified double-entry ledger (examples/erp_double_entry_verified.lll): an
+    // UNBALANCED transaction cannot be posted. `post` guards `requires sum(debits) == sum(credits)`.
+    // A caller posting debits != credits cannot discharge it → the module FAILS to verify. Books
+    // that don't balance are unrepresentable in a proved program — not a runtime check.
+    let src = "module Bad:\n\n  \
+        part column_total(lines: List[Int]) -> Int:\n    ensures result == sum(lines)\n    \
+            measure length(lines)\n    match lines:\n      [] -> yield 0\n      \
+            x :: rest -> yield x + column_total(rest)\n\n  \
+        part post(net: Int, debits: List[Int], credits: List[Int]) -> Int:\n    \
+            requires net == 0\n    requires sum(debits) == sum(credits)\n    ensures result == 0\n    \
+            yield net + column_total(debits) - column_total(credits)\n\n  \
+        part bad_post(net: Int) -> Int:\n    requires net == 0\n    \
+            yield post(net, [100], [90])\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "posting an unbalanced transaction (debits != credits) MUST fail to verify — double-entry is a theorem"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {

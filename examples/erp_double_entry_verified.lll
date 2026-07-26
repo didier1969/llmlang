@@ -1,0 +1,39 @@
+module ErpDoubleEntryVerified:
+
+  # ── AGENT CRITIQUE ERP VÉRIFIÉ : COMPTABILITÉ EN PARTIE DOUBLE (CPT-LLL-018) ──
+  #
+  # L'invariant comptable CANONIQUE, celui dont « silencieusement faux » corrompt un bilan entier :
+  # toute écriture ÉQUILIBRE ses débits et ses crédits (Σ débits == Σ crédits), et le grand livre
+  # reste BALANCÉ (net = Σ débits − Σ crédits == 0) après chaque écriture. Formalisé comme une
+  # PRÉSERVATION D'INVARIANT sous opération gardée : `post` porte un `requires` (l'écriture est
+  # équilibrée) que l'appelant DOIT décharger, et un `ensures` qui reconduit net == 0. Poster une
+  # écriture déséquilibrée est IMPOSSIBLE dans un programme prouvé — pas un contrôle runtime.
+
+  # Le total d'une colonne (débits OU crédits) == la somme EXACTE, à N lignes quelconque
+  # (le pont fold→sum, REQ-194 ; runtime-calculable, relié au spec `sum`).
+  part column_total(lines: List[Int]) -> Int:
+    ensures result == sum(lines)
+    measure length(lines)
+    match lines:
+      [] -> yield 0
+      x :: rest -> yield x + column_total(rest)
+
+  # Le déséquilibre d'une écriture = Σ débits − Σ crédits. Une écriture ÉQUILIBRÉE (le `requires`)
+  # a un déséquilibre PROUVÉ nul — c'est la validation de partie double, comme théorème.
+  part imbalance(debits: List[Int], credits: List[Int]) -> Int:
+    requires sum(debits) == sum(credits)
+    ensures result == 0
+    yield column_total(debits) - column_total(credits)
+
+  # Poster une écriture sur un grand livre BALANCÉ (net == 0) : légal SEULEMENT si l'écriture est
+  # équilibrée. L'ensures reconduit net == 0 → le grand livre reste balancé, écriture après écriture.
+  part post(net: Int, debits: List[Int], credits: List[Int]) -> Int:
+    requires net == 0
+    requires sum(debits) == sum(credits)
+    ensures result == 0
+    yield net + column_total(debits) - column_total(credits)
+
+  part main() -> Int via IO:
+    # Écriture équilibrée : débit 100+50 = crédit 150 → déséquilibre 0 ; postée sur un livre à 0,
+    # le net reste 0 (partie double tenue). On imprime le net final (0 = livre balancé).
+    yield IO.print(post(0, [100, 50], [150]))

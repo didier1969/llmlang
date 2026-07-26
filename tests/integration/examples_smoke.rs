@@ -88,6 +88,7 @@ fn flagship_examples_build_and_run() {
         "verified_registry.lll",      // CPT-LLL-018 brick: referential integrity — insert keeps the key present, read-back is exact
         "verified_bounded_sum.lll",   // CPT-LLL-018 brick: forall-over-list — all entries >= 0 proves total >= 0 (REQ-LLL-201)
         "erp_inventory_verified.lll", // ERP proof-ground: no-oversell invariant — committed <= on_hand keeps available >= 0, preserved by reserve, at symbolic N (forall+sum); a distinct CAPACITY-constrained conserved quantity (REQ-LLL-211)
+        "erp_double_entry_verified.lll", // ERP proof-ground: double-entry bookkeeping — a balanced posting (sum(debits)==sum(credits)) preserves the ledger's net==0 invariant; invariant-preservation under a guarded op, distinct from the summing agents (REQ-LLL-211)
         "verified_sanitize.lll",      // CPT-LLL-018 brick: prove-side forall — a filter PROVES its output is all-positive (REQ-LLL-204)
     ];
     let mut failures = Vec::new();
