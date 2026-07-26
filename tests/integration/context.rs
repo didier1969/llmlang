@@ -84,3 +84,54 @@ fn context_rejects_unknown_flag_req142() {
     assert_ne!(code, Some(0), "un flag inconnu doit être rejeté");
     let _ = out;
 }
+
+// ===================================================================
+// REQ-LLL-155 tranche 2c — `lll publish` / `lll verify-attest` : l'attestation de preuve durable
+// d'une brique (identité {def/contract/proof hash, vcgen+z3 version, verdict}) et sa RE-vérification
+// fail-stop contre la source courante. Palier LOCAL/re-vérifié (le palier SIGNÉ = sigstore, suivi).
+// `run_lll_cmd` met le fichier en dernier — compatible ici (`lll publish <file>`), et le même `tag`
+// réutilise le même dossier temp → l'attestation persiste entre les appels.
+// ===================================================================
+
+/// Lance `lll <args>` dans un dossier DONNÉ (publish + verify-attest partagent le même dossier →
+/// l'attestation `<file>.attest.json` persiste entre les appels — ce que `run_lll_cmd` ne permet
+/// pas, chaque appel créant un dossier unique).
+fn lll_in(dir: &std::path::Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_lll"));
+    cmd.args(args).current_dir(dir);
+    if let Ok(z3) = std::env::var("LLL_Z3") {
+        cmd.env("LLL_Z3", z3);
+    }
+    let out = cmd.output().unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn publish_then_verify_attest_roundtrips_and_is_fail_stop_req155() {
+    let dir = tempdir(); // UN seul dossier partagé (l'attestation y persiste)
+    let f = dir.join("m.lll");
+    let ok = "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 1\n    yield x + 1\n";
+    std::fs::write(&f, ok).unwrap();
+
+    // publish écrit m.lll.attest.json ; verify-attest de la MÊME source passe.
+    let (c1, o1, e1) = lll_in(&dir, &["publish", "m.lll"]);
+    assert_eq!(c1, Some(0), "publish must succeed: {o1}{e1}");
+    assert!(o1.contains("1/1 parts proven"), "publish reports the proven count: {o1}");
+    let (c2, o2, e2) = lll_in(&dir, &["verify-attest", "m.lll"]);
+    assert_eq!(c2, Some(0), "verify-attest of the published module must pass: {o2}{e2}");
+    assert!(o2.contains("verified"), "verify-attest confirms: {o2}");
+
+    // Une source CHANGÉE (elle vérifie toujours, mais son identité diffère) → verify-attest fail-stop.
+    let changed = "module M:\n\n  part inc(x: Int) -> Int:\n    ensures result == x + 2\n    yield x + 2\n";
+    std::fs::write(&f, changed).unwrap();
+    let (c3, _o3, e3) = lll_in(&dir, &["verify-attest", "m.lll"]);
+    assert_ne!(c3, Some(0), "une source changée DOIT échouer verify-attest (identité liée)");
+    assert!(
+        e3.to_lowercase().contains("mismatch"),
+        "verify-attest signale un mismatch d'identité, obtenu: {e3}"
+    );
+}

@@ -467,8 +467,101 @@ fn export_evidence(file: &str) -> Result<String, String> {
     serde_json::to_string_pretty(&out).map_err(|e| e.to_string())
 }
 
+/// The IDENTITY-only view of a module's proof evidence (REQ-LLL-155 tranche 2c) — the durable
+/// ATTESTATION, stripped of run-specific noise (time_ms, obligation counts). It is the JOINT
+/// proof identity {vcgen-version, z3-version, per-part def/contract/proof hash + verdict} that
+/// `lll publish` writes and `lll verify-attest` re-checks fail-stop against the current source.
+fn build_attestation(file: &str) -> Result<serde_json::Value, String> {
+    let ev: serde_json::Value =
+        serde_json::from_str(&export_evidence(file)?).map_err(|e| e.to_string())?;
+    let parts: Vec<serde_json::Value> = ev["evidence"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| {
+                    // Canonicalise the verdict: `proved` vs `cached-proved` is a CACHE artifact
+                    // (the 2nd run of the same source hits the cache), NOT part of the proof
+                    // IDENTITY. Collapse both to `proven` so the attestation is stable across runs.
+                    let verdict = match e["verdict"].as_str() {
+                        Some("proved") | Some("cached-proved") => "proven",
+                        Some(other) => other,
+                        None => "unknown",
+                    };
+                    serde_json::json!({
+                        "name": e["name"],
+                        "def_hash": e["def_hash"],
+                        "contract_hash": e["contract_hash"],
+                        "proof_hash": e["proof_hash"],
+                        "verdict": verdict,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "module": ev["module"],
+        "vcgen_version": ev["vcgen_version"],
+        "z3_version": ev["z3_version"],
+        "parts": parts,
+    }))
+}
+
+/// `lll publish <file>` — write `<file>.attest.json`, the durable proof attestation of the brick.
+/// This is the LOCAL palier (REQ-LLL-155, paliers explicites) : produced, unsigned. The SIGNED
+/// palier (sigstore-style) wraps this file; the trust-without-re-Z3 reuse is tranche 2b.
+fn cmd_publish(file: &str) -> Result<(), String> {
+    let att = build_attestation(file)?;
+    let path = format!("{file}.attest.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&att).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{path}: {e}"))?;
+    let arr = att["parts"].as_array();
+    let parts = arr.map(|a| a.len()).unwrap_or(0);
+    let proven = arr
+        .map(|a| a.iter().filter(|p| p["verdict"] == "proven").count())
+        .unwrap_or(0);
+    println!(
+        "published attestation → {path}  ({proven}/{parts} parts proven · z3 {})",
+        att["z3_version"].as_str().unwrap_or("?")
+    );
+    Ok(())
+}
+
+/// `lll verify-attest <file>` — re-check `<file>.attest.json` against the CURRENT source, fail-stop
+/// (DEC-LLL-015). Recomputes the identity and compares : a changed source, a changed contract, or a
+/// changed SOLVER (the z3-version is bound) makes the stored identity ≠ recomputed → REJECTED. The
+/// re-verified palier ; trusting an unsigned verdict without this check is never done.
+fn cmd_verify_attest(file: &str) -> Result<(), String> {
+    let path = format!("{file}.attest.json");
+    let stored: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?,
+    )
+    .map_err(|e| format!("{path}: invalid attestation JSON: {e}"))?;
+    let fresh = build_attestation(file)?;
+    if stored != fresh {
+        return Err(format!(
+            "attestation MISMATCH — the source, a contract, or the solver changed since publish \
+             (stored identity ≠ recomputed). Re-publish, or re-verify from source (DEC-LLL-015).\n  {path}"
+        ));
+    }
+    let all_proven = fresh["parts"]
+        .as_array()
+        .map(|a| !a.is_empty() && a.iter().all(|p| p["verdict"] == "proven"))
+        .unwrap_or(false);
+    if !all_proven {
+        return Err("attestation covers UNPROVEN parts — not a valid proof attestation".into());
+    }
+    println!(
+        "attestation verified ✓  identity matches source + solver ({}) · all parts proven",
+        fresh["z3_version"].as_str().unwrap_or("?")
+    );
+    Ok(())
+}
+
 fn usage() -> String {
-    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll check --locked <file>       also verify every module + package pin against lll.lock (REQ-LLL-155)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fetch <file.lll>            materialize git [dependencies] into lll/store/ (the ONLY networked command)\n  lll lock <file.lll>             (re)generate lll.lock: module hashes + [[package]] pins (REQ-LLL-155)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll evidence <file.lll>         emit proof evidence {def_hash, proof_hash, vcgen+z3 version, verdict} for Axon soll_attach_evidence (REQ-LLL-208/155)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
+    "usage:\n  lll check <file.lll>            parse + type/effect check + Z3 verification\n  lll check --no-cache <file>     same, ignoring the proof cache\n  lll check --format=json <file>  structured diagnostics for LLM agents (REQ-LLL-033)\n  lll check --locked <file>       also verify every module + package pin against lll.lock (REQ-LLL-155)\n  lll build [--unchecked] [--no-opt] <file>  check, emit Rust + compile (fail-stop overflow by default; --no-opt skips equality-saturation)\n  lll fetch <file.lll>            materialize git [dependencies] into lll/store/ (the ONLY networked command)\n  lll lock <file.lll>             (re)generate lll.lock: module hashes + [[package]] pins (REQ-LLL-155)\n  lll fmt <file.lll> [--check]    format the source (whitespace; identity-guarded)\n  lll new <dir>                   scaffold a project (lll.toml + a verified src/main.lll)\n  lll test <file.lll>             verify, then RUN the `example` clauses (model≡binary)\n  lll run <file.lll> [--trace f | --replay f]\n  lll suggest <file.lll> [--part <name>] [--max <k>] [--format=json]  Z3-checked hole completions (consultative; REQ-LLL-086)\n  lll hash <file.lll>             print def/contract hashes\n  lll rename <file.lll> <old> <new>   structural rename (hash-preserving)\n  lll dedup <file.lll>            report α-equivalent duplicate definitions (hash clusters)\n  lll dedup <file.lll> --merge    collapse each duplicate cluster to one canonical name\n  lll export-ist <file.lll>       emit Axon ExtractionResult JSON (symbols + relations)\n  lll evidence <file.lll>         emit proof evidence {def_hash, proof_hash, vcgen+z3 version, verdict} for Axon soll_attach_evidence (REQ-LLL-208/155)\n  lll publish <file.lll>          write <file>.attest.json — the durable proof attestation of a brick (REQ-LLL-155 2c)\n  lll verify-attest <file.lll>    re-check <file>.attest.json against the current source, fail-stop (identity + solver bound)\n  lll ffi-import <f.rs> <Eff> <p> derive an `effect Eff` = extern block from Rust sigs (path prefix p)\n  lll move <file> <part> <dest>   relocate a definition to <dest> (identity preserved, no rewrite)\n  lll extract <file> <part> <let> <new>   pull the RHS of `let <let>` into `part <new>` (free vars → params; REQ-LLL-143)\n  lll inline <file> <part>        inline a single-`yield` pure part at its call sites and remove it (REQ-LLL-143)\n  lll rationale add <file> <part> <text…>\n  lll rationale show <file> <part>\n  lll context <file> <part> [--format=json]  minimal edit context: part source + deps' CONTRACTS + byte reduction (REQ-LLL-142)\n  lll audit <file.lll>            read-only audit REPL\n  lll mcp <file.lll>              read-only MCP server (stdio JSON-RPC) over the audit surface\n  lll lsp                         language server: live diagnostics over stdio JSON-RPC (REQ-LLL-160)"
         .to_string()
 }
 
@@ -999,6 +1092,8 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             println!("{}", export_evidence(file)?);
             Ok(())
         }
+        ["publish", file] => cmd_publish(file),
+        ["verify-attest", file] => cmd_verify_attest(file),
         ["ffi-import", rust_file, effect, prefix] => {
             // FFI façade, LLM-efficient layer (REQ-LLL-022 tranche 2, DEC-LLL-033):
             // mechanically derive the `effect … = extern` block from Rust
