@@ -148,15 +148,9 @@ pub fn verify_session(
     // environment. PARTS instead get a per-part closure preamble matching their portable cache
     // key (REQ-LLL-155 2b), computed inside the loop — see `part_dt_decls`.
     let dt_decls = user_datatype_decls(&cm.module.types);
-    let cache_path = cache_dir.join("proofs.json");
-    let mut cache: HashMap<String, CacheEntry> = if use_cache {
-        std::fs::read_to_string(&cache_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
+    // Proof cache = a CONTENT-ADDRESSED store rooted at `cache_dir` (REQ-LLL-212): one file per
+    // proved key, read/written per-key below. No monolithic load/rewrite — so a shared store
+    // survives `--no-cache` and concurrent verifiers (see `proof_store`).
 
     // Typed holes (DEC-LLL-052): a part with a hole is INCOMPLETE — it SKIPS Z3, is
     // never cached, never emitted. Derived from the checker's `cm.holes` (SINGLE
@@ -179,13 +173,11 @@ pub fn verify_session(
         let mut obligations = gen_part_obligations(cm, part)?;
         obligations.extend(gen_part_example_obligations(cm, part)?);
         let key = cache_key_with(part, cm, hm, &obligations, z3_version());
-        if use_cache {
-            if let Some(e) = cache.get(&key) {
-                if e.verdict == "proved" {
-                    parts.push((part.name.clone(), PartVerdict::CachedProved));
-                    continue;
-                }
-            }
+        if use_cache
+            && crate::proof_store::get(cache_dir, &key).is_some_and(|e| e.verdict == "proved")
+        {
+            parts.push((part.name.clone(), PartVerdict::CachedProved));
+            continue;
         }
         let n = obligations.len();
         // The datatype preamble for THIS part = the SAME referenced closure its cache key
@@ -200,14 +192,15 @@ pub fn verify_session(
         let failures = discharge_memoised(&z3, &obligations, &part_dt_decls, &mut memo)?;
         let time_ms = t0.elapsed().as_millis();
         if failures.is_empty() {
-            cache.insert(
-                key,
-                CacheEntry {
-                    verdict: "proved".into(),
-                    obligations: n,
-                    time_ms,
-                },
-            );
+            // Add-only write of THIS proved key (REQ-LLL-212): idempotent, never rewrites the
+            // store, so a shared store survives `--no-cache` and concurrent verifiers. Written
+            // whenever a part proves (even under `--no-cache`, which re-verifies then records) —
+            // add-only means recording is always safe and never erases another key.
+            crate::proof_store::put(
+                cache_dir,
+                &key,
+                &CacheEntry { verdict: "proved".into(), obligations: n, time_ms },
+            )?;
             parts.push((
                 part.name.clone(),
                 PartVerdict::Proved {
@@ -240,12 +233,6 @@ pub fn verify_session(
             parts.push((name, PartVerdict::Failed { failures }));
         }
     }
-    std::fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &cache_path,
-        serde_json::to_string_pretty(&cache).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
     Ok(VerifyReport { parts })
 }
 

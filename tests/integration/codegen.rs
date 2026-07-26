@@ -282,6 +282,66 @@ fn incremental_verification_only_reproves_the_edited_module_req141() {
     assert_eq!(tag(&r2, "main"), "cached", "untouched importer must stay cached");
 }
 
+#[test]
+fn shared_store_reuses_a_bricks_proof_across_projects_req212() {
+    // REQ-LLL-212: the proof key is PORTABLE (folds obligations+types+classes+vcgen+z3, no path),
+    // so a proof discharged for a brick in project A is a HIT for the SAME brick in project B when
+    // they share a proof store — Z3 runs ONCE, never again. Two DISTINCT modules each containing an
+    // identical part `shared` produce the identical portable key for it. This is the payoff of 2b.
+    use vc::PartVerdict::{CachedProved, Proved};
+    let store = tempdir(); // the SHARED store both "projects" verify against
+    let brick =
+        "part shared(x: Int) -> Int:\n    requires x >= 0\n    ensures result >= x\n    yield x + 7\n";
+    let tag = |r: &vc::VerifyReport, n: &str| {
+        match r.parts.iter().find(|(p, _)| p == n).map(|(_, v)| v) {
+            Some(Proved { .. }) => "proved",
+            Some(CachedProved) => "cached",
+            _ => "missing",
+        }
+    };
+
+    // Project A verifies the brick for the first time (cold — Z3 runs).
+    let (cm_a, hm_a) = full(&format!("module A:\n\n  {brick}"));
+    let ra = vc::verify(&cm_a, &hm_a, &store, true).expect("verify A");
+    assert_eq!(tag(&ra, "shared"), "proved", "A verifies the brick cold");
+
+    // Project B — a DIFFERENT module (other name + an extra part) containing the SAME brick —
+    // shares the store: B's `shared` HITS A's proof (no Z3), B's own new part is proved fresh.
+    let (cm_b, hm_b) = full(&format!(
+        "module B:\n\n  {brick}\n  part other(y: Int) -> Int:\n    ensures result >= 0\n    yield 0\n"
+    ));
+    let rb = vc::verify(&cm_b, &hm_b, &store, true).expect("verify B");
+    assert_eq!(
+        tag(&rb, "shared"),
+        "cached",
+        "B reuses A's proof of the brick cross-project (no Z3)"
+    );
+    assert_eq!(tag(&rb, "other"), "proved", "B's own new part is verified fresh");
+}
+
+#[test]
+fn no_cache_run_never_erases_another_projects_proof_req212() {
+    // REQ-LLL-212 Bug A: the old monolithic store rewrote the whole file keeping ONLY the current
+    // module's parts, so a `--no-cache` check of module B ERASED module A's proofs from a shared
+    // store. The content-addressed per-key store is ADD-ONLY — a `--no-cache` run records its own
+    // key and touches no other. Prove A, then run B under `--no-cache`; A's key MUST survive.
+    let store = tempdir();
+    let (cm_a, hm_a) =
+        full("module A:\n\n  part pa(x: Int) -> Int:\n    ensures result >= x\n    yield x + 1\n");
+    vc::verify(&cm_a, &hm_a, &store, true).expect("verify A");
+    let key_a = vc::cache_key(&cm_a.module.parts[0], &cm_a, &hm_a);
+    assert!(proof_store::get(&store, &key_a).is_some(), "A's proof is in the store");
+
+    // B under --no-cache (use_cache=false): re-verifies + records its own key; must NOT erase A's.
+    let (cm_b, hm_b) =
+        full("module B:\n\n  part pb(x: Int) -> Int:\n    ensures result >= x\n    yield x + 2\n");
+    vc::verify(&cm_b, &hm_b, &store, false).expect("verify B --no-cache");
+    assert!(
+        proof_store::get(&store, &key_a).is_some(),
+        "A's proof SURVIVES B's --no-cache run (Bug A closed by the add-only per-key store)"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {

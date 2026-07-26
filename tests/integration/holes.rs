@@ -42,8 +42,14 @@ fn typed_hole_makes_part_incomplete_never_proved_or_cached() {
     let v = &report.parts.iter().find(|(n, _)| n == "f").unwrap().1;
     assert!(matches!(v, vc::PartVerdict::Incomplete { .. }), "holey part is Incomplete, got {v:?}");
     assert!(!report.ok(), "an incomplete module is not ok()");
-    let cache = std::fs::read_to_string(dir.join("proofs.json")).unwrap_or_default();
-    assert!(!cache.contains("\"proved\""), "a holey part must never be cached proved: {cache}");
+    // The proof store is content-addressed (one file per proved key, REQ-LLL-212). A holey part
+    // writes NONE, so no entry in the store carries a "proved" verdict.
+    let any_proved = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| std::fs::read_to_string(e.path()).map(|s| s.contains("\"proved\"")).unwrap_or(false));
+    assert!(!any_proved, "a holey part must never be cached proved");
 }
 
 

@@ -13,8 +13,6 @@
 use crate::ast::*;
 use crate::hash::HashedModule;
 use crate::types::CheckedModule;
-use crate::vc::CacheEntry;
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -65,7 +63,9 @@ pub struct AuditCtx<'a> {
     pub cm: &'a CheckedModule,
     pub hm: &'a HashedModule,
     pub root: &'a Path,
-    pub cache: HashMap<String, CacheEntry>,
+    /// The proof store root (REQ-LLL-212): verdicts are looked up per-key here (content-addressed),
+    /// not from a preloaded map.
+    pub store: PathBuf,
 }
 
 pub fn audit_repl(ctx: &AuditCtx) -> Result<(), String> {
@@ -168,7 +168,7 @@ fn verdict_str(ctx: &AuditCtx, part: &str) -> String {
         return format!("unknown part `{part}`");
     };
     let key = crate::vc::cache_key(p, ctx.cm, ctx.hm);
-    match ctx.cache.get(&key) {
+    match crate::proof_store::get(&ctx.store, &key) {
         Some(e) => format!(
             "proved ({} obligation(s), {} ms, cached)",
             e.obligations, e.time_ms

@@ -573,7 +573,9 @@ fn load(path: &str) -> Result<(String, types::CheckedModule, hash::HashedModule)
 }
 
 fn cache_dir() -> PathBuf {
-    PathBuf::from(".lll-cache")
+    // The proof store root (REQ-LLL-212): `.lll-cache` by default, `$LLL_PROOF_STORE` to share
+    // proofs across projects on the machine. Content-addressed per-key (see `proof_store`).
+    proof_store::store_dir()
 }
 
 /// Run the check pipeline and collect every failure as a structured diagnostic
@@ -1459,17 +1461,12 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         }
         ["audit", file] => {
             let (src, cm, hm) = load(file)?;
-            let cache: std::collections::HashMap<String, vc::CacheEntry> =
-                std::fs::read_to_string(cache_dir().join("proofs.json"))
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
             let ctx = explain::AuditCtx {
                 src: &src,
                 cm: &cm,
                 hm: &hm,
                 root: Path::new("."),
-                cache,
+                store: cache_dir(),
             };
             explain::audit_repl(&ctx)
         }

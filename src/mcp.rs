@@ -127,7 +127,7 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "lll_defs" => {
             let (_, cm, hm) = load(file)?;
-            let cache = read_cache();
+            let store = crate::proof_store::store_dir();
             let mut s = format!("module {} — {} part(s)\n", cm.module.name, cm.module.parts.len());
             for p in &cm.module.parts {
                 let eff = if p.effects.is_empty() {
@@ -140,7 +140,7 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
                     p.name,
                     &hm.def_hash[&p.name][..16],
                     eff,
-                    verdict(&cache, p, &cm, &hm)
+                    verdict(&store, p, &cm, &hm)
                 ));
             }
             Ok(s)
@@ -156,12 +156,12 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
                 .get(part)
                 .ok_or_else(|| format!("unknown part `{part}`"))?;
             let p = &cm.module.parts[idx];
-            let cache = read_cache();
+            let store = crate::proof_store::store_dir();
             let mut s = String::new();
             s.push_str(&format!("part `{part}`\n"));
             s.push_str(&format!("  def-hash      {}\n", hm.def_hash[part]));
             s.push_str(&format!("  contract-hash {}\n", hm.contract_hash[part]));
-            s.push_str(&format!("  verdict       {}\n", verdict(&cache, p, &cm, &hm)));
+            s.push_str(&format!("  verdict       {}\n", verdict(&store, p, &cm, &hm)));
             for r in &p.requires {
                 s.push_str(&format!("  requires {r:?}\n"));
             }
@@ -257,21 +257,15 @@ fn call_tool(file: &str, name: &str, args: &Value) -> Result<String, String> {
     }
 }
 
-fn read_cache() -> std::collections::HashMap<String, vc::CacheEntry> {
-    std::fs::read_to_string(".lll-cache/proofs.json")
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
 fn verdict(
-    cache: &std::collections::HashMap<String, vc::CacheEntry>,
+    store: &std::path::Path,
     p: &crate::ast::Part,
     cm: &CheckedModule,
     hm: &HashedModule,
 ) -> String {
     let key = vc::cache_key(p, cm, hm);
-    match cache.get(&key) {
+    // Look up the verdict per-key in the content-addressed proof store (REQ-LLL-212).
+    match crate::proof_store::get(store, &key) {
         Some(e) => format!("proved ({} obl, {} ms, cached)", e.obligations, e.time_ms),
         None => "not verified at current hash".to_string(),
     }

@@ -25,6 +25,7 @@ pub mod mcp;
 pub mod opsem;
 pub mod optimize;
 pub mod parser;
+pub mod proof_store;
 /// The package subsystem (REQ-LLL-155 wave A: `[dependencies]` path+git sources,
 /// content-addressed store, lockfile pins). The loader is its single
 /// compiler-side consumer — packages are import roots, nothing more; zero
