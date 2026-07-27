@@ -174,3 +174,37 @@ d'escapes réels). Les deux vues sont valides : structurelle (plancher, modèle 
 générée (modèle fort). Un **run tokens-à-correction 3-langages généré par LLM** (Python/Rust/llmlang,
 via OpenRouter — REQ-LLL-013 maintenant faisable) donnerait le chiffre de tokens définitif ; il est
 gated budget. Ce tableau structurel + le corpus one-shot existant sont la base gratuite.
+
+## Run GÉNÉRÉ 3-langages ($0.04, 36 unités) — le chiffre de tokens HONNÊTE (`xlang_gen.py`)
+
+Des LLM (haiku-4.5, gpt-4o-mini × 2 samples) GÉNÈRENT la solution dans chaque langage, itèrent
+contre le gate visible natif (Python/Rust : exemples ; llmlang : preuve `lll check`), puis oracle
+caché. 3 tâches : emod (mod-signe), square (overflow), alloc_ceil (reste). 1 timeout réseau
+(llmlang/square).
+
+| langage | vert visible | **ÉVASIONS** | correct-caché | tok_IN (primer+spec) | tok_OUT (génération) | tok total |
+|---|---|---|---|---|---|---|
+| Python  | 12/12 | **0/12** | 12/12 | 374 | 22 | 396 |
+| Rust    | 12/12 | **4/12 (33 %)** | 8/12 | 400 | 50 | 459 |
+| llmlang | 11/11 | **0/11** | 11/11 | 3755 | 63 | 3814 |
+
+**Ce que ça dit, sans complaisance :**
+1. **On NE peut PAS revendiquer « moins de tokens ».** En brut par tâche, llmlang coûte ~8× (3814 vs
+   396). MAIS le gouffre est ENTIÈREMENT le **primer** (tok_IN 3755 = les 175 lignes de doc du langage
+   inconnu, envoyées à CHAQUE unité). Le **coût MARGINAL** — ce que le LLM écrit vraiment (tok_OUT) —
+   est **63 (llmlang) vs 50 (Rust) vs 22 (Python)** : même ordre de grandeur, et le surplus llmlang
+   EST le contrat machine-vérifié. Le primer est un coût FIXE payé 1× par session (system prompt),
+   amorti sur N tâches → per-tâche il tend vers 0. **Honnête : tokens comparables une fois amortis ;
+   PAS un gain, un match ; un désavantage brut sur une tâche isolée.**
+2. **Le vrai différentiel est l'ÉVASION, et il est net : Rust 33 %, Python 0 %, llmlang 0 %.** Les 4
+   fuites Rust sont TOUTES l'overflow (`x*x` à 4e9) — les DEUX modèles forts écrivent le `x*x` naïf,
+   ne dégainent pas i128/checked. Confirme le tableau structurel avec des solutions GÉNÉRÉES.
+3. **Mais vs Python l'edge de correction DISPARAÎT ici** (Python 0 aussi : bignum + `%` euclidien). Sur
+   CES 3 tâches, llmlang ne bat que Rust. L'edge vs Python vit ailleurs (argent flottant, invariants
+   utilisateur — cf. le tableau structurel `xlang_escape.py` où Python évade 2/4).
+
+**Verdict honnête pour la thèse « efficience tokens ».** Elle est FAUSSE telle quelle : llmlang n'est
+pas moins cher en tokens (primer lourd ; comparable seulement amorti). La thèse défendable et MESURÉE
+est : **correction garantie (0 évasion) à coût marginal comparable, avantage net vs les langages
+typés/compilés (Rust : 33 % de fuites), plus étroit vs Python (bignum) sauf sur argent-exact et
+invariants**. « Preuve en millisecondes vs confiance-par-tests » reste le vrai argument, pas le token.
