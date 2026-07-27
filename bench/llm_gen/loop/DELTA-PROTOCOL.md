@@ -292,3 +292,47 @@ LIVE_CALLERS↔LIVE_AXON ≈ nulle, et un gain des DEUX vs LIVE_CTX sur le rippl
 des callers évité). Ceci ne dit PAS « Axon n'apporte rien » : la valeur DISTINCTE d'Axon (callers
 CROSS-module qu'un `lll context` intra-module rate ; intention SOLL) reste NON mesurée par ce
 substrat mono-module — c'est le prochain test de la thèse Axon (cf. `docs/ecosystem-strategy.md §3`).
+
+### RUN 6 — RÉSULTATS ($0.404, 112 unités, matrice propre v2)
+
+**Config** : d01–d07 × 4 bras (DARK/LIVE_CTX/LIVE_CALLERS/LIVE_AXON) × 2 modèles
+(`anthropic/claude-haiku-4.5`, `openai/gpt-4o-mini` ; gemini-2.0-flash exclu, 404) × 2 samples,
+mode SPLICE. Coût **$0.404** (612k tokens : 578k in / 34k out).
+
+**Succès (le finding fiabilité, ENFIN visible) — ripple vs localisé :**
+
+| bras | localisé (d01–d04) | RIPPLE (d05–d07) |
+|---|---|---|
+| DARK | 16/16 | 11/12 |
+| LIVE_CTX | 16/16 | **6/12** |
+| LIVE_CALLERS | 16/16 | **12/12** |
+| LIVE_AXON | 16/16 | **12/12** |
+
+Sur les tâches LOCALISÉES, le contexte de callers est neutre (tous 16/16 — pas de ripple à voir).
+Sur les RIPPLES, **LIVE_CTX (callee-only) échoue la MOITIÉ** (6/12) : le focus qui économise des
+tokens CACHE les callers → le modèle change la signature mais ne peut pas réparer les appelants, et
+n'en sort pas en 5 rounds. `round1_kind` le prouve : les 8 frictions round-1 de LIVE_CTX sont TOUTES
+`check` (obligation, pas `markers`) — la friction est RÉELLE, pas un artefact de marqueur. Un
+`round1_diag` concret (gpt-4o-mini, LIVE_CTX, d06) : sans la source de `fulfill`, le modèle FABRIQUE
+un contrat invalide `LLL-E5001: calls are not allowed in ensures (DEC-LLL-017)` pour le caller qu'il
+ne voit pas. Donner la source des callers — graphe llmlang (LIVE_CALLERS) OU Axon (LIVE_AXON) — →
+**12/12**. DARK (dump complet) a les callers dans le module → 11/12 (1 échec gpt-4o-mini d06).
+
+**Tokens (ratio médian apparié vs DARK, doublement-corrects seulement) :**
+- LIVE_CTX/DARK **0.731** IC95% [0.689, 0.877] (exclues 6/28 — SURVIVORSHIP : exclut ses 6 échecs).
+- LIVE_CALLERS/DARK **0.787** IC95% [0.765, 0.939] (exclues 1/28).
+- LIVE_AXON/DARK **0.806** IC95% [0.702, 0.936] (exclues 1/28).
+
+LIVE_CTX paraît le moins cher (0.731) mais c'est un BIAIS DE SURVIVANCE (le ratio n'apparie que les
+doublement-corrects → exclut ses 6 échecs ripple). Le vrai gagnant honnête = **LIVE_CALLERS** :
+~21 % de tokens en moins que DARK **ET** 28/28 de fiabilité. Le contexte de callers coûte ~5-8 % de
+tokens de plus que le callee-only, et ces tokens ACHÈTENT la fiabilité (28/28 vs 22/28).
+
+**Pré-enregistrement TENU** : LIVE_CALLERS ≈ LIVE_AXON (28/28 les deux, 0.787 vs 0.806 — même signal
+callers, source ≠ ; LIVE_CALLERS légèrement plus serré = clôture transitive du graphe llmlang). La
+valeur DISTINCTE d'Axon (callers CROSS-module qu'un `lll context` mono-module rate ; intention SOLL)
+reste NON mesurée — ce substrat est mono-module. = prochain test de la thèse Axon.
+
+**Thèse écosystème, mesurée** : langage vérifié = FOCUS token-efficient sur l'édition localisée, mais
+callee-only → INSUFFISANT sur le ripple ; + contexte de callers (langage OU Axon) = ripple FIABLE
+(12/12) à prime de tokens modeste. Ça se COMPOSE.
