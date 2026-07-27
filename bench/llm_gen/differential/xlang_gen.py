@@ -356,8 +356,11 @@ def run_unit(t, lang, model, sample, key):
         tin += usage.get("prompt_tokens", 0) or 0
         tout += usage.get("completion_tokens", 0) or 0
         cost += usage.get("cost", 0.0) or 0.0
-        code = loop_run.extract_code(reply)
-        green, feedback = LANGS[lang]["gate"](code, t)
+        code = loop_run.extract_code(reply or "") or ""  # None content/no fence → clean not-green, never a crash
+        if not code.strip():
+            green, feedback = False, "no fenced code block in the reply"
+        else:
+            green, feedback = LANGS[lang]["gate"](code, t)
         if green:
             break
     esc = green and not hidden_correct(lang, code, t)

@@ -208,3 +208,51 @@ pas moins cher en tokens (primer lourd ; comparable seulement amorti). La thèse
 est : **correction garantie (0 évasion) à coût marginal comparable, avantage net vs les langages
 typés/compilés (Rust : 33 % de fuites), plus étroit vs Python (bignum) sauf sur argent-exact et
 invariants**. « Preuve en millisecondes vs confiance-par-tests » reste le vrai argument, pas le token.
+
+## Run REPRÉSENTATIF ($1.13, 180 u) — le verdict honnête, sans cerise (`xlang_gen.py`, les 5 biais corrigés)
+
+Interrogé « ton test est représentatif ? », j'avais listé 5 biais qui tous flattaient/faussaient la
+mesure. Version corrigée : 6 tâches (mix piège/normale, scalaire + list/fold multi-fonctions), 2
+modèles (**claude-sonnet-5 FORT + gpt-4o-mini rapide**), 3/2 samples, **gate visible weak ET strong**
+(strong = batterie de bords = dev diligent), primer compté à son arme, reporting tokens marginal +
+amorti. `xlang_gen.py`, dryrun 100% (weak+strong).
+
+| gate | langage | green | fuite(piège) | fuite(normale) | tok_out (marginal) | primer 1× |
+|---|---|---|---|---|---|---|
+| **weak** | Python | 36/36 | 0/18 | 0/18 | 25 | 251 |
+| **weak** | Rust | 36/36 | **6/18** | 0/18 | 60 | 275 |
+| **weak** | llmlang | 25/36 | 0/18 | **2/18** | 185 | 3033 |
+| **strong** | Python | 24/24 | 0/12 | 0/12 | 24 | 251 |
+| **strong** | Rust | 22/24 | **0/12** | 0/12 | 95 | 275 |
+| **strong** | llmlang | 17/24 | 0/12 | **3/12** | 167 | 3033 |
+
+**Le finding-titre (et il refroidit) : la fuite Rust 33 % → 0 % sous un gate ÉQUITABLE.** Les 6 fuites
+Rust du gate weak étaient TOUTES l'overflow (`square`) — et sous le gate strong (le dev diligent teste
+une valeur qui déborde i64) elles sont **toutes attrapées**. Donc les « 33 % » du run isolé étaient un
+**artefact d'un jeu de tests faible**, pas une propriété du langage. Avec de vrais tests-propriété, Rust
+ne livre 0 bug lui aussi. L'avantage « preuve > tests » **s'évapore quand le baseline est testé
+sérieusement** : sous strong, les trois langages fuient ~0 sur les pièges.
+
+**Et sur les tâches NORMALES, llmlang fuit PLUS (2–3) que Python/Rust (0).** Parce que son gate est la
+PREUVE, et un modèle qui écrit un contrat FAIBLE prouve la terminaison sans prouver la correction →
+il livre une valeur fausse « prouvée ». L'avantage preuve-sur-tout-input n'existe QUE si le LLM écrit
+un contrat qui capture la spec — et souvent il ne le fait pas (aggravé par une friction d'outillage :
+`sum(xs)` en contrat perd le sort sur un littéral, pas de `let x: T`, pas d'appel en `ensures` — le
+modèle est POUSSÉ vers le contrat minimal qui n'attrape rien).
+
+**Coût & friction, mesurés sans complaisance :**
+- **Tokens** : llmlang écrit ~7× plus (marginal 167–185 vs 24–25 Python / 60–95 Rust), et son primer
+  (~3000 tok) est ~12× celui des autres. Sur AUCUN axe llmlang n'est moins cher.
+- **Génération** : llmlang atteint le vert **25/36 (weak), 17/24 (strong)** vs Python ~100 %, Rust
+  ~92–100 %. Le modèle FAIBLE (gpt-4o-mini) échoue en boucle sur des tâches triviales en llmlang
+  (langage peu vu à l'entraînement) ; le fort (sonnet-5) réussit mieux mais reste plus verbeux et cher.
+
+**Verdict représentatif honnête.** Avec les modèles ET l'outillage d'AUJOURD'HUI, llmlang ne démontre
+**NI supériorité en tokens NI supériorité en correction** : il est plus cher, plus dur à générer, et
+son avantage théorique (preuve pour TOUS les inputs > tests sur quelques-uns) reste **NON réalisé** —
+il faudrait (a) des modèles qui écrivent des contrats forts, (b) un outillage de contrats qui ne les
+en empêche pas (le chantier `sum`/list/contrat), et (c) que le baseline soit du code naïf, pas
+diligemment testé. Contre un dev diligent en Python/Rust, llmlang, tel qu'un LLM l'utilise
+aujourd'hui, ne gagne pas. C'est la vérité mesurée — pas l'histoire qu'on espérait, mais la bonne à
+connaître pour le positionnement (et la feuille de route : contrats-list ergonomiques + pousser le
+LLM à écrire des `ensures` forts sont les leviers qui pourraient renverser ce verdict).
