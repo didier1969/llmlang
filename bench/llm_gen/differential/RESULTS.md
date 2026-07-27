@@ -226,33 +226,42 @@ amorti. `xlang_gen.py`, dryrun 100% (weak+strong).
 | **strong** | Rust | 22/24 | **0/12** | 0/12 | 95 | 275 |
 | **strong** | llmlang | 17/24 | 0/12 | **3/12** | 167 | 3033 |
 
-**Le finding-titre (et il refroidit) : la fuite Rust 33 % → 0 % sous un gate ÉQUITABLE.** Les 6 fuites
-Rust du gate weak étaient TOUTES l'overflow (`square`) — et sous le gate strong (le dev diligent teste
-une valeur qui déborde i64) elles sont **toutes attrapées**. Donc les « 33 % » du run isolé étaient un
-**artefact d'un jeu de tests faible**, pas une propriété du langage. Avec de vrais tests-propriété, Rust
-ne livre 0 bug lui aussi. L'avantage « preuve > tests » **s'évapore quand le baseline est testé
-sérieusement** : sous strong, les trois langages fuient ~0 sur les pièges.
+**⚠ CORRECTION (revue advisor) — ma 1ʳᵉ lecture surclamait dans l'autre sens. Trois confondants, à
+énoncer AVANT toute conclusion :**
 
-**Et sur les tâches NORMALES, llmlang fuit PLUS (2–3) que Python/Rust (0).** Parce que son gate est la
-PREUVE, et un modèle qui écrit un contrat FAIBLE prouve la terminaison sans prouver la correction →
-il livre une valeur fausse « prouvée ». L'avantage preuve-sur-tout-input n'existe QUE si le LLM écrit
-un contrat qui capture la spec — et souvent il ne le fait pas (aggravé par une friction d'outillage :
-`sum(xs)` en contrat perd le sort sur un littéral, pas de `let x: T`, pas d'appel en `ensures` — le
-modèle est POUSSÉ vers le contrat minimal qui n'attrape rien).
+1. **Le gate strong est ASYMÉTRIQUE.** `shown_strong` donne à Python/Rust des inputs de bord *que
+   J'AI écrits depuis la spec* — dont `[3200000000]` pour `square`, c.-à-d. le piège overflow lui-même.
+   llmlang ne reçoit RIEN de plus (son gate reste `lll check` sur le contrat que le modèle a écrit). Donc
+   Rust 6/18→0/12 = en grande partie « je dis à Rust où est le bug ». Le parallèle llmlang serait de
+   renforcer le CONTRAT (nommer la propriété à mettre en `ensures`) — bras que je N'AI PAS. Donc « preuve
+   > tests s'évapore » n'est PAS licencié : ce qui est montré est quasi-tautologique (quand un humain
+   fournit la classe d'input fautive, le test rejoint la preuve SUR CETTE CLASSE) et ne dit rien des
+   classes que personne n'a pensé à tester — la vraie revendication de la preuve.
+2. **`square` est un piège TRUQUÉ.** J'ai fixé la signature Rust à `-> i64`, un type qui ne PEUT PAS
+   contenir la réponse (x² pour x=4e9). Rust n'était pas buggé, il était ENFERMÉ. Les 6 fuites Rust du
+   gate weak sont TOUTES `square` → **hors `square`, la fuite-piège Rust est 0/12 sous weak aussi**. À
+   reporter comme « signature-contrainte », pas un défaut.
+3. **Les escapes normaux llmlang, INSPECTÉS (1 régénération) ≠ « contrat faible ».** Le `max2` régénéré
+   écrit un contrat FORT (`ensures result >= a and result >= b`, `ensures result == a or result == b`).
+   Les échecs sont ERGONOMIQUES : un wrapper `module` imbriqué, et un `requires a>=0` ajouté qui EXCLUT
+   les inputs négatifs du hidden → l'oracle ne peut pas tourner dessus → compté non-correct. Donc mon
+   levier « pousser le LLM aux ensures forts » visait à côté : le modèle écrit DÉJÀ des ensures forts ;
+   la friction est la surface du langage + l'interaction avec le harnais, pas la faiblesse du contrat.
 
-**Coût & friction, mesurés sans complaisance :**
-- **Tokens** : llmlang écrit ~7× plus (marginal 167–185 vs 24–25 Python / 60–95 Rust), et son primer
-  (~3000 tok) est ~12× celui des autres. Sur AUCUN axe llmlang n'est moins cher.
-- **Génération** : llmlang atteint le vert **25/36 (weak), 17/24 (strong)** vs Python ~100 %, Rust
-  ~92–100 %. Le modèle FAIBLE (gpt-4o-mini) échoue en boucle sur des tâches triviales en llmlang
-  (langage peu vu à l'entraînement) ; le fort (sonnet-5) réussit mieux mais reste plus verbeux et cher.
+**Ce qui SURVIT aux trois points (substantiel, et défavorable, mais correct) :**
+- **llmlang est mesurablement PLUS CHER** : marginal ~7× (tok_out 167–185 vs 24–25 Python / 60–95 Rust),
+  primer ~12× (~3000 tok). Sur aucun axe token, moins cher. **Survit tout.**
+- **llmlang est mesurablement PLUS DUR à générer** : vert 25/36 (weak) / 17/24 (strong) vs Python ~100 %,
+  Rust ~92–100 % ; le modèle faible (gpt-4o-mini) échoue en boucle sur des tâches triviales. **Survit.**
+- **L'avantage de correction n'est PAS DÉMONTRÉ par cette expérience** — ce qui est DIFFÉRENT de
+  « réfuté ». L'expérience, telle que bâtie (gate asymétrique + `square` truqué + escapes non-inspectés
+  au départ), ne peut pas séparer « la preuve n'aide pas » de « le gate était biaisé et le piège
+  arrangé ». Ne rien conclure de plus.
 
-**Verdict représentatif honnête.** Avec les modèles ET l'outillage d'AUJOURD'HUI, llmlang ne démontre
-**NI supériorité en tokens NI supériorité en correction** : il est plus cher, plus dur à générer, et
-son avantage théorique (preuve pour TOUS les inputs > tests sur quelques-uns) reste **NON réalisé** —
-il faudrait (a) des modèles qui écrivent des contrats forts, (b) un outillage de contrats qui ne les
-en empêche pas (le chantier `sum`/list/contrat), et (c) que le baseline soit du code naïf, pas
-diligemment testé. Contre un dev diligent en Python/Rust, llmlang, tel qu'un LLM l'utilise
-aujourd'hui, ne gagne pas. C'est la vérité mesurée — pas l'histoire qu'on espérait, mais la bonne à
-connaître pour le positionnement (et la feuille de route : contrats-list ergonomiques + pousser le
-LLM à écrire des `ensures` forts sont les leviers qui pourraient renverser ce verdict).
+**Verdict représentatif honnête (corrigé).** Ce qui est établi : llmlang est **plus cher** et **plus dur
+à générer** pour un LLM aujourd'hui — deux faits mesurés, robustes. Ce qui N'EST PAS établi (ni dans un
+sens ni dans l'autre) : un avantage de correction, parce que ce test ne l'a pas mesuré équitablement.
+Pour le mesurer vraiment il faudrait un bras SYMÉTRIQUE (renforcer le contrat llmlang comme on renforce
+les tests Python/Rust), une classe de piège NON contrainte par le type de sortie (pas `-> i64`), et une
+inspection systématique des escapes. Levier roadmap réel, vu à l'inspection : l'ERGONOMIE du langage
+(module imbriqué, `requires` sur-restrictif, `sum`/list en contrat) — pas « des contrats plus forts ».
