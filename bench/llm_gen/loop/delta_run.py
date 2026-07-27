@@ -194,7 +194,12 @@ RUNS_DIR = os.path.join(HERE, "runs")
 # reçoivent le FOCUS SEUL (`lll context`) au lieu du dump complet — le vrai test « focus économise
 # des tokens ». Résultats dans un fichier SÉPARÉ (mêmes unit_keys que le mode full-module).
 SPLICE = os.environ.get("DELTA_SPLICE") == "1"
-RESULTS = os.path.join(HERE, "delta_results_splice.jsonl" if SPLICE else "delta_results.jsonl")
+# Run 6 (REQ-221/192) : le SCHÉMA des rows a changé (4 bras + round1_diag/round1_kind). On écrit dans
+# un fichier NEUF (tag "v2") — sinon la reprise (`done` = unit_keys déjà présents) SAUTERAIT les
+# unités Run 5 (3 bras, sans diag), y compris les unités ripple d05 dont la friction motive ce batch,
+# et cmd_score BLENDERAIT une matrice 3-way et 4-way. DELTA_RESULTS_TAG permet de nommer un run.
+_TAG = os.environ.get("DELTA_RESULTS_TAG", "v2")
+RESULTS = os.path.join(HERE, f"delta_results_splice_{_TAG}.jsonl" if SPLICE else f"delta_results_{_TAG}.jsonl")
 
 
 # ------------------------------------------------------------------ tasks --
@@ -327,6 +332,23 @@ def change_present(code, task):
     return all(marker in code for marker in task["change_markers"])
 
 
+def diag_kind(feedback):
+    """Classe le diagnostic round-1 par CAUSE (lu du préfixe des messages de gate_modify) — pour
+    lire la friction sans grepper 100 rows, et surtout REPÉRER un `markers` : une reformulation
+    CORRECTE et prouvée mais qui rate un marqueur exact (ex. `qty + min_keep <= on_hand - committed`
+    ≡ la garde attendue) → faux round-2 qui gonfle la métrique rounds. Si `markers` domine, resserrer
+    l'instruction ou assouplir le marqueur ; tant que c'est `check`, la friction est RÉELLE."""
+    if feedback.startswith("lll check FAILED"):
+        return "check"          # obligation non déchargée : la vraie friction de vérification
+    if "markers absent" in feedback:
+        return "markers"        # édition non détectée (peut être un faux négatif de marqueur)
+    if feedback.startswith("lll run FAILED"):
+        return "run"            # ne s'exécute plus
+    if "aucun bloc" in feedback:
+        return "splice"         # rien d'émis en mode splice
+    return "other"
+
+
 def gate_modify(code, tag, task):
     """VERT ssi : `lll check` exit 0 ET changement présent ET `lll run` marche.
     En mode SPLICE, `code` = les part(s) émise(s) → on les re-splice dans la base d'abord."""
@@ -384,6 +406,7 @@ def run_unit(task, model, sample, arm, key):
     }
     if round1_diag:
         row["round1_diag"] = clip(round1_diag)
+        row["round1_kind"] = diag_kind(round1_diag)  # check | markers | run | splice
     return row
 
 

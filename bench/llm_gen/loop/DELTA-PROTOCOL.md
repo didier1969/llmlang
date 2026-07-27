@@ -272,3 +272,23 @@ C'est la valeur DISTINCTE, isolée et mesurable, du caller-context « langage »
 **Bras : DARK · LIVE_CTX · LIVE_CALLERS · LIVE_AXON** (4-way). Score → 3 ratios vs DARK. Le RUN
 PAYANT qui produit la donnée riche (`round1_diag` peuplé sur d05/d06/d07) reste gated `BENCH_GO=1` +
 budget-go opérateur. Construit + dryrun = gratis, fait.
+
+**Note (a+) — `round1_kind`.** En plus du texte `round1_diag`, la row porte `round1_kind` ∈
+{check, markers, run, splice} (classé du préfixe du gate). But : distinguer la friction RÉELLE
+(`check` = obligation non déchargée) d'un FAUX round-2 (`markers` = reformulation correcte et prouvée
+qui rate un marqueur exact — ex. `qty + min_keep <= on_hand - committed` ≡ la garde attendue). Si
+`markers` domine sur d06/d07, la métrique rounds est contaminée → resserrer l'instruction / assouplir
+le marqueur AVANT de conclure. C'est le garde-fou qui rend la récolte lisible sans grepper.
+
+**Fichier de résultats NEUF (v2).** Le schéma des rows a changé (4 bras + round1_diag/kind) → Run 6
+écrit dans `delta_results_splice_v2.jsonl` (tag `DELTA_RESULTS_TAG`, défaut `v2`), PAS dans le fichier
+Run 5. Sinon la reprise sauterait les unités Run 5 (dont d05 ripple, la friction qui motive tout ça)
+et `score` blenderait une matrice 3-way et 4-way. Run 6 = matrice PROPRE d01–d07 × 4 bras.
+
+**PRÉ-ENREGISTREMENT (honnêteté avant la dépense).** Sur CE substrat (d05/d06/d07), `axon_affects`
+= les callers transitifs du graphe llmlang → **LIVE_CALLERS et LIVE_AXON portent la MÊME information**
+(callers), de sources différentes (graphe langage vs index Axon). On ATTEND donc une différence
+LIVE_CALLERS↔LIVE_AXON ≈ nulle, et un gain des DEUX vs LIVE_CTX sur le ripple (le round de découverte
+des callers évité). Ceci ne dit PAS « Axon n'apporte rien » : la valeur DISTINCTE d'Axon (callers
+CROSS-module qu'un `lll context` intra-module rate ; intention SOLL) reste NON mesurée par ce
+substrat mono-module — c'est le prochain test de la thèse Axon (cf. `docs/ecosystem-strategy.md §3`).
