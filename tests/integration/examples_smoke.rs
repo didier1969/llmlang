@@ -96,6 +96,7 @@ fn flagship_examples_build_and_run() {
         "uses_inventory_lib.lll",     // ERP distribution: imports the verified inventory brick (examples/lib/inventory_lib.lll, no main) and composes it CROSS-MODULE — can_fulfill's no-oversell bound discharges from the imported stock_reserve's contract across the import boundary; the cross-file call fixture for Axon's source_file attribution (REQ-LLL-217/155-2a)
         "erp_idempotent_limit_verified.lll", // ERP proof-ground: IDEMPOTENCE — re-enforcing a credit limit on an already-capped value is a no-op (f(f(x))==f(x), the difference proven 0); a distinct proof shape guarding replayed/duplicated operations (REQ-LLL-211)
         "verified_sanitize.lll",      // CPT-LLL-018 brick: prove-side forall — a filter PROVES its output is all-positive (REQ-LLL-204)
+        "erp_journal_balanced_verified.lll", // ERP proof-ground: INDUCTIVE system invariant over a JOURNAL — if every entry is balanced (debit==credit), the whole journal's trial balance is 0 AND replaying it preserves any opening balance, proven by structural recursion at symbolic length; a step-invariant LIFTED over an arbitrary history, distinct from the single-op bricks (REQ-LLL-211)
     ];
     let mut failures = Vec::new();
     for name in flagship {

@@ -1,0 +1,61 @@
+module ErpJournalBalancedVerified:
+
+  # ── CAPSTONE INDUCTIF : les livres restent équilibrés sur TOUTE l'histoire (CPT-LLL-018) ──
+  #
+  # Les briques précédentes prouvent UNE transaction (brique 11 : un posting équilibre) ou le total
+  # d'une liste (brique 2). Celle-ci monte d'un cran — un invariant SYSTÈME sur un JOURNAL de longueur
+  # QUELCONQUE : « si chaque écriture est équilibrée (débit == crédit), la balance de vérification du
+  # journal entier est nulle », prouvé par RÉCURRENCE structurelle. C'est le socle de la comptabilité
+  # en partie double : la balance de vérification est zéro non parce qu'on l'a testée sur quelques
+  # jeux, mais parce que c'est un THÉORÈME sur n'importe quelle séquence de transactions équilibrées.
+  #
+  # AVANT (le réflexe) : poster les transactions, puis assert(trial_balance == 0) en test/prod.
+  # APRÈS (ici) : `requires (∀ écriture équilibrée)` + `ensures balance == 0` est prouvé une fois pour
+  # toutes les histoires — un livre qui déséquilibre est IMPOSSIBLE à construire (le contrat le rejette).
+
+  type Entry = {debit: Int, credit: Int}
+
+  # L'effet net d'une écriture sur la balance de vérification = débit − crédit. Équilibrée ⇒ 0.
+  part entry_net(e: Entry) -> Int:
+    requires e.debit == e.credit
+    ensures result == 0
+    yield e.debit - e.credit
+
+  # LA CLÉ INDUCTIVE : la balance de vérification d'un journal de transactions TOUTES équilibrées est
+  # nulle, pour un nombre de lignes quelconque. Z3 le prouve par récurrence structurelle : à `h :: t`,
+  # le prédicat de tête donne `h.debit == h.credit` (donc entry_net(h) == 0), le `requires` de l'appel
+  # récursif sur `t` (les écritures de la queue restent équilibrées, propagation du forall), et l'IH
+  # donne trial_balance(t) == 0. Donc 0 + 0 == 0.
+  part trial_balance(js: List[Entry]) -> Int:
+    requires forall e in js: e.debit == e.credit
+    ensures result == 0
+    measure length(js)
+    match js:
+      [] -> yield 0
+      h :: t -> yield entry_net(h) + trial_balance(t)
+
+  # ── SECOND ANGLE : PRÉSERVATION par fold-avec-accumulateur ──
+  # Appliquer une écriture équilibrée à une balance courante la laisse INCHANGÉE (net 0).
+  part post(balance: Int, e: Entry) -> Int:
+    requires e.debit == e.credit
+    ensures result == balance
+    yield balance + entry_net(e)
+
+  # Rejouer un journal ENTIER sur une balance d'ouverture : la clôture ÉGALE l'ouverture — aucune
+  # dérive, pour toute séquence équilibrée. L'invariant de PRÉSERVATION (et non juste l'agrégat nul),
+  # prouvé par récurrence : à `h :: t`, post ne change pas la balance, et l'IH sur `t` la reconduit.
+  part replay(opening: Int, js: List[Entry]) -> Int:
+    requires forall e in js: e.debit == e.credit
+    ensures result == opening
+    measure length(js)
+    match js:
+      [] -> yield opening
+      h :: t -> yield replay(post(opening, h), t)
+
+  part main() -> Int via IO:
+    # Un journal de 3 transactions équilibrées (achat, vente, encaissement).
+    let journal = [Entry(1000, 1000), Entry(500, 500), Entry(750, 750)]
+    # Balance de vérification 0, prouvée pour la SÉQUENCE entière (pas ligne à ligne).
+    let tb = IO.print(trial_balance(journal))
+    # Rejoué sur une balance d'ouverture de 4200 → clôture 4200 (préservation prouvée).
+    yield IO.print(replay(4200, journal))

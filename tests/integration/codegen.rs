@@ -476,6 +476,32 @@ fn erp_false_idempotence_claim_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_unbalanced_journal_fails_to_verify_req211() {
+    // The inductive trial-balance theorem (examples/erp_journal_balanced_verified.lll): a JOURNAL of
+    // balanced entries has trial balance 0, proven by structural recursion at symbolic length. The
+    // dual bites here — a journal containing ONE unbalanced entry (debit != credit) cannot discharge
+    // `trial_balance`'s `requires forall e in js: e.debit == e.credit` at the call site, so the
+    // module FAILS to verify. A ledger that doesn't balance is unrepresentable in a proved program,
+    // not caught by a runtime assert — the counterexample is the `Entry(100, 90)` itself.
+    let src = "module Bad:\n\n  \
+        type Entry = {debit: Int, credit: Int}\n\n  \
+        part entry_net(e: Entry) -> Int:\n    requires e.debit == e.credit\n    \
+            ensures result == 0\n    yield e.debit - e.credit\n\n  \
+        part trial_balance(js: List[Entry]) -> Int:\n    \
+            requires forall e in js: e.debit == e.credit\n    ensures result == 0\n    \
+            measure length(js)\n    match js:\n      [] -> yield 0\n      \
+            h :: t -> yield entry_net(h) + trial_balance(t)\n\n  \
+        part bad_journal() -> Int:\n    yield trial_balance([Entry(100, 90)])\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "a journal with an unbalanced entry (debit != credit) MUST fail to verify — the trial-balance invariant is a theorem"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {

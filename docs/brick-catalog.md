@@ -273,6 +273,26 @@
   l'idempotence d'une op qui ne l'est pas (soustraire un paiement) NE COMPILE PAS.
 - **REQ** — `REQ-LLL-211` (agent ERP, forme idempotence).
 
+## 18. Invariant INDUCTIF sur un journal (les livres équilibrés sur toute l'histoire) — `examples/erp_journal_balanced_verified.lll`
+
+- **Prouve** — le saut au-dessus des briques mono-étape : un invariant SYSTÈME sur un JOURNAL de
+  longueur **quelconque**, par récurrence structurelle. Là où la brique 11 prouve qu'UNE transaction
+  équilibre, celle-ci LÈVE ce pas sur toute une histoire — deux angles :
+  - `trial_balance(js: List[Entry]) -> Int` · `requires (∀ e ∈ js: e.debit == e.credit)` ·
+    `ensures result == 0` — la balance de vérification d'un journal de transactions toutes équilibrées
+    est nulle (AGRÉGAT).
+  - `replay(opening, js) -> Int` · même `requires` · `ensures result == opening` — rejouer le journal
+    sur une balance d'ouverture la reconduit exactement (PRÉSERVATION par fold-avec-accumulateur).
+- **Quand** — la balance de vérification comptable (« les livres balancent »), tout invariant d'état
+  maintenu sur un LOG de transactions (stock après une suite de mouvements, solde après une suite
+  d'opérations), les propriétés « peu importe l'ordre/l'histoire ».
+- **Technique** — `forall e in js: e.debit == e.credit` en `requires`, propagé à l'appel récursif sur
+  la queue (REQ-201/204), l'if/match portant l'IH (REQ-198) : à `h :: t`, le prédicat de tête donne
+  `entry_net(h) == 0` et l'IH donne l'invariant sur `t`. Test de REJET : un journal avec UNE écriture
+  déséquilibrée (`Entry(100, 90)`) NE COMPILE PAS (le `forall` requires n'est pas déchargé au call-site).
+- **REQ** — `REQ-LLL-211` (agent ERP, forme invariant-inductif-sur-liste ; la composition d'un pas
+  prouvé sur une histoire quelconque — distincte des briques mono-résultat).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
