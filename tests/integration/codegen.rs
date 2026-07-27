@@ -533,6 +533,31 @@ fn erp_below_cost_sale_in_a_day_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_cash_floor_without_nonneg_guard_fails_to_verify_req211() {
+    // The stateful monotone fold (examples/erp_cash_position_verified.lll) proves a cash position
+    // fed only by receipts never drops below its opening balance — an INEQUALITY preserved across a
+    // threaded accumulator. The guard is LOAD-BEARING: drop `requires 0 <= r.amount` and the floor
+    // `ensures result >= opening` is no longer a theorem (a negative amount is a withdrawal that can
+    // breach the opening), so the module FAILS to verify. The invariant is not vacuous — it holds
+    // BECAUSE the accumulator only moves one way.
+    let src = "module Bad:\n\n  \
+        type Receipt = {amount: Int}\n\n  \
+        part apply_receipt(balance: Int, r: Receipt) -> Int:\n    \
+            ensures result == balance + r.amount\n    yield balance + r.amount\n\n  \
+        part cash_position(opening: Int, receipts: List[Receipt]) -> Int:\n    \
+            ensures result >= opening\n    measure length(receipts)\n    match receipts:\n      \
+            [] -> yield opening\n      \
+            h :: t -> yield cash_position(apply_receipt(opening, h), t)\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "the cash-floor invariant WITHOUT the non-negative-receipt guard MUST fail to verify — the floor holds only because the balance only grows"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {

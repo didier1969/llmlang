@@ -312,6 +312,25 @@
   NE COMPILE PAS (le `forall` de plancher de marge n'est pas déchargé au call-site).
 - **REQ** — `REQ-LLL-211` (agent ERP, DÉMONSTRATEUR — composition multi-invariants sur une séquence).
 
+## 20. Invariant MONOTONE sur un état threadé (le solde ne franchit pas son plancher) — `examples/erp_cash_position_verified.lll`
+
+- **Prouve** — la forme sœur de la brique 18, sur l'autre axe : là où 18 préserve une ÉGALITÉ
+  (accumulateur constant, `result == opening`), celle-ci préserve une INÉGALITÉ sur un accumulateur
+  qui CHANGE :
+  - `cash_position(opening, receipts) -> Int` · `requires (∀ r: 0 <= r.amount)` · `ensures result
+    >= opening` — une position de trésorerie alimentée uniquement par des encaissements ne descend
+    JAMAIS sous son ouverture, pour toute séquence, à N symbolique.
+- **Quand** — un solde qu'on ne fait qu'alimenter (trésorerie encaissements-seuls), un compteur d'audit
+  qui n'incrémente que, tout cumul monotone dont on veut garantir qu'il reste du bon côté d'un seuil.
+- **Technique** — fold à ÉTAT : l'accumulateur (`opening`) est un PARAMÈTRE de la récursion ; chaque pas
+  `apply_receipt` ne fait que monter le solde (`ensures result >= balance`), et l'IH reconduit le
+  plancher sur la queue → le `>=` se chaîne. Le guard `0 <= r.amount` reste indépendant de
+  l'accumulateur (donc exprimable en `forall`, contournant la limite « pas d'appel en contrat »
+  DEC-LLL-017). Test de REJET : SANS le guard `0 <= amount`, le plancher `result >= opening` N'EST PLUS
+  un théorème (un retrait le franchirait) → NE COMPILE PAS. L'invariant tient PARCE QUE le solde ne
+  bouge que dans un sens.
+- **REQ** — `REQ-LLL-211` (agent ERP, forme invariant-monotone-sous-fold-à-état).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles
