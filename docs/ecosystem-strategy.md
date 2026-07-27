@@ -71,35 +71,47 @@ Trois axes, tous rattachés à CPT-LLL-013 / REQ-LLL-119. **Baseline = stack mai
 
 > Discipline : tout ce qui n'est pas rattaché à (1)/(2)/(3) reste **[HYPOTHÈSE]** dans ce document, pas « delta ».
 
-### RÉSULTATS MESURÉS (2026-07-25) — le delta n'est plus prédit, il est chiffré
+### RÉSULTATS MESURÉS (2026-07-25 → 07-27) — le delta n'est plus prédit, il est chiffré
 
-Harnais `bench/llm_gen/loop/delta_run.py` (3 bras : DARK=dump complet / LIVE_CTX=`lll context` /
-LIVE_AXON=+blast-radius), tâches = modifier un `part` d'un module ERP vérifié, gate = compilateur-
-oracle (`lll check` vert + changement présent). Détail complet : `DELTA-PROTOCOL.md`. Quatre runs :
+Harnais `bench/llm_gen/loop/delta_run.py` (4 bras : DARK=dump / LIVE_CTX=`lll context` /
+LIVE_CALLERS=`--with-callers` graphe llmlang / LIVE_AXON=+blast-radius Axon), tâches = modifier un
+`part` sous contexte, gate = compilateur-oracle (`lll check` vert + changement + `lll run`). Détail
+complet : `DELTA-PROTOCOL.md`. Sept runs :
 
-1. **Run full-module (raté INSTRUCTIF).** LIVE=dump+contexte → +4 % tokens. Faux : c'était un défaut
-   de design (donner le module ENTIER *plus* le contexte). La vraie valeur = fiabilité (0 vs 2
-   échecs), invisible dans le ratio apparié.
-2. **Run SPLICE (le vrai test « focus AU LIEU du dump »).** Le modèle n'émet que la `part` changée ;
-   les bras LIVE reçoivent le FOCUS SEUL. **LIVE_CTX/DARK = 0.695, IC95% [0.614, 0.730] → ~30 % de
-   tokens en MOINS, IC entièrement sous 1.0, à 100 % de réussite** (d01–d04). Le read-set contract-
-   firewall du langage vérifié SUFFIT et est plus serré → économie réelle.
-3. **Run d05 ripple (le blast-radius).** Changement qui se propage aux callers. Le contexte
-   caller-aware évite le round de découverte que le focus callee-only doit payer : **rounds moyens
-   DARK 1.50 / callee-only 1.83 / caller-aware 1.33 ; ratio caller-aware/callee-only 0.850**
-   (~15 % de plus sur un ripple).
-4. **`lll context --with-callers` LIVRÉ** (commit `610e81e`) : le gain ripple productisé en capacité
-   LANGAGE (clôture transitive du graphe d'appel inverse, intra-module, SANS Axon).
+1. **Run full-module (raté INSTRUCTIF).** LIVE=dump+contexte → +4 % tokens (défaut de design).
+2. **Run SPLICE (focus AU LIEU du dump).** **LIVE_CTX/DARK = 0.695 [0.614, 0.730] → ~30 % de tokens
+   en MOINS à 100 % de réussite** (d01–d04). Le read-set contract-firewall du langage SUFFIT.
+3. **Run d05 ripple.** Contexte caller-aware évite le round de découverte (ratio 0.850 sur un ripple).
+4. **`lll context --with-callers` LIVRÉ** (`610e81e`) : gain ripple productisé, capacité LANGAGE.
+5. **Run 5 (récolte, $0.25).** ~30 % confirmé sur 2 modèles ; friction concentrée sur le ripple.
+6. **Run 6 (matrice v2, $0.404, 112 u).** Fiabilité VISIBLE : sur les ripples INTRA-module, LIVE_CTX
+   (callee-only) **6/12**, LIVE_CALLERS & LIVE_AXON **12/12** — le graphe du langage donne les callers,
+   Axon ≈ redondant ici. Tokens LIVE_CALLERS/DARK 0.787 à 28/28.
+7. **Run 7 (CROSS-module, $0.066).** stock_reserve@lib → can_fulfill@AUTRE-fichier. **LIVE_CTX 0/3,
+   LIVE_CALLERS 0/4** (graphe mono-fichier aveugle), **LIVE_AXON 4/4** en 1 round. La valeur DISTINCTE
+   d'Axon, MESURÉE.
 
-**Ce que la mesure a CLARIFIÉ (correction honnête de la prédiction ci-dessus).** Le contexte
-**STRUCTUREL** (callees, callers, blast-radius) est **dérivable du CODE** → c'est une capacité du
-**LANGAGE VÉRIFIÉ**, pas d'Axon (llmlang le fournit : `lll context` + `--with-callers`). Les gains
-mesurés (~30 % focus + ~15 % ripple) sont des gains **LANGAGE**. La valeur **irréductiblement
-distincte d'Axon** n'est PAS la structure — c'est l'**INTENTION** (SOLL : le POURQUOI, le REQ, les
-acceptance-criteria), un savoir **qui n'est pas dans le code**. Elle reste **NON MESURÉE**, bloquée
-par : (a) extraction de symboles `.lll` partielle côté AXO (certains modules résolvent, d'autres
-non — chantier AXO), (b) `why` bruite vers `vc.rs`, (c) intention par-part pas granulaire dans SOLL.
-→ **Prochain chantier propre = mesurer la valeur INTENTION d'Axon** (session dédiée, repo AXO).
+**La thèse, désormais CHIFFRÉE strate par strate (correction/raffinement des prédictions).**
+- Édition **localisée** → le langage vérifié suffit (focus ~30 %). **[Run 2/5/6]**
+- Ripple **INTRA-module** → le graphe d'appel PROPRE du langage (`--with-callers`) suffit ; Axon
+  redondant. **[Run 6 : LIVE_CALLERS = LIVE_AXON = 12/12]**
+- Ripple **CROSS-module** → le graphe mono-fichier du langage est AVEUGLE (0 %) ; l'intelligence
+  cross-module d'Axon est la zone EXCLUSIVE qui rend solvable (100 %). **[Run 7 — MESURÉ]** ← la
+  structure n'est PAS toute au langage : la structure *cross-fichier* est une valeur Axon distincte.
+- **INTENTION** (le POURQUOI, hors-code) → **NON mesurable sur du code `.lll` VÉRIFIÉ**, et pour une
+  raison de fond (pas juste un blocage d'outillage) : sur un langage vérifié, l'intention qui compte
+  est SOIT dans le contrat (le compilateur l'impose → gap nul, LIVE_INTENT dégénère en LIVE_CTX) SOIT
+  hors-contrat mais alors détectable seulement par un oracle QUE J'AURAIS ÉCRIT (le gate divulgue la
+  réponse). Confirmé empiriquement (2026-07-27) : `why` sur `stock_reserve`/`order_subtotal` route
+  vers la machinerie compilateur (`oblige_exists`@vc.rs, `contract: informational_only`), PAS vers une
+  intention métier par-fonction — Axon détient l'intention du COMPILATEUR (DEC-LLL-*), pas des
+  exemples ERP (leur intention est dans les contrats + commentaires, déjà en LIVE_CTX). **C'est un
+  POINT POUR le langage** : le contrat EST l'intention imposée ; là où un codebase non-vérifié aurait
+  besoin d'Axon pour porter « l'invariant doit tenir », llmlang le DÉPLACE dans le contrat que le
+  compilateur impose. → La valeur distincte d'Axon pour dev-llmlang est **STRUCTURELLE cross-module**
+  (mesurée), pas l'injection d'intention sur code vérifié. Où la jambe intention SERAIT mesurable :
+  le code du COMPILATEUR (Rust, non contraint par contrats) vs les décisions DEC-LLL de soundness —
+  un banc DIFFÉRENT (Rust-modify, oracle caché plus dur), ligne future distincte.
 
 ---
 
