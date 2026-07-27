@@ -136,3 +136,41 @@ by a DIFFERENT mechanism: **proof** (T2 canonical), **construction** (T1 Euclide
 
 The corpus is frozen and verbatim, so every future language version re-scores it at
 zero LLM cost (`lll check` the `.lll`; `rustc` + the batteries in this file the `.rs`).
+
+## Extension 3-LANGAGES — Python ajouté (REQ-LLL-013), et le recadrage HONNÊTE de la thèse tokens
+
+Question opérateur : « on n'a pas prouvé que llmlang réduit les tokens ; comment le prouver ? ».
+Réponse honnête en deux temps. **(1) Ce qu'on peut montrer GRATIS** (structural, reproductible :
+`python3 xlang_escape.py`) : la solution idiomatique-naïve de chaque langage, sur un piège caché.
+Un « escape » = compile/tourne + rend une valeur FAUSSE (le bug silencieux) ; un crash = fail-stop
+(pas un escape).
+
+| tâche | classe de piège | Python | Rust | llmlang |
+|---|---|---|---|---|
+| overflow (Σ carrés) | débordement i64 | correct (bignum) | **ESCAPE** | 0 (fail-stop, DEC-026) |
+| mod-sign (emod −100,3) | reste euclidien d'un négatif | correct (`%` euclidien) | **ESCAPE** | 0 (prouvé `0≤r<b`) |
+| allocation (100 sur 3) | conservation (Σ == N) | **ESCAPE** | **ESCAPE** | 0 (prouvé `Σ==total`) |
+| argent flottant ($4.35→c) | dérive IEEE-754 | **ESCAPE** | **ESCAPE** | 0 (**pas de type flottant** — inexprimable) |
+| **escapes** | | **2/4** | **4/4** | **0/4** |
+
+**Le vrai message, sans charabia.** llmlang n'est PAS d'abord une histoire de « moins de tokens » —
+les comptes de tokens sont COMPARABLES (Problème emod : llmlang ≈ Rust ; isqrt : ~1.5×, et le surplus
+EST la spec machine-vérifiée). C'est une histoire de **zéro valeur-fausse-silencieuse à coût de tokens
+comparable**. Et l'edge dépend du concurrent :
+- **vs Rust** (typé/compilé) : llmlang ferme les 4 classes, Rust les évade toutes → edge LARGE. C'est
+  le cas de TOUT langage mainstream typé (Java/C++/Go/C#) : overflow, mod-signe, argent, invariants
+  sont laissés à la diligence de l'auteur.
+- **vs Python** (dynamique/bignum) : Python couvre overflow (bignum) et mod-signe (`%` euclidien) À SON
+  RUNTIME → l'edge de llmlang se RESSERRE aux classes que **personne ne prouve** : l'argent exact
+  (llmlang n'a pas de flottant, le bug est inexprimable) et les **invariants utilisateur** (conservation,
+  non-survente) — là Python évade autant que Rust. Plus l'axe que le tableau ne capture pas : llmlang
+  donne une **PREUVE** en millisecondes là où Python/Rust donnent une **confiance-par-tests** qu'il faut
+  écrire et maintenir.
+
+**Nuance de méthode (honnêteté).** Ce tableau mesure le potentiel STRUCTUREL (la solution naïve
+évade-t-elle). Les modèles FORTS évitent souvent le piège naïf (haiku/sonnet ont fait le sign-fix Rust
+pour emod). Le pendant « ce que les LLM font VRAIMENT » est le corpus one-shot ci-dessus (Rust 33 %
+d'escapes réels). Les deux vues sont valides : structurelle (plancher, modèle faible/pressé) et
+générée (modèle fort). Un **run tokens-à-correction 3-langages généré par LLM** (Python/Rust/llmlang,
+via OpenRouter — REQ-LLL-013 maintenant faisable) donnerait le chiffre de tokens définitif ; il est
+gated budget. Ce tableau structurel + le corpus one-shot existant sont la base gratuite.
