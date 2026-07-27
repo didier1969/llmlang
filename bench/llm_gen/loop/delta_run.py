@@ -187,7 +187,7 @@ def splice_parts(base_src, blocks):
         lines = lines[:sp[0]] + blk.split("\n") + lines[sp[1]:]
     return "\n".join(lines)
 
-ARMS = ("DARK", "LIVE_CTX", "LIVE_AXON")
+ARMS = ("DARK", "LIVE_CTX", "LIVE_CALLERS", "LIVE_AXON")
 TASKS_DIR = os.path.join(HERE, "delta_tasks")
 RUNS_DIR = os.path.join(HERE, "runs")
 # MODE SPLICE (DELTA_SPLICE=1) : le modèle n'émet QUE les part(s) changée(s), et les bras LIVE
@@ -217,10 +217,15 @@ def base_src(task):
     return read_file(base_path(task))
 
 
-def lll_context(task):
+def lll_context(task, with_callers=False):
     """Le payload LIVE_CTX : `lll context <base> <target> --format=json` (source cible +
-    contrats des CALLEES, le firewall)."""
-    out = run_cmd([LLL, "context", base_path(task), task["target"], "--format=json"])
+    contrats des CALLEES, le firewall). `with_callers` ajoute `--with-callers` = les CALLERS
+    TRANSITIFS (leur source complète) depuis le graphe d'appel PROPRE de llmlang (REQ-LLL-192,
+    SANS Axon) — pour un changement qui RIPPLE aux appelants."""
+    cmd = [LLL, "context", base_path(task), task["target"], "--format=json"]
+    if with_callers:
+        cmd.append("--with-callers")
+    out = run_cmd(cmd)
     return out.stdout if out.returncode == 0 else ""
 
 
@@ -253,12 +258,18 @@ def axon_block(task):
 
 # ---------------------------------------------------------------- prompts --
 
-def _ctx_block(task):
+def _ctx_block(task, with_callers=False):
+    label = (
+        "`lll context --with-callers`: the target's source + its direct dependencies' CONTRACTS "
+        "AND the source of its TRANSITIVE CALLERS (llmlang's own call graph) — read these too if "
+        "the change ripples to the callers"
+        if with_callers else
+        "`lll context`: the target's source + the CONTRACTS of its direct dependencies, "
+        "the verification firewall"
+    )
     return (
-        "# Focused context — what to read to change the target safely "
-        "(`lll context`: the target's source + the CONTRACTS of its direct "
-        "dependencies, the verification firewall)\n\n```json\n"
-        + lll_context(task) + "\n```\n\n"
+        "# Focused context — what to read to change the target safely (" + label + ")\n\n```json\n"
+        + lll_context(task, with_callers) + "\n```\n\n"
     )
 
 
@@ -270,7 +281,9 @@ def gen_prompt(arm, task):
         if arm == "DARK":
             ctx = "# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
         else:
-            ctx = _ctx_block(task)
+            # LIVE_CALLERS = focus + callers depuis le graphe llmlang (SANS Axon) ;
+            # LIVE_AXON = focus + callers depuis le blast-radius Axon (axon_block).
+            ctx = _ctx_block(task, with_callers=(arm == "LIVE_CALLERS"))
             if arm == "LIVE_AXON":
                 ctx += axon_block(task)
         return (
@@ -284,8 +297,8 @@ def gen_prompt(arm, task):
         primer + "\n\n# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
         + "# Change to make\n\n" + task["instruction"] + "\n\n"
     )
-    if arm in ("LIVE_CTX", "LIVE_AXON"):
-        core += _ctx_block(task)
+    if arm in ("LIVE_CTX", "LIVE_CALLERS", "LIVE_AXON"):
+        core += _ctx_block(task, with_callers=(arm == "LIVE_CALLERS"))
     if arm == "LIVE_AXON":
         core += axon_block(task)
     core += (
@@ -342,6 +355,7 @@ def gate_modify(code, tag, task):
 def run_unit(task, model, sample, arm, key):
     base_tag = f"{task['id']}__{model.replace('/', '_')}__{arm}__{sample}"
     code, feedback, correct, rounds = "", "", False, 0
+    round1_diag = ""
     tokens_in = tokens_out = 0
     cost = 0.0
     for rnd in range(1, R_MAX + 1):
@@ -355,15 +369,22 @@ def run_unit(task, model, sample, arm, key):
         with open(os.path.join(RUNS_DIR, base_tag + f"__r{rnd}.raw"), "w") as fh:
             fh.write(reply)
         correct, feedback = gate_modify(code, base_tag + f"__r{rnd}", task)
+        # POURQUOI le round-1 a échoué : le diagnostic compilateur (obligation + contre-exemple +
+        # abduction) que le LLM a lu pour se réparer. Absent quand le round-1 réussit du premier coup.
+        if rnd == 1 and not correct:
+            round1_diag = feedback
         if correct:
             break
-    return {
+    row = {
         "pair": task["id"], "model": model, "sample": sample, "arm": arm,
         "correct": correct, "rounds": rounds,
         "tokens_in": tokens_in, "tokens_out": tokens_out,
         "tokens_total": tokens_in + tokens_out, "cost_usd": round(cost, 6),
         "r_max": R_MAX,
     }
+    if round1_diag:
+        row["round1_diag"] = clip(round1_diag)
+    return row
 
 
 def load_results():
@@ -388,18 +409,21 @@ def cmd_validate(_args):
 
 
 def cmd_dryrun(_args):
-    """Assemble les prompts des 3 bras, rapporte le surcoût de chaque étage de contexte,
+    """Assemble les prompts des 4 bras, rapporte le surcoût de chaque étage de contexte,
     et exerce le gate sur la référence correcte + le module inchangé. AUCUNE API."""
     for task in load_tasks():
         print(f"\n=== task {task['id']}  (base {task['base']}, target `{task['target']}`, kind: {task.get('kind', '?')}) ===")
         dark = gen_prompt("DARK", task)
         ctx = gen_prompt("LIVE_CTX", task)
+        cal = gen_prompt("LIVE_CALLERS", task)
         axn = gen_prompt("LIVE_AXON", task)
         affects = task.get("axon_affects", [])
-        print(f"  DARK      : {len(dark):6d} chars")
-        print(f"  LIVE_CTX  : {len(ctx):6d} chars  (+{len(ctx) - len(dark)} = `lll context`, callees+contrats)")
+        print(f"  DARK         : {len(dark):6d} chars")
+        print(f"  LIVE_CTX     : {len(ctx):6d} chars  (+{len(ctx) - len(dark)} = `lll context`, callees+contrats)")
+        cal_note = "callers transitifs présents" if len(cal) > len(ctx) else "aucun caller (cible non-appelée) → = LIVE_CTX"
+        print(f"  LIVE_CALLERS : {len(cal):6d} chars  (+{len(cal) - len(ctx)} vs CTX = `--with-callers`, graphe llmlang : {cal_note})")
         axon_note = f"impact→{', '.join(affects)}" if affects else "VIDE → dégrade vers LIVE_CTX (Axon ne résout pas la cible)"
-        print(f"  LIVE_AXON : {len(axn):6d} chars  (+{len(axn) - len(ctx)} = blast-radius Axon : {axon_note})")
+        print(f"  LIVE_AXON    : {len(axn):6d} chars  (+{len(axn) - len(ctx)} vs CTX = blast-radius Axon : {axon_note})")
         # Gate demo — SANS API : correct → VERT ; inchangé → ROUGE (l'édition n'a pas atterri).
         ref = read_file(os.path.join(HERE, task["reference"]))
         ok_ref, msg_ref = gate_modify(ref, f"dryrun_{task['id']}_reference", task)
@@ -408,9 +432,9 @@ def cmd_dryrun(_args):
         verdict_base = "ROUGE (correctement)" if not ok_base else "VERT — INATTENDU"
         print(f"  gate(base inchangée)     : {verdict_base}  ({msg_base[:70] if not ok_base else ''})")
         assert ok_ref and not ok_base, "invariant dry-run : référence→vert, inchangée→rouge"
-    print("\n✔ dry-run OK — prompts DARK/LIVE_CTX/LIVE_AXON assemblés, surcoût de chaque étage rapporté,")
+    print("\n✔ dry-run OK — prompts DARK/LIVE_CTX/LIVE_CALLERS/LIVE_AXON assemblés, surcoût de chaque étage rapporté,")
     print("  gate changement-présent distingue correct vs inchangé. ZÉRO appel API.")
-    print("  Pour les 2 ratios (LIVE_CTX/DARK, LIVE_AXON/DARK) : BENCH_GO=1 delta_run.py run ; puis score.")
+    print("  Pour les 3 ratios (LIVE_CTX/CALLERS/AXON vs DARK) : BENCH_GO=1 delta_run.py run ; puis score.")
 
 
 def cmd_run(_args):
@@ -448,7 +472,7 @@ def cmd_score(_args):
         green = sum(1 for r in rows if r.get("arm") == arm and r.get("correct"))
         print(f"  {arm}: {green}/{n} vert")
     import statistics
-    for num in ("LIVE_CTX", "LIVE_AXON"):
+    for num in ("LIVE_CTX", "LIVE_CALLERS", "LIVE_AXON"):
         pair_medians, excluded, total = paired_ratio_stats(rows, num, "DARK")
         if not pair_medians:
             print(f"  {num}/DARK : aucune unité appariée & toutes-deux-correctes (exclues {excluded}/{total}) — non concluant.")

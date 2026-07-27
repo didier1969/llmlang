@@ -324,6 +324,7 @@ def run_unit(pair, model, sample, arm, key):
     code, feedback = "", ""
     correct = False
     rounds_used = 0
+    round1_diag = ""
     for rnd in range(1, R_MAX + 1):
         prompt = (gen_prompt(arm, spec) if rnd == 1
                   else repair_prompt(arm, spec, code, feedback))
@@ -342,11 +343,15 @@ def run_unit(pair, model, sample, arm, key):
             green, feedback = gate_r_self(code, tag)
         else:
             green, feedback = gate_r_oracle(code, pair, tag)
+        # WHY round-1 failed: the gate diagnostic the model read to repair itself. Absent on
+        # a first-try green. Lets a row reveal the failed obligation, not just the round count.
+        if rnd == 1 and not green:
+            round1_diag = feedback
         if green:
             correct = True
             break  # conditioned-on-failure: a green round terminates the unit
     heldout = judge_heldout(arm, code, pair, base_tag) if correct else "n/a"
-    return {
+    row = {
         "pair": pair["id"], "model": model, "sample": sample, "arm": arm,
         "correct": correct, "censored": not correct, "rounds": rounds_used,
         "tokens_in": tokens_in, "tokens_out": tokens_out,
@@ -355,6 +360,9 @@ def run_unit(pair, model, sample, arm, key):
         "evasion": correct and heldout == "fail",
         "endpoint": ENDPOINT, "r_max": R_MAX, "temperature": 0.2,
     }
+    if round1_diag:
+        row["round1_diag"] = clip(round1_diag)
+    return row
 
 
 def unit_key(row):

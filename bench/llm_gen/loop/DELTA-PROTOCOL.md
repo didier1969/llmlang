@@ -235,3 +235,40 @@ friction, contexte = surcoût ~0 (économie via le focus splice).
    une vraie récolte « où/pourquoi les LLM calent », le banc doit logger la sortie du gate round-1.
 4. Les tâches actuelles sont trop faciles (54/66 en 1 round) → pour une friction riche, il faut des
    tâches PLUS DURES (multi-part, contrats non-triviaux) — sur les nouveaux agents ERP (17 briques).
+
+## RUN 6 — les 3 améliorations issues de la récolte (Run 5), côté banc (REQ-LLL-221 + REQ-192)
+
+Décision opérateur « récolter l'expérience LLM AVANT d'améliorer le produit en conséquence » →
+« les trois ». Les 3 findings actionnables du Run 5 sont devenus 3 améliorations du HARNAIS (zéro
+changement compilateur) pour que la PROCHAINE récolte soit riche — le *pourquoi*, pas seulement le
+*combien* — sur des tâches où la friction existe vraiment :
+
+**(a) Capture du diagnostic round-1 (finding #3).** `run_unit` (delta_run.py ET loop_run.py) garde
+désormais le feedback du gate round-1 dans la row : `round1_diag` (présent SSI le round-1 a échoué =
+il y a eu réparation). Une row révèle ENFIN l'obligation échouée + contre-exemple + abduction que le
+LLM a lus pour se corriger — plus seulement le compteur de rounds. C'est la donnée « où/pourquoi les
+LLM calent » qui manquait.
+
+**(b) 2 tâches RIPPLE dures (finding #4).** La friction du Run 5 était TOUTE sur d05 (ripple
+signature→callers). Deux nouvelles tâches du même schéma, sur les capstones ERP (vrais callers) :
+- **d06** — `erp_order_to_cash_verified.lll` : ajouter `min_keep` (stock de sécurité) à `reserve`,
+  qui RIPPLE à `fulfill` puis `main` (ripple à 2 niveaux). `axon_affects: [fulfill, main]`.
+- **d07** — `erp_procure_to_pay_verified.lll` : ajouter `max_capacity` à `receive`, qui RIPPLE à
+  `procure` puis `main`. `axon_affects: [procure, main]`.
+Chaque `reference.lll` est PROUVÉ (`lll check` vert + `lll run`) ; le dryrun confirme l'invariant
+(référence→VERT, base-inchangée→ROUGE). Les markers (le nouveau param + la garde resserrée) + le
+`lll check` VERT enforce ensemble le ripple d'arité COMPLET (reserve→fulfill→main) : émettre le param
+sans mettre à jour les callers = erreur d'arité = ROUGE.
+
+**(c) Bras `LIVE_CALLERS` (finding #2, mesure isolée).** Nouveau 4ᵉ bras : `lll context
+--with-callers` (livré REQ-192) = LIVE_CTX + la source des CALLERS TRANSITIFS depuis le graphe
+d'appel PROPRE de llmlang, **SANS Axon**. Sépare proprement deux valeurs qui se confondaient :
+- **LIVE_CALLERS** = callers depuis le graphe llmlang (langage seul, toujours disponible).
+- **LIVE_AXON** = callers depuis le blast-radius de l'index Axon (`impact`, indexation .lll inégale).
+Dryrun (SPLICE, 7 tâches) : LIVE_CALLERS non-vide sur les 7 (+1.1k–1.4k chars vs CTX), y compris
+d02/d03 où Axon ne résout PAS la cible → le graphe llmlang fournit les callers là où Axon échoue.
+C'est la valeur DISTINCTE, isolée et mesurable, du caller-context « langage » vs « intention Axon ».
+
+**Bras : DARK · LIVE_CTX · LIVE_CALLERS · LIVE_AXON** (4-way). Score → 3 ratios vs DARK. Le RUN
+PAYANT qui produit la donnée riche (`round1_diag` peuplé sur d05/d06/d07) reste gated `BENCH_GO=1` +
+budget-go opérateur. Construit + dryrun = gratis, fait.

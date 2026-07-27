@@ -1,5 +1,5 @@
 {
-  "comment": "Tâches DELTA (REQ-LLL-192) 3-WAY : MODIFIER un module llmlang vérifié, mesurer 3 conditions de contexte. DARK = dump complet. LIVE_CTX = + `lll context` (source cible + contrats des CALLEES, le firewall — calculé en direct depuis le graphe d'appel). LIVE_AXON = LIVE_CTX + le blast-radius Axon `impact` (les CALLERS/symboles impactés — ce que lll context n'a PAS). `axon_affects` = les symboles que `impact <target>` (project=LLL) renvoie ; VIDE quand Axon ne résout pas la cible (indexation .lll inégale : le pipeline résout, sourcing/planning non aujourd'hui — LIVE_AXON dégrade alors gracieusement vers LIVE_CTX). Gate = `lll check` vert + marqueur(s) présent(s) + `lll run` marche. reference.lll = modif correcte prouvée (valide la solvabilité + dry-run du gate). Run PAYANT gated par BENCH_GO=1 + budget. d05 est la tâche RIPPLE : c'est là que le blast-radius LIVE_AXON (invoice, main) différencie de LIVE_CTX (callees seuls).",
+  "comment": "Tâches DELTA (REQ-LLL-192) 4-WAY : MODIFIER un module llmlang vérifié, mesurer 4 conditions de contexte. DARK = dump complet. LIVE_CTX = + `lll context` (source cible + contrats des CALLEES, le firewall — calculé en direct depuis le graphe d'appel). LIVE_CALLERS = LIVE_CTX + `--with-callers` (la source des CALLERS TRANSITIFS depuis le graphe d'appel PROPRE de llmlang, SANS Axon). LIVE_AXON = LIVE_CTX + le blast-radius Axon `impact` (les CALLERS/symboles impactés depuis l'index Axon). LIVE_CALLERS et LIVE_AXON donnent tous deux les callers mais de sources DIFFÉRENTES (graphe llmlang vs index Axon) → sépare proprement les deux valeurs. `axon_affects` = les symboles que `impact <target>` (project=LLL) renvoie ; VIDE quand Axon ne résout pas la cible (indexation .lll inégale : le pipeline résout, sourcing/planning non aujourd'hui — LIVE_AXON dégrade alors gracieusement vers LIVE_CTX). Gate = `lll check` vert + marqueur(s) présent(s) + `lll run` marche. reference.lll = modif correcte prouvée (valide la solvabilité + dry-run du gate). Run PAYANT gated par BENCH_GO=1 + budget. d05/d06/d07 sont les tâches RIPPLE : c'est là que le contexte de callers (LIVE_CALLERS, LIVE_AXON) différencie de LIVE_CTX (callees seuls).",
   "tasks": [
     {
       "id": "d01_subtotal_upper_bound",
@@ -50,6 +50,26 @@
       "change_markers": ["q3: Int", "line_net(q3, p3, d3)", "order_subtotal(q1, p1, d1, q2, p2, d2, q3, p3, d3)"],
       "reference": "delta_tasks/d05_third_order_line_ripple/reference.lll",
       "kind": "RIPPLE (signature → callers) — c'est ICI que LIVE_AXON (blast-radius invoice/main) différencie de LIVE_CTX"
+    },
+    {
+      "id": "d06_reserve_min_keep_ripple",
+      "base": "examples/erp_order_to_cash_verified.lll",
+      "target": "reserve",
+      "axon_affects": ["fulfill", "main"],
+      "instruction": "Ajoute un paramètre `min_keep: Int` à `reserve` (un stock de sécurité à toujours garder). Ajoute `requires min_keep >= 0`, et RESSERRE la borne de réservation en remplaçant `requires qty <= on_hand - committed` par `requires qty <= on_hand - committed - min_keep`. Ce paramètre RIPPLE aux callers : `fulfill` (qui appelle `reserve`) doit à son tour prendre un `min_keep: Int` (avec `requires min_keep >= 0` ET `requires qty <= on_hand - committed - min_keep`), le passer à `reserve`, et `main` doit passer une valeur au nouvel argument de `fulfill` (ex. 10, en gardant qty ≤ dispo − min_keep). Le module doit rester vérifié (`lll check` vert) et exécutable (`lll run`).",
+      "change_markers": ["min_keep", "qty <= on_hand - committed - min_keep"],
+      "reference": "delta_tasks/d06_reserve_min_keep_ripple/reference.lll",
+      "kind": "RIPPLE (reserve → fulfill → main) — LIVE_CALLERS/LIVE_AXON donnent la source des callers"
+    },
+    {
+      "id": "d07_receive_capacity_ripple",
+      "base": "examples/erp_procure_to_pay_verified.lll",
+      "target": "receive",
+      "axon_affects": ["procure", "main"],
+      "instruction": "Ajoute un paramètre `max_capacity: Int` à `receive` (la capacité de l'entrepôt). Ajoute `requires on_hand + qty <= max_capacity`. Ce paramètre RIPPLE aux callers : `procure` (qui appelle `receive`) doit à son tour prendre un `max_capacity: Int` (avec `requires on_hand + qty <= max_capacity`), le passer à `receive`, et `main` doit passer une valeur au nouvel argument de `procure` (ex. 200, en gardant on_hand + qty ≤ max_capacity). Le module doit rester vérifié (`lll check` vert) et exécutable (`lll run`).",
+      "change_markers": ["max_capacity", "on_hand + qty <= max_capacity"],
+      "reference": "delta_tasks/d07_receive_capacity_ripple/reference.lll",
+      "kind": "RIPPLE (receive → procure → main) — LIVE_CALLERS/LIVE_AXON donnent la source des callers"
     }
   ]
 }

@@ -1,0 +1,70 @@
+module ErpOrderToCashVerified:
+
+  # ── CAPSTONE COMPOSÉ : commande → facture, TROIS invariants prouvés ENSEMBLE (CPT-LLL-018) ──
+  #
+  # Les briques ERP ne valent que si elles S'ASSEMBLENT sans qu'une garantie n'en casse une autre.
+  # Ce capstone exécute un mini flux « order-to-cash » qui compose les trois formes de preuve du
+  # terrain ERP — CAPACITÉ (inventaire), ORDERING (numérotation), PLANCHER (marge) — et prouve que
+  # les trois invariants tiennent SIMULTANÉMENT sur le résultat d'une commande honorée :
+  #   1. le stock n'est pas survendu (engagé ≤ en-main),
+  #   2. le numéro de facture est contigu (successeur immédiat),
+  #   3. le prix net facturé n'est jamais sous le coût.
+  # Chaque `requires` d'une brique est déchargé par les `requires` du flux ; les trois `ensures` se
+  # composent dans le contrat de `fulfill`. (Composition inline — les modules-agents portent un
+  # `main` ; la forme-bibliothèque importable est une tranche distincte 2a.)
+
+  type Order = {committed: Int, invoice: Int, net: Int}
+
+  # Brique CAPACITÉ : réserver sans survendre (engagé ≤ en-main), en gardant `min_keep` unités en
+  # réserve (stock de sécurité) — un paramètre ajouté qui RIPPLE à tous les callers.
+  part reserve(on_hand: Int, committed: Int, qty: Int, min_keep: Int) -> Int:
+    requires 0 <= committed
+    requires committed <= on_hand
+    requires 0 <= qty
+    requires 0 <= min_keep
+    requires qty <= on_hand - committed - min_keep
+    ensures result == committed + qty
+    ensures result <= on_hand
+    yield committed + qty
+
+  # Brique ORDERING : le prochain numéro de facture, contigu (successeur immédiat).
+  part next_invoice(last: Int) -> Int:
+    requires last >= 0
+    ensures result == last + 1
+    yield last + 1
+
+  # Brique PLANCHER : prix net protégé par la marge (jamais sous le coût).
+  part net_price(price: Int, cost: Int, discount: Int) -> Int:
+    requires 0 <= cost
+    requires cost <= price
+    requires 0 <= discount
+    requires discount <= price - cost
+    ensures result == price - discount
+    ensures result >= cost
+    yield price - discount
+
+  # LE COMPOSITE : honorer une commande = réserver le stock + numéroter la facture + tarifer, et
+  # PROUVER les trois invariants métier sur le même résultat. Aucune garantie n'en casse une autre.
+  part fulfill(on_hand: Int, committed: Int, qty: Int, last: Int, price: Int, cost: Int, discount: Int, min_keep: Int) -> Order:
+    requires 0 <= committed
+    requires committed <= on_hand
+    requires 0 <= qty
+    requires 0 <= min_keep
+    requires qty <= on_hand - committed - min_keep
+    requires last >= 0
+    requires 0 <= cost
+    requires cost <= price
+    requires 0 <= discount
+    requires discount <= price - cost
+    ensures result.committed <= on_hand      # 1. STOCK : pas de survente
+    ensures result.invoice == last + 1        # 2. NUMÉRO : contigu (audit)
+    ensures result.net >= cost                # 3. MARGE : jamais sous le coût
+    yield Order(reserve(on_hand, committed, qty, min_keep), next_invoice(last), net_price(price, cost, discount))
+
+  part main() -> Int via IO:
+    # Stock 100, engagé 30 (dispo 70), commander 40 en gardant 10 en réserve (40 ≤ 70−10=60) ; dernier
+    # n° 5000 ; prix 200, coût 120, remise 50. → engagé 70 (≤100), facture 5001, net 150 (≥120).
+    let o = fulfill(100, 30, 40, 5000, 200, 120, 50, 10)
+    let a = IO.print(o.committed)
+    let b = IO.print(o.invoice)
+    yield IO.print(o.net)
