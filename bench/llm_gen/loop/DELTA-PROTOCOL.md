@@ -203,3 +203,35 @@ valeur chiffrée de l'écosystème llmlang×Axon pour le dev-via-LLM.
   propre de llmlang) ; (b) plus d'échantillons/modèles (robustesse, n=6 sur d05) ; (c) couverture
   Axon des symboles à `effect Solver` (planning/sourcing not-found — LllParser d'Axon échoue dessus) ;
   (d) ID `google/gemini-2.0-flash-001` périmé (404) ; (e) jambe intention SOLL.
+
+## Run 5 (2026-07-27) — RÉCOLTE D'EXPÉRIENCE LLM (décision opérateur « récolter avant d'améliorer »)
+
+Objectif : gather de la vraie expérience LLM sur le produit COURANT (avec `source_file`/`suggest`
+livrés) avant d'ajouter des features en spéculant. Run payant modeste, mode SPLICE.
+
+**Config** : 2 modèles (`anthropic/claude-haiku-4.5`, `openai/gpt-4o-mini`) × 2 samples × 5 tâches ×
+3 bras = 66 unités. **Coût total $0.248** (trivial — le banc peut scaler). `gemini-2.0-flash-001`
+exclu (404, périmé).
+
+**Résultats** : DARK 22/22, LIVE_CTX 22/22, LIVE_AXON 22/22 (tous corrects). Ratio tokens médian
+LIVE_CTX/DARK **0.701** IC95% [0.614, 0.931] ; LIVE_AXON/DARK **0.701** [0.614, 0.811] → ~30 % de
+tokens en MOINS avec le contexte, confirmé sur DEUX modèles (le finding delta tient hors Claude).
+Tokens moyens : DARK 6657 / LIVE_CTX 4937 / LIVE_AXON 4800.
+
+**Rounds (la friction)** : 54/66 unités en 1 round, 12 en 2 rounds. Rounds moyens DARK 1.23 /
+LIVE_CTX 1.23 / **LIVE_AXON 1.09**. La friction est CONCENTRÉE sur **d05 (ripple)** — la tâche où un
+changement de signature oblige à mettre à jour les CALLERS : claude-haiku LIVE_CTX ×3, gpt-4o-mini
+DARK ×3 / LIVE_AXON ×2 / LIVE_CTX ×2 (+ un d04 gpt-4o-mini DARK). **LIVE_AXON cale MOINS sur le
+ripple** (le blast-radius évite le round de découverte des callers). Les 4 tâches localisées : ~0
+friction, contexte = surcoût ~0 (économie via le focus splice).
+
+**Findings pour le produit (à traiter « en conséquence », phase suivante) :**
+1. Le contexte du langage vérifié économise ~30 % de tokens, robuste sur 2 modèles — valeur confirmée.
+2. Le **caller-ripple** (mettre à jour les appelants d'une signature changée) est LE point de friction
+   LLM. `lll context --with-callers` (livré) + le blast-radius d'Axon le ciblent directement — c'est
+   la valeur la plus tangible mesurée. → prioriser l'exposition de ce contexte aux LLM.
+3. **META (manque du banc)** : les rows n'enregistrent PAS le DIAGNOSTIC du round-1 (ce que le
+   compilateur a dit, ce qui a fait échouer le LLM). On voit COMBIEN de rounds, pas POURQUOI. Pour
+   une vraie récolte « où/pourquoi les LLM calent », le banc doit logger la sortie du gate round-1.
+4. Les tâches actuelles sont trop faciles (54/66 en 1 round) → pour une friction riche, il faut des
+   tâches PLUS DURES (multi-part, contrats non-triviaux) — sur les nouveaux agents ERP (17 briques).
