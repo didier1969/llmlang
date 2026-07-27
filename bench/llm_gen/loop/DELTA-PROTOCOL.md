@@ -372,3 +372,37 @@ caller cross-fichier → doivent la reconstruire → error-prone, cf. le mécani
 fabriqué invalide), et **LIVE_AXON qui réussit/plus fiable** (il a la source). Un écart
 LIVE_AXON > LIVE_CALLERS ICI = la première mesure de la valeur DISTINCTE d'Axon (au-delà du graphe du
 langage). Run payant gated `BENCH_GO=1` : x01 × 4 bras × 2 modèles × 2 samples = 16 unités (~$0.06).
+
+### RUN 7 — RÉSULTATS ($0.066, 16 unités) : la valeur DISTINCTE d'Axon, MESURÉE
+
+x01 × 4 bras × 2 modèles (haiku-4.5, gpt-4o-mini) × 2 samples. Un timeout réseau (LIVE_CTX/haiku)
+→ 15 unités sémantiques + 1 erreur.
+
+| bras | succès cross-module | rounds |
+|---|---|---|
+| DARK (dump des 2 fichiers) | **4/4** | 1.00 |
+| LIVE_CTX (mono-fichier, callee-only) | **0/3** | — (5 rounds, échec) |
+| LIVE_CALLERS (`--with-callers`, graphe llmlang) | **0/4** | — (5 rounds, échec) |
+| LIVE_AXON (+ Axon impact cross-module) | **4/4** | 1.00 |
+
+**C'est l'INVERSE exact du Run 6.** Run 6 (intra-module) : LIVE_CALLERS = LIVE_AXON (le caller est
+dans le même fichier → le graphe llmlang le trouve). Run 7 (cross-module) : **LIVE_CALLERS = LIVE_CTX
+= 0 %** — le caller `can_fulfill` est dans un AUTRE fichier, invisible au graphe mono-fichier, même
+avec `--with-callers`. Les DEUX bras du langage échouent 100 %, TOUS `round1_kind=check` (arité
+cross-fichier non réparée), 5 rounds épuisés, sur les DEUX modèles. **Seul LIVE_AXON réussit (4/4,
+1 round)** : Axon fournit la source de `can_fulfill` → le modèle édite le vrai caller du premier coup.
+
+**Tokens** : LIVE_AXON/DARK = **0.919** (LIVE_AXON ~8 % moins cher que DARK, à 4/4 identique). DARK
+réussit aussi (le dump des 2 fichiers CONTIENT can_fulfill) mais au prix fort. LIVE_AXON = le focus
+JUSTE (firewall + le caller cross-fichier qu'Axon pointe) → même fiabilité, moins de tokens.
+(Économie modeste ici car l'unité est petite ; la RELIABILITÉ 0 %→100 % est le titre, pas les tokens.)
+
+**LA THÈSE ÉCOSYSTÈME, COMPLÈTE ET MESURÉE :**
+- Édition LOCALISÉE → le langage vérifié suffit (focus token-efficient, ~30 %).
+- Ripple INTRA-module → le graphe du langage (`--with-callers`) donne les callers → fiable.
+- Ripple CROSS-module → le langage est AVEUGLE (0 %) ; **c'est la valeur DISTINCTE d'Axon** : son
+  intelligence cross-module rend le ripple solvable (100 %) là où le langage seul ne peut pas.
+
+llmlang (le COMMENT, vérifié, intra-module) et Axon (le POURQUOI/la structure, cross-module) ne se
+recouvrent pas : ils se COMPOSENT, et chacun a une zone où il est seul à pouvoir. Première mesure
+directe de la complémentarité, pas juste une assertion.
