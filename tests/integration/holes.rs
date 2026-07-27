@@ -551,6 +551,17 @@ fn suggest_synthesises_binary_arithmetic_and_comparison_req220() {
         "the comparison completion `x > 0` must be proposed: {:?}",
         sugs[0].candidates
     );
+    // (3) a List[Int] hole whose ensures is `result == x :: rest` → cons `x :: rest` is proposed
+    //     (head from D0(Int), tail from D0(List[Int]) = the list binder `rest`) — the recursive
+    //     list-function shape.
+    let cons = "module M:\n\n  part prepend(x: Int, rest: List[Int]) -> List[Int]:\n    ensures result == x :: rest\n    yield ?\n";
+    let cm = types::check_module(parser::parse_module(cons).expect("parse")).expect("check");
+    let sugs = synth::suggest(&cm, None, 16).expect("suggest");
+    assert!(
+        sugs[0].candidates.iter().any(|c| c == "x :: rest"),
+        "the cons completion `x :: rest` must be proposed: {:?}",
+        sugs[0].candidates
+    );
 }
 
 

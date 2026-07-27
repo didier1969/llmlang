@@ -17,7 +17,8 @@
 //! v1 is enumerate-and-check, depth 1, type-directed (the D2 goal is displayed, not used to
 //! guide the search — the full VC set subsumes it). D1 covers unary applications (part/ctor) AND
 //! binary operators (`a op b`, REQ-LLL-220 — arithmetic `+ - *` to an Int hole, comparisons and
-//! `&& ||` to a Bool hole), both with operands drawn only from D0. Out of scope: depth ≥ 2 /
+//! `&& ||` to a Bool hole, and cons `a :: b` to a List hole), all with operands drawn only from
+//! D0 (bounded, no recursion in the grammar). Out of scope: depth ≥ 2 /
 //! nested applications, goal-guided search, lambda/match/conditional synthesis, function-typed or
 //! polymorphic holes, joint multi-hole synthesis, cache pre-warming, text auto-editing.
 
@@ -215,6 +216,20 @@ fn enumerate(t: &Ty, h: &HoleInfo, cm: &CheckedModule) -> Vec<Expr> {
                     for b in &bools {
                         out.push(Expr::Bin(op, Box::new(a.clone()), Box::new(b.clone())));
                     }
+                }
+            }
+        }
+        // to a List[E] hole: cons `a :: b` — the shape of a recursive list result's base/step
+        // (`x :: []`, `h :: rest`). Head from D0(E), tail from D0(List[E]) (the empty list + any
+        // list binder in scope), both from D0 → bounded, no recursion in the grammar.
+        Ty::List(elem) => {
+            let mut heads = Vec::new();
+            d0(elem, h, cm, &mut heads);
+            let mut tails = Vec::new();
+            d0(t, h, cm, &mut tails);
+            for a in &heads {
+                for b in &tails {
+                    out.push(Expr::Cons(Box::new(a.clone()), Box::new(b.clone())));
                 }
             }
         }
