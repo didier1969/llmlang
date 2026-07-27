@@ -70,6 +70,18 @@
       "change_markers": ["max_capacity", "on_hand + qty <= max_capacity"],
       "reference": "delta_tasks/d07_receive_capacity_ripple/reference.lll",
       "kind": "RIPPLE (receive → procure → main) — LIVE_CALLERS/LIVE_AXON donnent la source des callers"
+    },
+    {
+      "id": "x01_stock_reserve_xmod_ripple",
+      "base": "examples/uses_inventory_lib.lll",
+      "dep_files": ["examples/lib/inventory_lib.lll"],
+      "target_file": "examples/lib/inventory_lib.lll",
+      "target": "stock_reserve",
+      "axon_affects": ["can_fulfill", "main"],
+      "instruction": "Ajoute un paramètre `min_keep: Int` à `stock_reserve` (un stock de sécurité à toujours garder). Ajoute `requires 0 <= min_keep`, et RESSERRE la borne en remplaçant `requires qty <= on_hand - committed` par `requires qty <= on_hand - committed - min_keep`. ATTENTION : `stock_reserve` est définie dans lib/inventory_lib.lll mais APPELÉE depuis un AUTRE fichier — tu DOIS aussi mettre à jour `can_fulfill` (qui l'appelle) pour prendre un `min_keep: Int` (avec `requires 0 <= min_keep` ET `requires order <= on_hand - committed - min_keep`) et le passer à `stock_reserve`, ET `main` doit passer une valeur au nouvel argument de `can_fulfill` (ex. 10). Les DEUX fichiers de l'unité doivent rester vérifiés (`lll check` vert) et exécutables (`lll run`).",
+      "change_markers": ["min_keep", "stock_reserve(on_hand, committed, order, min_keep)"],
+      "reference": "delta_tasks/x01_stock_reserve_xmod_ripple/reference.lll",
+      "kind": "CROSS-MODULE RIPPLE (stock_reserve@lib → can_fulfill@user → main) — le caller can_fulfill est dans un AUTRE fichier : LIVE_CTX/LIVE_CALLERS (mono-fichier) sont AVEUGLES, seul LIVE_AXON (impact cross-module) donne sa source. LA valeur DISTINCTE d'Axon."
     }
   ]
 }

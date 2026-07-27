@@ -336,3 +336,39 @@ reste NON mesurée — ce substrat est mono-module. = prochain test de la thèse
 **Thèse écosystème, mesurée** : langage vérifié = FOCUS token-efficient sur l'édition localisée, mais
 callee-only → INSUFFISANT sur le ripple ; + contexte de callers (langage OU Axon) = ripple FIABLE
 (12/12) à prime de tokens modeste. Ça se COMPOSE.
+
+## RUN 7 (substrat) — test CROSS-MODULE : la valeur DISTINCTE d'Axon (REQ-LLL-192)
+
+Le Run 6 a montré que le contexte de callers rend le ripple fiable — mais LIVE_CALLERS (graphe
+llmlang) ≈ LIVE_AXON, car sur un module unique le caller est dans le MÊME fichier : le graphe propre
+de llmlang le trouve, Axon n'ajoute rien. La thèse « Axon = valeur DISTINCTE » exigeait un caller
+CROSS-fichier. Ce substrat le fournit.
+
+**Le fixture (existant, prouvé)** : `examples/uses_inventory_lib.lll` importe
+`examples/lib/inventory_lib.lll` ; `can_fulfill` (fichier user) appelle `stock_reserve` (fichier lib).
+Changer la signature de `stock_reserve` (tâche **x01** : + `min_keep`) RIPPLE à `can_fulfill` dans
+l'AUTRE fichier, puis `main`. Vérifié empiriquement : `lll check` attrape la casse cross-fichier
+(`error: part 'can_fulfill': 'stock_reserve' expects 4 argument(s), got 3`).
+
+**Ce que voit chaque bras (mesuré au dryrun, avant tout appel API) :**
+- `lll context lib stock_reserve --with-callers` → **AUCUN caller** (mono-fichier, aveugle au caller
+  cross-fichier). LIVE_CALLERS n'ajoute que +104 chars (le label), PAS de source de caller.
+- Axon `impact stock_reserve` (project=LLL) → résout **can_fulfill** dans l'autre fichier
+  (confidence=high, direct_calls=4). LIVE_AXON ajoute +742 chars = la source réelle de can_fulfill.
+
+C'est l'INVERSE du Run 6 : ici seul Axon a le caller. Le trou est **structurellement démontré** (le
+dryrun le prouve, gratis) : il existe une classe de ripple (cross-fichier) où l'outillage propre du
+langage ne peut PAS aider et où seul Axon le peut.
+
+**Extension du banc (multi-fichiers, bench-only, mono-fichier inchangé)** : une tâche porte
+`dep_files` + `target_file` ; le splice route chaque `part` émise vers le fichier qui la définit,
+écrit l'unité dans un dir temp en PRÉSERVANT les chemins d'import, et `lll check` l'entrée. Gate
+adversarialement vérifié : une édition qui change `stock_reserve` mais PAS `can_fulfill` → ROUGE
+(arité cross-fichier) ; l'édition complète 2-fichiers → VERT. Non-régression : les 7 tâches
+mono-fichier inchangées (dryrun 8/8, gate référence-VERT/base-ROUGE).
+
+**PRÉ-ENREGISTREMENT** : on ATTEND, sur x01, LIVE_CTX ≈ LIVE_CALLERS (les deux privés de la source du
+caller cross-fichier → doivent la reconstruire → error-prone, cf. le mécanisme Run 6 : contrat
+fabriqué invalide), et **LIVE_AXON qui réussit/plus fiable** (il a la source). Un écart
+LIVE_AXON > LIVE_CALLERS ICI = la première mesure de la valeur DISTINCTE d'Axon (au-delà du graphe du
+langage). Run payant gated `BENCH_GO=1` : x01 × 4 bras × 2 modèles × 2 samples = 16 unités (~$0.06).

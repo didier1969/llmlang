@@ -222,12 +222,44 @@ def base_src(task):
     return read_file(base_path(task))
 
 
+# ── UNITÉ DE COMPILATION (mono OU multi-fichiers) ──────────────────────────────────────────────
+# Une tâche CROSS-MODULE (REQ-192, valeur DISTINCTE d'Axon) porte la cible dans un fichier importé
+# et le ripple dans un AUTRE : `lll context`/`--with-callers` (mono-fichier) ratent le caller
+# cross-fichier, seul Axon `impact` le voit. `dep_files` = les autres fichiers de l'unité ;
+# `target_file` = le fichier qui DÉFINIT la cible (défaut base). Mono-fichier → comportement
+# historique inchangé (dep_files vide, target_file=base).
+def unit_files(task):
+    return [task["base"]] + task.get("dep_files", [])
+
+
+def target_file(task):
+    return task.get("target_file", task["base"])
+
+
+def unit_dump(task):
+    """Le dump DARK d'une unité : tous les fichiers concaténés (étiquetés) — DARK a TOUT, y compris
+    les callers cross-fichiers, mais au prix fort."""
+    return "\n\n".join(
+        f"# ── file: {rel} ──\n" + read_file(os.path.join(REPO, rel)) for rel in unit_files(task)
+    )
+
+
+def _find_part_source(task, name):
+    """La source d'une `part` où qu'elle soit dans l'unité (le caller peut être dans un autre fichier)."""
+    for rel in unit_files(task):
+        s = extract_part(read_file(os.path.join(REPO, rel)), name)
+        if s:
+            return s
+    return None
+
+
 def lll_context(task, with_callers=False):
-    """Le payload LIVE_CTX : `lll context <base> <target> --format=json` (source cible +
+    """Le payload LIVE_CTX : `lll context <target_file> <target> --format=json` (source cible +
     contrats des CALLEES, le firewall). `with_callers` ajoute `--with-callers` = les CALLERS
     TRANSITIFS (leur source complète) depuis le graphe d'appel PROPRE de llmlang (REQ-LLL-192,
-    SANS Axon) — pour un changement qui RIPPLE aux appelants."""
-    cmd = [LLL, "context", base_path(task), task["target"], "--format=json"]
+    SANS Axon) — MAIS mono-fichier : un caller cross-fichier reste INVISIBLE (c'est là qu'Axon
+    différencie). `lll context` tourne sur le fichier qui DÉFINIT la cible."""
+    cmd = [LLL, "context", os.path.join(REPO, target_file(task)), task["target"], "--format=json"]
     if with_callers:
         cmd.append("--with-callers")
     out = run_cmd(cmd)
@@ -248,11 +280,11 @@ def axon_block(task):
         "CALLEES). Keep them consistent: " + ", ".join(affects) + "\n\n"
     )
     if SPLICE:
-        # Axon dit QUELS callers sont affectés → on lit EXACTEMENT ceux-là (pas tout le module).
-        # C'est la valeur du blast-radius : un contexte focalisé COMPLET pour un changement qui
-        # se propage. `lll context` (callee-only) ne les révèle pas → LIVE_CTX les rate.
-        base = base_src(task)
-        srcs = [s for c in affects if (s := extract_part(base, c))]
+        # Axon dit QUELS callers sont affectés → on lit EXACTEMENT ceux-là (pas tout le module),
+        # où qu'ils soient dans l'unité — Y COMPRIS un caller dans un AUTRE fichier que la cible,
+        # que `lll context`/`--with-callers` (mono-fichier) ne peuvent PAS révéler. C'est la valeur
+        # DISTINCTE cross-module d'Axon.
+        srcs = [s for c in affects if (s := _find_part_source(task, c))]
         if srcs:
             block += (
                 "Their current source (edit these too if the change ripples to them):\n\n```\n"
@@ -284,7 +316,10 @@ def gen_prompt(arm, task):
         # DARK reçoit le module COMPLET ; LIVE reçoit le FOCUS SEUL (le read-set serré) au lieu du
         # dump — c'est LÀ que le focus économise des tokens. Tous émettent SEULEMENT les parts changées.
         if arm == "DARK":
-            ctx = "# Existing module\n\n```\n" + base_src(task) + "\n```\n\n"
+            # DARK a TOUT le read-set : mono-fichier = le module ; multi-fichiers = tous les
+            # fichiers de l'unité (dont le caller cross-fichier) — coûteux mais complet.
+            dump = unit_dump(task) if len(unit_files(task)) > 1 else base_src(task)
+            ctx = "# Existing module(s)\n\n```\n" + dump + "\n```\n\n"
         else:
             # LIVE_CALLERS = focus + callers depuis le graphe llmlang (SANS Axon) ;
             # LIVE_AXON = focus + callers depuis le blast-radius Axon (axon_block).
@@ -349,22 +384,55 @@ def diag_kind(feedback):
     return "other"
 
 
+def _write_unit(tag, task, blocks):
+    """Splice les `part` émises dans l'unité et écrit sur disque. Mono-fichier → un `.lll`.
+    Multi-fichiers → un dir temp qui PRÉSERVE les chemins relatifs (pour que les `import`
+    résolvent), chaque bloc routé vers le fichier qui définit une part de ce nom (splice_parts
+    ignore les parts absentes). Retourne (chemin d'entrée à checker, texte concaténé de l'unité
+    splicée pour la détection de marqueurs)."""
+    files = unit_files(task)
+    if len(files) == 1:
+        path = os.path.join(RUNS_DIR, tag + ".lll")
+        full = splice_parts(base_src(task), blocks)
+        with open(path, "w") as fh:
+            fh.write(full)
+        return path, full
+    base_dir = os.path.dirname(base_path(task))  # les imports du base sont relatifs à SON dir
+    udir = os.path.join(RUNS_DIR, tag)
+    entry, spliced_all = None, []
+    for rel in files:
+        abs_src = os.path.join(REPO, rel)
+        spliced = splice_parts(read_file(abs_src), blocks)
+        spliced_all.append(spliced)
+        dest = os.path.join(udir, os.path.relpath(abs_src, base_dir))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w") as fh:
+            fh.write(spliced)
+        if rel == task["base"]:
+            entry = dest
+    return entry, "\n".join(spliced_all)
+
+
 def gate_modify(code, tag, task):
     """VERT ssi : `lll check` exit 0 ET changement présent ET `lll run` marche.
-    En mode SPLICE, `code` = les part(s) émise(s) → on les re-splice dans la base d'abord."""
+    En mode SPLICE, `code` = les part(s) émise(s) → on les re-splice dans l'unité d'abord
+    (mono OU multi-fichiers)."""
     os.makedirs(RUNS_DIR, exist_ok=True)
-    path = os.path.join(RUNS_DIR, tag + ".lll")
     if SPLICE:
         blocks = split_emitted_parts(code)
         if not blocks:
             return False, "aucun bloc `part` émis (mode splice)"
-        code = splice_parts(base_src(task), blocks)  # module COMPLET après splice
-    with open(path, "w") as fh:
-        fh.write(code)
+        path, full = _write_unit(tag, task, blocks)
+    else:
+        # mode module-complet, mono-fichier (comportement historique)
+        path = os.path.join(RUNS_DIR, tag + ".lll")
+        with open(path, "w") as fh:
+            fh.write(code)
+        full = code
     chk = run_cmd([LLL, "check", "--no-cache", "--format=json", path])
     if chk.returncode != 0:
         return False, "lll check FAILED:\n" + clip(chk.stdout + chk.stderr)
-    if not change_present(code, task):
+    if not change_present(full, task):
         return False, "the required change did not land (markers absent): " + repr(task["change_markers"])
     run = run_cmd([LLL, "run", path])
     if run.returncode != 0:
@@ -443,7 +511,13 @@ def cmd_dryrun(_args):
         affects = task.get("axon_affects", [])
         print(f"  DARK         : {len(dark):6d} chars")
         print(f"  LIVE_CTX     : {len(ctx):6d} chars  (+{len(ctx) - len(dark)} = `lll context`, callees+contrats)")
-        cal_note = "callers transitifs présents" if len(cal) > len(ctx) else "aucun caller (cible non-appelée) → = LIVE_CTX"
+        # +petit (< ~300 chars) = juste le label, AUCUN caller réel trouvé : soit la cible n'est pas
+        # appelée, soit — cas cross-module — le(s) caller(s) sont dans un AUTRE fichier, invisibles au
+        # graphe mono-fichier de `--with-callers`. C'est LÀ que seul Axon (cross-module) différencie.
+        cross = len(unit_files(task)) > 1
+        cal_note = ("callers transitifs présents (graphe intra-fichier)" if len(cal) - len(ctx) > 300
+                    else ("caller(s) CROSS-FICHIER → INVISIBLES à `--with-callers` (mono-fichier) ; seul LIVE_AXON les a"
+                          if cross else "aucun caller (cible non-appelée) → = LIVE_CTX"))
         print(f"  LIVE_CALLERS : {len(cal):6d} chars  (+{len(cal) - len(ctx)} vs CTX = `--with-callers`, graphe llmlang : {cal_note})")
         axon_note = f"impact→{', '.join(affects)}" if affects else "VIDE → dégrade vers LIVE_CTX (Axon ne résout pas la cible)"
         print(f"  LIVE_AXON    : {len(axn):6d} chars  (+{len(axn) - len(ctx)} vs CTX = blast-radius Axon : {axon_note})")

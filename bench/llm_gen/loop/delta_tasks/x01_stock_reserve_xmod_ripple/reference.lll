@@ -1,0 +1,26 @@
+  # Référence = les blocs `part` changés qu'un modèle CORRECT émet (mode splice) pour le ripple
+  # CROSS-MODULE : le paramètre ajouté à `stock_reserve` (défini dans lib/inventory_lib.lll) RIPPLE
+  # à `can_fulfill` (défini dans uses_inventory_lib.lll, un AUTRE fichier) puis `main`. Le harnais
+  # route chaque bloc vers le fichier qui définit la part de ce nom.
+
+  part stock_reserve(on_hand: Int, committed: Int, qty: Int, min_keep: Int) -> Int:
+    requires 0 <= committed
+    requires committed <= on_hand
+    requires 0 <= qty
+    requires 0 <= min_keep
+    requires qty <= on_hand - committed - min_keep
+    ensures committed <= result
+    ensures result <= on_hand
+    yield committed + qty
+
+  part can_fulfill(on_hand: Int, committed: Int, order: Int, min_keep: Int) -> Int:
+    requires 0 <= committed
+    requires committed <= on_hand
+    requires 0 <= order
+    requires 0 <= min_keep
+    requires order <= on_hand - committed - min_keep
+    ensures result <= on_hand
+    yield stock_reserve(on_hand, committed, order, min_keep)
+
+  part main() -> Int via IO:
+    yield IO.print(can_fulfill(100, 30, 40, 10))
