@@ -109,9 +109,27 @@ complet : `DELTA-PROTOCOL.md`. Sept runs :
   POINT POUR le langage** : le contrat EST l'intention imposée ; là où un codebase non-vérifié aurait
   besoin d'Axon pour porter « l'invariant doit tenir », llmlang le DÉPLACE dans le contrat que le
   compilateur impose. → La valeur distincte d'Axon pour dev-llmlang est **STRUCTURELLE cross-module**
-  (mesurée), pas l'injection d'intention sur code vérifié. Où la jambe intention SERAIT mesurable :
-  le code du COMPILATEUR (Rust, non contraint par contrats) vs les décisions DEC-LLL de soundness —
-  un banc DIFFÉRENT (Rust-modify, oracle caché plus dur), ligne future distincte.
+  (mesurée), pas l'injection d'intention sur code vérifié.
+- **INTENTION côté COMPILATEUR (Rust) — SONDÉ 2026-07-27, même conclusion, autre raison.** Candidat
+  net : le pairing SMT↔Rust de div/mod (`src/opsem.rs`), gouverné par DEC-LLL-026 (« le modèle SMT et
+  le binaire doivent concorder »). Précipice RÉEL et bench MÉCANIQUEMENT VALIDE (démontré) : une
+  édition plausible « euclidien → `/` tronqué » passerait les tests sur opérandes positifs mais casse
+  la soundness sur négatifs (`-7 mod 3` : Z3 prouve `2`, le binaire tronqué rend `-1`) — appliquée en
+  scratch, l'oracle tenu-à-l'écart `div_mod_are_euclidean_on_both_backends` la CAPTURE (ROUGE),
+  reverté. MAIS l'intention est **LOCALE au site d'édition** : `opsem.rs` porte 13 lignes de doc-module
+  + les commentaires DEC-026 inline + un paragraphe expliquant pourquoi `/` natif serait unsound. Un
+  LLM qui édite ce fichier LIT déjà l'intention → DARK l'a, LIVE_INTENT (+ DEC SOLL) est redondant →
+  gap prédit nul. **Même conclusion que la sonde `.lll`, raison complémentaire** : là l'intention est
+  dans le CONTRAT (imposée par le compilateur), ici dans les COMMENTAIRES (portants, au site).
+- **MÉTA-FINDING unificateur.** La valeur d'INJECTION-d'intention d'un traqueur-du-POURQUOI (Axon) est
+  **inversement proportionnelle à quel point le code porte sa propre intention localement**. Sur CE
+  codebase — contrats machine-vérifiés (`.lll`) + zéro-warning + discipline de commentaires portants
+  (compilateur) — l'intention est LOCALE partout par CONSTRUCTION, donc le gap d'injection est petit.
+  C'est un **POINT POUR l'écosystème** (rendre le code éditable-sûr par un LLM = rendre l'intention
+  locale, ce que llmlang fait par design). La valeur distincte d'Axon, MESURÉE, est la STRUCTURE
+  cross-module (Run 7 : 0 %→100 %), là où le code ne PEUT PAS se documenter localement (un caller dans
+  un autre fichier n'est pas visible au site). La jambe intention n'est pas « non mesurée » : elle est
+  **fermée sur base de principe, sondée sur les deux substrats**.
 
 ---
 
