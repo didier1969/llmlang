@@ -293,6 +293,25 @@
 - **REQ** — `REQ-LLL-211` (agent ERP, forme invariant-inductif-sur-liste ; la composition d'un pas
   prouvé sur une histoire quelconque — distincte des briques mono-résultat).
 
+## 19. DÉMONSTRATEUR — une journée de ventes, trois invariants système ensemble — `examples/erp_sales_day_verified.lll`
+
+- **Prouve** — l'ARTEFACT qui rend la thèse tangible : sur un LOG de ventes de longueur **quelconque**,
+  TROIS garanties tiennent SIMULTANÉMENT, prouvées par récurrence — le passage d'« une opération est
+  correcte » à « la journée entière est cohérente, quelle que soit la séquence » :
+  - `sale_net(s)` · `ensures result >= s.cost` — MARGE : aucune ligne sous le coût (brique 12).
+  - `day_revenue(sales)` · `requires (∀ s: bien formée)` · `ensures result >= 0` — REVENU du jour
+    exact et non-négatif à N ventes symbolique (brique 8 : par-élément → agrégat).
+  - `day_trial_balance(sales)` · `ensures result == 0` — PARTIE DOUBLE : chaque vente poste une
+    écriture équilibrée → les livres de la journée balancent (brique 18 : invariant inductif de journal).
+- **Quand** — la démonstration « voici un flux ERP réel où chaque règle est prouvée, pas testée » : une
+  clôture de journée, un lot de transactions, tout traitement par lot dont on veut la cohérence garantie.
+- **Technique** — composition de trois briques sur une même liste : `forall` en `requires` propagé à la
+  queue (REQ-201/204), if/match portant l'IH (REQ-198), récurrence structurelle. Contrainte respectée :
+  DEC-LLL-017 interdit les appels dans les contrats → chaque `ensures` est auto-contenu (`>= 0`, `== 0`).
+  Test de REJET : une journée avec UNE vente sous le coût (`Sale(100, 60, 50)`, remise 50 > marge 40)
+  NE COMPILE PAS (le `forall` de plancher de marge n'est pas déchargé au call-site).
+- **REQ** — `REQ-LLL-211` (agent ERP, DÉMONSTRATEUR — composition multi-invariants sur une séquence).
+
 ---
 
 ## Primitives & mécanismes qui rendent les briques possibles

@@ -502,6 +502,37 @@ fn erp_unbalanced_journal_fails_to_verify_req211() {
     );
 }
 
+#[test]
+fn erp_below_cost_sale_in_a_day_fails_to_verify_req211() {
+    // The sales-day demonstrator (examples/erp_sales_day_verified.lll) composes three invariants over
+    // a LOG of sales of any length: margin floor, non-negative day revenue, balanced books. The
+    // margin-floor leg bites here — a day containing ONE below-cost sale (discount > price - cost, so
+    // the line sells under cost) cannot discharge `day_revenue`'s `requires forall s: s.discount <=
+    // s.price - s.cost` at the call site, so the module FAILS to verify. A loss-making day is
+    // unrepresentable — the counterexample is the `Sale(100, 60, 50)` (discount 50 > margin 40).
+    let src = "module Bad:\n\n  \
+        type Sale = {price: Int, cost: Int, discount: Int}\n\n  \
+        part sale_net(s: Sale) -> Int:\n    requires 0 <= s.cost\n    \
+            requires s.cost <= s.price\n    requires 0 <= s.discount\n    \
+            requires s.discount <= s.price - s.cost\n    ensures result >= 0\n    \
+            yield s.price - s.discount\n\n  \
+        part day_revenue(sales: List[Sale]) -> Int:\n    \
+            requires forall s in sales: 0 <= s.cost\n    \
+            requires forall s in sales: s.cost <= s.price\n    \
+            requires forall s in sales: 0 <= s.discount\n    \
+            requires forall s in sales: s.discount <= s.price - s.cost\n    \
+            ensures result >= 0\n    measure length(sales)\n    match sales:\n      \
+            [] -> yield 0\n      h :: t -> yield sale_net(h) + day_revenue(t)\n\n  \
+        part bad_day() -> Int:\n    yield day_revenue([Sale(100, 60, 50)])\n";
+    let (cm, hm) = full(src);
+    let dir = tempdir();
+    let report = vc::verify(&cm, &hm, &dir, false).expect("verify runs");
+    assert!(
+        !report.ok(),
+        "a day containing a below-cost sale (discount > price - cost) MUST fail to verify — the margin floor is a theorem over the whole day"
+    );
+}
+
 
 #[test]
 fn interproc_ownership_flips_borrowed_param_fed_to_owned_position_req148() {
