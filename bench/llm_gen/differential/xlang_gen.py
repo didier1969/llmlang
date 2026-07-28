@@ -91,16 +91,24 @@ TASKS = [
         "hidden": [[-100, 3], [-1, 5], [-7, 3], [8, 5]],
         "expected": lambda a, b: a % b,
         "trap": "Euclidean remainder of a negative (Rust naive a%b truncates)",
+        "property": "0 <= result < b  AND  result is congruent to a modulo b (holds for negative a too)",
     },
     {
-        "id": "square", "mode": "scalars", "args": ["x"],
-        "spec": "Return x squared (x*x) as an exact integer, for any x up to 5e9 — the true value, "
-                "never wrapped/overflowed.",
-        "shown": [[3], [5]],
-        "shown_strong": [[0], [-7], [3200000000]],    # 3.2e9² overflows i64 → forces a wider type
-        "hidden": [[4000000000], [3000000000], [5000000000]],
-        "expected": lambda x: x * x,
-        "trap": "i64 overflow (Rust i64 cannot even hold the answer; Python/llmlang exact)",
+        # FAIR overflow trap (replaces the rigged `square`, whose i64 signature could not hold the
+        # answer): floor((a+b)/2). The ANSWER always fits i64; only the NAIVE intermediate `a+b`
+        # overflows. So a correct i64 Rust solution EXISTS (`a + (b-a)/2` or i128) — Rust isn't boxed.
+        "id": "midpoint", "mode": "scalars", "args": ["a", "b"],
+        "spec": "Return the integer midpoint floor((a+b)/2) of a and b, exact for ANY i64 a and b, "
+                "including values near i64::MIN/MAX (the answer always fits i64; beware intermediate "
+                "overflow of a+b).",
+        "shown": [[4, 10], [3, 7]],
+        "shown_strong": [[0, 2], [-4, -2], [100, 200]],   # small, no overflow, distinct from hidden
+        "hidden": [[9000000000000000000, 9000000000000000000],
+                   [8000000000000000000, 8000000000000000000],
+                   [9000000000000000000, 8000000000000000000]],
+        "expected": lambda a, b: (a + b) // 2,
+        "trap": "intermediate i64 overflow of a+b (naive (a+b)/2 wraps; the answer fits i64)",
+        "property": "result == floor((a+b)/2), i.e. 2*result <= a+b < 2*result+2, with NO overflow",
     },
     {
         "id": "alloc_ceil", "mode": "scalars", "args": ["n", "k"],
@@ -111,6 +119,7 @@ TASKS = [
         "hidden": [[100, 3], [10, 3], [7, 2], [1, 4]],
         "expected": lambda n, k: -(-n // k),
         "trap": "off-by-one on the remainder (naive n/k floors; Python & Rust escape)",
+        "property": "result*k >= n  AND  (result-1)*k < n  (the exact ceiling, for k>=1)",
     },
     # ── normal task (scalar) — base rate: everyone should get it ──
     {
@@ -333,6 +342,11 @@ def gen_prompt(lang, t):
     extra = ("\nWrite it WITH a contract (`requires`/`ensures`) that CAPTURES the spec, so `lll check` "
              "proves it correct for every valid input (not just the examples). You may add helper "
              "`part`s.\n" if lang == "llmlang" else "\n")
+    # SYMMETRIC strong arm (fairness): under the strong gate Python/Rust get an edge-test battery
+    # (`shown_strong`); the llmlang parallel is naming the PROPERTY to put in the contract. Both sides
+    # get the same "diligence" hint — tests-of-the-edge vs contract-of-the-property.
+    if SHOWN == "strong" and lang == "llmlang" and t.get("property"):
+        extra += f"\nYour `ensures` MUST establish this property: {t['property']}\n"
     return (primer + "\n\n# Task\n\n" + t["spec"] + "\n\n# Required signature\n\n`" + signature(lang, t)
             + "`\n\n# Examples that must hold\n\n" + ex + "\n" + extra
             + "\nEmit ONLY the function/part definition(s) in ONE fenced code block, no prose outside it.")
@@ -369,6 +383,7 @@ def run_unit(t, lang, model, sample, key):
         "trap": t["trap"] is not None, "shown": SHOWN,
         "shown_green": green, "rounds": rounds, "escape": esc, "hidden_correct": green and not esc,
         "tokens_in": tin, "tokens_out": tout, "tokens_total": tin + tout, "cost_usd": round(cost, 6),
+        "code": code[:800],  # the emitted solution — so every escape is INSPECTABLE from the jsonl
     }
 
 
@@ -385,10 +400,11 @@ REFS = {
         ("rust", "fn solve(a: i64, b: i64) -> i64 { a % b }", "escape"),
         ("llmlang", "part solve(a: Int, b: Int) -> Int:\n    requires b > 0\n    ensures 0 <= result\n    ensures result < b\n    yield a mod b", "correct"),
     ],
-    "square": [
-        ("python", "def solve(x):\n    return x * x", "correct"),
-        ("rust", "fn solve(x: i64) -> i64 { x * x }", "escape"),
-        ("llmlang", "part solve(x: Int) -> Int:\n    ensures result == x * x\n    yield x * x", "correct"),
+    "midpoint": [
+        ("python", "def solve(a, b):\n    return (a + b) // 2", "correct"),
+        ("rust", "fn solve(a: i64, b: i64) -> i64 { (a + b) / 2 }", "escape"),
+        ("rust", "fn solve(a: i64, b: i64) -> i64 { ((a as i128 + b as i128) / 2) as i64 }", "correct"),
+        ("llmlang", "part solve(a: Int, b: Int) -> Int:\n    ensures 2 * result <= a + b\n    ensures a + b < 2 * result + 2\n    yield (a + b) div 2", "correct"),
     ],
     "alloc_ceil": [
         ("python", "def solve(n, k):\n    return (n + k - 1) // k", "correct"),
