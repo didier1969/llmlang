@@ -152,7 +152,51 @@ TASKS = [
         "expected": lambda xs: sum(xs[0::2]) - sum(xs[1::2]),
         "trap": None,   # normal, but multi-function (sum evens/odds) — amortisation + contract firewall
     },
+    # ── FEATURE-scale tasks (multi-function module + cross-cutting invariant) — the SCALE probe ──
+    {
+        # SEMANTIC trap at feature scale: composed net→tax where the intermediate net*tax_bps
+        # overflows i64 but the ANSWER fits i64 (fair: a correct i64 Rust solution exists via i128).
+        "id": "order_charged", "mode": "scalars", "args": ["qty", "price", "discount", "tax_bps"],
+        "spec": "Write a module with helper parts and expose `solve(qty, price, discount, tax_bps)` = the "
+                "amount charged for an order line: first net = qty*price - discount, then apply a tax in "
+                "basis points: net + (net*tax_bps) div 10000. Requirements: qty>=0, price>=0, "
+                "0<=discount<=qty*price, 0<=tax_bps<=10000. The result must be the EXACT integer (never "
+                "wrapped/overflowed) and >= 0. In llmlang, prove result>=0 via helper contracts.",
+        "shown": [[2, 100, 50, 2000], [1, 200, 0, 1000]],
+        "shown_strong": [[0, 0, 0, 0], [3, 100, 300, 10000]],
+        "hidden": [[2000000000, 4000000000, 0, 2], [1000000000, 5000000000, 0, 3], [2, 100, 200, 5000]],
+        "expected": lambda q, p, d, t: (q * p - d) + ((q * p - d) * t) // 10000,
+        "trap": "intermediate i64 overflow of net*tax_bps (naive Rust wraps; answer fits i64)",
+        "property": "result == net + (net*tax_bps) div 10000 with net = qty*price - discount, no overflow, result >= 0",
+    },
+    {
+        # LOGIC trap at feature scale — the core thesis test. Apply a sequence of reservations,
+        # SKIPPING any that would oversell (running committed + q > on_hand). A model that forgets the
+        # skip oversells (wrong). In llmlang, proving `committed <= on_hand` FORCES the skip to compile.
+        "id": "seq_reserve", "mode": "list", "args": ["xs"],
+        "spec": "Process a sequence of stock reservations. Input xs = [on_hand, q1, q2, ...]: initial "
+                "stock, then reservation quantities (all >= 0). Apply each reservation ONLY if it fits "
+                "(running committed + q <= on_hand); SKIP any that would exceed on_hand. Expose "
+                "`solve(xs)` = the final committed. INVARIANT: committed must NEVER exceed on_hand "
+                "(in llmlang, prove it with a contract).",
+        "shown": [[100, 40, 40], [50, 10, 20]],
+        "shown_strong": [[100, 100], [10, 5, 5, 5], [20]],
+        "hidden": [[100, 60, 60, 30], [50, 40, 40], [30, 10, 25, 5], [100, 200]],
+        "expected": lambda xs: _seq_reserve(xs),
+        "trap": "forgetting to SKIP an over-committing reservation (naive always-apply oversells)",
+        "property": "the returned committed never exceeds on_hand; only reservations that fit are applied",
+    },
 ]
+
+
+def _seq_reserve(xs):
+    if not xs:
+        return 0
+    on_hand, committed = xs[0], 0
+    for q in xs[1:]:
+        if committed + q <= on_hand:
+            committed += q
+    return committed
 
 
 def task(tid):
@@ -428,6 +472,20 @@ REFS = {
         ("rust", "fn solve(xs: &[i64]) -> i64 {\n    let d: i64 = xs.iter().step_by(2).sum();\n    let c: i64 = xs.iter().skip(1).step_by(2).sum();\n    d - c\n}", "correct"),
         ("llmlang", "part solve(xs: List[Int]) -> Int:\n    measure length(xs)\n    match xs:\n      [] -> yield 0\n      d :: r ->\n        match r:\n          [] -> yield d\n          c :: rest -> yield (d - c) + solve(rest)", "correct"),
     ],
+    "order_charged": [
+        ("python", "def solve(qty, price, discount, tax_bps):\n    net = qty*price - discount\n    return net + (net*tax_bps)//10000", "correct"),
+        ("rust", "fn solve(qty: i64, price: i64, discount: i64, tax_bps: i64) -> i64 {\n    let net = qty*price - discount;\n    net + (net*tax_bps)/10000\n}", "escape"),
+        ("rust", "fn solve(qty: i64, price: i64, discount: i64, tax_bps: i64) -> i64 {\n    let net = qty*price - discount;\n    net + ((net as i128 * tax_bps as i128)/10000) as i64\n}", "correct"),
+        ("llmlang", "part line_net(qty: Int, price: Int, discount: Int) -> Int:\n    requires qty >= 0, price >= 0, discount >= 0, discount <= qty * price\n    ensures result >= 0\n    yield qty * price - discount\n\npart with_tax(net: Int, tax_bps: Int) -> Int:\n    requires net >= 0, tax_bps >= 0, tax_bps <= 10000\n    ensures result >= 0\n    yield net + (net * tax_bps) div 10000\n\npart solve(qty: Int, price: Int, discount: Int, tax_bps: Int) -> Int:\n    requires qty >= 0, price >= 0, discount >= 0, discount <= qty * price\n    requires tax_bps >= 0, tax_bps <= 10000\n    ensures result >= 0\n    yield with_tax(line_net(qty, price, discount), tax_bps)", "correct"),
+    ],
+    "seq_reserve": [
+        ("python", "def solve(xs):\n    on_hand = xs[0]\n    c = 0\n    for q in xs[1:]:\n        if c + q <= on_hand:\n            c += q\n    return c", "correct"),
+        ("python", "def solve(xs):\n    return sum(xs[1:])", "escape"),
+        ("rust", "fn solve(xs: &[i64]) -> i64 {\n    let on_hand = xs[0];\n    let mut c = 0;\n    for &q in &xs[1..] {\n        if c + q <= on_hand { c += q; }\n    }\n    c\n}", "correct"),
+        ("rust", "fn solve(xs: &[i64]) -> i64 { xs[1..].iter().sum() }", "escape"),
+        ("llmlang", "part apply(on_hand: Int, committed: Int, qs: List[Int]) -> Int:\n    requires 0 <= committed\n    requires committed <= on_hand\n    requires forall x in qs: x >= 0\n    ensures result <= on_hand\n    measure length(qs)\n    match qs:\n      [] -> yield committed\n      q :: rest ->\n        match committed + q <= on_hand:\n          true  -> yield apply(on_hand, committed + q, rest)\n          false -> yield apply(on_hand, committed, rest)\n\npart solve(xs: List[Int]) -> Int:\n    requires forall x in xs: x >= 0\n    match xs:\n      [] -> yield 0\n      on_hand :: qs -> yield apply(on_hand, 0, qs)", "correct"),
+        ("llmlang", "part addall(c: Int, qs: List[Int]) -> Int:\n    measure length(qs)\n    match qs:\n      [] -> yield c\n      q :: rest -> yield addall(c + q, rest)\n\npart solve(xs: List[Int]) -> Int:\n    match xs:\n      [] -> yield 0\n      oh :: qs -> yield addall(0, qs)", "escape"),
+    ],
 }
 
 
@@ -471,8 +529,10 @@ def cmd_run(_a):
     if not key:
         raise SystemExit("OPENROUTER_API_KEY required.")
     done = {(r["task"], r["lang"], r["model"], r["sample"], r.get("shown")) for r in load_results() if "error" not in r}
+    only = os.environ.get("XLANG_ONLY")
+    tasks = [t for t in TASKS if not only or t["id"] in only.split(",")]
     with open(RESULTS, "a") as fh:
-        for t in TASKS:
+        for t in tasks:
             for lang in ("python", "rust", "llmlang"):
                 for model in MODELS:
                     for s in range(SAMPLES):
