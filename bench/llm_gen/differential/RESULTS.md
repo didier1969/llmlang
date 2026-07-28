@@ -313,3 +313,24 @@ d'ergonomie de langage (fixables), pas de fond. La thèse « preuve = moins de b
 prouvée ni réfutée : elle est **hors de portée d'un banc de petites fonctions avec des modèles forts** ;
 il faut un banc à l'ÉCHELLE (features multi-modules où tester tous les chemins est infaisable) pour lui
 donner sa chance. C'est le prochain terrain honnête — et un chantier bien plus lourd.
+
+## Sonde de FAISABILITÉ (~$0.05) — llmlang À L'ÉCHELLE se génère bien (correction de mon pessimisme)
+
+J'avais prédit que le banc à l'échelle serait BLOQUÉ (llmlang ~50 % green sur des fonctions triviales
+→ « probablement 10-20 % sur des features »). **C'est DÉMENTI.** Une sonde : demander à un modèle FORT
+(claude-sonnet-5) d'écrire un MODULE ERP vérifié complet (plusieurs `part` + invariants + composition
+modulaire), jusqu'à 5 tours de `lll check`.
+
+| feature | parts | résultat |
+|---|---|---|
+| order_pricing (marge ≥ 0, net ≤ brut, tax ≥ net, composition) | 4 | ✔ **vérifié au 1ᵉʳ tour**, 805 tok out |
+| inventory_ledger (pas de survente, écriture équilibrée, composition modulaire) | 5 | ✔ **vérifié au 1ᵉʳ tour**, 629 tok out |
+
+**Le « 50 % green » du petit banc était un artefact de DEUX choses, pas du langage** : (a) le modèle
+FAIBLE (gpt-4o-mini) qui échouait en boucle et tirait la moyenne, et (b) le cadrage CONTRAINT du petit
+banc (une seule fonction `solve` imposée + oracle + splice) qui provoquait les échecs bizarres (module
+imbriqué, `requires` sur-restrictif, opérateurs de bits). Rendu à son unité NATURELLE — « écris un
+module avec ces contrats » — un modèle fort produit du vrai code métier VÉRIFIÉ, du premier coup, avec
+composition modulaire (chaque `part` décharge des `ensures` de ses callees). **Le verrou de faisabilité
+n'existe pas avec un modèle fort ; le banc à l'échelle EST runnable.** (Nuance : gpt-4o-mini reste faible
+en llmlang ; l'écart au tier de modèle est réel.)
