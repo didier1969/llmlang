@@ -265,3 +265,51 @@ Pour le mesurer vraiment il faudrait un bras SYMÉTRIQUE (renforcer le contrat l
 les tests Python/Rust), une classe de piège NON contrainte par le type de sortie (pas `-> i64`), et une
 inspection systématique des escapes. Levier roadmap réel, vu à l'inspection : l'ERGONOMIE du langage
 (module imbriqué, `requires` sur-restrictif, `sum`/list en contrat) — pas « des contrats plus forts ».
+
+## Run ÉQUITABLE ($1.06, 144u) — la mesure de correction sans confondant (les 3 fixes advisor)
+
+Corrige les 3 confondants de mon run précédent : (1) bras SYMÉTRIQUE (sous strong, l'llmlang reçoit un
+indice de PROPRIÉTÉ à mettre en `ensures`, parallèle du `shown_strong` qui donne les tests-bord à
+Python/Rust) ; (2) piège NON-truqué (`square`→`midpoint` = floor((a+b)/2) : la réponse tient en i64,
+une solution i64 correcte EXISTE, et `shown_strong` teste des bords raisonnables SANS valeur près de
+i64::MAX → un dev diligent PEUT rater l'overflow) ; (3) code émis sauvé → chaque escape INSPECTÉ.
+
+| gate | langage | green | fuite(piège) | fuite(normale) | tok_out |
+|---|---|---|---|---|---|
+| weak | Python | 24/24 | 0/12 | 0/12 | 26 |
+| weak | Rust | 24/24 | 0/12 | 0/12 | 79 |
+| weak | llmlang | 12/24 | 0/12 | 1/12 | 191 |
+| strong | Python | 24/24 | 0/12 | 0/12 | 25 |
+| strong | Rust | 24/24 | 0/12 | 0/12 | 74 |
+| strong | llmlang | 13/24 | 0/12 | 2/12 | 151 |
+
+**Correction = ÉGALITÉ.** Les TROIS langages : **0 fuite sur les pièges**, y compris `midpoint`
+(overflow équitable) — les modèles (sonnet-5, gpt-4o-mini) écrivent une solution Rust/Python CORRECTE,
+ils N'écrivent PAS le naïf `(a+b)/2`. Avec des modèles capables, le piège ne se déclenche pas, donc
+la preuve n'ajoute AUCUNE correction : il n'y a pas de bug à attraper. Le différentiel de correction
+que tout l'arc cherchait **n'existe pas à cette échelle avec ces modèles**.
+
+**Les « fuites » llmlang, INSPECTÉES, ne sont PAS des logiques fausses.** Le `max2` : contrat FORT
+(`ensures result >= a and result >= b`) mais le modèle ajoute `requires a >= 0 and b >= 0` — une
+précondition trop restrictive qui exclut les négatifs du hidden → l'oracle ne peut pas tourner →
+compté « escape » (artefact harnais + ergonomie des préconditions, pas une valeur fausse). Un `midpoint`
+non-green : sonnet-5 écrit l'astuce bits `(a&b)+((a^b)>>1)` que llmlang ne supporte pas → échec de
+SURFACE. La logique de llmlang est correcte partout ; ses échecs sont ergonomiques.
+
+**Ce qui reste vrai, précisé :**
+- **Correction : ÉGALITÉ** (0 fuite partout). La preuve n'aide pas quand le modèle ne fait pas le bug —
+  ce qui, sur des fonctions simples avec des modèles forts, est le cas. L'avantage de la preuve
+  demanderait des modèles PLUS FAIBLES (qui font des bugs) ou de l'ÉCHELLE (composition ingérable en
+  tests, prouvable) — ni l'un ni l'autre testé favorablement ici.
+- **Coût : llmlang ~6–7× (marginal) + primer ~12×.** Robuste, inchangé.
+- **Génération : llmlang ~50 % green (12–13/24) vs 100 %.** Le vrai frein, et il est ERGONOMIQUE
+  (opérateurs bits absents, ergonomie des `requires`, `module` imbriqué, `sum`/list en contrat) — donc
+  potentiellement FIXABLE côté produit, PAS un défaut de correction.
+
+**Verdict final, équitable et précis.** À cette échelle, avec ces modèles : llmlang n'a **pas** de
+désavantage de correction (sa logique est juste) mais **pas d'avantage** non plus (personne ne fuit) ;
+il est **plus cher en tokens** et surtout **deux fois plus dur à générer**, pour des raisons
+d'ergonomie de langage (fixables), pas de fond. La thèse « preuve = moins de bugs livrés » n'est ni
+prouvée ni réfutée : elle est **hors de portée d'un banc de petites fonctions avec des modèles forts** ;
+il faut un banc à l'ÉCHELLE (features multi-modules où tester tous les chemins est infaisable) pour lui
+donner sa chance. C'est le prochain terrain honnête — et un chantier bien plus lourd.
