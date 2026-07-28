@@ -374,3 +374,36 @@ Python) plus la **preuve-comme-documentation-vérifiée** ; le coût réel est *
 features BEAUCOUP plus grosses (où même un modèle fort se trompe sur un chemin non testé) — au-delà de
 ce que ces bancs, et ce budget, mesurent. À ce stade, la démonstration honnête de la valeur passe par
 les BRIQUES (du code métier prouvé qui EXISTE), pas par un banc comparatif.
+
+## Test HORS-LIGNE de la VRAIE thèse (« ≥30% moins de tokens sur GROS projet ») — read-set × taille, $0
+
+L'objectif prioritaire de l'opérateur : un langage ≥30% plus efficient en tokens que toute autre
+méthode, sur les GROS projets. Mécanisme supposé : le pare-feu de contrats laisse lire un read-set
+serré et ~constant pour éditer en sécurité, là où Python doit relire les appelants+tests (croît avec
+la taille). Testé hors-ligne (`readset_scale.py`), même projet généré dans les 2 langages à 3 tailles,
+parité d'outils (llmlang: `lll context` ; Python: lecteur ast par-symbole), même estimateur de tokens.
+Read-set présenté en BANDE (pour ne pas re-sur-facturer Python comme dans mon erreur `square`) :
+
+| appelants | llmlang | Python diligent (fn+tests) | Python défensif (fn+appelants+tests) | L/diligent | L/défensif |
+|---|---|---|---|---|---|
+| 3 | 100 | 52 | 101 | 1.92 | 0.99 |
+| 8 | 100 | 52 | 182 | 1.92 | 0.55 |
+| 20 | 100 | 52 | 380 | 1.92 | 0.26 |
+
+**Verdict, sans complaisance : la thèse « ≥30% moins de tokens » NE tient PAS sous mesure loyale.**
+- Contre un dev Python DILIGENT (il lit la fonction + SES tests, pas tous les appelants pour une
+  édition qui préserve le comportement) : llmlang lit **~2× PLUS** (le contrat + les contrats des
+  callees pèsent plus que fn+tests), et c'est **CONSTANT** avec la taille, pas décroissant. Aucun
+  avantage de tokens.
+- Le beau chiffre « 0.26, l'écart grandit » n'apparaît QUE contre un Python DÉFENSIF (relire les 20
+  appelants) — mais lui charger tous les appelants pour une édition contract-préservante, c'est le
+  sur-facturer (l'erreur `square`). Un dev/agent Python raisonnable ne le fait pas.
+
+**Ce qui est VRAI (et c'est autre chose que des tokens).** L'avantage de llmlang n'est pas « lire
+moins » — c'est **PROUVER qu'aucun appelant ne casse SANS avoir à les lire ni à écrire un test qui les
+échantillonne**. Sur un changement qui doit préserver un invariant à travers TOUT le graphe d'appel,
+Python doit lire/tester chaque site (et un test échantillonne, il ne prouve pas) ; llmlang décharge la
+preuve depuis les contrats. C'est un avantage de **certitude et de couverture**, pas de **volume de
+tokens**. La promesse d'origine (efficience token) est réfutée hors-ligne, pour $0 — le banc agentique
+payant ne ferait que le reconfirmer plus cher. La valeur réelle du langage doit se vendre sur la
+correction garantie, pas sur le coût.
