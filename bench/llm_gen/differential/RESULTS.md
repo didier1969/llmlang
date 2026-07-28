@@ -334,3 +334,43 @@ module avec ces contrats » — un modèle fort produit du vrai code métier VÉ
 composition modulaire (chaque `part` décharge des `ensures` de ses callees). **Le verrou de faisabilité
 n'existe pas avec un modèle fort ; le banc à l'échelle EST runnable.** (Nuance : gpt-4o-mini reste faible
 en llmlang ; l'écart au tier de modèle est réel.)
+
+## Probe À L'ÉCHELLE ($0.30, 24u) — la thèse « preuve = attrape des bugs logiques » NON démontrée
+
+Deux features (module multi-fonctions) : F1 `order_charged` (composition net→tax, overflow intermédiaire
+ÉQUITABLE) ; F2 `seq_reserve` (le trap LOGIQUE cœur de thèse : appliquer une suite de réservations en
+SAUTANT celles qui survendent — un modèle qui oublie le skip survend ; en llmlang, prouver
+`committed <= on_hand` FORCE le skip pour compiler). Réf llmlang de F2 prouvée (apply, 11 obligations).
+
+| feature | langage | green | ESCAPE |
+|---|---|---|---|
+| order_charged (overflow) | Python | 4/4 | 0 |
+| order_charged (overflow) | Rust | 4/4 | **2** |
+| order_charged (overflow) | llmlang | 2/4 | 0 |
+| seq_reserve (LOGIQUE) | Python | 4/4 | **0** |
+| seq_reserve (LOGIQUE) | Rust | 4/4 | **0** |
+| seq_reserve (LOGIQUE) | llmlang | **0/4** | 0 |
+
+**F1 confirme l'avantage SÉMANTIQUE à l'échelle** (Rust fuit l'overflow composé 2/4, Python/llmlang
+exacts) — mais c'est le MÊME avantage qu'avant (exact-Int bat i64, égale bignum), pas un nouveau.
+
+**F2 : la thèse ne reçoit PAS sa démonstration.** Les modèles forts écrivent le skip CORRECTEMENT en
+Python/Rust (0 fuite) — ils ne font pas le bug logique → la preuve n'a rien à attraper. ET llmlang
+échoue à générer la version prouvante (0/4) : gpt-4o-mini écrit du pseudocode impératif (`var`/`for`/
+`:=`/`return`, non supporté) ; sonnet-5 est un QUASI-succès (le helper `reserve` avec le bon contrat)
+mais oublie le `measure` (terminaison) et le `requires forall q>=0`. Nuance de FAIRNESS : mon entrée
+uniforme `solve(xs)` a imposé un encodage-liste (on_hand dans la liste) plus dur que la forme multi-args
+NATURELLE — que la sonde de faisabilité générait à 100 %. Donc le 0/4 est en partie un handicap de
+harnais, pas une limite pure du langage.
+
+**Conclusion de tout l'arc, stable et honnête.** Testé loyalement aux DEUX échelles (petites fonctions
+ET features), avec un modèle fort : **le différentiel de correction ne se matérialise pas** — les
+modèles capables n'écrivent pas les bugs que la preuve attraperait (ni arithmétiques ni logiques), donc
+la preuve ne « gagne » sur rien de mesurable. L'avantage réel et mesuré de llmlang reste **sémantique**
+(arithmétique exacte : bat les langages typés à entier borné comme Rust, égale un langage bignum comme
+Python) plus la **preuve-comme-documentation-vérifiée** ; le coût réel est **plus de tokens** et une
+**friction de génération** (mesure/préconditions/entrées-liste — ergonomique, fixable). La promesse
+« preuve = moins de bugs livrés » demanderait des modèles PLUS FAIBLES (qui font les bugs) ou des
+features BEAUCOUP plus grosses (où même un modèle fort se trompe sur un chemin non testé) — au-delà de
+ce que ces bancs, et ce budget, mesurent. À ce stade, la démonstration honnête de la valeur passe par
+les BRIQUES (du code métier prouvé qui EXISTE), pas par un banc comparatif.
