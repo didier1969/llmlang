@@ -407,3 +407,44 @@ preuve depuis les contrats. C'est un avantage de **certitude et de couverture**,
 tokens**. La promesse d'origine (efficience token) est réfutée hors-ligne, pour $0 — le banc agentique
 payant ne ferait que le reconfirmer plus cher. La valeur réelle du langage doit se vendre sur la
 correction garantie, pas sur le coût.
+
+## Test BRIQUE-MACRO ($0, structurel + vérifié) — le SEUL angle où llmlang bat Python en tokens
+
+La question : invoquer une brique VÉRIFIÉE émet-il moins de tokens que coder la chose sûre ? Mesure des
+tokens que le MODÈLE ÉMET (corps de brique/lib pré-existants des DEUX côtés, non comptés). Équité : 3
+bras dont Python+lib (le plafond équitable — Python a AUSSI une bibliothèque). Le llmlang doit
+`lll check` VERT (preuve réelle, pas assertée). `bench/llm_gen/differential/brick_macro.py`.
+
+**Tâche FACILE (une réservation, peu à tester) :**
+| bras | tok émis | gate |
+|---|---|---|
+| llmlang + brique (prouvé) | 98 | VERT |
+| python + lib + tests | 83 | VERT |
+| python + scratch + tests | 127 | VERT |
+
+→ llmlang/py+lib = **1.18 (PERD)** ; llmlang/py+scratch = 0.77. Sur une tâche simple, la preuve COÛTE
+des tokens (`requires`/`ensures`) que Python+lib n'a pas à compenser (peu de tests). Le −23 % vs scratch
+vient d'AVOIR une lib, pas de la vérif — et Python a la même lib.
+
+**Tâche à INVARIANT (borne d'agrégat sur une liste, VÉRIFIÉE pour de vrai) :** un consommateur importe
+la brique `total` (contrat `requires ∀ e≥0 → ensures result≥0`) et COMPOSE l'invariant `audit(...) ≥ 0`
+**sans le redémontrer** (`lll check` : 2 obligations déchargées du contrat importé ; run = 650). 61 tok
+émis. Python+lib pour la MÊME garantie doit appeler la lib + ÉCHANTILLONNER l'invariant `≥0` sur des
+séquences variées (une batterie de tests, car la lib ne le prouve pas) ≈ 127 tok.
+→ llmlang/py+lib = **0.48 (GAGNE, ~52% de moins)**.
+
+**LE MÉCANISME, ENFIN NET ET MESURÉ.** Le gain de tokens de la brique-macro = le nombre de TESTS que la
+preuve rend inutiles. Tâche sans invariant à tester → llmlang PERD (la preuve est un surcoût). Tâche
+avec un invariant qui, en Python, exige une batterie de tests → llmlang GAGNE franchement (la clause
+`ensures` remplace la batterie). **CAVEAT DÉCOUVERT (honnête)** : la brique ne compose l'invariant que si
+SON PROPRE contrat le porte — `lib/ledger.lll::ledger_total` garantit `== sum` mais PAS `≥0`, donc il ne
+déchargeait PAS mon `audit ≥ 0` (échec `lll check` observé) ; il a fallu la brique `total` (brique 8)
+qui porte `ensures result ≥ 0`. Donc le gain exige une bibliothèque de briques dont les contrats portent
+les invariants voulus — un actif à CONSTRUIRE, pas gratuit.
+
+**Conclusion actionnable.** Le seul chemin token-gagnant mesuré n'est PAS « le langage » ni « un skill
+de syntaxe » — c'est une **bibliothèque de briques métier vérifiées + un skill qui pousse le modèle à
+les INVOQUER** (au lieu de réécrire). Le gain (~50% sur les tâches à invariant) vient de l'abstraction
+vérifiée, et il n'apparaît QUE là où Python paierait une batterie de tests. Sur du code sans invariant,
+llmlang reste plus cher. Le produit token-efficient n'est donc pas « llmlang » mais « une lib de
+composants métier prouvés » — vendue là où la correction d'invariants compte (finance/ERP), pas partout.
