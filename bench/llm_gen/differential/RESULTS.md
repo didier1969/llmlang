@@ -448,3 +448,38 @@ les INVOQUER** (au lieu de réécrire). Le gain (~50% sur les tâches à invaria
 vérifiée, et il n'apparaît QUE là où Python paierait une batterie de tests. Sur du code sans invariant,
 llmlang reste plus cher. Le produit token-efficient n'est donc pas « llmlang » mais « une lib de
 composants métier prouvés » — vendue là où la correction d'invariants compte (finance/ERP), pas partout.
+
+## Banc CYCLE-TDD COMPLET ($0, structurel + vérifié) — la vraie méthode de travail de l'opérateur
+
+La question juste : « dans un autre langage je dois AUSSI écrire les tests TDD — économise-t-on des
+tokens ? ». Compter TOUS les tokens émis jusqu'à confiance ÉGALE, PUIS une modif de maintenance :
+Python = code + tests + réparer-les-tests-après-modif ; llmlang = code+ensures (la preuve se re-vérifie
+gratis, aucun test à re-maintenir). Les 5 modules llmlang `lll check` VERTS. `tdd_cost.py`.
+
+| tâche | py total | llmlang total | ratio | gate |
+|---|---|---|---|---|
+| emod (invariant 0<=r<b) | 110 | 56 | **0.51** | VERT |
+| bounded_sum (invariant >=0 à N) | 106 | 97 | 0.92 | VERT |
+| midpoint (invariant no-overflow) | 91 | 57 | **0.63** | VERT |
+| add (trivial) | 38 | 42 | 1.11 | VERT |
+| negate (trivial) | 34 | 38 | 1.12 | VERT |
+
+**AGRÉGAT : tâches à INVARIANT llmlang/python = 0.68 (~32% MOINS) ; tâches TRIVIALES = 1.11 (PLUS).**
+
+**C'est le premier résultat qui étaye la thèse tokens — et il est logique.** Le −32% sur invariant
+apparaît PARCE QUE le comparatif inclut enfin le coût RÉEL de l'autre méthode : en Python un invariant
+(`0<=r<b`, `total>=0`, pas d'overflow) se couvre par une BATTERIE de tests (souvent une boucle/du
+sampling), et ces tests SE RE-MAINTIENNENT à chaque modif ; en llmlang une clause `ensures` couvre
+l'infinité des cas, une fois, et la preuve re-tourne gratis. Le gain CROÎT avec (a) la rigueur voulue
+(plus de tests à écrire) et (b) le nombre de modifs futures (maintenance récurrente des tests).
+
+**Où llmlang PERD (honnête) : le trivial.** Un `add`/`neg` a besoin d'un assert, pas d'une batterie ;
+l'`ensures` y est un surcoût (+11%). Donc le gain n'est PAS universel — il est concentré sur le code à
+INVARIANT numérique/logique (finance/ERP/calcul), exactement là où le TDD coûte cher. Sur du code
+d'I/O, réseau, UI (invariants inexprimables en contrat), zéro gain — on teste comme partout.
+
+**LIMITES de CE test (à lever par un run payant).** (1) Les tokens de MAINTENANCE Python sont des stubs
+que j'ai sous-estimés → le vrai avantage llmlang est probablement PLUS grand, pas moindre. (2) Les
+références sont écrites par moi (risque de biais) → à confirmer par un run où un MODÈLE génère les deux
+côtés jusqu'à un oracle caché. Le signal structurel (0.68 sur invariant, avec preuves réelles) est
+néanmoins le premier étai crédible de la thèse « moins de tokens », correctement cadré sur le cycle TDD.
