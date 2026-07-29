@@ -483,3 +483,44 @@ que j'ai sous-estimés → le vrai avantage llmlang est probablement PLUS grand,
 références sont écrites par moi (risque de biais) → à confirmer par un run où un MODÈLE génère les deux
 côtés jusqu'à un oracle caché. Le signal structurel (0.68 sur invariant, avec preuves réelles) est
 néanmoins le premier étai crédible de la thèse « moins de tokens », correctement cadré sur le cycle TDD.
+
+## Run PAYANT TDD-généré ($0.29, 32u) — le 30% CONFIRMÉ par du code de modèle, avec sa vraie nuance
+
+Un modèle génère les DEUX côtés jusqu'à confiance égale : Python émet code+tests (son filet TDD ; green
+= ses tests passent ; puis oracle caché → escape s'il sous-teste) ; llmlang émet code+ensures (green =
+`lll check` prouve ; puis même oracle). `tdd_gen.py`, sonnet-5 + gpt-4o-mini × 2 samples.
+
+| tâche | type | Python emit (méd.) | llmlang emit (méd.) | ratio |
+|---|---|---|---|---|
+| midpoint | INV | 1506 | 452 | 0.30 |
+| emod | INV | 772 | 128 | 0.17 |
+| clamp | INV | 570 | 74 | 0.13 |
+| add | trivial | 438 | 42 | 0.10 |
+| **agrégat invariant** | | | | **0.16** |
+
+Escapes : **0 partout** (les deux atteignent la correction). Green : Python 14/16, llmlang 10/16.
+
+**LE FAIT ROBUSTE : sur TOUTES les tâches, code+tests ≫ code+ensures.** Le comparatif inclut enfin le
+coût réel de l'autre méthode — et un modèle en TDD écrit une VRAIE batterie (sonnet-5 sur `emod` : 953
+tok = validations de types + commentaires + 15 asserts couvrant les négatifs/zéro/bornes). L'`ensures`
+équivalent = 3 lignes. La thèse de l'opérateur (« dans un autre langage je dois AUSSI écrire les tests »)
+est CONFIRMÉE par du code que je n'ai pas écrit.
+
+**MAIS l'ampleur 0.16 est GONFLÉE — la borne honnête est « llmlang gagne nettement, le combien dépend
+du style de test ». Trois biais, tous nommés :**
+1. **Verbosité TDD du modèle.** sonnet-5 sur-teste massivement (438 tok de tests pour `add` trivial — un
+   humain en écrirait 2). Le ratio mesure en partie « sonnet est bavard en tests », pas que le langage.
+   → le 0.16 est un PLAFOND ; un Python TDD sobre remonterait le ratio (vers le ~0.68 de mon structurel).
+2. **Biais de survie.** Le ratio n'apparie que les VERTS ; llmlang échoue à générer 6/16 (sonnet rate
+   emod/midpoint, gpt-4o-mini presque tout), et ses verts sont les plus courts → flatte llmlang.
+3. **Le trivial gagne aussi (0.10)** — anormal ; confirme que c'est la sur-verbosité Python qui domine,
+   pas un avantage structurel du langage sur le trivial (où mon structurel honnête montrait llmlang qui
+   PERD, 1.11).
+
+**Conclusion mesurée, prudente.** Il existe un régime RÉEL et large où llmlang émet beaucoup moins de
+tokens que Python : le code à INVARIANT jugé à confiance égale, tests TDD compris. L'ampleur va de
+~30% (structurel sobre) à ~85% (run avec un modèle très bavard en tests) — la vérité dépend de combien
+de tests l'équipe écrit vraiment. Plus l'équipe est rigoureuse (plus de tests, plus de maintenance),
+plus llmlang gagne. Contre-partie inchangée : llmlang échoue plus souvent à la génération (friction
+ergonomique) et n'a aucun avantage sur le code sans invariant. Le 30% de l'opérateur n'est PAS réfuté —
+il est le PLANCHER d'un effet réel, sur le bon périmètre.
