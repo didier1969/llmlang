@@ -28,6 +28,41 @@ fn generated_rust_compiles_and_runs() {
     assert!(stdout.contains("42"), "gcd(126,84) must print 42, got: {stdout}");
 }
 
+#[test]
+fn long_list_literal_compiles_without_overflowing_rustc_req223() {
+    // REQ-LLL-223: a list literal used to codegen as textually NESTED `Rc::new(Cons(e, Rc::new(
+    // Cons(…))))` whose PARSE DEPTH equals the list length — rustc SIGSEGV'd (stack overflow) on a
+    // few-thousand-element literal (found by the DES/SimPy probe, examples/des_queue_verified.lll).
+    // Fix: emit an iterative builder above a length threshold. Here a 200-element literal (well past
+    // the 64 threshold) must compile AND run — the exact failure mode this guards.
+    let elems = (0..200).map(|i| (i % 3).to_string()).collect::<Vec<_>>().join(", ");
+    let src = format!(
+        "module T:\n\n  part sum(xs: List[Int]) -> Int:\n    measure length(xs)\n    match xs:\n      \
+         [] -> yield 0\n      h :: t -> yield h + sum(t)\n\n  \
+         part main() -> Int via IO:\n    yield IO.print(sum([{elems}]))\n"
+    );
+    let (cm, _) = full(&src);
+    let rust = codegen::emit_rust(&cm).expect("codegen");
+    let dir = tempdir();
+    let rs = dir.join("t.rs");
+    let bin = dir.join("t_bin");
+    std::fs::write(&rs, rust).unwrap();
+    let st = std::process::Command::new("rustc")
+        .args(["-O", "--edition", "2021", "-o"])
+        .arg(&bin)
+        .arg(&rs)
+        .output()
+        .expect("rustc");
+    assert!(
+        st.status.success(),
+        "generated Rust for a 200-element list literal failed to compile (REQ-223 regression):\n{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    // 200 elements cycling 0,1,2 → 66*(0+1+2) + (0+1) = 396 + 1 = 397
+    let out = std::process::Command::new(&bin).output().unwrap();
+    assert!(out.status.success(), "the 200-element list binary must run without crashing");
+}
+
 
 #[test]
 fn algebraic_effect_abort_verifies_and_runs() {

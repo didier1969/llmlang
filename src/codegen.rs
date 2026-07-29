@@ -5735,11 +5735,29 @@ fn expr(e: &Expr, cx: &Cx, res: bool) -> Result<String, String> {
             }
         }
         Expr::ListLit(items) => {
-            let mut t = "Rc::new(LstI::Nil)".to_string();
-            for i in items.iter().rev() {
-                t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, cx, res)?);
+            // A textually NESTED `Rc::new(Cons(e, Rc::new(Cons(…))))` has parse depth = list
+            // length; rustc SIGSEGVs on a deeply nested expression (~thousands). For a long
+            // literal, emit an ITERATIVE builder instead (flat sequence of pushes folded into a
+            // cons-list, back-to-front) so the generated expression stays shallow. Short lists
+            // keep the direct nested form (clearer, and the common case). (REQ-LLL-223)
+            const NEST_LIMIT: usize = 64;
+            if items.len() > NEST_LIMIT {
+                let pushes: Result<Vec<String>, String> = items
+                    .iter()
+                    .rev()
+                    .map(|i| Ok(format!("__acc = Rc::new(LstI::Cons({}, __acc));", expr(i, cx, res)?)))
+                    .collect();
+                format!(
+                    "{{ let mut __acc = Rc::new(LstI::Nil); {} __acc }}",
+                    pushes?.join(" ")
+                )
+            } else {
+                let mut t = "Rc::new(LstI::Nil)".to_string();
+                for i in items.iter().rev() {
+                    t = format!("Rc::new(LstI::Cons({}, {t}))", expr(i, cx, res)?);
+                }
+                t
             }
-            t
         }
         Expr::Cons(h, t) => format!(
             "Rc::new(LstI::Cons({}, {}))",

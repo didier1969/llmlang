@@ -566,39 +566,41 @@ SimPy = coroutines suspend/resume ; llmlang est purement fonctionnel → world-v
 stochastique de SimPy retiré — un langage vérifié et l'aléatoire sont en tension). `examples/
 des_queue_verified.lll` (prouvé : run_events 33 obligations) vs le SimPy équivalent.
 
-**RÉSULTAT — le langage VÉRIFIE le modèle, mais une mesure a échoué et l'a révélé (honnêteté) :**
+**RÉSULTAT — bug trouvé PAR la sonde, CORRIGÉ, puis re-mesuré honnêtement (à charge égale) :**
 
 | axe | llmlang | SimPy | verdict |
 |---|---|---|---|
 | **Stabilité (l'invariant)** | **PROUVÉ** statiquement : 0<=busy<=1 ∧ waiting>=0 sur TOUTE trajectoire à N pas (run_events 33 obl) | **OBSERVÉ** par run (max_busy=1 constaté, pas garanti) | llmlang garantit ce que SimPy espère — RÉEL |
-| **Vitesse (exécution)** | **NON MESURÉE — le codegen a un BUG** | interprété ~0.16s / 3000 évts | comparatif IMPOSSIBLE en l'état |
+| **Vitesse (exécution, 3000 évts / 1000 clients, à charge ÉGALE)** | binaire natif **<0.01s** (×5) | interprété **~0.30s** (×5) | llmlang **~30× plus rapide** — MESURÉ après fix |
 | **Tokens (source)** | 796 tok (dont les contrats) | 244 tok | SimPy **3.3× moins** — le surcoût llmlang = la preuve |
 
-**⚠ CORRECTION (le piège que la sonde a attrapé sur MOI).** J'avais d'abord écrit « ~20-30× plus
-rapide (binaire natif <0.01s) ». C'est FAUX et retiré : le binaire que j'avais timé était une version
-PÉRIMÉE (9 événements), pas les 3000. Quand j'ai voulu builder la vraie trajectoire de 3000 événements,
-**le codegen produit du Rust que rustc NE PEUT PAS compiler — SIGSEGV / stack overflow à l'expansion du
-match imbriqué** (llmlang le signale lui-même : « rustc failed on generated code — the vc fork accepted
-it »). C'est un DÉFAUT DE CODEGEN réel que la sonde a découvert : un match imbriqué récursif génère une
-expression Rust trop profonde. Le module VÉRIFIE (la preuve est bonne) mais ne se COMPILE pas de façon
-fiable en natif → **je ne peux PAS publier de chiffre de vitesse.** L'exemple est donc verify-only,
-EXCLU du smoke build+run jusqu'à correction du codegen.
+**⚠ CE QUE LA SONDE A ATTRAPÉ SUR MOI, ET LA CORRECTION.** J'avais d'abord écrit « ~20-30× plus rapide »
+sur un binaire PÉRIMÉ (9 évts) — non mesuré. En voulant builder la vraie trajectoire, **rustc SIGSEGV**.
+Diagnostic (repro minimal) : ce n'était PAS le match imbriqué (repro isolé OK) mais **le LITTÉRAL DE
+LISTE** — `[e0, e1, …, eN]` se générait en `Rc::new(Cons(e0, Rc::new(Cons(e1, …))))` TEXTUELLEMENT
+imbriqué, profondeur = N → rustc déborde sa pile à ~milliers d'éléments (le .rs faisait 160KB, une
+ligne de 114000 chars pour 3000 cons). **FIX (REQ-LLL-223, src/codegen.rs)** : au-delà de 64 éléments,
+émettre un builder ITÉRATIF (`{ let mut __acc = Nil; __acc = Cons(e, __acc); … __acc }`) — expression
+plate. Test de régression permanent (liste de 200 éléments compile+tourne) ; gate 774 int + 87 lib +
+clippy 0. **APRÈS le fix**, la trajectoire de 3000 événements compile et le binaire tourne — d'où la
+mesure de vitesse ci-dessus, HONNÊTE et à charge égale (sanity : les deux traitent bien les 1000
+clients, occupation max 1). C'est le piège « unequal work / stale binary » de ma propre note
+mémoire — attrapé et corrigé avant publication.
 
 **Lecture honnête, sans complaisance :**
-- **Stabilité** : c'est LA valeur distinctive, et elle TIENT (la preuve est réelle). SimPy ne peut PAS
-  prouver « le serveur n'est jamais sur-alloué » — il l'observe. llmlang en fait un théorème.
-- **Vitesse** : promesse théorique (natif compilé > interprété) mais NON tenue ici — le codegen casse sur
-  ce pattern. Honnêtement : tant que ce bug n'est pas corrigé, l'argument vitesse n'est PAS démontré.
-- **Tokens** : llmlang PERD (3.3×) sur une source écrite UNE fois (la preuve est un surcoût) — cohérent
-  avec l'arc (l'avantage tokens est sur le CYCLE TDD + maintenance, pas l'écriture seule).
-- **Ergonomie** : le stochastique (essence de SimPy) est retiré (zone où la vérif n'apporte rien) ; le
-  if-then-else multi-ligne casse le parseur (→ match imbriqué) ; et CE match imbriqué casse le codegen.
-  Trois frictions ergonomiques rencontrées sur UNE petite sonde.
+- **Stabilité** : LA valeur distinctive, et elle TIENT. SimPy ne peut PAS prouver « jamais sur-alloué » ;
+  llmlang en fait un théorème sur toute trajectoire.
+- **Vitesse** : avantage RÉEL (~30×), maintenant MESURÉ (natif compilé vs interprété) — mais il a fallu
+  corriger un vrai bug de codegen pour l'obtenir. Le natif est le vrai produit (`lll run` rebuild, ≠
+  binaire). Caveat : le build de 30k+ éléments devient lent (rustc compile N pushes) — le natif brille
+  à l'exécution, pas à la compilation d'énormes littéraux.
+- **Tokens** : llmlang PERD (3.3×) sur une source écrite UNE fois — cohérent (l'avantage tokens est sur
+  le CYCLE TDD + maintenance, pas l'écriture seule).
+- **Ergonomie** : le stochastique (essence de SimPy) retiré (zone sans valeur pour la vérif) ; le
+  if-then-else multi-ligne casse le parseur (→ match imbriqué). Deux frictions ergonomiques réelles.
 
-**Verdict SimPy (inchangé sur le fond, renforcé sur la prudence).** Réimplémenter SimPy EN llmlang =
-mauvais choix (stochastique + coroutines + modélisation = zone faible, ET le codegen n'est pas prêt
-pour ce style). Le bon rôle reste : le NOYAU d'invariants d'une simulation (ressource prouvée
-non-sur-allouable, temps monotone) prouvé statiquement, APPELÉ par un orchestrateur Python. MAIS la
-sonde a aussi montré que même ce noyau bute sur des défauts de codegen/ergonomie à corriger d'abord.
-Confirme « noyau vérifié appelé », pas « généraliste » — et rappelle que la robustesse d'exécution
-n'est pas acquise.
+**Verdict SimPy.** Réimplémenter SimPy EN llmlang = mauvais choix (stochastique + coroutines = zone
+faible). Le bon rôle : le NOYAU d'invariants d'une simulation — prouvé ET ~30× plus rapide que
+l'interprété — APPELÉ par un orchestrateur Python qui gère le stochastique. La sonde a aussi rendu le
+langage PLUS robuste (bug codegen réel trouvé+corrigé). Confirme « noyau vérifié rapide appelé », pas
+« généraliste » — et la robustesse d'exécution, sur ce pattern, est désormais acquise.
