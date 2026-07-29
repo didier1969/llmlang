@@ -557,3 +557,48 @@ croisement plus tard). (3) Échantillon modeste (36 steps, 2 tâches) — signal
 non sur-interprétée. **Levier d'extension clé** : baisser le COÛT D'ÉCRITURE INITIALE (le seul point où
 llmlang perd) via briques-macro (invoquer au lieu d'écrire un contrat) + réduction de friction
 (fine-tune/skill) → le croisement passe de ~3 modifs à ~1, l'avantage devient quasi immédiat.
+
+## Sonde SIMPY-ÉQUIVALENT — DES en llmlang pur, mesuré (vitesse / stabilité / tokens)
+
+Question : llmlang peut-il faire une librairie de simulation à événements discrets (comme SimPy) ?
+SimPy = coroutines suspend/resume ; llmlang est purement fonctionnel → world-view event-scheduling
+(état {temps, file, occupé}, on traite l'événement le plus proche). Modèle M/M/1 déterministe (le
+stochastique de SimPy retiré — un langage vérifié et l'aléatoire sont en tension). `examples/
+des_queue_verified.lll` (prouvé : run_events 33 obligations) vs le SimPy équivalent.
+
+**RÉSULTAT — le langage VÉRIFIE le modèle, mais une mesure a échoué et l'a révélé (honnêteté) :**
+
+| axe | llmlang | SimPy | verdict |
+|---|---|---|---|
+| **Stabilité (l'invariant)** | **PROUVÉ** statiquement : 0<=busy<=1 ∧ waiting>=0 sur TOUTE trajectoire à N pas (run_events 33 obl) | **OBSERVÉ** par run (max_busy=1 constaté, pas garanti) | llmlang garantit ce que SimPy espère — RÉEL |
+| **Vitesse (exécution)** | **NON MESURÉE — le codegen a un BUG** | interprété ~0.16s / 3000 évts | comparatif IMPOSSIBLE en l'état |
+| **Tokens (source)** | 796 tok (dont les contrats) | 244 tok | SimPy **3.3× moins** — le surcoût llmlang = la preuve |
+
+**⚠ CORRECTION (le piège que la sonde a attrapé sur MOI).** J'avais d'abord écrit « ~20-30× plus
+rapide (binaire natif <0.01s) ». C'est FAUX et retiré : le binaire que j'avais timé était une version
+PÉRIMÉE (9 événements), pas les 3000. Quand j'ai voulu builder la vraie trajectoire de 3000 événements,
+**le codegen produit du Rust que rustc NE PEUT PAS compiler — SIGSEGV / stack overflow à l'expansion du
+match imbriqué** (llmlang le signale lui-même : « rustc failed on generated code — the vc fork accepted
+it »). C'est un DÉFAUT DE CODEGEN réel que la sonde a découvert : un match imbriqué récursif génère une
+expression Rust trop profonde. Le module VÉRIFIE (la preuve est bonne) mais ne se COMPILE pas de façon
+fiable en natif → **je ne peux PAS publier de chiffre de vitesse.** L'exemple est donc verify-only,
+EXCLU du smoke build+run jusqu'à correction du codegen.
+
+**Lecture honnête, sans complaisance :**
+- **Stabilité** : c'est LA valeur distinctive, et elle TIENT (la preuve est réelle). SimPy ne peut PAS
+  prouver « le serveur n'est jamais sur-alloué » — il l'observe. llmlang en fait un théorème.
+- **Vitesse** : promesse théorique (natif compilé > interprété) mais NON tenue ici — le codegen casse sur
+  ce pattern. Honnêtement : tant que ce bug n'est pas corrigé, l'argument vitesse n'est PAS démontré.
+- **Tokens** : llmlang PERD (3.3×) sur une source écrite UNE fois (la preuve est un surcoût) — cohérent
+  avec l'arc (l'avantage tokens est sur le CYCLE TDD + maintenance, pas l'écriture seule).
+- **Ergonomie** : le stochastique (essence de SimPy) est retiré (zone où la vérif n'apporte rien) ; le
+  if-then-else multi-ligne casse le parseur (→ match imbriqué) ; et CE match imbriqué casse le codegen.
+  Trois frictions ergonomiques rencontrées sur UNE petite sonde.
+
+**Verdict SimPy (inchangé sur le fond, renforcé sur la prudence).** Réimplémenter SimPy EN llmlang =
+mauvais choix (stochastique + coroutines + modélisation = zone faible, ET le codegen n'est pas prêt
+pour ce style). Le bon rôle reste : le NOYAU d'invariants d'une simulation (ressource prouvée
+non-sur-allouable, temps monotone) prouvé statiquement, APPELÉ par un orchestrateur Python. MAIS la
+sonde a aussi montré que même ce noyau bute sur des défauts de codegen/ergonomie à corriger d'abord.
+Confirme « noyau vérifié appelé », pas « généraliste » — et rappelle que la robustesse d'exécution
+n'est pas acquise.

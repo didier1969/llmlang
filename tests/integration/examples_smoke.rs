@@ -99,6 +99,9 @@ fn flagship_examples_build_and_run() {
         "erp_journal_balanced_verified.lll", // ERP proof-ground: INDUCTIVE system invariant over a JOURNAL — if every entry is balanced (debit==credit), the whole journal's trial balance is 0 AND replaying it preserves any opening balance, proven by structural recursion at symbolic length; a step-invariant LIFTED over an arbitrary history, distinct from the single-op bricks (REQ-LLL-211)
         "erp_sales_day_verified.lll", // ERP proof-ground DEMONSTRATOR: a DAY of sales (a list of any length) with THREE invariants proven TOGETHER over the whole sequence — margin floor (no line below cost), non-negative day revenue, and balanced books (trial balance 0); composes bricks 12/8/18 over a log, the step from "one op correct" to "the whole day consistent" (REQ-LLL-211)
         "erp_cash_position_verified.lll", // ERP proof-ground: MONOTONE invariant over a THREADED accumulator — a cash position fed only by receipts never drops below its opening balance (result >= opening), an INEQUALITY preserved across a stateful fold at symbolic length; distinct from brick 18 (equality/constant accumulator) — the frontier where the accumulator CHANGES but stays bounded (REQ-LLL-211)
+        // NOTE: des_queue_verified.lll (DES/SimPy probe) is NOT flagship — it VERIFIES but its nested
+        // match generates Rust that overflows rustc's stack at build (a codegen defect the probe found,
+        // REQ-LLL-192). Kept as a verify-only example; excluded from build+run until the codegen is fixed.
     ];
     let mut failures = Vec::new();
     for name in flagship {
