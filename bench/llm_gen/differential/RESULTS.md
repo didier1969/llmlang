@@ -524,3 +524,36 @@ de tests l'équipe écrit vraiment. Plus l'équipe est rigoureuse (plus de tests
 plus llmlang gagne. Contre-partie inchangée : llmlang échoue plus souvent à la génération (friction
 ergonomique) et n'a aucun avantage sur le code sans invariant. Le 30% de l'opérateur n'est PAS réfuté —
 il est le PLANCHER d'un effet réel, sur le bon périmètre.
+
+## Run COÛT-PAR-MODIFICATION ($0.48, 36 steps) — l'avantage COMPOSE avec les modifs (mesuré)
+
+La moitié non-mesurée de la thèse gros-projet : l'avantage grandit-il avec le nombre de MODIFICATIONS
+(la durée de vie), pas la taille ? Un modèle part d'une solution verte et applique une CHAÎNE de 3
+changements de spec ; à chaque step, revenir au vert (Python: réparer code + re-maintenir les tests vs
+l'oracle ; llmlang: modifier le part + re-lll-check). `maint_cost.py`, sonnet-5 + gpt-4o-mini × 2.
+
+| step | Python méd. | llmlang méd. | ratio | Python cumul | llmlang cumul |
+|---|---|---|---|---|---|
+| écriture (edit 0) | 333 | 1383 | 4.15 | 333 | 1383 |
+| modif 1 | 618 | 129 | 0.21 | 951 | 1512 |
+| modif 2 | 673 | 188 | 0.28 | 1624 | 1700 |
+
+**RÉSULTAT : l'avantage COMPOSE.** Écriture initiale : llmlang coûte 4× PLUS (contrat + friction de
+génération). Mais chaque MODIFICATION suivante : Python **~623 tok** (réparer + re-maintenir les tests
+cassés) vs llmlang **~167 tok** (modifier + preuve re-vérifiée gratis) → **~456 tok économisés PAR
+modification**. Le cumul se croise : **llmlang devient moins cher au total après ~3 modifications**, et
+l'écart se creuse LINÉAIREMENT ensuite. Coût = écriture + N×maintenance : Python a l'écriture bon
+marché + la maintenance chère, llmlang l'inverse. Sur du code vivant longtemps édité (un ERP sur des
+années), llmlang gagne largement ; sur un script jeté après écriture, Python gagne.
+
+**Le mécanisme, net :** les tests Python sont un PASSIF re-payé à chaque changement ; le contrat llmlang
+est un ACTIF écrit une fois. Bonus observé : une fois le contrat posé, les modifs llmlang passent 3/3 —
+le contrat GUIDE les éditions suivantes (l'edit 0 était 3/8 green : la friction est CONCENTRÉE à
+l'écriture initiale, pas à la maintenance).
+
+**Caveats honnêtes.** (1) llmlang échoue plus à l'edit 0 (green 3/8 vs Python 8/8) — friction de
+génération réelle, au départ. (2) Le croisement ~3 dépend du style de test (Python moins testé =
+croisement plus tard). (3) Échantillon modeste (36 steps, 2 tâches) — signal net, précision du « 3 »
+non sur-interprétée. **Levier d'extension clé** : baisser le COÛT D'ÉCRITURE INITIALE (le seul point où
+llmlang perd) via briques-macro (invoquer au lieu d'écrire un contrat) + réduction de friction
+(fine-tune/skill) → le croisement passe de ~3 modifs à ~1, l'avantage devient quasi immédiat.
