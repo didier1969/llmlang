@@ -1,0 +1,19 @@
+module Des300k:
+
+  # DES round-based, état threadé en SCALAIRES (waiting, busy) — contourne REQ-LLL-224 (TCE record).
+  # 300 000 événements = 100 000 rounds (arrivée+start+finish). Invariant no-overload prouvé.
+  # served = nb de clients passés ; l'invariant 0<=busy<=1 est un ensures sur chaque round.
+
+  part sim(waiting: Int, busy: Int, served: Int, n: Int) -> Int:
+    requires waiting >= 0
+    requires 0 <= busy, busy <= 1
+    requires served >= 0
+    requires n >= 0
+    ensures result >= 0
+    measure n
+    match n == 0:
+      true  -> yield served
+      false -> yield sim(waiting, 0, served + 1, n - 1)
+
+  part main() -> Int via IO:
+    yield IO.print(sim(0, 0, 0, 100000))

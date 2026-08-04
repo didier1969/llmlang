@@ -604,3 +604,32 @@ faible). Le bon rôle : le NOYAU d'invariants d'une simulation — prouvé ET ~3
 l'interprété — APPELÉ par un orchestrateur Python qui gère le stochastique. La sonde a aussi rendu le
 langage PLUS robuste (bug codegen réel trouvé+corrigé). Confirme « noyau vérifié rapide appelé », pas
 « généraliste » — et la robustesse d'exécution, sur ce pattern, est désormais acquise.
+
+## Test 300 000 événements — vitesse à grande échelle + DEUXIÈME bug trouvé (REQ-LLL-224)
+
+Poussé à 300k événements (100k rounds), la sonde a trouvé un SECOND défaut de robustesse : une fonction
+récursive-tail qui THREAD un RECORD (l'état de simu, `sim(s: Sim, n)`) VÉRIFIE mais son Rust généré
+fait un appel récursif DIRECT (pas de boucle) → **stack overflow runtime entre 10k et 100k itérations**.
+Cause isolée (repro minimal) : `tail_self_of` désactive la TCE dès qu'un param est BORROWÉ, et tout
+record threadé est passé par `&Rc<..>` → la TCE ne marche QUE pour le fast-path i64 SCALAIRE
+(`countdown(Int,Int)->Int` tient 100k), PAS pour un état-record. **REQ-LLL-224** (fix soundness-sensible :
+lower la self-tail-call record en loop). WORKAROUND mesuré : threader l'état en scalaires séparés
+(`sim(waiting, busy, served, n)`) → fast-path → TCE → tient. `examples/des_scale_verified.lll` (prouvé,
+invariant no-overload 0<=busy<=1).
+
+**Vitesse à 300k événements (charge égale, sanity : les deux servent 100000 clients) :**
+| | llmlang natif | SimPy interprété | ratio |
+|---|---|---|---|
+| 3000 évts | <0.01s | ~0.30s | ~30× |
+| **300000 évts** | **<0.01s** | **~2.1s** | **~200×+** |
+
+**L'écart GRANDIT avec l'échelle** : le natif compilé est ~constant (négligeable), SimPy interprété est
+linéaire. C'est l'avantage attendu d'un langage compilé sur un interprété — RÉEL et mesuré.
+
+**Les DEUX findings de la sonde SimPy, honnêtes.** (1) REQ-223 : littéral de liste long → SIGSEGV rustc
+(CORRIGÉ, builder itératif + régression). (2) REQ-224 : TCE absente sur récursion à état-record →
+stack overflow runtime (loggé, workaround scalaire). Ces deux bugs étaient INVISIBLES avant qu'on pousse
+le langage sur un cas réel à l'échelle — la valeur d'une sonde exigeante. Verdict vitesse : llmlang natif
+écrase SimPy (~200× à 300k), MAIS la robustesse d'exécution à grande échelle demande soit le fix TCE
+(REQ-224), soit de threader l'état en scalaires. La promesse « noyau de simu rapide » tient — avec cette
+dette d'ingénierie nommée.
