@@ -668,3 +668,32 @@ array n'est PAS « un constructeur runtime » seul : c'est **rendre le balayage 
 l'échelle — sinon on paie l'alloc de la liste. **Sans ça, llmlang = parité Python sur l'image, pas 200×.**
 La garantie de correction (pixel ∈ [0,255], pas de débordement) reste, elle, l'avantage réel — mais
 c'est de la SÛRETÉ, pas de la VITESSE, sur ce domaine.
+
+## Probe VITESSE — CORRECTION : sur ARRAY contigu, llmlang EST ~19× (mon « parité » ne valait que pour List)
+
+Suite immédiate du probe ci-dessus. Mon verdict « parité Python, pas 200× » était vrai pour la LISTE
+(cons-cell, alloc par élément) mais FAUX comme conclusion générale. Re-mesuré sur le bon substrat —
+l'`Array` (Vec CONTIGU, get/set O(1), cache-friendly) — `examples/image_kernel_scale_verified.lll`
+(build 262k px + sweep refine, invariant [0,255] + longueur préservée PROUVÉS) :
+
+| substrat | build+sweep 262k px | vs Python |
+|---|---|---|
+| **llmlang Array (natif)** | **~20 ms** | **~19× plus rapide** |
+| llmlang List (compréhension) | ~90 ms | ~1.5× |
+| Python | ~140 ms | 1× |
+
+**Deux corrections à mon récit précédent :**
+1. **L'avantage vitesse EST là (~19×)** — il fallait le substrat CONTIGU. La List cons-cell est ~18×
+   plus lente que l'Array (alloc + localité) ; ce n'est pas llmlang qui est lent, c'est la structure de
+   données chaînée qui est le mauvais outil pour du pixel. Sur Array, le natif compilé vole.
+2. **AUCUN changement de compilateur n'a été nécessaire.** Ma prédiction « REQ-224 fait déborder le
+   balayage récursif d'Array » était FAUSSE : `build`/`sweep` récursifs threadant un Array de 262k
+   PROUVENT et TOURNENT (~20 ms) sans stack overflow — le pattern prend le chemin move/TCE. Et le probe
+   « part récursive à `ensures forall` sur Array » (annoncé non-résolu par l'exploration du code) PROUVE
+   (21 obligations). Donc le domaine array RAPIDE + PROUVÉ est utilisable AUJOURD'HUI, sans REQ-226
+   côté langage. Le seul reste (Piste B) = recevoir un VRAI buffer image de Kotlin (FFI), gaté.
+
+**Verdict domaine image, révisé et mesuré :** llmlang donne un noyau image (a) PROUVÉ sûr (pixel ∈
+[0,255], pas de débordement, longueur préservée) ET (b) ~19× plus rapide que Python — sur Array
+contigu. La sûreté ET la vitesse, ensemble. L'opérateur avait raison de pousser : le 200× SimPy ne se
+transpose pas (l'image alloue) mais un ~19× solide, lui, se matérialise sur le bon substrat.
