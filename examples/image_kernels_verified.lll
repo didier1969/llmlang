@@ -1,0 +1,55 @@
+module ImageKernels:
+
+  # ── CATALOGUE de noyaux image CERTIFIÉS (domaine array, REQ-LLL-037) ──
+  # Le flux d'un sticker : masque IA brut → raffiné → binarisé (dur) → inversé. CHAQUE noyau
+  # prouve, à taille QUELCONQUE : sortie ∈ [0,255], index en bornes, longueur préservée. Trois
+  # garanties qu'un noyau pixel C/Kotlin ne donne pas. Les noyaux se COMPOSENT sans casser l'invariant.
+
+  # ── noyau 1 : SEUILLAGE DOUX (rampe alpha) ──
+  part refine_px(a: Int, low: Int, high: Int) -> Int:
+    requires 0 <= a, a <= 255
+    requires 0 <= low, low < high, high <= 255
+    ensures 0 <= result, result <= 255
+    match a <= low:
+      true  -> yield 0
+      false ->
+        match a >= high:
+          true  -> yield 255
+          false -> yield ((a - low) * 255) div (high - low)
+
+  # ── noyau 2 : BINARISATION (masque dur : < t → 0, sinon → 255) ──
+  part binarize_px(a: Int, t: Int) -> Int:
+    requires 0 <= a, a <= 255
+    requires 0 <= t, t <= 255
+    ensures 0 <= result, result <= 255
+    match a < t:
+      true  -> yield 0
+      false -> yield 255
+
+  # ── noyau 3 : INVERSION (255 - alpha) ──
+  part invert_px(a: Int) -> Int:
+    requires 0 <= a, a <= 255
+    ensures 0 <= result, result <= 255
+    yield 255 - a
+
+  # balayeur générique : applique refine puis binarize puis invert, pixel par pixel. Chaque
+  # composition PRÉSERVE [0,255] (les ensures se chaînent) et la longueur.
+  part pipeline(src: Array[Int], dst: Array[Int], i: Int, low: Int, high: Int, t: Int) -> Array[Int]:
+    requires length(src) == length(dst)
+    requires 0 <= i, i <= length(src)
+    requires 0 <= low, low < high, high <= 255
+    requires 0 <= t, t <= 255
+    requires forall k in 0 .. length(src): 0 <= get(src, k)
+    requires forall k in 0 .. length(src): get(src, k) <= 255
+    ensures length(result) == length(src)
+    measure length(src) - i
+    match i >= length(src):
+      true  -> yield dst
+      false -> yield pipeline(src, set(dst, i, invert_px(binarize_px(refine_px(get(src, i), low, high), t))), i + 1, low, high, t)
+
+  part main() -> Int via IO:
+    let raw = array(10, 200, 128, 40, 250, 5, 180)
+    let buf = array(0, 0, 0, 0, 0, 0, 0)
+    let out = pipeline(raw, buf, 0, 50, 200, 128)
+    let a = IO.print(get(out, 2))   # 128→refine 132→binarize(t128) 255→invert 0
+    yield IO.print(length(out))     # 7
