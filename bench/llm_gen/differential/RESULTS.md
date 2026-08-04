@@ -633,3 +633,38 @@ le langage sur un cas réel à l'échelle — la valeur d'une sonde exigeante. V
 écrase SimPy (~200× à 300k), MAIS la robustesse d'exécution à grande échelle demande soit le fix TCE
 (REQ-224), soit de threader l'état en scalaires. La promesse « noyau de simu rapide » tient — avec cette
 dette d'ingénierie nommée.
+
+## Probe VITESSE domaine image (REQ-LLL-226, Étape 0) — le chemin loop-lowered scale, mais PAS 200×
+
+Objectif opérateur : mesurer la vitesse du noyau image à taille réelle (le ~200× vs Python du SimPy),
+bloqué par le littéral `array(...)` (build 171 s / 5000 px). Probe GRATUIT (0 modif compilateur) : exprimer
+génération ET noyau en COMPRÉHENSIONS sur List (`[f(k) for k in 0..n]`, `[refine_px(p) for p in raw]`),
+loop-lowered → pas de récursion → pas de REQ-224.
+
+**Ce que le probe a établi (mesuré) :**
+- **Construction** : `[k mod 256 for k in 0..262144]` build en **2.5 s** (vs 171 s littéral) → le coût de
+  compilation est RÉSOLU par le chemin compréhension. Le générateur RÉCURSIF (`gen(n,acc)` threadant une
+  List) déborde au runtime (REQ-224) ; la compréhension-range NON (loop-lowered). Prouve + tourne à 262k.
+- **VITESSE (le chiffre honnête, et il CORRIGE l'attente 200×)** : noyau refine sur 262k px, sanity
+  vérifiée (mêmes sorties que Python) :
+  | charge | llmlang natif | Python | ratio |
+  |---|---|---|---|
+  | 1 passe × 262k | ~90 ms | ~140 ms | **~1.5×** |
+  | 10 passes × 262k | ~360 ms | ~380 ms | **~1.05× (parité)** |
+
+**Pourquoi PAS 200× (le finding qui compte).** Le SimPy volait (~200×) parce qu'il bouclait sur un ÉTAT
+SCALAIRE — zéro allocation. Ici, chaque compréhension ALLOUE une nouvelle liste **cons-cell `Rc<Cons>`**
+(262k allocations chaînées par passe) : l'allocation + la mauvaise localité mémoire de la liste chaînée
+immuable DOMINENT le calcul. Plus il y a de passes (donc d'allocs relatives au calcul), plus l'avantage
+s'érode vers la parité. **llmlang n'a pas d'avantage vitesse sur le traitement image en List** — la
+structure de données (liste chaînée) est le mauvais outil pour du pixel contigu.
+
+**L'implication.** L'avantage vitesse natif de llmlang est RÉEL sur du calcul scalaire/état (SimPy 200×),
+mais s'ÉVAPORE sur du traitement de gros tableaux tant que la donnée est une `List` cons. Le bon substrat
+serait l'`Array` (`Vec` contigu, O(1), localité) — mais c'est LUI qui a les deux blocages
+(construction littérale lente + REQ-224 TCE sur balayage récursif). Donc la vraie priorité du domaine
+array n'est PAS « un constructeur runtime » seul : c'est **rendre le balayage d'Array loop-lowered**
+(compréhension/fold sur Array, ou fix REQ-224) POUR que la structure contiguë soit utilisable à
+l'échelle — sinon on paie l'alloc de la liste. **Sans ça, llmlang = parité Python sur l'image, pas 200×.**
+La garantie de correction (pixel ∈ [0,255], pas de débordement) reste, elle, l'avantage réel — mais
+c'est de la SÛRETÉ, pas de la VITESSE, sur ce domaine.
