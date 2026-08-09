@@ -28,14 +28,23 @@ Sortie : `corpus/llmlang_sft.jsonl`, un objet JSON par ligne
 
 ## État actuel (corpus à l'échelle)
 
-11 familles paramétrées, **3300 exemples certifiés, 0 rejet, tous uniques** (taux de certification
-100 %, généré en ~2.5 min, gratis). Chaque famille couvre une FORME DE PREUVE distincte :
-`clamp` (borne d'intervalle) · `bounded_agg` / `list_min_bound` (∀ e≥m ⟹ sum≥0) · `euclid` (reste
-borné 0≤r<b) · `array_kernel` (balayage d'Array, longueur préservée) · `floor` (plancher de marge) ·
-`monotone` (fold ne descend jamais sous l'ouverture) · `limit` (min/capping, idempotence-ready) ·
-`successor` (numérotation contiguë sans trou) · `scale_nonneg` (produit non-négatif) · `balanced`
-(partie double, contribution nette 0). C'est l'échelle utile pour un premier QLoRA de code.
-Variation : ~480 identifiants composés × axes structurels (offset, borne, step, plancher) par famille.
+14 familles paramétrées, **7820 exemples certifiés, 0 rejet, tous uniques** (certification 100 %,
+généré en ~5 min, gratis), dont **30 % multi-fonctions** (2360 exemples composés = le régime « feature »
+réel, pas des fonctions isolées).
+
+**11 familles isolées** (une forme de preuve chacune) : `clamp` (borne d'intervalle) · `bounded_agg` /
+`list_min_bound` (∀ e≥m ⟹ sum≥0) · `euclid` (reste borné 0≤r<b) · `array_kernel` (balayage d'Array,
+longueur préservée) · `floor` (plancher de marge) · `monotone` (fold ne descend jamais sous l'ouverture) ·
+`limit` (min/capping) · `successor` (numérotation contiguë) · `scale_nonneg` (produit non-négatif) ·
+`balanced` (partie double, net 0).
+
+**3 familles COMPOSÉES** (multi-`part`, composition modulaire DEC-LLL-021 — un consommateur décharge son
+invariant du CONTRAT d'un helper) : `compose_pricing` (unit_price → charged) · `compose_fold` (helper
+par-élément → fold liste) · `compose_pipe` (2 noyaux bornés → pipeline, invariant traversant). C'est ce
+qui apprend au modèle à COMPOSER, au-delà des one-liners.
+
+Variation : ~480 identifiants composés × axes structurels (offset, borne, step, plancher, cap) par
+famille. Les familles plafonnent à ~480 (nom-seul) ou 700 (axe structurel en plus).
 
 ## Comment atteindre les milliers (le scaling, mécanique)
 

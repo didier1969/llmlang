@@ -232,8 +232,82 @@ def fam_list_min_bound(rng):
     return instr, code
 
 
+# ── familles COMPOSÉES (multi-`part`) : le régime « feature » réel — un consommateur décharge son
+# invariant du CONTRAT d'un helper, sans le redémontrer. C'est la composition modulaire (DEC-LLL-021)
+# que le modèle doit apprendre au-delà des fonctions isolées.
+
+def fam_compose_pricing(rng):
+    """2 parts : unit_price (helper borné) + charged (consommateur qui compose result>=0)."""
+    n = rng.choice(NAMES)
+    instr = (f"Write a verified llmlang module with two parts: `unit_price_{n}(base: Int, tax_bps: Int) "
+             f"-> Int` = base + (base*tax_bps) div 10000 (require base>=0, 0<=tax_bps<=10000, prove "
+             f"result>=base); and `charged_{n}(base: Int, tax_bps: Int, discount: Int) -> Int` that "
+             f"applies unit_price to (base-discount) (require 0<=discount<=base, prove result>=0). The "
+             f"second must discharge its proof from the first's contract.")
+    code = (f"module M:\n\n"
+            f"  part unit_price_{n}(base: Int, tax_bps: Int) -> Int:\n"
+            f"    requires base >= 0, tax_bps >= 0, tax_bps <= 10000\n"
+            f"    ensures result >= base\n"
+            f"    yield base + (base * tax_bps) div 10000\n\n"
+            f"  part charged_{n}(base: Int, tax_bps: Int, discount: Int) -> Int:\n"
+            f"    requires base >= 0, tax_bps >= 0, tax_bps <= 10000\n"
+            f"    requires 0 <= discount, discount <= base\n"
+            f"    ensures result >= 0\n"
+            f"    yield unit_price_{n}(base - discount, tax_bps)\n")
+    return instr, code
+
+
+def fam_compose_fold(rng):
+    """2 parts : clean (helper par-élément >=0) + sum_clean (fold liste qui compose l'invariant)."""
+    n = rng.choice(NAMES)
+    instr = (f"Write a verified llmlang module with `clean_{n}(a: Int) -> Int` returning max(a,0) "
+             f"(prove result>=0), and `sum_{n}(xs: List[Int]) -> Int` that sums clean_{n} of each "
+             f"element over a list of any length (prove result>=0). Use a `measure`.")
+    code = (f"module M:\n\n"
+            f"  part clean_{n}(a: Int) -> Int:\n"
+            f"    ensures result >= 0\n"
+            f"    match a < 0:\n"
+            f"      true  -> yield 0\n"
+            f"      false -> yield a\n\n"
+            f"  part sum_{n}(xs: List[Int]) -> Int:\n"
+            f"    ensures result >= 0\n"
+            f"    measure length(xs)\n"
+            f"    match xs:\n"
+            f"      [] -> yield 0\n"
+            f"      h :: t -> yield clean_{n}(h) + sum_{n}(t)\n")
+    return instr, code
+
+
+def fam_compose_pipe(rng):
+    """3 parts : deux noyaux bornés + un pipeline qui les compose, invariant [0,cap] traversant."""
+    n = rng.choice(NAMES)
+    cap = rng.choice([100, 255, 1000])
+    instr = (f"Write a verified llmlang module with `clampA_{n}(x: Int) -> Int` clamping x into "
+             f"[0,{cap}] (prove in range); `invB_{n}(x: Int) -> Int` = {cap}-x requiring 0<=x<={cap} "
+             f"(prove in [0,{cap}]); and `pipe_{n}(x: Int) -> Int` = invB_{n}(clampA_{n}(x)) proving "
+             f"the result is in [0,{cap}]. The pipeline's proof chains through the two kernels' contracts.")
+    code = (f"module M:\n\n"
+            f"  part clampA_{n}(x: Int) -> Int:\n"
+            f"    ensures 0 <= result, result <= {cap}\n"
+            f"    match x < 0:\n"
+            f"      true  -> yield 0\n"
+            f"      false ->\n"
+            f"        match x > {cap}:\n"
+            f"          true  -> yield {cap}\n"
+            f"          false -> yield x\n\n"
+            f"  part invB_{n}(x: Int) -> Int:\n"
+            f"    requires 0 <= x, x <= {cap}\n"
+            f"    ensures 0 <= result, result <= {cap}\n"
+            f"    yield {cap} - x\n\n"
+            f"  part pipe_{n}(x: Int) -> Int:\n"
+            f"    ensures 0 <= result, result <= {cap}\n"
+            f"    yield invB_{n}(clampA_{n}(x))\n")
+    return instr, code
+
+
 FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor, fam_monotone,
-            fam_limit, fam_successor, fam_scale_nonneg, fam_balanced, fam_list_min_bound]
+            fam_limit, fam_successor, fam_scale_nonneg, fam_balanced, fam_list_min_bound,
+            fam_compose_pricing, fam_compose_fold, fam_compose_pipe]
 
 
 def to_record(instr, code):
