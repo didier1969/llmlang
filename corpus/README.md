@@ -26,12 +26,16 @@ python3 corpus/generate.py --per-family 100 --out corpus/llmlang_sft.jsonl
 Sortie : `corpus/llmlang_sft.jsonl`, un objet JSON par ligne
 `{"instruction": <prompt NL>, "input": "", "output": <code llmlang vérifié>}`.
 
-## État actuel (prototype prouvé)
+## État actuel (corpus à l'échelle)
 
-6 familles paramétrées, **360 exemples certifiés, 0 rejet** (taux de certification 100 %) :
-`clamp` (borne d'intervalle) · `bounded_agg` (∀ e≥0 ⟹ sum≥0) · `euclid` (reste borné 0≤r<b) ·
-`array_kernel` (balayage d'Array, longueur préservée) · `floor` (plancher de marge) · `monotone`
-(fold ne descend jamais sous l'ouverture). Chaque famille couvre une FORME DE PREUVE distincte.
+11 familles paramétrées, **3300 exemples certifiés, 0 rejet, tous uniques** (taux de certification
+100 %, généré en ~2.5 min, gratis). Chaque famille couvre une FORME DE PREUVE distincte :
+`clamp` (borne d'intervalle) · `bounded_agg` / `list_min_bound` (∀ e≥m ⟹ sum≥0) · `euclid` (reste
+borné 0≤r<b) · `array_kernel` (balayage d'Array, longueur préservée) · `floor` (plancher de marge) ·
+`monotone` (fold ne descend jamais sous l'ouverture) · `limit` (min/capping, idempotence-ready) ·
+`successor` (numérotation contiguë sans trou) · `scale_nonneg` (produit non-négatif) · `balanced`
+(partie double, contribution nette 0). C'est l'échelle utile pour un premier QLoRA de code.
+Variation : ~480 identifiants composés × axes structurels (offset, borne, step, plancher) par famille.
 
 ## Comment atteindre les milliers (le scaling, mécanique)
 

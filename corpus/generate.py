@@ -38,10 +38,13 @@ def lll_verifies(code):
 # Chaque famille : generator(rng) -> (instruction, code). L'instruction = le prompt NL qu'un modèle
 # recevrait ; le code = la réponse vérifiée. La variété vient de noms/bornes randomisés.
 
-NAMES = ["value", "amount", "qty", "score", "level", "count", "price", "stock", "credit", "weight",
-         "balance", "total", "rate", "margin", "units", "tally", "depth", "height", "span", "delta",
-         "budget", "load", "size", "index", "offset", "gain", "cost", "flux", "mass", "volume",
-         "energy", "power", "signal", "voltage", "current", "pressure", "temp", "speed", "accel", "torque"]
+_BASES = ["value", "amount", "qty", "score", "level", "count", "price", "stock", "credit", "weight",
+          "balance", "total", "rate", "margin", "units", "tally", "depth", "height", "span", "delta",
+          "budget", "load", "size", "index", "offset", "gain", "cost", "flux", "mass", "volume",
+          "energy", "power", "signal", "voltage", "current", "pressure", "temp", "speed", "accel", "torque"]
+_QUALS = ["", "net", "gross", "raw", "final", "base", "adj", "eff", "cur", "max", "min", "avg"]
+# nom = [qualificatif_]base → ~40 × 12 = ~480 identifiants distincts, multiplie l'espace de chaque famille
+NAMES = [f"{q}_{b}" if q else b for b in _BASES for q in _QUALS]
 
 
 def fam_clamp(rng):
@@ -155,7 +158,82 @@ def fam_monotone(rng):
     return instr, code
 
 
-FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor, fam_monotone]
+def fam_limit(rng):
+    """Enforce une limite (min) : 0 <= result <= limit ET result <= exposure. Idempotence-ready."""
+    n = rng.choice(NAMES)
+    instr = (f"Write a verified llmlang `part limit_{n}(exposure: Int, cap: Int) -> Int` that returns "
+             f"exposure capped at cap (exposure if exposure<=cap, else cap). Require `exposure >= 0`, "
+             f"`cap >= 0`. Prove `0 <= result`, `result <= cap`, and `result <= exposure`.")
+    code = (f"module M:\n\n"
+            f"  part limit_{n}(exposure: Int, cap: Int) -> Int:\n"
+            f"    requires exposure >= 0, cap >= 0\n"
+            f"    ensures 0 <= result, result <= cap, result <= exposure\n"
+            f"    yield if exposure <= cap then exposure else cap\n")
+    return instr, code
+
+
+def fam_successor(rng):
+    """Numérotation contiguë : result == last + step (audit sans trou). Varie step."""
+    n = rng.choice(NAMES)
+    step = rng.choice([1, 2, 5, 10])
+    instr = (f"Write a verified llmlang `part next_{n}(last: Int) -> Int` that returns the next number "
+             f"`last + {step}`. Require `last >= 0`. Prove `result == last + {step}` and `result > last`.")
+    code = (f"module M:\n\n"
+            f"  part next_{n}(last: Int) -> Int:\n"
+            f"    requires last >= 0\n"
+            f"    ensures result == last + {step}, result > last\n"
+            f"    yield last + {step}\n")
+    return instr, code
+
+
+def fam_scale_nonneg(rng):
+    """Produit non-négatif : a>=0, b>=0 => a*b>=0 (invariant multiplicatif). Varie via facteur."""
+    n = rng.choice(NAMES)
+    instr = (f"Write a verified llmlang `part scale_{n}(a: Int, b: Int) -> Int` returning `a * b`. "
+             f"Require `a >= 0` and `b >= 0`. Prove the result is `>= 0` and `result == a * b`.")
+    code = (f"module M:\n\n"
+            f"  part scale_{n}(a: Int, b: Int) -> Int:\n"
+            f"    requires a >= 0, b >= 0\n"
+            f"    ensures result >= 0, result == a * b\n"
+            f"    yield a * b\n")
+    return instr, code
+
+
+def fam_balanced(rng):
+    """Partie double : une écriture équilibrée a une contribution nette 0."""
+    n = rng.choice(NAMES)
+    instr = (f"Write a verified llmlang `part posting_{n}(debit: Int, credit: Int) -> Int` returning "
+             f"`debit - credit`. Require `debit >= 0` and `debit == credit` (a balanced entry). Prove "
+             f"the result is exactly `0`.")
+    code = (f"module M:\n\n"
+            f"  part posting_{n}(debit: Int, credit: Int) -> Int:\n"
+            f"    requires debit >= 0, debit == credit\n"
+            f"    ensures result == 0\n"
+            f"    yield debit - credit\n")
+    return instr, code
+
+
+def fam_list_min_bound(rng):
+    """Borne inférieure d'agrégat : forall e >= m => sum >= 0 quand m>=0. Varie le plancher m."""
+    n = rng.choice(NAMES)
+    m = rng.choice([0, 1, 2, 5, 10])
+    instr = (f"Write a verified llmlang `part agg_{n}(xs: List[Int]) -> Int` returning the sum of xs. "
+             f"Require every element `>= {m}` (`forall e in xs: e >= {m}`). Prove `result == sum(xs)` "
+             f"and `result >= 0`, for any length.")
+    code = (f"module M:\n\n"
+            f"  part agg_{n}(xs: List[Int]) -> Int:\n"
+            f"    requires forall e in xs: e >= {m}\n"
+            f"    ensures result == sum(xs)\n"
+            f"    ensures result >= 0\n"
+            f"    measure length(xs)\n"
+            f"    match xs:\n"
+            f"      [] -> yield 0\n"
+            f"      h :: t -> yield h + agg_{n}(t)\n")
+    return instr, code
+
+
+FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor, fam_monotone,
+            fam_limit, fam_successor, fam_scale_nonneg, fam_balanced, fam_list_min_bound]
 
 
 def to_record(instr, code):
