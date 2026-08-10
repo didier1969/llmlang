@@ -97,10 +97,12 @@ def fam_euclid(rng):
         f"`b > 0`. Prove `0 <= result` and `result < b`.",
         f"Return `{expr}` for any integer a (a may be negative) and b > 0 as a verified llmlang "
         f"`part wrap_{n}(a: Int, b: Int) -> Int`, proving `0 <= result < b`.")
+    # ensures inclut `result == {expr}` : enseigne que prouver l'ÉGALITÉ à la spec se fait par le SIMPLE
+    # `yield {expr}` (le modèle sur-compliquait avec un `if a>=0 then … else …` non prouvable).
     code = (f"module M:\n\n"
             f"  part wrap_{n}(a: Int, b: Int) -> Int:\n"
             f"    requires b > 0\n"
-            f"    ensures 0 <= result, result < b\n"
+            f"    ensures 0 <= result, result < b, result == {expr}\n"
             f"    yield {expr}\n")
     return instr, code
 
