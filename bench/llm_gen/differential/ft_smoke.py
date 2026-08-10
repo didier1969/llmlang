@@ -32,6 +32,13 @@ import loop_run  # noqa: E402  — extract_code
 ADAPTER_REL = "bfb7eb0f/lora_model"
 SFT = "### Instruction:\n{}\n\n### Input:\n\n### Response:\n"
 
+# Aide-mémoire syntaxe (~55 tokens) — optionnel (--hint) : cible les GLISSEMENTS observés au smoke (le
+# modèle connaît la logique mais réécrit des idiomes Python/Rust). ~55 tok vs les ~3033 du primer complet.
+HINT = ("llmlang notes: integer ops are `mod` and `div` (never `%` or `/`); a list's length is "
+        "`length(xs)` — no `.length`, no slicing like `xs[i:]`, no `xs(i)`; destructure lists with "
+        "`match xs:` then `[] -> …` and `h :: t -> …`; `result` may appear only in `ensures`, never in "
+        "`requires`; wrap an inline conditional in parentheses: `(if c then x else y)`.")
+
 
 def instr_for(t: dict) -> str:
     """L'instruction llmlang de gen_prompt, MOINS le primer (le modèle connaît le langage)."""
@@ -99,10 +106,12 @@ def main() -> int:
                     help="récupérer un appel Modal RETENU (0 inférence) au lieu d'en relancer un")
     ap.add_argument("--adapter-rel", default=ADAPTER_REL,
                     help="chemin de l'adaptateur RELATIF au volume (ex. <run>/lora_model)")
+    ap.add_argument("--hint", action="store_true",
+                    help="préfixer un aide-mémoire syntaxe (~55 tok) au prompt (nudge anti-glissement)")
     args = ap.parse_args()
 
     tasks = X.TASKS
-    prompts = [SFT.format(instr_for(t)) for t in tasks]
+    prompts = [SFT.format((HINT + "\n\n" if args.hint else "") + instr_for(t)) for t in tasks]
     primer_tok = X.primer_tokens("llmlang")
     ft_prompt_tok_est = [len(p) // 4 for p in prompts]
 

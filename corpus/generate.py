@@ -89,8 +89,14 @@ def fam_euclid(rng):
     n = rng.choice(NAMES)
     k = rng.randint(0, 9)  # axe structurel : (a + k) mod b, k>=0 constant
     expr = "a mod b" if k == 0 else f"(a + {k}) mod b"
-    instr = (f"Write a verified llmlang `part` named `wrap_{n}` taking `a: Int`, `b: Int` that returns "
-             f"`{expr}` (Euclidean remainder). Require `b > 0`. Prove `0 <= result` and `result < b`.")
+    instr = _pick(rng,
+        f"Write a verified llmlang `part` named `wrap_{n}` taking `a: Int`, `b: Int` that returns "
+        f"`{expr}` (Euclidean remainder). Require `b > 0`. Prove `0 <= result` and `result < b`.",
+        f"Euclidean remainder in llmlang: `part wrap_{n}(a: Int, b: Int) -> Int` = `{expr}`, which lies "
+        f"in [0, b) for ANY integer a INCLUDING NEGATIVE (llmlang's `mod` is already Euclidean). Require "
+        f"`b > 0`. Prove `0 <= result` and `result < b`.",
+        f"Return `{expr}` for any integer a (a may be negative) and b > 0 as a verified llmlang "
+        f"`part wrap_{n}(a: Int, b: Int) -> Int`, proving `0 <= result < b`.")
     code = (f"module M:\n\n"
             f"  part wrap_{n}(a: Int, b: Int) -> Int:\n"
             f"    requires b > 0\n"
@@ -428,12 +434,62 @@ def fam_bounded_reserve(rng):
     return instr, code
 
 
+def fam_wrap_index(rng):
+    """Ramener un index (possiblement négatif) dans [0, size) via `i mod size`. Renforce `mod` sur les
+    entrées négatives — le modèle réécrivait l'idiome Python `%` au lieu du `mod` (déjà euclidien) llmlang."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a verified llmlang `part idx_{n}(i: Int, size: Int) -> Int` that wraps an index i (which "
+        f"may be negative) into [0, size) as `i mod size`. Require `size > 0`. Prove `0 <= result` and `result < size`.",
+        f"Wrap a possibly-negative index into range in llmlang: `part idx_{n}(i: Int, size: Int) -> Int` = "
+        f"`i mod size` for size > 0, proving `0 <= result < size`.")
+    code = (f"module M:\n\n"
+            f"  part idx_{n}(i: Int, size: Int) -> Int:\n"
+            f"    requires size > 0\n"
+            f"    ensures 0 <= result, result < size\n"
+            f"    yield i mod size\n")
+    return instr, code
+
+
+def fam_compose_charge(rng):
+    """3 parts : net (>=0) → charge (helper taxé, requiert net>=0) → total (compose). Enseigne la CHAÎNE
+    de préconditions : le consommateur décharge `result>=0` du contrat `requires net>=0` du helper (le
+    trou d'order_charged, où le modèle oubliait `requires net>=0`)."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a verified llmlang module: `net_{n}(qty: Int, price: Int, discount: Int) -> Int` = "
+        f"qty*price - discount (require qty>=0, price>=0, 0<=discount<=qty*price, prove result>=0); "
+        f"`charge_{n}(net: Int, tax_bps: Int) -> Int` = net + (net*tax_bps) div 10000 (require net>=0, "
+        f"0<=tax_bps<=10000, prove result>=0); and `total_{n}(qty: Int, price: Int, discount: Int, "
+        f"tax_bps: Int) -> Int` = charge_{n}(net_{n}(...), tax_bps), proving result>=0 from the helpers' contracts.",
+        f"Compose an order total in llmlang across three parts: a net (qty*price-discount, proved >=0), a "
+        f"taxed charge (net + net*tax_bps div 10000, requiring net>=0, proved >=0), and `total_{n}` that "
+        f"chains them proving the final amount >= 0 from the helper contracts.")
+    code = (f"module M:\n\n"
+            f"  part net_{n}(qty: Int, price: Int, discount: Int) -> Int:\n"
+            f"    requires qty >= 0, price >= 0, discount >= 0, discount <= qty * price\n"
+            f"    ensures result >= 0\n"
+            f"    yield qty * price - discount\n\n"
+            f"  part charge_{n}(net: Int, tax_bps: Int) -> Int:\n"
+            f"    requires net >= 0, tax_bps >= 0, tax_bps <= 10000\n"
+            f"    ensures result >= 0\n"
+            f"    yield net + (net * tax_bps) div 10000\n\n"
+            f"  part total_{n}(qty: Int, price: Int, discount: Int, tax_bps: Int) -> Int:\n"
+            f"    requires qty >= 0, price >= 0, discount >= 0, discount <= qty * price\n"
+            f"    requires tax_bps >= 0, tax_bps <= 10000\n"
+            f"    ensures result >= 0\n"
+            f"    yield charge_{n}(net_{n}(qty, price, discount), tax_bps)\n")
+    return instr, code
+
+
 FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor, fam_monotone,
             fam_limit, fam_successor, fam_scale_nonneg, fam_balanced, fam_list_min_bound,
             fam_compose_pricing, fam_compose_fold, fam_compose_pipe,
             # itération REQ-LLL-228 — formes qui calaient au smoke OOD :
             fam_plain_sum, fam_ceil_div, fam_midpoint, fam_minmax, fam_pairwise_balance,
-            fam_bounded_reserve]
+            fam_bounded_reserve,
+            # v3 — les 3 trous résiduels (mod-vs-%, .length, chaîne de préconditions) :
+            fam_wrap_index, fam_compose_charge]
 
 
 def to_record(instr, code):
