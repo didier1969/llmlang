@@ -106,7 +106,7 @@ def fam_array_kernel(rng):
     instr = (f"Write a verified llmlang module with a `part cap_{n}(a: Int) -> Int` that clamps a into "
              f"[0, {cap}] (0 if a<0, {cap} if a>{cap}, else a) proving the result is in [0, {cap}]; and a "
              f"`part sweep_{n}(src: Array[Int], i: Int) -> Array[Int]` that applies cap_{n} to every "
-             f"element via `set`/`get`, proving the array length is preserved. Use a `measure`.")
+             f"element via `set`/`get`, proving the array length is preserved.")
     code = (f"module M:\n\n"
             f"  part cap_{n}(a: Int) -> Int:\n"
             f"    ensures 0 <= result, result <= {cap}\n"
@@ -262,7 +262,7 @@ def fam_compose_fold(rng):
     n = rng.choice(NAMES)
     instr = (f"Write a verified llmlang module with `clean_{n}(a: Int) -> Int` returning max(a,0) "
              f"(prove result>=0), and `sum_{n}(xs: List[Int]) -> Int` that sums clean_{n} of each "
-             f"element over a list of any length (prove result>=0). Use a `measure`.")
+             f"element over a list of any length (prove result>=0).")
     code = (f"module M:\n\n"
             f"  part clean_{n}(a: Int) -> Int:\n"
             f"    ensures result >= 0\n"
@@ -305,9 +305,135 @@ def fam_compose_pipe(rng):
     return instr, code
 
 
+# ── familles AJOUTÉES (itération REQ-LLL-228) : comblent les formes qui calaient au smoke OOD.
+# Le corpus couvrait déjà forall/measure/mod mais TROP templaté (1 phrasé/famille → mémorisation du
+# patron) ; ici on VARIE le phrasé (`_pick`) et on ajoute les structures manquantes, chaque code tiré
+# d'une solution PROUVÉE (REFS du banc) donc certifiée par construction.
+
+def _pick(rng, *variants):
+    return rng.choice(variants)
+
+
+def fam_plain_sum(rng):
+    """Somme de liste SANS précondition : juste measure + fold. Les familles sum existantes couplaient
+    toujours un `forall` + précondition ; le modèle inventait donc une précondition (mal formée) et
+    oubliait le measure sur une somme nue."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a verified llmlang `part sum_{n}(xs: List[Int]) -> Int` that returns the exact sum of the list, for a list of any length.",
+        f"In llmlang, sum a list of integers: `part sum_{n}(xs: List[Int]) -> Int` returning their exact total (any length).",
+        f"Return the exact sum of a list of integers `xs` as a llmlang `part sum_{n}(xs: List[Int]) -> Int`.")
+    code = (f"module M:\n\n"
+            f"  part sum_{n}(xs: List[Int]) -> Int:\n"
+            f"    ensures result == sum(xs)\n"
+            f"    measure length(xs)\n"
+            f"    match xs:\n"
+            f"      [] -> yield 0\n"
+            f"      h :: t -> yield h + sum_{n}(t)\n")
+    return instr, code
+
+
+def fam_ceil_div(rng):
+    """Division plafond ceil(num/k) avec contrat exact (result*k >= num et (result-1)*k < num)."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a verified llmlang `part ceil_{n}(num: Int, k: Int) -> Int` returning ceil(num/k) = the smallest integer whose product with k is >= num. Require num >= 0 and k >= 1. Prove result*k >= num and (result-1)*k < num.",
+        f"Integer ceiling division in llmlang: `part ceil_{n}(num: Int, k: Int) -> Int` = ceil(num/k) for num>=0, k>=1. Prove result*k >= num and (result-1)*k < num.")
+    code = (f"module M:\n\n"
+            f"  part ceil_{n}(num: Int, k: Int) -> Int:\n"
+            f"    requires 0 <= num, k >= 1\n"
+            f"    ensures result * k >= num, (result - 1) * k < num\n"
+            f"    yield (num + k - 1) div k\n")
+    return instr, code
+
+
+def fam_midpoint(rng):
+    """Milieu entier (a+b) div 2 avec contrat d'encadrement (anti-overflow au sens exact-ℤ)."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a verified llmlang `part mid_{n}(a: Int, b: Int) -> Int` returning the integer midpoint floor((a+b)/2). Prove 2*result <= a+b and a+b < 2*result+2.",
+        f"Integer midpoint in llmlang: `part mid_{n}(a: Int, b: Int) -> Int` = floor((a+b)/2). Prove 2*result <= a+b and a+b < 2*result+2.")
+    code = (f"module M:\n\n"
+            f"  part mid_{n}(a: Int, b: Int) -> Int:\n"
+            f"    ensures 2 * result <= a + b, a + b < 2 * result + 2\n"
+            f"    yield (a + b) div 2\n")
+    return instr, code
+
+
+def fam_minmax(rng):
+    """Max ou min de deux entiers : renforce `if/then/else` + `ensures` simples, phrasé varié."""
+    n = rng.choice(NAMES)
+    if rng.random() < 0.5:
+        instr = _pick(rng,
+            f"Write a verified llmlang `part max_{n}(a: Int, b: Int) -> Int` returning the larger of a and b. Prove result >= a and result >= b.",
+            f"Return the larger of two integers in llmlang as `part max_{n}(a: Int, b: Int) -> Int`. Prove result >= a and result >= b.")
+        code = (f"module M:\n\n"
+                f"  part max_{n}(a: Int, b: Int) -> Int:\n"
+                f"    ensures result >= a, result >= b\n"
+                f"    yield if a >= b then a else b\n")
+    else:
+        instr = _pick(rng,
+            f"Write a verified llmlang `part min_{n}(a: Int, b: Int) -> Int` returning the smaller of a and b. Prove result <= a and result <= b.",
+            f"Return the smaller of two integers in llmlang as `part min_{n}(a: Int, b: Int) -> Int`. Prove result <= a and result <= b.")
+        code = (f"module M:\n\n"
+                f"  part min_{n}(a: Int, b: Int) -> Int:\n"
+                f"    ensures result <= a, result <= b\n"
+                f"    yield if a <= b then a else b\n")
+    return instr, code
+
+
+def fam_pairwise_balance(rng):
+    """Balance d'un journal débit,crédit alterné [d1,c1,d2,c2,...] : fold consommant une PAIRE via un
+    match imbriqué. Les folds existants consomment 1 élément à la fois — forme manquante."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"A journal is a flat list of alternating debit,credit integers [d1,c1,d2,c2,...]. Write a verified llmlang `part balance_{n}(xs: List[Int]) -> Int` returning (sum of debits) - (sum of credits), for any length.",
+        f"Write a verified llmlang `part balance_{n}(xs: List[Int]) -> Int` that folds an alternating debit,credit list [d1,c1,d2,c2,...] into its trial balance (debits minus credits).")
+    code = (f"module M:\n\n"
+            f"  part balance_{n}(xs: List[Int]) -> Int:\n"
+            f"    measure length(xs)\n"
+            f"    match xs:\n"
+            f"      [] -> yield 0\n"
+            f"      d :: r ->\n"
+            f"        match r:\n"
+            f"          [] -> yield d\n"
+            f"          c :: rest -> yield (d - c) + balance_{n}(rest)\n")
+    return instr, code
+
+
+def fam_bounded_reserve(rng):
+    """Séquence de réservations avec SKIP des dépassements, prouvant committed <= on_hand : accumulateur
+    conditionnel (match sur un booléen) + précondition `forall`. La forme la plus dure du banc."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Process stock reservations in llmlang. Input xs = [on_hand, q1, q2, ...]: initial stock then reservation quantities (all >= 0). Apply each reservation ONLY if it fits (running committed + q <= on_hand); SKIP any that would exceed on_hand. Write `reserve_{n}(xs: List[Int]) -> Int` = the final committed, proving committed never exceeds on_hand.",
+        f"Write a verified llmlang module folding a list [on_hand, q1, q2, ...] applying each reservation qi only when committed + qi <= on_hand (skip otherwise), proving the running committed stays <= on_hand. Expose `reserve_{n}(xs: List[Int]) -> Int`.")
+    code = (f"module M:\n\n"
+            f"  part apply_{n}(on_hand: Int, committed: Int, qs: List[Int]) -> Int:\n"
+            f"    requires 0 <= committed, committed <= on_hand\n"
+            f"    requires forall x in qs: x >= 0\n"
+            f"    ensures result <= on_hand\n"
+            f"    measure length(qs)\n"
+            f"    match qs:\n"
+            f"      [] -> yield committed\n"
+            f"      q :: rest ->\n"
+            f"        match committed + q <= on_hand:\n"
+            f"          true  -> yield apply_{n}(on_hand, committed + q, rest)\n"
+            f"          false -> yield apply_{n}(on_hand, committed, rest)\n\n"
+            f"  part reserve_{n}(xs: List[Int]) -> Int:\n"
+            f"    requires forall x in xs: x >= 0\n"
+            f"    match xs:\n"
+            f"      [] -> yield 0\n"
+            f"      on_hand :: qs -> yield apply_{n}(on_hand, 0, qs)\n")
+    return instr, code
+
+
 FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor, fam_monotone,
             fam_limit, fam_successor, fam_scale_nonneg, fam_balanced, fam_list_min_bound,
-            fam_compose_pricing, fam_compose_fold, fam_compose_pipe]
+            fam_compose_pricing, fam_compose_fold, fam_compose_pipe,
+            # itération REQ-LLL-228 — formes qui calaient au smoke OOD :
+            fam_plain_sum, fam_ceil_div, fam_midpoint, fam_minmax, fam_pairwise_balance,
+            fam_bounded_reserve]
 
 
 def to_record(instr, code):
@@ -333,9 +459,10 @@ def main():
             if fk >= per:
                 break
             instr, code = fam(rng)
-            if code in seen:
-                continue
-            seen.add(code)
+            key = (instr, code)  # dédup sur (instruction, code) : plusieurs phrasés → même code sont
+            if key in seen:      # GARDÉS (enseigne NL varié → code robuste ; la diversité de phrasé
+                continue         # ne serait pas perdue par un dédup sur le seul code).
+            seen.add(key)
             ok, fb = lll_verifies(code)
             if ok:
                 kept.append(to_record(instr, code))

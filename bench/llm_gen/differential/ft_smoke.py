@@ -64,14 +64,15 @@ def check_forms(code: str) -> tuple[bool, str, str]:
 
 
 def modal_infer(prompts: list[str], *, batch_size: int, max_new_tokens: int,
-                call_id: str | None = None, wall_clock_s: int = 2400) -> list[str]:
+                adapter_rel: str = ADAPTER_REL, call_id: str | None = None,
+                wall_clock_s: int = 2400) -> list[str]:
     import modal
     if call_id:
         call = modal.functions.FunctionCall.from_id(call_id)
         print(f">>> récupération de l'appel retenu {call_id} (0 inférence)")
     else:
         fn = modal.Function.from_name("unslot-training", "infer_remote")
-        call = fn.spawn(ADAPTER_REL, prompts, max_new_tokens=max_new_tokens, batch_size=batch_size)
+        call = fn.spawn(adapter_rel, prompts, max_new_tokens=max_new_tokens, batch_size=batch_size)
         print(f">>> modal call id: {call.object_id}")
     deadline = time.monotonic() + wall_clock_s
     delay = 15
@@ -96,6 +97,8 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--call-id", default=None,
                     help="récupérer un appel Modal RETENU (0 inférence) au lieu d'en relancer un")
+    ap.add_argument("--adapter-rel", default=ADAPTER_REL,
+                    help="chemin de l'adaptateur RELATIF au volume (ex. <run>/lora_model)")
     args = ap.parse_args()
 
     tasks = X.TASKS
@@ -122,7 +125,8 @@ def main() -> int:
 
     print(f"\n>>> inférence Modal ({len(prompts)} prompts) …")
     completions = modal_infer(prompts, batch_size=args.batch_size,
-                              max_new_tokens=args.max_new_tokens, call_id=args.call_id)
+                              max_new_tokens=args.max_new_tokens,
+                              adapter_rel=args.adapter_rel, call_id=args.call_id)
 
     green = 0
     forms: dict[str, int] = {}
