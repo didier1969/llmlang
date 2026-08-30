@@ -9,9 +9,11 @@ module Std.Str:
 
   part str_len(s: List[Int]) -> Int:
     ensures result >= 0
+    ensures result == length(s)
     yield len(s)
 
   part str_concat(s: List[Int], t: List[Int]) -> List[Int]:
+    ensures length(result) == length(s) + length(t)
     yield append(s, t)
 
   part str_at(s: List[Int], i: Int, d: Int) -> Int:
@@ -48,10 +50,12 @@ module Std.Str:
 
   # the substring of `n` codepoints starting at `start`; clamps at both ends (total).
   part substring(s: List[Int], start: Int, n: Int) -> List[Int]:
+    ensures length(result) <= length(s)
     yield take(drop(s, start), n)
 
   # 0-based index of the first occurrence of codepoint `c`, or -1 (total).
   part str_index_of(s: List[Int], c: Int) -> Int:
+    ensures result >= 0 - 1
     yield index_of(s, c)
 
   # does `needle` occur as a contiguous substring of `hay`?
@@ -76,11 +80,13 @@ module Std.Str:
   # `List[List[Int]]` (as in `split`'s base case `[] :: []`) has no child to pin its
   # `List[Int]` element type, so the checker cannot infer it — `empty_line()` fixes it.
   part empty_line() -> List[Int]:
+    ensures length(result) == 0
     yield []
 
   # split on a single-codepoint delimiter: split("a,b", ',') = ["a", "b"]. Always yields
   # at least one piece; adjacent delimiters produce empty pieces (standard split).
   part split(s: List[Int], d: Int) -> List[List[Int]]:
+    ensures length(result) >= 1
     match s:
       []     -> yield empty_line() :: []
       h :: t ->
@@ -108,12 +114,14 @@ module Std.Str:
   part int_to_str_pos(n: Int) -> List[Int]:
     requires n >= 0
     measure n
+    ensures length(result) >= 1
     match n:
       z when z < 10 -> yield digit_cp(n) :: []
       _             -> yield append(int_to_str_pos(n div 10), digit_cp(n mod 10) :: [])
 
   # decimal string of any integer; a negative value is prefixed with '-' (codepoint 45).
   part int_to_str(n: Int) -> List[Int]:
+    ensures length(result) >= 1
     match n:
       z when z < 0 -> yield 45 :: int_to_str_pos(0 - n)
       _            -> yield int_to_str_pos(n)

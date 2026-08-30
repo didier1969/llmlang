@@ -9,21 +9,25 @@ module Std.List:
 
   part len(xs: List[a]) -> Int:
     ensures result >= 0
+    ensures result == length(xs)
     match xs:
       []     -> yield 0
       h :: t -> yield 1 + len(t)
 
   part append(xs: List[a], ys: List[a]) -> List[a]:
+    ensures length(result) == length(xs) + length(ys)
     match xs:
       []     -> yield ys
       h :: t -> yield h :: append(t, ys)
 
   part rev_acc(xs: List[a], acc: List[a]) -> List[a]:
+    ensures length(result) == length(xs) + length(acc)
     match xs:
       []     -> yield acc
       h :: t -> yield rev_acc(t, h :: acc)
 
   part reverse(xs: List[a]) -> List[a]:
+    ensures length(result) == length(xs)
     yield rev_acc(xs, [])
 
   part contains(xs: List[a], v: a) -> Bool:
@@ -35,6 +39,7 @@ module Std.List:
           _             -> yield contains(t, v)
 
   part take(xs: List[a], n: Int) -> List[a]:
+    ensures length(result) <= length(xs)
     match xs:
       []     -> yield []
       h :: t ->
@@ -43,6 +48,7 @@ module Std.List:
           _             -> yield h :: take(t, n - 1)
 
   part drop(xs: List[a], n: Int) -> List[a]:
+    ensures length(result) <= length(xs)
     match xs:
       []     -> yield xs
       h :: t ->
@@ -60,6 +66,7 @@ module Std.List:
 
   # higher-order, type-changing: one proof over abstract element sorts (a, b)
   part map(f: (a) -> b, xs: List[a]) -> List[b]:
+    ensures length(result) == length(xs)
     match xs:
       []     -> yield []
       h :: t -> yield f(h) :: map(f, t)
@@ -104,6 +111,7 @@ module Std.List:
 
   # keep the elements satisfying the predicate, in order.
   part filter(p: (a) -> Bool, xs: List[a]) -> List[a]:
+    ensures length(result) <= length(xs)
     match xs:
       []     -> yield []
       h :: t ->
@@ -145,6 +153,7 @@ module Std.List:
   # — the -1 sentinel is a genuine "not found", not a runtime fallback: Option-returning
   # search waits on parametric ADTs, REQ-LLL-068).
   part index_of(xs: List[a], v: a) -> Int:
+    ensures result >= 0 - 1
     match xs:
       []     -> yield 0 - 1
       h :: t ->
@@ -159,6 +168,7 @@ module Std.List:
   # pair elements positionally; stops at the shorter list. First-class tuples (surface
   # construct + `match (a, b)` destructure) make `List[(a, b)]` consumable in pure llmlang.
   part zip(xs: List[a], ys: List[b]) -> List[(a, b)]:
+    ensures length(result) <= length(xs)
     match xs:
       []       -> yield []
       xh :: xt ->

@@ -824,6 +824,68 @@ fn std_root_imports_verified_stdlib_by_name_req144() {
     assert!(cm.index.contains_key("main"), "root part lost");
 }
 
+
+#[test]
+fn std_list_map_contract_discharges_a_consumer_length_invariant() {
+    // The `ensures length(result) == length(xs)` on `Std.List.map` is LOAD-BEARING,
+    // not decorative. A consumer discharges its own business invariant — "a payroll
+    // run neither loses nor invents a line" — FROM that contract, in one obligation,
+    // instead of sampling it with a test battery. That composition IS the measured
+    // token win of a verified library (bench/llm_gen/differential, brick-macro): the
+    // clause replaces the battery only when the callee's own contract carries it.
+    //
+    // The must-NOT-prove half is the point of the test: strip the ensures from a
+    // local copy of std and the SAME consumer stops verifying. Without it, this test
+    // would pass just as well against a contract-free stdlib.
+    //
+    // `gross_to_net` is deliberately TOTAL (no `requires`): a part used as a function
+    // value must hold its precondition for every input (REQ-LLL-177), so a guarded
+    // helper cannot be passed to `map` at all.
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let consumer = "import std.list\n\nmodule Payroll:\n\n  part gross_to_net(g: Int) -> Int:\n    ensures result >= 0\n    match g:\n      v when v <= 0 -> yield 0\n      _             -> yield g - (g div 10)\n\n  part net_run(gross: List[Int]) -> List[Int]:\n    ensures length(result) == length(gross)\n    yield map(gross_to_net, gross)\n";
+    let map_with_contract =
+        "  part map(f: (a) -> b, xs: List[a]) -> List[b]:\n    ensures length(result) == length(xs)\n";
+
+    let consumer_verifies = |tag: &str, strip_map_ensures: bool| -> bool {
+        let dir = req149_project(tag);
+        let std_dir = dir.join("std");
+        std::fs::create_dir_all(&std_dir).unwrap();
+        for m in ["option.lll", "list.lll"] {
+            std::fs::copy(format!("{repo}/std/{m}"), std_dir.join(m)).unwrap();
+        }
+        if strip_map_ensures {
+            let p = std_dir.join("list.lll");
+            let src = std::fs::read_to_string(&p).unwrap();
+            assert!(
+                src.contains(map_with_contract),
+                "std/list.lll no longer carries map's length contract — this test's \
+                 must-NOT-prove half would silently become vacuous"
+            );
+            let stripped =
+                src.replace(map_with_contract, "  part map(f: (a) -> b, xs: List[a]) -> List[b]:\n");
+            std::fs::write(&p, stripped).unwrap();
+        }
+        std::fs::write(dir.join("lll.toml"), "[imports]\nstd = \"std\"\n").unwrap();
+        let root = dir.join("main.lll");
+        std::fs::write(&root, consumer).unwrap();
+        let (_, m) = loader::load_program(root.to_str().unwrap()).expect("consumer program loads");
+        let cm = types::check_module(m).expect("consumer type-checks");
+        let hm = hash::hash_module(&cm).expect("hash");
+        let r = vc::verify(&cm, &hm, &dir, false).expect("verify");
+        failures(&r).is_empty()
+    };
+
+    assert!(
+        consumer_verifies("mapcontract-on", false),
+        "net_run must discharge `length(result) == length(gross)` FROM Std.List.map's contract"
+    );
+    assert!(
+        !consumer_verifies("mapcontract-off", true),
+        "must-NOT-prove: with map's ensures stripped, the SAME consumer cannot prove its \
+         invariant — this is what makes the stdlib contract load-bearing rather than decorative"
+    );
+}
+
 #[test]
 fn lockfile_pins_and_detects_dependency_change_req155() {
     // REQ-LLL-155: `lll lock` records the content-hash of every resolved module; then
