@@ -141,6 +141,59 @@ fn unbounded_array_index_failure_carries_length_repair_hint_req098() {
 
 
 #[test]
+fn part_with_requires_as_function_value_carries_a_repair_hint_that_actually_repairs() {
+    // REQ-LLL-177's obligation ("used as a total function value") is CORRECT — a higher-order
+    // function applies its argument to EVERY element, so a guarded part cannot be passed by
+    // name — but on its own it leaves the author stuck, which is the ergonomic friction the
+    // generation bench keeps measuring (RESULTS.md, run équitable: the failures are surface,
+    // never wrong logic). The diagnostic must therefore NAME the repair.
+    //
+    // The second half is what makes this test worth having: it pins that the repair the hint
+    // names ACTUALLY VERIFIES. A repair hint that does not repair is worse than no hint — it
+    // spends the author's tokens on a wrong turn.
+    let broken = "module M:\n\n  part half(g: Int) -> Int:\n    requires g >= 0\n    yield g div 2\n\n  part lmap(f: (Int) -> Int, xs: List[Int]) -> List[Int]:\n    match xs:\n      []     -> yield []\n      h :: t -> yield f(h) :: lmap(f, t)\n\n  part run(xs: List[Int]) -> List[Int]:\n    yield lmap(half, xs)\n";
+    let repaired = broken.replace(
+        "yield lmap(half, xs)",
+        "yield lmap(\\(x: Int) -> (if x >= 0 then half(x) else 0), xs)",
+    );
+
+    // human channel: the failure must carry the hint
+    let (code, out, _) = check_lll_src("177-hint", broken);
+    assert_eq!(code, Some(1), "passing a guarded part by name must FAIL: {out}");
+    assert!(
+        out.contains("guarded lambda") && out.contains("dropping the `requires`"),
+        "the human diagnostic must name BOTH repairs (guarded lambda, or make it total):\n{out}"
+    );
+
+    // JSON channel (`--format=json`): the hint is lifted into `fix`
+    let dir = tempdir().join("177-hint-json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("m.lll");
+    std::fs::write(&f, broken).unwrap();
+    let json = String::from_utf8_lossy(
+        &std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+            .args(["check", "--format=json", "--no-cache", f.to_str().unwrap()])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .into_owned();
+    assert!(
+        json.contains("\"fix\"") && json.contains("guarded lambda"),
+        "the JSON `fix` must carry the repair hint: {json}"
+    );
+
+    // and the repair the hint names must VERIFY — otherwise the hint is a wrong turn
+    let (rcode, rout, _) = check_lll_src("177-repaired", &repaired);
+    assert_eq!(
+        rcode,
+        Some(0),
+        "the guarded-lambda repair NAMED BY THE HINT must verify, or the hint is misleading:\n{rout}"
+    );
+}
+
+
+#[test]
 fn forall_false_for_some_index_is_rejected_req087_t1() {
     // REQ-LLL-087 T1 soundness — the fresh index is UNconstrained (never over-constrained to
     // a single witness): a `forall i in 0..len: get>0` true for SOME indices only

@@ -255,6 +255,15 @@ pub fn obligation_fix(descr: &str) -> Option<&'static str> {
              on its producer (or a `requires`/guard); a quantified `ensures forall …` alone \
              does NOT bound the length",
         ),
+        // Some obligation descriptions NAME the offending symbol, so they cannot be keyed
+        // exactly. Key those on a stable, unique fragment of the description instead.
+        _ if descr.contains("used as a total function value") => Some(
+            "a higher-order function applies its argument to EVERY element, so a part with a \
+             `requires` cannot be passed by name — wrap it in a guarded lambda whose guard \
+             discharges that precondition, e.g. `map(\\(x: Int) -> (if x >= 0 then f(x) else 0), xs)`; \
+             or make the part total by handling the excluded inputs in its body and dropping \
+             the `requires`",
+        ),
         _ => None,
     }
 }
