@@ -744,3 +744,34 @@ modification — le passif mesuré séparément par `maint_cost.py` (~456 tok pa
 effets se composent : ce tableau est donc un PLANCHER sur du code vivant.
 
 Reproduire : `export LLL_Z3="$(pwd)/vendor/z3/bin/z3" && python3 bench/llm_gen/differential/brick_macro.py`
+
+## ⚠ BIAIS D'INSTRUMENT MESURÉ (2026-08-31, REQ-LLL-232) — le « ~50 % green » de llmlang est en partie un artefact du harnais
+
+À relire avant de citer un green-rate llmlang de ce fichier. `xlang_gen._lll_module` enrobe
+SYSTÉMATIQUEMENT ce que le modèle émet dans `module Gen:`. Quand le modèle émet déjà un module
+complet — ce qu'il fait souvent, et ce que le corpus de fine-tune lui apprend à faire — on obtient
+`module Gen:` contenant `module Emod:`, donc une erreur de parse.
+
+Mesuré :
+
+```
+xlang_gen.lll_check(parts nus)      -> GREEN
+xlang_gen.lll_check(module complet) -> RED
+```
+
+Et le point qui tranche : **le MÊME module complet, écrit verbatim dans un fichier et passé à
+`lll check`, rend `✔ Emod: all parts verified`.** Le harnais compte donc rouge un programme que le
+compilateur PROUVE.
+
+**Portée, sans surclamer.** De combien le « llmlang vert 12–13/24 » est-il affecté : **NON MESURÉ**
+— il faudrait rejouer le banc en acceptant les deux formes pour le chiffrer. Le biais va dans un seul
+sens : il **sous-estime** llmlang. Donc aucune conclusion défavorable à llmlang tirée d'ici n'est
+retournée « dans le mauvais sens » — mais l'ampleur du frein ERGONOMIQUE est surestimée, et c'est
+précisément ce frein que le projet a désigné comme sa priorité d'ingénierie.
+
+**Correctif de référence existant** : `ft_smoke.check_forms` essaie déjà les DEUX formes et ne conclut
+à l'échec que si les deux ratent. Le porter dans `xlang_gen.lll_check` demande un cycle dédié, pas une
+retouche : la forme verbatim change le nom du module (`Emod` au lieu de `Gen`), donc il faut d'abord
+vérifier que l'aval (exécution contre l'oracle caché, `_lll_arg`, runners) ne dépend pas de `Gen` —
+sinon on échange une erreur de parse contre une erreur d'exécution silencieuse. Et les chiffres
+d'avant/après cesseront d'être comparables : à écrire ici le jour où c'est fait.
