@@ -697,3 +697,50 @@ l'`Array` (Vec CONTIGU, get/set O(1), cache-friendly) — `examples/image_kernel
 [0,255], pas de débordement, longueur préservée) ET (b) ~19× plus rapide que Python — sur Array
 contigu. La sûreté ET la vitesse, ensemble. L'opérateur avait raison de pousser : le 200× SimPy ne se
 transpose pas (l'image alloue) mais un ~19× solide, lui, se matérialise sur le bon substrat.
+
+## Test STDLIB-MACRO ($0, structurel + vérifié) — le gain n'exige PAS une brique sur mesure (REQ-LLL-231)
+
+Le test BRIQUE-MACRO plus haut a mesuré 0,48 sur une tâche à invariant — mais avec une brique écrite
+POUR la tâche (`total`, portant exactement l'`ensures result >= 0` dont le consommateur avait besoin).
+Il laissait donc une question ouverte, et elle était commerciale autant que technique : **faut-il une
+brique par tâche pour gagner, ou la bibliothèque standard générale suffit-elle ?** Si la réponse est
+« une brique par tâche », le gain ne se vend pas — il se re-gagne à chaque fois.
+
+Préalable livré la même session : `std/list.lll` et `std/str.lll` portent désormais 18 contrats
+prouvés et falsifiables (commit `7e9ae65`). Avant, `std/` comptait 29 clauses pour 21 modules —
+sur l'axe tokens, l'équivalent d'un `import` Python.
+
+TASK 2 ajoutée à `brick_macro.py` (même estimateur, même schéma à 3 bras, aucun fichier nouveau) :
+une paie applique un taux à chaque ligne brute, avec **deux** garanties — aucune ligne perdue ni
+inventée (`length(result) == length(gross)`, déchargée de `Std.List.map`), et aucun net négatif
+(de l'`ensures` de la fonction par ligne). Le bras llmlang compose sur `std.list`, sans rien écrire
+pour la tâche. Python ne peut prouver ni l'une ni l'autre : un dev diligent les échantillonne toutes
+les deux par une batterie.
+
+| tâche | bras | tok émis | porte | llmlang/py+lib |
+|---|---|---|---|---|
+| 1 — brique sur mesure, 1 garantie | llmlang + brique | 98 | prouvé | **1,18 (PERD)** |
+| | python + lib + tests | 83 | vert | |
+| | python + scratch + tests | 127 | vert | |
+| 2 — **stdlib livrée**, 2 garanties | llmlang + `std.list` | **77** | **prouvé** | **0,58 (GAGNE)** |
+| | python + lib + tests | 132 | vert | |
+| | python + scratch + tests | 148 | vert | |
+
+**Ce que TASK 2 établit seule, et c'était la question ouverte : le gain n'exige PAS une brique écrite
+pour la tâche.** 0,58 contre un Python qui a AUSSI sa bibliothèque — ~42 % de tokens en moins, la
+stdlib générale suffit. C'est ce qui rend l'argument vendable : l'actif est construit une fois.
+
+**⚠ Ce que le tableau NE dit PAS, et il faut le dire.** L'écart 1,18 → 0,58 ne se lit pas
+« stdlib > brique sur mesure » : les deux tâches diffèrent sur **deux axes à la fois** (brique-sur-
+mesure vs stdlib-livrée, ET une garantie vs deux). Isoler ce qu'une brique sur mesure ajouterait en
+plus demanderait la même tâche dans les deux formes. Non mesuré, non affirmé.
+
+**Et TASK 1 reste le rappel utile** : sur une tâche sans invariant à tester, llmlang **perd** (1,18).
+Le gain est concentré là où la batterie de tests est chère, pas partout — conclusion inchangée depuis
+le premier test brique-macro.
+
+**Le comptage est UNE écriture.** Il n'inclut pas la re-maintenance de la batterie à chaque
+modification — le passif mesuré séparément par `maint_cost.py` (~456 tok par modification). Les deux
+effets se composent : ce tableau est donc un PLANCHER sur du code vivant.
+
+Reproduire : `export LLL_Z3="$(pwd)/vendor/z3/bin/z3" && python3 bench/llm_gen/differential/brick_macro.py`
