@@ -48,12 +48,20 @@ ending in `:` and closes on dedent. Tabs are not indentation.
 | Decimal | `3.5`, `0.25` | an **exact rational**, reduced at parse time — never a float |
 | String | `"hello"` | desugars to `List[Int]` of Unicode scalar codepoints |
 | Interpolated string | `"n = {x}"` | `{expr}` splices; `{{` and `}}` are literal braces |
+| Character | `'a'`, `'\n'`, `','` | one `Int` codepoint; usable in patterns too |
 | Boolean | `true`, `false` | `Bool` |
 | List | `[1, 2, 3]`, `[]` | `List[T]` |
 | Hole | `?` | a typed hole — see §6.4 |
 
 A string is a `List[Int]`, so every verified list operation applies to text. `"abc"`
 and `[97, 98, 99]` are the same value.
+
+> **Escapes live in character literals, not in string literals.** `'\n'`, `'\t'`,
+> `'\r'`, `'\0'`, `'\\'`, `'\''` and `'\"'` are the supported escapes, and a
+> character literal also works in pattern position. A *string* literal has **no**
+> escapes at all: `"a\nb"` is the six characters `a \ n b`, and a `"` cannot appear
+> inside one. A multi-line text is therefore built as a list of lines, or joined
+> with `'\n'` — it is not written as one literal.
 
 ### 1.4 Identifiers and names
 
@@ -387,7 +395,7 @@ add_expr     = mul_expr , { ( "+" | "-" ) , mul_expr } ;
 mul_expr     = unary_expr , { ( "*" | "/" | "div" | "mod" ) , unary_expr } ;
 unary_expr   = "-" , unary_expr | postfix_expr ;
 postfix_expr = atom , { "." , ( int | ident ) } ;
-atom         = int | dec | string | "true" | "false" | "?" | "_"
+atom         = int | dec | string | char | "true" | "false" | "?" | "_"
              | ident | dotted_name
              | ident , "(" , [ expr , { "," , expr } ] , ")"
              | "[" , [ expr , { "," , expr } ] , "]"

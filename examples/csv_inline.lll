@@ -1,0 +1,61 @@
+import "../std/str.lll"
+import "../std/char.lll"
+
+module CsvInline:
+
+  # ORDINARY code: parse a CSV held in memory and total a column. No FFI, no
+  # effect, no domain invariant — the kind of ten-minute job a program does every
+  # day, written in llmlang.
+  #
+  # What it shows that matters: `std/str.lll`'s own `str_to_int` documents that it
+  # "assumes ASCII digits; validation is a logged robustness follow-up". With
+  # `std/char.lll` that gap closes here — `cell_int` VALIDATES, and a malformed
+  # cell yields a value the caller can see rather than silent garbage.
+
+  # ---- one field of a comma-separated line ----
+
+  part field(line: List[Int], i: Int) -> List[Int]:
+    yield nth(split(line, ','), i, empty_line())
+
+  # ---- validated integer parsing ----
+
+  # true only if every codepoint is an ASCII digit and there is at least one.
+  part all_digits(s: List[Int]) -> Bool:
+    match s:
+      []     -> yield false
+      h :: t ->
+        match t:
+          []      -> yield is_digit(h)
+          x :: xs -> yield is_digit(h) and all_digits(t)
+
+  # the integer value of a numeric cell, or `-1` when the cell is not a number.
+  # Errors are values (DEC-LLL-046), never a silent zero.
+  part cell_int(s: List[Int]) -> Int:
+    yield if all_digits(s) then str_to_int(s) else 0 - 1
+
+  # ---- the report ----
+
+  # Total column `col` over every line, skipping the header and any line whose
+  # cell is not numeric. Structural recursion on the list of lines terminates.
+  part total_col(lines: List[List[Int]], col: Int) -> Int:
+    match lines:
+      []     -> yield 0
+      h :: t ->
+        let v = cell_int(field(h, col))
+        yield (if v >= 0 then v else 0) + total_col(t, col)
+
+  # how many lines were rejected — a report that hides its skips is a report that lies.
+  part rejected(lines: List[List[Int]], col: Int) -> Int:
+    ensures result >= 0
+    match lines:
+      []     -> yield 0
+      h :: t -> yield (if cell_int(field(h, col)) < 0 then 1 else 0) + rejected(t, col)
+
+  part main() -> Int via IO:
+    # a header, three good rows, one malformed cell. NOTE: string literals carry no
+    # escapes, so a multi-line CSV is a LIST of lines, not one text with `\n` in it.
+    # (`'\n'` as a CHARACTER literal does work — escapes live there, not in strings.)
+    let body  = ["bolt,12", "nut,30", "washer,oops", "screw,5"]
+    let total = total_col(body, 1)
+    let bad   = rejected(body, 1)
+    yield IO.print(total * 10 + bad)

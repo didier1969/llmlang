@@ -252,6 +252,28 @@ identity model. [`examples/spec_tour.lll`](examples/spec_tour.lll) is that
 specification as one verified program — every construct it documents, in code that
 `lll check` accepts.
 
+## Ordinary programs
+
+llmlang is not only for code you must *prove*. These examples carry **no domain
+invariant and no `measure`** — they are the everyday jobs any language is asked to
+do, and they are here because a language that only demonstrates theorems looks like
+a theorem prover:
+
+| Example | What it does | Output |
+|---|---|---|
+| [`examples/wordfreq.lll`](examples/wordfreq.lll) | word frequency over a line of text: tokenise, lowercase, count, longest word | `325` |
+| [`examples/csv_inline.lll`](examples/csv_inline.lll) | total a CSV column, rejecting malformed cells instead of silently zeroing them | `471` |
+
+What the language still gives them for free, without a single contract being
+written for the purpose: termination is proved, every `match` is exhaustive or it
+does not compile, and `Int` is exact so no counter can wrap around.
+
+`std/char.lll` is the piece that makes text processing ordinary — `is_digit`,
+`is_alpha`, `is_space`, `to_lower`/`to_upper`, `digit_value`, each under a contract
+that says exactly what it does and does not claim (ASCII-scoped, and it says so).
+It closes a gap `std/str.lll` documented in its own source: `str_to_int` "assumes
+ASCII digits". With `char`, a caller can validate first.
+
 ## License
 
 Apache License 2.0 — see [`LICENSE`](LICENSE).

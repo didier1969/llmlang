@@ -1,0 +1,91 @@
+module Std.Char:
+
+  # Character classification and case conversion — the socket every text-processing
+  # program plugs into, and the one piece of the generalist standard-library floor
+  # that Grain, Gleam and Elm all have and llmlang did not.
+  #
+  # A character is its Unicode scalar codepoint (`Int`, DEC-LLL-030), so a string
+  # (`List[Int]`) maps over these directly. The predicates below are ASCII-scoped and
+  # SAY SO in their contracts: `is_alpha` is false for `é` (U+00E9), it does not
+  # pretend otherwise. Full Unicode categories need a table, which belongs behind the
+  # FFI frontier, not in a verified pure module.
+  #
+  # Every conversion carries the contract that makes it composable: `to_lower` is
+  # PROVED to leave a non-uppercase codepoint untouched and to land inside `a`..`z`,
+  # so a caller chaining it into a comparison discharges its own bounds from ours.
+
+  # ---- codepoint constants (named, so the algorithms read as intent, not as magic) ----
+
+  part cp_zero() -> Int:
+    ensures result == 48
+    yield 48
+
+  part cp_nine() -> Int:
+    ensures result == 57
+    yield 57
+
+  part cp_upper_a() -> Int:
+    ensures result == 65
+    yield 65
+
+  part cp_upper_z() -> Int:
+    ensures result == 90
+    yield 90
+
+  part cp_lower_a() -> Int:
+    ensures result == 97
+    yield 97
+
+  part cp_lower_z() -> Int:
+    ensures result == 122
+    yield 122
+
+  # ---- classification ----
+
+  part is_digit(c: Int) -> Bool:
+    ensures result == (48 <= c and c <= 57)
+    yield 48 <= c and c <= 57
+
+  part is_upper(c: Int) -> Bool:
+    ensures result == (65 <= c and c <= 90)
+    yield 65 <= c and c <= 90
+
+  part is_lower(c: Int) -> Bool:
+    ensures result == (97 <= c and c <= 122)
+    yield 97 <= c and c <= 122
+
+  part is_alpha(c: Int) -> Bool:
+    ensures result == ((65 <= c and c <= 90) or (97 <= c and c <= 122))
+    yield is_upper(c) or is_lower(c)
+
+  part is_alnum(c: Int) -> Bool:
+    ensures result == ((48 <= c and c <= 57) or (65 <= c and c <= 90) or (97 <= c and c <= 122))
+    yield is_digit(c) or is_alpha(c)
+
+  # space, tab, newline, carriage return, form feed, vertical tab
+  part is_space(c: Int) -> Bool:
+    ensures result == (c == 32 or (9 <= c and c <= 13))
+    yield c == 32 or (9 <= c and c <= 13)
+
+  # ---- case conversion ----
+
+  # An uppercase letter moves to lowercase; anything else is returned unchanged.
+  # Both facts are proved, so a caller may rely on either one alone.
+  part to_lower(c: Int) -> Int:
+    ensures (65 <= c and c <= 90) == (result == c + 32)
+    ensures (not (65 <= c and c <= 90)) == (result == c)
+    yield if 65 <= c and c <= 90 then c + 32 else c
+
+  part to_upper(c: Int) -> Int:
+    ensures (97 <= c and c <= 122) == (result == c - 32)
+    ensures (not (97 <= c and c <= 122)) == (result == c)
+    yield if 97 <= c and c <= 122 then c - 32 else c
+
+  # ---- digit value ----
+
+  # The numeric value of a digit codepoint; `-1` for anything else, so the caller must
+  # look at the result rather than trust the input (errors are values, DEC-LLL-046).
+  part digit_value(c: Int) -> Int:
+    ensures (48 <= c and c <= 57) == (0 <= result and result <= 9)
+    ensures (not (48 <= c and c <= 57)) == (result == 0 - 1)
+    yield if 48 <= c and c <= 57 then c - 48 else 0 - 1

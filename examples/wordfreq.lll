@@ -1,0 +1,57 @@
+import "../std/str.lll"
+import "../std/char.lll"
+
+module WordFreq:
+
+  # ORDINARY code, not a theorem. Word frequency over a line of text — the
+  # "hello world" of text processing, written the way anyone would write it.
+  #
+  # The point of this example is what it does NOT contain: no domain invariant,
+  # no business rule to prove, no `measure`. It is a normal program. What the
+  # language still gives it for free:
+  #   - termination is proved (structural recursion on the list of words);
+  #   - `Int` is exact, so no counter can wrap around;
+  #   - the `match` on every list is exhaustive or it does not compile;
+  #   - the few contracts below are the ones that were actually worth writing.
+
+  # ---- counting ----
+
+  part count_word(ws: List[List[Int]], w: List[Int]) -> Int:
+    ensures result >= 0
+    match ws:
+      []     -> yield 0
+      h :: t -> yield (if str_eq(h, w) then 1 else 0) + count_word(t, w)
+
+  # ---- longest word ----
+
+  part longest(ws: List[List[Int]], best: List[Int]) -> List[Int]:
+    match ws:
+      []     -> yield best
+      h :: t -> yield longest(t, if str_len(h) > str_len(best) then h else best)
+
+  # ---- normalisation: lowercase a whole word, one character at a time ----
+
+  part lower_word(w: List[Int]) -> List[Int]:
+    ensures length(result) == length(w)
+    yield [to_lower(c) for c in w]
+
+  part lower_all(ws: List[List[Int]]) -> List[List[Int]]:
+    ensures length(result) == length(ws)
+    yield [lower_word(w) for w in ws]
+
+  # ---- tokenising ----
+
+  # Split on spaces. `split` guarantees at least one field, so `words` never
+  # returns an empty list — a fact the caller gets from the contract, not from
+  # reading the body.
+  part words(text: List[Int]) -> List[List[Int]]:
+    ensures length(result) >= 1
+    yield split(text, 32)
+
+  part main() -> Int via IO:
+    let text    = "The quick brown fox jumps over the lazy dog the fox"
+    let ws      = lower_all(words(text))
+    let n_the   = count_word(ws, "the")
+    let n_fox   = count_word(ws, "fox")
+    let biggest = longest(ws, "")
+    yield IO.print(n_the * 100 + n_fox * 10 + str_len(biggest))
