@@ -224,10 +224,34 @@ cache marks mutual calls so dissolving a cycle re-verifies the survivors.
 
 ## v1 restrictions (documented, not hidden)
 
-Int/Bool/List[Int]; `measure` over Int params only (mutual recursion:
-Int-measure cross-decrease, no lexicographic tuples yet); no calls inside
-contracts; no higher-order functions yet; cross-file rename lands with
-workspace resolution (wave 4); an `Int` LITERAL must fit 64 bits (values are
-unbounded — a big constant is COMPUTED, not typed out); no proof hints yet (a
-failed obligation means rewrite, not annotate). See `bench/llm_gen/` for the LLM
-generation-success harness (CPT-LLL-011).
+- **Contracts admit a fragment, not the language.** `Int`, `Bool`, `List`, `Array`,
+  user ADTs and records, arithmetic, comparison, `length(...)`, bounded
+  `forall`/`exists`, and `spec` predicates — but **not** arbitrary user calls
+  (`DEC-LLL-017`). A `spec` is the escape hatch: a named pure predicate, inlined
+  before verification.
+- **The fragment is decidable except where list `length` appears**, which lowers to
+  an axiomatized abstract `len`. Those scripts are semi-decidable but **fail-closed**:
+  an unprovable goal returns `unknown` and is *rejected*, never accepted.
+- **An `example` is discharged from the contract, not the body** — a part with no
+  `ensures` cannot entail its own example. See [`docs/SPEC.md`](docs/SPEC.md) §3.1.
+- **No float type.** `Rational` is exact; `Float` is gated on a real
+  compute-intensive use case (`DEC-LLL-051`).
+- **An `Int` literal must fit 64 bits** — values are unbounded, so a big constant is
+  *computed*, not typed out.
+- **No proof hints.** A failed obligation means rewrite, not annotate.
+- **HTTP is client-only, plain `http://`** — no TLS, status codes or headers yet.
+
+See [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for the claim→proof map and the
+honest gated boundary, and `bench/llm_gen/` for the LLM generation-success harness.
+
+## Specification
+
+[`docs/SPEC.md`](docs/SPEC.md) is the normative language reference: lexical
+structure, EBNF grammar, operator precedence, the verification fragment, and the
+identity model. [`examples/spec_tour.lll`](examples/spec_tour.lll) is that
+specification as one verified program — every construct it documents, in code that
+`lll check` accepts.
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE).

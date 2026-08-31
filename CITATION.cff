@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+title: "llmlang (LLL)"
+message: "If you use llmlang in your work, please cite it as below."
+type: software
+authors:
+  - family-names: Stadelmann
+    given-names: Didier
+repository-code: "https://github.com/didier1969/llmlang"
+abstract: >-
+  llmlang is a purely functional, statically verified, compiled programming
+  language designed for LLM coding agents rather than for human ergonomics
+  first. Contracts (requires/ensures) and termination are discharged at compile
+  time by the Z3 SMT solver: an undischarged proof obligation is a compile error
+  carrying a counter-model, never a runtime check. Identity is the Blake3 hash of
+  the alpha-normalized AST, so renaming is mechanical and hash-preserving.
+  Integers are arbitrary-precision with a checked i64 fast path, and the compiler
+  emits Rust.
+keywords:
+  - programming-language
+  - formal-verification
+  - smt-solver
+  - z3
+  - design-by-contract
+  - functional-programming
+  - compiler
+  - llm
+  - code-generation
+license: Apache-2.0

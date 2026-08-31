@@ -1,0 +1,89 @@
+module SpecTour:
+
+  # Every construct this file uses is specified in docs/SPEC.md. If `lll check`
+  # accepts this file, the specification is accurate on those points.
+
+  type Color = Red | Green | Blue
+  type Point = {x: Int, y: Int}
+  type Tree  = Leaf | Node(Tree, Int, Tree)
+
+  spec in_unit(p: Int) -> Bool:
+    yield 0 <= p and p <= 100
+
+  # contract + termination measure + chained comparison in a contract
+  part clamp(v: Int, lo: Int, hi: Int) -> Int:
+    requires lo <= hi
+    ensures  lo <= result and result <= hi
+    yield if v < lo then lo else if v > hi then hi else v
+
+  # a `spec` predicate used as a precondition
+  part scale_pct(v: Int, p: Int) -> Int:
+    requires v >= 0, in_unit(p)
+    ensures  result >= 0
+    yield v * p div 100
+
+  # structural recursion on a list: no `measure` needed
+  part total(xs: List[Int]) -> Int:
+    match xs:
+      []     -> yield 0
+      h :: t -> yield h + total(t)
+
+  # `measure` + guard arm
+  part count_down(n: Int) -> Int:
+    requires n >= 0
+    ensures  result == 0
+    measure n
+    match n:
+      0 -> yield 0
+      _ -> yield count_down(n - 1)
+
+  # exhaustive match over an ADT
+  part code_of(c: Color) -> Int:
+    match c:
+      Red   -> yield 0
+      Green -> yield 1
+      Blue  -> yield 2
+
+  # recursive ADT
+  part depth(t: Tree) -> Int:
+    ensures result >= 0
+    match t:
+      Leaf          -> yield 0
+      Node(l, v, r) -> yield 1 + depth(l)
+
+  # record construction and field projection
+  part shift(p: Point, d: Int) -> Int:
+    yield p.x + d
+
+  # comprehensions: map, filter-as-proof-hypothesis, numeric range
+  part squares(n: Int) -> List[Int]:
+    requires n >= 0
+    yield [i * i for i in 0 .. n]
+
+  part safe_divide_all(xs: List[Int], num: Int) -> List[Int]:
+    yield [num div x for x in xs if x != 0]
+
+  # exact rational division and a decimal literal
+  # NOTE: an `example` is discharged from the CONTRACT, not from the body — the call
+  # goes through the same firewall as any other (prove `requires`, havoc the result,
+  # assume `ensures`). A part with no `ensures` cannot entail its own example.
+  part half_of(v: Rational) -> Rational:
+    ensures result + result == v
+    example half_of(1.0) == 0.5
+    yield v / 2.0
+
+  part quarter() -> Rational:
+    yield 0.25
+
+  # strings are lists of codepoints; interpolation splices an expression
+  part greeting(n: Int) -> List[Int]:
+    yield "count = {n}"
+
+  # effects: `via` declares the row
+  part main() -> Int via IO:
+    let p     = Point{x: 3, y: 4}
+    let bound = clamp(150, 0, 100)
+    let sum   = total([1, 2, 3])
+    let sq    = squares(4)
+    let msg   = greeting(sum)
+    yield IO.print(bound + sum + shift(p, 0) + code_of(Green) + depth(Leaf))
