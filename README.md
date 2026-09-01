@@ -111,7 +111,49 @@ lll rename <f.lll> <old> <new>  structural rename (hash-preserving, validated)
 lll rationale add|show <f.lll> <part> [text…]
 lll audit  <f.lll>              read-only audit REPL
 lll mcp    <f.lll>              read-only MCP server (stdio) over the audit surface
+
+lll suggest <f.lll> [--part p] [--max k]   Z3-checked completions for a `?` hole
+lll context <f.lll> <part>      minimal edit context: the part + its deps' CONTRACTS
+lll extract <f.lll> <part> <let> <new>     pull a `let` RHS into its own part
+lll inline  <f.lll> <part>      inline a single-`yield` pure part and remove it
+lll dedup   <f.lll> [--merge]   report (or collapse) α-equivalent duplicate definitions
+lll move    <f.lll> <part> <dest>          relocate a definition, identity preserved
+lll fetch / lll lock            materialize git dependencies · pin them in lll.lock
+lll evidence / publish / verify-attest     proof evidence and durable attestations
+lll export-ist <f.lll>          emit Axon ExtractionResult JSON (symbols + relations)
+lll ffi-import <f.rs> <Eff> <p> derive an `effect` block from Rust signatures
 ```
+
+### Two commands built for an agent, not for a human
+
+**`lll context`** answers the question an editing agent actually has — *what is the
+least I must read to change this safely?* It returns the part's source plus the
+**contracts** (never the bodies) of what it calls, because a contract is what a
+caller may rely on:
+
+```
+$ lll context examples/wordfreq.lll count_word
+  part count_word(ws: List[List[Int]], w: List[Int]) -> Int: …
+## external dependencies (contract in their own module)
+- str_eq
+── edit context: 223 bytes · whole file: 2116 bytes · 89% smaller ──
+```
+
+**`lll suggest`** fills a `?` hole with completions **Z3 has already checked against
+the contract**, and says plainly what it is not:
+
+```
+$ lll suggest hole.lll --max 3
+◇ hole in part `clamp_hi` (line 6): expected type Int
+    suggest: hi
+    suggest: 0
+    suggest: hi + 0
+note: a suggestion is NOT a proof — write it into the text, then `check`
+```
+
+That last line is the design: the text is the source of truth (`DEC-LLL-020`), so a
+suggestion is a *candidate*, never an authority. The compiler still has to be
+convinced.
 
 `lll mcp` speaks JSON-RPC/MCP on stdio (tools: `lll_defs`, `lll_part`,
 `lll_check`) — plug it into Claude Code or any MCP client:
