@@ -194,3 +194,24 @@ fn a_strong_contract_still_discharges_its_example_by_itself() {
     let (code, _out, err) = run_lll_cmd("ex_b_contract", src, &["check"]);
     assert_eq!(code, Some(0), "a part with a pinning `ensures` must still verify:\n{err}");
 }
+
+/// REQ-LLL-234 option B, tranche 2 — FALSIFICATION on a `match` body.
+///
+/// Slice 1 refused every `match` body by falling back to the contract, so a wrong example was
+/// rejected for the wrong reason: not because it was false, but because nothing was tried.
+/// Once the body IS turned into a term, that accident disappears and the rejection has to come
+/// from the term being false. This test is what tells the two apart.
+#[test]
+fn a_wrong_example_on_a_match_body_is_rejected_on_its_merits() {
+    let src = "module M:\n\n  part sgn(n: Int) -> Int:\n    example sgn(5) == 99\n    match n > 0:\n      true  -> yield 1\n      false -> yield 0\n";
+    let (code, out, err) = run_lll_cmd("ex_m_false", src, &["check"]);
+    assert_ne!(code, Some(0), "`sgn(5) == 99` is false:\nstdout={out}\nstderr={err}");
+}
+
+/// The capability slice 2 adds: a correct example on a `match` body, with no contract.
+#[test]
+fn a_correct_example_verifies_from_a_match_body() {
+    let src = "module M:\n\n  part sgn(n: Int) -> Int:\n    example sgn(5) == 1\n    example sgn(0 - 3) == 0\n    match n > 0:\n      true  -> yield 1\n      false -> yield 0\n";
+    let (code, out, err) = run_lll_cmd("ex_m_true", src, &["check"]);
+    assert_eq!(code, Some(0), "both examples are true of the body:\nstdout={out}\nstderr={err}");
+}

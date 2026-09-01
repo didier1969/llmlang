@@ -951,10 +951,75 @@ fn body_as_term(
                 }
                 out = Some(em.tr(e, &env, None).ok()?);
             }
+            Stmt::Match(scrut, arms) => {
+                if out.is_some() || arms.is_empty() {
+                    return None;
+                }
+                out = Some(match_as_term(em, scrut, arms, &env)?);
+            }
             _ => return None,
         }
     }
     out
+}
+
+/// A `match` as one nested `ite`, for the patterns that need no destructuring.
+///
+/// Handled: `true`/`false`, integer literals, `_`, and a binder. Refused: constructor, list and
+/// tuple patterns — those bind FIELDS, which means emitting the datatype's testers and
+/// accessors, and the reliable form of that (Z3 4.16's recognizer for a parametric datatype is
+/// not) lives in `walk_body` entangled with list element sorts and tuple component sorts.
+/// Pulling it out is its own slice; refusing here is what keeps this one honest.
+///
+/// The LAST arm becomes the `else`. That is sound because the checker already proved the match
+/// exhaustive: if no earlier condition holds, the last arm is the one that matches. It is also
+/// why a refused pattern must refuse the whole match rather than skip an arm — a skipped arm
+/// would silently widen the `else` and make the term claim something the body does not.
+fn match_as_term(
+    em: &mut Emit,
+    scrut: &Expr,
+    arms: &[Arm],
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    if arms.iter().any(|a| a.guard.is_some()) {
+        return None; // a guarded arm is a condition this slice does not read
+    }
+    let s_t = em.tr(scrut, env, None).ok()?;
+
+    // condition per arm, and the environment its body sees; `None` = matches unconditionally.
+    let mut cases: Vec<(Option<String>, String)> = Vec::new();
+    for arm in arms {
+        let (cond, benv) = match &arm.pattern {
+            Pattern::BoolLit(b) => (Some(format!("(= {s_t} {b})")), env.clone()),
+            // SMT-LIB has no negative literal: `-3` is the application `(- 3)`.
+            Pattern::IntLit(n) => {
+                let lit = if *n < 0 { format!("(- {})", n.unsigned_abs()) } else { n.to_string() };
+                (Some(format!("(= {s_t} {lit})")), env.clone())
+            }
+            Pattern::Wildcard => (None, env.clone()),
+            Pattern::Var(name) => {
+                let mut e2 = env.clone();
+                e2.insert(name.clone(), s_t.clone());
+                (None, e2)
+            }
+            _ => return None,
+        };
+        cases.push((cond, body_as_term(em, &arm.body, benv)?));
+    }
+
+    // The last arm is the fallback. Everything before it must carry a condition, or it would
+    // shadow the arms after it — which the checker allows (a binder arm can sit anywhere) but
+    // this construction cannot express.
+    let (last_cond, last_val) = cases.pop()?;
+    if cases.iter().any(|(c, _)| c.is_none()) {
+        return None;
+    }
+    let _ = last_cond;
+    let mut term = last_val;
+    for (cond, val) in cases.into_iter().rev() {
+        term = format!("(ite {} {val} {term})", cond?);
+    }
+    Some(term)
 }
 
 pub fn gen_part_example_obligations(
