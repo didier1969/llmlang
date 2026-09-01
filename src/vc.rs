@@ -2782,7 +2782,21 @@ impl<'a> Emit<'a> {
                 // is itself a typed `nil`; otherwise the bare `nil`, whose sort Z3 infers
                 // structurally from the `cons` head — the pre-existing behaviour, unchanged.
                 let mut t = match expected {
-                    Some(t @ Ty::List(_)) => {
+                    // A NON-EMPTY literal takes its element sort from its own items whenever the
+                    // expected type is not ground. That expected type comes from the callee's
+                    // uninstantiated signature — `append(xs: List[a], ys: List[a])` makes it
+                    // `List[a]` — and annotating the terminal `nil` with `(Lst Tv_a)` under a
+                    // `cons` whose head is an `Int` gives Z3 two contradictory demands for the
+                    // same `T`. It answers `ambiguous constant reference … cons` and rejects the
+                    // WHOLE script, so one such literal takes every obligation with it.
+                    //
+                    // An EMPTY literal keeps the expected annotation even when it is not ground:
+                    // there is no item to infer from, and a bare `nil` is worse — it leaves the
+                    // sort unconstrained and the obligation unprovable rather than merely
+                    // ill-sorted. That is why this guard is on emptiness and not on groundness
+                    // alone (dropping the annotation outright turned 1 red example into 10,
+                    // `std/list.lll` among them).
+                    Some(t @ Ty::List(_)) if items.is_empty() || is_ground_ty(t) => {
                         let term = format!("(as nil {})", smt_ty(t));
                         self.sorts.insert(term.clone(), smt_ty(t));
                         term
@@ -4188,6 +4202,25 @@ fn pattern_cond(
 // element sort — `(Lst Int)`, `(Lst Bool)`, `(Lst Tv_a)`. Constructors nil/cons
 // and selectors head/tail are shared across every instantiation, so list terms
 // translate identically regardless of element type (DEC-LLL-028).
+/// Does this type mention no type VARIABLE — i.e. is it fully instantiated?
+///
+/// The distinction matters wherever a type is turned into an SMT sort ANNOTATION. A
+/// signature like `append(xs: List[a], ys: List[a])` gives an argument the expected type
+/// `List[a]`, and `a` is the callee's own variable, not the caller's instantiation. Writing
+/// it into `(as nil (Lst Tv_a))` under a `cons` whose head is an `Int` hands Z3 two
+/// contradictory demands for the same `T`, and it answers `ambiguous constant reference …
+/// cons` — rejecting every obligation in the script, not just that one.
+fn is_ground_ty(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => false,
+        Ty::Int | Ty::Bool | Ty::Big | Ty::Rational | Ty::Never | Ty::Unit => true,
+        Ty::List(e) | Ty::Array(e) | Ty::Set(e) | Ty::Seq(e) => is_ground_ty(e),
+        Ty::Map(k, v) => is_ground_ty(k) && is_ground_ty(v),
+        Ty::Tuple(ts) | Ty::User(_, ts) => ts.iter().all(is_ground_ty),
+        Ty::Fun(ps, r) => ps.iter().all(is_ground_ty) && is_ground_ty(r),
+    }
+}
+
 const LIST_DECL: &str =
     "(declare-datatypes ((Lst 1)) ((par (T) ((nil) (cons (head T) (tail (Lst T)))))))";
 
@@ -4719,6 +4752,21 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
 }
 
 pub(crate) fn run_z3(z3: &Path, script: &str) -> Result<String, String> {
+    // `LLL_DUMP_SMT=<dir>` writes every script handed to the solver, one file per call.
+    //
+    // The oracle is an external process, so when it answers with a complaint about ITS
+    // input — a re-declaration, an ambiguous symbol, a sort mismatch — the only way to
+    // read that complaint is to hold the input. Without this, a solver-level error is
+    // diagnosed by guessing at what was probably emitted.
+    if let Some(dir) = std::env::var("LLL_DUMP_SMT").ok().filter(|d| !d.trim().is_empty()) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            std::path::Path::new(&dir).join(format!("z3-{}-{n:04}.smt2", std::process::id())),
+            script,
+        );
+    }
     let mut child = Command::new(z3)
         .arg("-in")
         .stdin(Stdio::piped())

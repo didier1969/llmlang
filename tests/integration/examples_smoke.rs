@@ -178,3 +178,56 @@ fn every_self_contained_example_builds_and_runs_without_crashing() {
         failures.join("\n")
     );
 }
+
+/// REQ-LLL-237 — EVERY `.lll` under `examples/` and `std/` must pass `lll check`.
+///
+/// The build+run tests above walk a CURATED list, and a curated list only covers what someone
+/// remembered to add to it. `examples/std_demo.lll` failed to verify for an unknown length of
+/// time behind a green gate for exactly that reason: it was never on the list. This test asks
+/// the filesystem instead, so an example added tomorrow is covered the day it lands.
+///
+/// It only CHECKS — no codegen, no rustc — so it stays cheap enough to run on every gate, and
+/// it needs no environment: verification is static even for the modules that talk to a
+/// database at runtime.
+#[test]
+fn every_example_and_std_module_passes_lll_check() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let bin = env!("CARGO_BIN_EXE_lll");
+    let z3: Vec<(String, String)> =
+        std::env::var("LLL_Z3").ok().map(|v| ("LLL_Z3".to_string(), v)).into_iter().collect();
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in ["examples", "examples/lib", "std"] {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "lll") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    assert!(files.len() > 50, "the sweep found only {} files — the walk is broken, not the corpus", files.len());
+
+    let mut failures = Vec::new();
+    for f in &files {
+        let out = std::process::Command::new(bin)
+            .args(["check", f.to_str().unwrap()])
+            .current_dir(&root)
+            .envs(z3.iter().cloned())
+            .output()
+            .expect("spawn lll check");
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            failures.push(format!("  ✗ {}: {last}", f.strip_prefix(&root).unwrap_or(f).display()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} modules do not verify:\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n")
+    );
+}
