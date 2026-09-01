@@ -572,7 +572,13 @@ fn discharge_memoised(
 }
 
 pub fn find_z3() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("LLL_Z3") {
+    // An EMPTY `LLL_Z3` means "unset", not "the empty path". A shell that exports
+    // `LLL_Z3=`, or a caller forwarding an ABSENT variable through `unwrap_or_default`,
+    // otherwise defeats discovery outright: `Command::new("")` fails with `failed to
+    // start z3: No such file or directory` — an error naming no remedy — while the
+    // vendored binary sits right there. Falling through reaches the message that does
+    // name one.
+    if let Some(p) = std::env::var("LLL_Z3").ok().filter(|p| !p.trim().is_empty()) {
         return Ok(PathBuf::from(p));
     }
     // vendored next to the project root (cwd) or next to the executable

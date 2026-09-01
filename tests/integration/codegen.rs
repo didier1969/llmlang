@@ -1919,14 +1919,19 @@ fn export_ist_attributes_imported_symbols_to_their_defining_file_req217() {
 // yields verdict "failed"; the proof_hash is stable across runs (DEC-LLL-020).
 #[test]
 fn evidence_emits_proof_tuple_for_axon_req208() {
-    let z3 = std::env::var("LLL_Z3").unwrap_or_default();
+    // Forward `LLL_Z3` ONLY when it is actually set. Forwarding an ABSENT variable as an
+    // EMPTY one is not neutral: the child reads `""` as a path and dies with `failed to
+    // start z3`, never reaching the vendored binary — a red that appears only on machines
+    // where the variable happens to be unset.
+    let z3: Vec<(String, String)> =
+        std::env::var("LLL_Z3").ok().map(|v| ("LLL_Z3".to_string(), v)).into_iter().collect();
     let run = |src: &str, name: &str| -> serde_json::Value {
         let dir = tempdir();
         let path = dir.join(name);
         std::fs::write(&path, src).unwrap();
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
             .args(["evidence", path.to_str().unwrap()])
-            .env("LLL_Z3", &z3)
+            .envs(z3.iter().cloned())
             // isolate the `.lll-cache` in this test's own tempdir so concurrent tests never
             // race on a shared `proofs.json` (the path arg is absolute, so cwd only steers cache).
             .current_dir(&dir)

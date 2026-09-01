@@ -44,12 +44,17 @@ fn examples_dir() -> PathBuf {
 /// non-zero exit (crash / overflow / panic in generated code).
 fn build_and_run_example(name: &str) -> Result<(), String> {
     let bin = env!("CARGO_BIN_EXE_lll");
-    let z3 = std::env::var("LLL_Z3").unwrap_or_default();
+    // Forward `LLL_Z3` ONLY when it is actually set. Forwarding an ABSENT variable as an
+    // EMPTY one is not neutral: the child reads `""` as a path and dies with `failed to
+    // start z3`, never reaching the vendored binary — a red that appears only on machines
+    // where the variable happens to be unset.
+    let z3: Vec<(String, String)> =
+        std::env::var("LLL_Z3").ok().map(|v| ("LLL_Z3".to_string(), v)).into_iter().collect();
     let dir = examples_dir();
     let out = std::process::Command::new(bin)
         .args(["run", dir.join(name).to_str().unwrap()])
         .current_dir(&dir)
-        .env("LLL_Z3", &z3)
+        .envs(z3.iter().cloned())
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn lll run");
@@ -121,7 +126,12 @@ fn flagship_examples_build_and_run() {
 #[ignore = "slow (rustc -O3 per example); run with `cargo test -- --ignored` for a full corpus sweep"]
 fn every_self_contained_example_builds_and_runs_without_crashing() {
     let bin = env!("CARGO_BIN_EXE_lll");
-    let z3 = std::env::var("LLL_Z3").unwrap_or_default();
+    // Forward `LLL_Z3` ONLY when it is actually set. Forwarding an ABSENT variable as an
+    // EMPTY one is not neutral: the child reads `""` as a path and dies with `failed to
+    // start z3`, never reaching the vendored binary — a red that appears only on machines
+    // where the variable happens to be unset.
+    let z3: Vec<(String, String)> =
+        std::env::var("LLL_Z3").ok().map(|v| ("LLL_Z3".to_string(), v)).into_iter().collect();
     let dir = examples_dir();
     let mut ran = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -146,7 +156,7 @@ fn every_self_contained_example_builds_and_runs_without_crashing() {
         let out = std::process::Command::new(bin)
             .args(["run", path.to_str().unwrap()])
             .current_dir(&dir)
-            .env("LLL_Z3", &z3)
+            .envs(z3.iter().cloned())
             .stdin(std::process::Stdio::null())
             .output()
             .expect("spawn lll run");

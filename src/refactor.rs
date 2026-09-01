@@ -23,11 +23,9 @@ use std::collections::HashMap;
 /// included here and filtered against the local scope by the caller.
 fn free_vars(e: &Expr, bound: &mut Vec<String>, out: &mut Vec<String>) {
     match e {
-        Expr::Var(n) => {
-            if !bound.contains(n) && !out.contains(n) {
-                out.push(n.clone());
-            }
-        }
+        // Guard rather than a nested `if`: the fall-through arm below is `_ => {}`, so a
+        // `Var` that fails the guard does exactly nothing either way (clippy::collapsible_match).
+        Expr::Var(n) if !bound.contains(n) && !out.contains(n) => out.push(n.clone()),
         Expr::Lambda(params, body) => {
             let k = bound.len();
             for (p, _) in params {

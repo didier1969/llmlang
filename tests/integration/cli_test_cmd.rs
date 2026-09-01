@@ -50,7 +50,12 @@ fn lll_new_scaffolds_a_project_whose_printed_next_steps_all_work() {
     let root = tempdir().join("scaffold");
     let _ = std::fs::remove_dir_all(&root);
     let bin = env!("CARGO_BIN_EXE_lll");
-    let z3 = std::env::var("LLL_Z3").unwrap_or_default();
+    // Forward `LLL_Z3` ONLY when it is actually set. Forwarding an ABSENT variable as an
+    // EMPTY one is not neutral: the child reads `""` as a path and dies with `failed to
+    // start z3`, never reaching the vendored binary — a red that appears only on machines
+    // where the variable happens to be unset.
+    let z3: Vec<(String, String)> =
+        std::env::var("LLL_Z3").ok().map(|v| ("LLL_Z3".to_string(), v)).into_iter().collect();
 
     let out = std::process::Command::new(bin)
         .args(["new", root.to_str().unwrap()])
@@ -66,7 +71,7 @@ fn lll_new_scaffolds_a_project_whose_printed_next_steps_all_work() {
         let st = std::process::Command::new(bin)
             .args([cmd, entry.to_str().unwrap()])
             .current_dir(&root)
-            .env("LLL_Z3", &z3)
+            .envs(z3.iter().cloned())
             .output()
             .unwrap();
         assert!(
@@ -110,4 +115,30 @@ fn lll_test_refuses_a_module_that_does_not_verify() {
         err.contains("verification") || err.contains("refus"),
         "it must say the PROOF failed, not that a test failed, got: {err}"
     );
+}
+
+/// NON-RÉGRESSION (REQ-LLL-236). Une variable `LLL_Z3` VIDE doit valoir « absente », jamais
+/// « le chemin vide ». Le défaut était silencieux et asymétrique : `find_z3` prenait `""` pour
+/// un chemin, `Command::new("")` mourait en `failed to start z3: No such file or directory`,
+/// et la découverte du binaire vendorisé n'était JAMAIS atteinte — alors qu'elle était juste
+/// en dessous. Le message obtenu ne nommait aucun remède ; celui qui en nomme un était
+/// inaccessible. Un shell qui exporte `LLL_Z3=` suffisait à casser la première minute.
+#[test]
+fn an_empty_lll_z3_means_unset_and_never_defeats_z3_discovery() {
+    let dir = tempdir();
+    let path = dir.join("empty_z3.lll");
+    std::fs::write(&path, "module M:\n\n  part inc(n: Int) -> Int:\n    requires n >= 0\n    ensures result > n\n    yield n + 1\n").unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lll"))
+        .args(["check", path.to_str().unwrap(), "--no-cache"])
+        .env("LLL_Z3", "") // exactement ce qu'un `unwrap_or_default()` sur une variable absente fabrique
+        .output()
+        .expect("spawn lll check");
+
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("failed to start z3"),
+        "une `LLL_Z3` vide a défait la découverte de z3 au lieu d'être ignorée:\n{err}"
+    );
+    assert!(out.status.success(), "check must pass with an empty LLL_Z3:\n{err}");
 }

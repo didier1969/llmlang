@@ -258,7 +258,8 @@ mod lll_solver_runtime {
     // to cwd / the executable, then PATH. The oracle is an EFFECT BOUNDARY, so this reaches
     // outside the verified core by design (the result is re-checked, DEC-LLL-017).
     fn z3_path() -> String {
-        if let Ok(p) = std::env::var("LLL_Z3") {
+        // Empty means unset — the mirror of `vc::find_z3`; see the note there.
+        if let Some(p) = std::env::var("LLL_Z3").ok().filter(|p| !p.trim().is_empty()) {
             return p;
         }
         for base in [
