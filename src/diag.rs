@@ -216,7 +216,7 @@ impl Diagnostic {
         // REQ-LLL-098 (boucle mesure→produit, friction bench t16) : hint de réparation
         // indexé par KIND d'obligation — surgit UNIQUEMENT ici, à l'échec. Additif au
         // contre-modèle, jamais un substitut.
-        if let Some(hint) = obligation_fix(&f.descr) {
+        if let Some(hint) = obligation_fix(&f.descr, &f.status) {
             fix.push_str(" · ");
             fix.push_str(hint);
         }
@@ -245,7 +245,24 @@ impl Diagnostic {
 /// `unknown_var_msg` (types.rs) but for a FAILED proof obligation, learned from the
 /// generation bench (CPT-LLL-011). One arm per obligation `descr` whose failure has a
 /// common, mechanical cause an LLM (or human) can act on. Extensible without new plumbing.
-pub fn obligation_fix(descr: &str) -> Option<&'static str> {
+pub fn obligation_fix(descr: &str, status: &str) -> Option<&'static str> {
+    // A counter-model exists ONLY for `sat`. Every hint below reads the failure as "these
+    // inputs break it" — which is not what `unknown` or `timeout` mean. There the solver did
+    // not DECIDE, so nothing says the code is wrong, and a repair aimed at a refutation sends
+    // the reader to change code that is fine.
+    //
+    // Measured case (REQ-LLL-234): an `example` on a body using a list comprehension comes back
+    // `unknown`, and got the advice "your contract is too weak" — which would have had the
+    // reader add an `ensures` that could not help either.
+    if status != "sat" {
+        return Some(
+            "the solver did not DECIDE this — `unknown` is neither a proof nor a refutation, so \
+             nothing here says the code is wrong. It happens when the obligation must reason \
+             about a construct whose encoding is only semi-decidable: a list comprehension, a \
+             quantifier, an abstract `length`. Reduce what it has to reason about, or state the \
+             fact as an `ensures` and discharge it where it is simpler",
+        );
+    }
     match descr {
         // bench t16 (REQ-LLL-097): a quantified `ensures forall …` over an Array is true
         // vacuously for an empty array, so it does NOT bound the length — indexing the
@@ -552,9 +569,9 @@ mod example_obligation_advice_tests {
     /// That is the omission this advice closes.
     #[test]
     fn a_failing_example_names_the_contract_and_not_the_inputs() {
-        let none = obligation_fix("example #1 holds for `inc` (no `ensures`)")
+        let none = obligation_fix("example #1 holds for `inc` (no `ensures`)", "sat")
             .expect("a part with no `ensures` must get advice");
-        let weak = obligation_fix("example #1 holds for `inc`")
+        let weak = obligation_fix("example #1 holds for `inc`", "sat")
             .expect("a part with a weak `ensures` must get advice");
 
         assert_ne!(none, weak, "the two shapes need different repairs: one writes an `ensures`, the other tightens it");
@@ -571,5 +588,40 @@ mod example_obligation_advice_tests {
         }
         assert!(none.contains("add an `ensures`"), "with no contract the repair is to WRITE one: {none}");
         assert!(weak.contains("strengthen"), "with a weak contract the repair is to TIGHTEN it: {weak}");
+    }
+}
+
+#[cfg(test)]
+mod undecided_obligation_tests {
+    use super::obligation_fix;
+
+    /// REQ-LLL-234 — `unknown` is not `sat`, and the repair differs completely.
+    ///
+    /// Every descr-keyed hint reads a failure as "these inputs break it". That reading is only
+    /// valid when the solver produced a counter-model. On `unknown` it did not decide at all,
+    /// and telling the reader their contract is too weak points at something that would not
+    /// have helped — measured on an `example` over a list comprehension.
+    #[test]
+    fn an_undecided_verdict_is_not_reported_as_a_refutation() {
+        let sat = obligation_fix("example #1 holds for `f` (no `ensures`)", "sat")
+            .expect("a refuted example still gets its own advice");
+        let unknown = obligation_fix("example #1 holds for `f` (no `ensures`)", "unknown")
+            .expect("an undecided obligation must still be explained");
+
+        assert_ne!(sat, unknown, "a refutation and a non-decision are different situations");
+        assert!(
+            unknown.contains("did not DECIDE"),
+            "the reader must be told the solver gave no verdict: {unknown}"
+        );
+        assert!(
+            unknown.contains("nothing here says the code is wrong"),
+            "an undecided obligation must not read as an accusation: {unknown}"
+        );
+        assert_eq!(
+            obligation_fix("array index in bounds", "timeout"),
+            Some(unknown),
+            "the rule is on the VERDICT, not on the obligation kind — a timeout is no more a \
+             refutation than an unknown"
+        );
     }
 }
