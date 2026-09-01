@@ -142,3 +142,55 @@ fn an_empty_lll_z3_means_unset_and_never_defeats_z3_discovery() {
     );
     assert!(out.status.success(), "check must pass with an empty LLL_Z3:\n{err}");
 }
+
+// ===================================================================
+// REQ-LLL-234 option B — an `example` may be discharged from the BODY when the contract
+// does not entail it.
+//
+// Before B, `example` was proved only from the contract: the call havocs the result and
+// assumes the `ensures`, so a part with no `ensures` could not prove its own example however
+// obviously correct the body was. That made `example` unusable on ordinary code, which
+// usually has no post-condition worth stating — and it pushed every demonstration back
+// towards "prove everything", which is what the generalist orientation exists to avoid.
+// ===================================================================
+
+/// THE FALSIFICATION TEST, and the one that matters most here.
+///
+/// Discharging from the body means building a term for that body. A bug in that construction
+/// makes the obligation trivially TRUE, and every wrong example would then compile — the exact
+/// shape of a false proof. This test must be green both before and after B: it is what proves
+/// the new path can still say no.
+#[test]
+fn an_example_that_is_simply_wrong_is_still_rejected_without_a_contract() {
+    let src = "module M:\n\n  part inc(n: Int) -> Int:\n    example inc(2) == 99\n    yield n + 1\n";
+    let (code, out, err) = run_lll_cmd("ex_b_false", src, &["check"]);
+    assert_ne!(
+        code,
+        Some(0),
+        "`inc(2) == 99` is FALSE — accepting it would mean the body-discharge path proves \
+         anything:\nstdout={out}\nstderr={err}"
+    );
+}
+
+/// The capability B adds: a correct example on a part with NO contract verifies.
+#[test]
+fn a_correct_example_verifies_from_the_body_when_there_is_no_contract() {
+    let src = "module M:\n\n  part inc(n: Int) -> Int:\n    example inc(2) == 3\n    yield n + 1\n";
+    let (code, out, err) = run_lll_cmd("ex_b_true", src, &["check"]);
+    assert_eq!(
+        code,
+        Some(0),
+        "`inc(2) == 3` is true of the body and must verify without inventing an `ensures`:\
+         \nstdout={out}\nstderr={err}"
+    );
+}
+
+/// A contract that IS strong enough must keep proving on its own — the body path is a
+/// fallback, never a replacement. Were it to take over, a part could pass its example while
+/// its contract silently stopped being checked.
+#[test]
+fn a_strong_contract_still_discharges_its_example_by_itself() {
+    let src = "module M:\n\n  part inc(n: Int) -> Int:\n    ensures result == n + 1\n    example inc(2) == 3\n    yield n + 1\n";
+    let (code, _out, err) = run_lll_cmd("ex_b_contract", src, &["check"]);
+    assert_eq!(code, Some(0), "a part with a pinning `ensures` must still verify:\n{err}");
+}

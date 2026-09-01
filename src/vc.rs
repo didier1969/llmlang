@@ -919,6 +919,44 @@ fn module_uses_actor_runtime(cm: &CheckedModule) -> bool {
 /// discharge it trivially — the STATIC half of the two checks REQ-LLL-049
 /// asks for; the DYNAMIC half (catching a codegen bug the contract can't see)
 /// is the `#[test]` emitted by codegen.rs (inc.4).
+/// REQ-LLL-234 option B — build ONE SMT term for a body, or `None` when the shape is outside
+/// what this slice handles.
+///
+/// A body is a sequence of statements, not an expression, so there is no term to hand the
+/// solver until one is built. This handles the shape that ordinary code overwhelmingly takes:
+/// a run of `let` bindings ending in a single `yield`. Anything else — a `match`, a `handle`,
+/// more than one `yield` — returns `None`, and the caller falls back to proving the example
+/// from the contract alone. Refusing the shapes it cannot build is what keeps this honest: a
+/// half-built term would be a term the solver reasons about as if it were the definition.
+fn body_as_term(
+    em: &mut Emit,
+    body: &[Stmt],
+    mut env: HashMap<String, String>,
+) -> Option<String> {
+    let mut out: Option<String> = None;
+    for st in body {
+        match st {
+            Stmt::Let(name, e) => {
+                let t = em.tr(e, &env, None).ok()?;
+                if name != "_" {
+                    if let Some(srt) = em.sort_of(e, &env) {
+                        em.sorts.insert(t.clone(), srt);
+                    }
+                    env.insert(name.clone(), t);
+                }
+            }
+            Stmt::Yield(e) => {
+                if out.is_some() {
+                    return None; // two yields: the value depends on a path this slice cannot see
+                }
+                out = Some(em.tr(e, &env, None).ok()?);
+            }
+            _ => return None,
+        }
+    }
+    out
+}
+
 pub fn gen_part_example_obligations(
     cm: &CheckedModule,
     part: &Part,
@@ -926,6 +964,41 @@ pub fn gen_part_example_obligations(
     let (mut em, env) = setup_part_emit(cm, part)?;
     for (i, ex) in part.examples.iter().enumerate() {
         let goal = em.tr(ex, &env, Some(&Ty::Bool))?;
+
+        // REQ-LLL-234 option B. Translating the example above havoc'd every call to this part
+        // and recorded each one in `call_memo`, keyed by its ARGUMENT terms. For a PURE part
+        // the body is the definition, so the havoc'd result is EQUAL to that body evaluated at
+        // those very arguments — a fact the contract firewall throws away and that nothing
+        // else can restore.
+        //
+        // Adding it as a hypothesis, rather than changing how calls translate, keeps the change
+        // contained: every other obligation still sees the contract and only the contract
+        // (DEC-LLL-017), and a part whose `ensures` already entails its example proves exactly
+        // as before. The hypothesis can only ADD knowledge — it never licenses a wrong example,
+        // because it equates the result to the real body, so a false expected value stays false.
+        //
+        // Effectful parts are excluded: their body is not a function of its arguments.
+        if part.effects.is_empty() {
+            let calls: Vec<(Vec<String>, String)> = em
+                .call_memo
+                .iter()
+                .filter(|((name, _), _)| *name == part.name)
+                .map(|((_, args), res)| (args.clone(), res.clone()))
+                .collect();
+            for (args, res) in calls {
+                if args.len() != part.params.len() {
+                    continue;
+                }
+                let mut benv = env.clone();
+                for ((pname, _), at) in part.params.iter().zip(args.iter()) {
+                    benv.insert(pname.clone(), at.clone());
+                }
+                if let Some(bt) = body_as_term(&mut em, &part.body, benv) {
+                    em.hyps.push(format!("(= {res} {bt})"));
+                }
+            }
+        }
+
         em.obls.push(Obligation {
             part: part.name.clone(),
             // The description carries WHICH of the two shapes this is, because the repair
