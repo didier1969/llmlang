@@ -264,6 +264,28 @@ pub fn obligation_fix(descr: &str) -> Option<&'static str> {
              or make the part total by handling the excluded inputs in its body and dropping \
              the `requires`",
         ),
+        // REQ-LLL-234. An `example` is discharged from the CONTRACT, never from the body: the
+        // call goes through the same firewall as any other call site — prove `requires`, HAVOC
+        // the result, assume `ensures`. So a part whose contract does not entail the expected
+        // value cannot prove its own example, however obviously correct the body is.
+        //
+        // The counter-example printed just above shows PARAMETER values, which reads as "these
+        // inputs give the wrong answer" and sends the reader to edit a body that is fine. Both
+        // arms below say what is actually missing.
+        _ if descr.contains("example #") && descr.contains("(no `ensures`)") => Some(
+            "an `example` is proved from the part's CONTRACT, not from its body — the call \
+             havocs the result and assumes the `ensures`, so a part with no `ensures` entails \
+             nothing about what it returns. The counter-example above shows parameter values, \
+             but the inputs are not the problem: add an `ensures` that pins the result, e.g. \
+             `ensures result == n + 1` for a part whose body is `yield n + 1`",
+        ),
+        _ if descr.contains("example #") => Some(
+            "an `example` is proved from the part's CONTRACT, not from its body — so this \
+             `ensures` is too weak to entail the expected value. The counter-example above \
+             shows parameter values, but the inputs are not the problem: strengthen the \
+             `ensures` until it determines the result (an inequality bounds it, an equality \
+             pins it)",
+        ),
         _ => None,
     }
 }
@@ -514,5 +536,40 @@ mod tests {
             Assignment { var: "ys".into(), value: "[-1, 2]".into() },
             Assignment { var: "acc".into(), value: "0".into() },
         ]);
+    }
+}
+
+#[cfg(test)]
+mod example_obligation_advice_tests {
+    use super::obligation_fix;
+
+    /// REQ-LLL-234 — the two shapes of a failing `example` need DIFFERENT repairs, and the
+    /// message must say the counter-example is not the point.
+    ///
+    /// An `example` is proved from the contract, never from the body. When it fails, the
+    /// diagnostic prints a counter-model over the part's PARAMETERS, which reads as "these
+    /// inputs give the wrong answer" — so the reader goes and edits a body that is correct.
+    /// That is the omission this advice closes.
+    #[test]
+    fn a_failing_example_names_the_contract_and_not_the_inputs() {
+        let none = obligation_fix("example #1 holds for `inc` (no `ensures`)")
+            .expect("a part with no `ensures` must get advice");
+        let weak = obligation_fix("example #1 holds for `inc`")
+            .expect("a part with a weak `ensures` must get advice");
+
+        assert_ne!(none, weak, "the two shapes need different repairs: one writes an `ensures`, the other tightens it");
+
+        for (label, msg) in [("no-ensures", none), ("weak-ensures", weak)] {
+            assert!(
+                msg.contains("CONTRACT") || msg.contains("contract"),
+                "{label}: the message must name the contract as the source of proof: {msg}"
+            );
+            assert!(
+                msg.contains("inputs are not the problem"),
+                "{label}: the message must disown the counter-example, which is what misleads: {msg}"
+            );
+        }
+        assert!(none.contains("add an `ensures`"), "with no contract the repair is to WRITE one: {none}");
+        assert!(weak.contains("strengthen"), "with a weak contract the repair is to TIGHTEN it: {weak}");
     }
 }

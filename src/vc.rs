@@ -928,7 +928,15 @@ pub fn gen_part_example_obligations(
         let goal = em.tr(ex, &env, Some(&Ty::Bool))?;
         em.obls.push(Obligation {
             part: part.name.clone(),
-            descr: format!("example #{} holds for `{}`", i + 1, part.name),
+            // The description carries WHICH of the two shapes this is, because the repair
+            // differs: with no `ensures` at all there is nothing to strengthen — one has to
+            // be written; with a weak one, it exists and must be tightened. `obligation_fix`
+            // keys on that distinction (REQ-LLL-234).
+            descr: if part.ensures.is_empty() {
+                format!("example #{} holds for `{}` (no `ensures`)", i + 1, part.name)
+            } else {
+                format!("example #{} holds for `{}`", i + 1, part.name)
+            },
             decls: em.decls.clone(),
             hyps: em.hyps.clone(),
             goal,
