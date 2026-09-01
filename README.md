@@ -3,9 +3,20 @@
 A programming language designed **for LLM coding agents first** — token-efficient
 to maintain, verified by construction, compiled to native speed via Rust.
 
-The intent graph (vision, pillars, decisions `DEC-LLL-001..026`) lives in Axon
-SOLL, project code `LLL`. The text is the single source of truth; hashes,
-proof caches and the rationale index are derived artifacts.
+**The text is the single source of truth**; hashes, proof caches and the rationale
+index are all derived artifacts (`DEC-LLL-020`).
+
+> **About the `DEC-LLL-*` / `REQ-LLL-*` references.** You will meet them throughout
+> this repository — in the README, in the specification, and ~245 times inside the
+> `.lll` sources themselves. They are stable identifiers for recorded design
+> decisions and requirements, cited at the place the decision actually bites, so a
+> reader (human or model) can tell *this is a deliberate choice* from *this is how it
+> happened to be written*. The intent graph that holds them is an internal tool and
+> is **not public**; what each cited decision means is stated where it is cited, and
+> the ones that shape the language are spelled out in
+> [`docs/SPEC.md`](docs/SPEC.md). Treat an id you cannot resolve as a footnote, not
+> as a missing dependency — nothing in the repository needs it to build, verify or
+> run.
 
 **Every capability below is backed by a test or example you can re-run** — see
 [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for the claim→proof map, the honest

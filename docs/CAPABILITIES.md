@@ -9,8 +9,10 @@ the reader-facing, reproducible mirror — not a substitute.
 Re-run everything:
 
 ```
-export LLL_Z3="$(pwd)/vendor/z3/bin/z3"     # absolute path (subprocess tests need it)
-cargo test                                   # 61 lib + 618 integration + 3 property
+# LLL_Z3 is OPTIONAL: with `vendor/z3/bin/z3` in place the compiler finds it on its
+# own, and an EMPTY LLL_Z3 counts as unset rather than as the empty path (REQ-LLL-236).
+# Set it only to point at a z3 living somewhere else.
+cargo test                                   # 87 lib + 779 integration + 3 property
 cargo test -- --ignored                      # + the full build+run corpus sweep (slow)
 cargo test --test integration <test_name>    # one row below, in isolation
 ./target/debug/lll check examples/<file>.lll # any example
