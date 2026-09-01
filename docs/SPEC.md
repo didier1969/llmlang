@@ -316,6 +316,13 @@ The fragment is quantifier-free and decidable **except** when list `length` is u
 that lowers to an axiomatized abstract `len`, making those scripts semi-decidable but
 **fail-closed** — an unprovable goal returns `unknown` and is rejected, never accepted.
 
+> **`length` on a list is CONTRACT vocabulary, not body vocabulary.** It is admitted in
+> `requires` / `ensures` / `measure`, where it lowers to the axiomatized `len`; a *body*
+> that calls `length(xs)` on a `List` is rejected with `` `length` needs an Array, got
+> List[Int] ``. Bodies count a list by structural recursion, or by importing `len` from
+> `std/list.lll`. On an `Array`, `length` is an ordinary body function — the asymmetry is
+> real and worth stating, because the error message names the type rather than the rule.
+
 ### 6.3 Effects and purity
 
 A pure part is deterministic and its calls are interchangeable with their result.
