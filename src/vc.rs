@@ -4751,6 +4751,28 @@ fn script_for(obls: &[&Obligation], get_model: bool, dt_decls: &[String]) -> Str
     s
 }
 
+/// Turn a solver complaint into advice the reader can act on.
+///
+/// An `(error …)` here is the solver objecting to the script THE COMPILER WROTE — an
+/// ill-sorted assertion, an ambiguous symbol, a re-declaration. The program being checked
+/// may be perfectly well-formed; the compiler simply failed to ask the question. Printing
+/// the raw complaint alone hands the reader a message about SMT-LIB syntax they never wrote
+/// and cannot fix, and the natural reaction is to start editing correct code.
+///
+/// So the message says three things the raw output does not: that this is not their program's
+/// fault, that verification is refused rather than assumed (fail-closed), and how to capture
+/// the offending script so the defect can be reported.
+fn solver_error_advice(out: &str) -> String {
+    format!(
+        "the solver rejected the script this compiler generated, so verification is REFUSED \
+         rather than assumed:\n{out}\n\
+         note: this is a defect in the generated SMT, not necessarily in your program — a \
+         well-formed script never makes the solver answer `(error …)`.\n\
+         note: capture it with `LLL_DUMP_SMT=<dir> lll check <file>`, which writes every \
+         script handed to the solver; the one reproducing the message above is the bug report."
+    )
+}
+
 pub(crate) fn run_z3(z3: &Path, script: &str) -> Result<String, String> {
     // `LLL_DUMP_SMT=<dir>` writes every script handed to the solver, one file per call.
     //
@@ -4805,7 +4827,7 @@ fn discharge(
     // error must NEVER be silently reinterpreted as a discharged obligation
     // (DEC-LLL-015/017 — an undischarged obligation is a compile error, never a repli).
     if out.contains("(error") {
-        return Err(format!("z3 reported an error while discharging obligations:\n{out}"));
+        return Err(solver_error_advice(&out));
     }
     let verdicts: Vec<&str> = out
         .lines()
@@ -5015,6 +5037,38 @@ fn parse_declare_const(decl: &str) -> Option<(String, String)> {
     let inner = decl.trim().strip_prefix("(declare-const ")?.strip_suffix(')')?;
     let (name, sort) = inner.trim().split_once(char::is_whitespace)?;
     Some((name.to_string(), sort.trim().to_string()))
+}
+
+#[cfg(test)]
+mod solver_error_advice_tests {
+    use super::solver_error_advice;
+
+    /// REQ-LLL-232 — a solver-level complaint must not be handed over raw.
+    ///
+    /// The reader sees a message about SMT-LIB syntax they never wrote. Without being told
+    /// whose fault it is, the reasonable next move is to start editing correct code — which is
+    /// exactly what happened before this existed: an example that failed this way sat unfixed
+    /// behind a green gate, and diagnosing it meant guessing at what had probably been emitted
+    /// (REQ-LLL-237).
+    #[test]
+    fn a_solver_complaint_says_whose_fault_it_is_and_how_to_capture_it() {
+        let raw = "(error \"line 17 column 146: ambiguous constant reference … cons\")\nunsat";
+        let msg = solver_error_advice(raw);
+
+        assert!(msg.contains(raw), "the raw complaint must survive — it IS the evidence");
+        assert!(
+            msg.contains("not necessarily in your program"),
+            "the reader must be told the defect is in the generated script, not their code: {msg}"
+        );
+        assert!(
+            msg.contains("LLL_DUMP_SMT"),
+            "the message must name the one switch that captures the offending script: {msg}"
+        );
+        assert!(
+            msg.contains("REFUSED"),
+            "fail-closed must be stated: a solver error is never read as a discharge: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]
