@@ -963,13 +963,11 @@ fn body_as_term(
     out
 }
 
-/// A `match` as one nested `ite`, for the patterns that need no destructuring.
+/// A `match` as one nested `ite`.
 ///
-/// Handled: `true`/`false`, integer literals, `_`, and a binder. Refused: constructor, list and
-/// tuple patterns — those bind FIELDS, which means emitting the datatype's testers and
-/// accessors, and the reliable form of that (Z3 4.16's recognizer for a parametric datatype is
-/// not) lives in `walk_body` entangled with list element sorts and tuple component sorts.
-/// Pulling it out is its own slice; refusing here is what keeps this one honest.
+/// Handled: `true`/`false`, integer literals, `_`, a binder, and the destructuring patterns —
+/// constructor, list and tuple, nested included. Refused: a GUARDED arm, whose condition this
+/// path does not read, and an unconditional pattern anywhere but last (see below).
 ///
 /// The LAST arm becomes the `else`. That is sound because the checker already proved the match
 /// exhaustive: if no earlier condition holds, the last arm is the one that matches. It is also
@@ -1049,6 +1047,11 @@ pub fn gen_part_example_obligations(
     part: &Part,
 ) -> Result<Vec<Obligation>, String> {
     let (mut em, env) = setup_part_emit(cm, part)?;
+    // Which argument tuples already carry a body equation. It outlives the example loop because
+    // `em.hyps` does: an equation posted for example #1 is just as true for example #2, and
+    // re-posting it would multiply the solver's input for nothing. The BUDGET below is reloaded
+    // per example instead, so a deeply recursive first example cannot starve the second.
+    let mut unfolded: HashSet<Vec<String>> = HashSet::new();
     for (i, ex) in part.examples.iter().enumerate() {
         let goal = em.tr(ex, &env, Some(&Ty::Bool))?;
 
@@ -1066,22 +1069,55 @@ pub fn gen_part_example_obligations(
         //
         // Effectful parts are excluded: their body is not a function of its arguments.
         if part.effects.is_empty() {
-            let calls: Vec<(Vec<String>, String)> = em
-                .call_memo
-                .iter()
-                .filter(|((name, _), _)| *name == part.name)
-                .map(|((_, args), res)| (args.clone(), res.clone()))
-                .collect();
-            for (args, res) in calls {
-                if args.len() != part.params.len() {
-                    continue;
+            // Tranche 4 — the equation is posted at a FIXED POINT, not once. Translating the body
+            // at one argument tuple havocs the recursive call inside it, which lands in
+            // `call_memo` as a NEW entry; a single pass would leave that entry unconstrained and
+            // the example unprovable. Re-scanning until nothing new appears walks the recursion
+            // down to its base case, where the body stops calling itself.
+            //
+            // The bound is what makes running out safe. An unfolding that exhausted its budget
+            // knows strictly LESS than one that reached the base case — the deepest call stays
+            // havoc'd — so the example falls back on the contract and is refused if the contract
+            // does not carry it. Less knowledge must cost a proof, never buy one; every equation
+            // posted is true of the body whether or not the next one gets posted, so a partial
+            // unfolding is sound, merely weaker.
+            //
+            // 24 is sized for what an `example` can actually mention: its arguments are literals
+            // written on one line of source, so the recursion depth is the length of that
+            // literal. It also caps a body that recurses twice, where the calls branch instead of
+            // chaining.
+            const UNFOLD_BUDGET: usize = 24;
+            let mut budget = UNFOLD_BUDGET;
+            while budget > 0 {
+                let pending: Vec<(Vec<String>, String)> = em
+                    .call_memo
+                    .iter()
+                    .filter(|((name, args), _)| {
+                        *name == part.name
+                            && args.len() == part.params.len()
+                            && !unfolded.contains(args)
+                    })
+                    .map(|((_, args), res)| (args.clone(), res.clone()))
+                    .collect();
+                if pending.is_empty() {
+                    break;
                 }
-                let mut benv = env.clone();
-                for ((pname, _), at) in part.params.iter().zip(args.iter()) {
-                    benv.insert(pname.clone(), at.clone());
-                }
-                if let Some(bt) = body_as_term(&mut em, &part.body, benv) {
-                    em.hyps.push(format!("(= {res} {bt})"));
+                for (args, res) in pending {
+                    if budget == 0 {
+                        break;
+                    }
+                    budget -= 1;
+                    // Marked before the translation, not after: a body this slice cannot render
+                    // returns `None` at the same arguments every time, and retrying it would
+                    // spend the whole budget on one shape that will never yield an equation.
+                    unfolded.insert(args.clone());
+                    let mut benv = env.clone();
+                    for ((pname, _), at) in part.params.iter().zip(args.iter()) {
+                        benv.insert(pname.clone(), at.clone());
+                    }
+                    if let Some(bt) = body_as_term(&mut em, &part.body, benv) {
+                        em.hyps.push(format!("(= {res} {bt})"));
+                    }
                 }
             }
         }

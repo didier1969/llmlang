@@ -246,3 +246,106 @@ fn a_wrong_example_on_a_list_match_is_rejected() {
     let (code, out, err) = run_lll_cmd("ex_l_false", src, &["check"]);
     assert_ne!(code, Some(0), "the head of [7, 8] is 7, not 8:\nstdout={out}\nstderr={err}");
 }
+
+/// REQ-LLL-234 option B, tranche 4 — FALSIFICATION first: a recursive body must not
+/// license a wrong expected value. Bounded unfolding adds equations that are true of
+/// the body, so a false example stays false however many of them are posted.
+#[test]
+fn a_wrong_example_on_a_recursive_body_is_rejected() {
+    let src = "module M:\n\n  part count(xs: List[Int]) -> Int:\n    example count([1, 2, 3]) == 99\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + count(t)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_false", src, &["check"]);
+    assert_ne!(code, Some(0), "`count([1, 2, 3])` is 3, not 99:\nstdout={out}\nstderr={err}");
+}
+
+/// The capability slice 4 adds: the recursive call is unfolded at its ground arguments
+/// until the base case, so the example needs no `ensures` to carry it.
+#[test]
+fn a_correct_example_verifies_from_a_recursive_body() {
+    let src = "module M:\n\n  part count(xs: List[Int]) -> Int:\n    example count([1, 2, 3]) == 3\n    example count([]) == 0\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + count(t)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_true", src, &["check"]);
+    assert_eq!(code, Some(0), "counting [1, 2, 3] gives 3:\nstdout={out}\nstderr={err}");
+}
+
+/// Past the unfolding budget the example is REFUSED, never assumed. Falling back on the
+/// contract is the whole point of a bound: an unfolding that ran out of budget knows
+/// strictly less than one that reached the base case, and less knowledge must cost a
+/// proof, never buy one.
+#[test]
+fn a_recursion_deeper_than_the_budget_is_refused_not_assumed() {
+    let long = (1..=40).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+    let src = format!(
+        "module M:\n\n  part count(xs: List[Int]) -> Int:\n    example count([{long}]) == 40\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + count(t)\n"
+    );
+    let (code, out, err) = run_lll_cmd("ex_r_deep", &src, &["check"]);
+    assert_ne!(
+        code,
+        Some(0),
+        "40 unfoldings exceed the budget, so the example falls back on the (absent) contract:\nstdout={out}\nstderr={err}"
+    );
+}
+
+/// Non-regression: a recursive part whose `ensures` already entails its example proved
+/// before slice 4 and must still prove, by the contract alone.
+#[test]
+fn a_recursive_example_carried_by_its_contract_still_verifies() {
+    let src = "module M:\n\n  part count(xs: List[Int]) -> Int:\n    ensures result >= 0\n    example count([1, 2, 3]) >= 0\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + count(t)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_contract", src, &["check"]);
+    assert_eq!(code, Some(0), "the `ensures` alone carries it:\nstdout={out}\nstderr={err}");
+}
+
+/// A body that recurses TWICE branches instead of chaining, so the fixed point has to
+/// close over both calls at every level.
+#[test]
+fn a_correct_example_verifies_from_a_branching_recursion() {
+    let src = "module M:\n\n  type Tree = Leaf(Int) | Node(Tree, Tree)\n\n  part total(t: Tree) -> Int:\n    example total(Node(Leaf(1), Leaf(2))) == 3\n    match t:\n      Leaf(v)    -> yield v\n      Node(l, r) -> yield total(l) + total(r)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_tree", src, &["check"]);
+    assert_eq!(code, Some(0), "1 + 2 is 3:\nstdout={out}\nstderr={err}");
+}
+
+#[test]
+fn a_wrong_example_on_a_branching_recursion_is_rejected() {
+    let src = "module M:\n\n  type Tree = Leaf(Int) | Node(Tree, Tree)\n\n  part total(t: Tree) -> Int:\n    example total(Node(Leaf(1), Leaf(2))) == 99\n    match t:\n      Leaf(v)    -> yield v\n      Node(l, r) -> yield total(l) + total(r)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_tree_false", src, &["check"]);
+    assert_ne!(code, Some(0), "the total is 3, not 99:\nstdout={out}\nstderr={err}");
+}
+
+/// An accumulator changes BOTH arguments at each step, so the memo key that identifies an
+/// already-unfolded call has to be the whole tuple, not the recursing parameter.
+#[test]
+fn a_correct_example_verifies_from_an_accumulator_recursion() {
+    let src = "module M:\n\n  part sum_from(xs: List[Int], acc: Int) -> Int:\n    example sum_from([1, 2, 3], 0) == 6\n    match xs:\n      []     -> yield acc\n      h :: t -> yield sum_from(t, acc + h)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_acc", src, &["check"]);
+    assert_eq!(code, Some(0), "1 + 2 + 3 is 6:\nstdout={out}\nstderr={err}");
+}
+
+#[test]
+fn a_wrong_example_on_an_accumulator_recursion_is_rejected() {
+    let src = "module M:\n\n  part sum_from(xs: List[Int], acc: Int) -> Int:\n    example sum_from([1, 2, 3], 0) == 7\n    match xs:\n      []     -> yield acc\n      h :: t -> yield sum_from(t, acc + h)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_acc_false", src, &["check"]);
+    assert_ne!(code, Some(0), "the sum is 6, not 7:\nstdout={out}\nstderr={err}");
+}
+
+/// The boundary of the slice, pinned so it is not mistaken for a bug: unfolding covers the
+/// part's calls to ITSELF. A call to a NEIGHBOUR part stays behind the contract firewall,
+/// so an example that depends on what that neighbour returns is refused unless the
+/// neighbour's `ensures` says it. Widening this to the whole call graph is a decision about
+/// how far an `example` reaches, not a missing case.
+#[test]
+fn an_example_needing_a_neighbour_part_body_is_refused() {
+    let src = "module M:\n\n  part double(n: Int) -> Int:\n    yield n * 2\n\n  part sum_doubles(xs: List[Int]) -> Int:\n    example sum_doubles([1, 2]) == 6\n    match xs:\n      []     -> yield 0\n      h :: t -> yield double(h) + sum_doubles(t)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_neighbour", src, &["check"]);
+    assert_ne!(
+        code,
+        Some(0),
+        "`double` has no `ensures`, so its result is havoc'd:\nstdout={out}\nstderr={err}"
+    );
+}
+
+/// And the same shape proves once the neighbour's contract carries it — the refusal above is
+/// about the missing `ensures`, not about neighbours as such.
+#[test]
+fn an_example_needing_a_neighbour_part_verifies_once_it_has_a_contract() {
+    let src = "module M:\n\n  part double(n: Int) -> Int:\n    ensures result == n * 2\n    yield n * 2\n\n  part sum_doubles(xs: List[Int]) -> Int:\n    example sum_doubles([1, 2]) == 6\n    match xs:\n      []     -> yield 0\n      h :: t -> yield double(h) + sum_doubles(t)\n";
+    let (code, out, err) = run_lll_cmd("ex_r_neighbour_ok", src, &["check"]);
+    assert_eq!(code, Some(0), "2 + 4 is 6:\nstdout={out}\nstderr={err}");
+}
