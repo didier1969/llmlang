@@ -589,3 +589,49 @@ fn parse_error_reports_the_exact_column_req160() {
         "parse error must point at the exact column of `[` (line 2 col 19), got: {err}"
     );
 }
+
+// ===================================================================
+// REQ-LLL-235 — le harnais ne doit rien laisser derrière lui, ni sur le chemin de
+// SUCCÈS ni sur celui d'ÉCHEC. `/tmp` est un TMPFS sur la machine de dev : ce qu'on
+// y oublie est de la RAM confisquée à tout le poste. 1 548 répertoires s'étaient
+// accumulés à 757/jour, faisant passer `MemAvailable` sous le seuil d'admission —
+// le gate affamait la machine dont il avait besoin.
+// ===================================================================
+
+/// Tous les scratch d'un run vivent sous UNE racine par processus — c'est ce qui rend
+/// le résidu réclamable : une chose à nettoyer au lieu de huit cents.
+#[test]
+fn every_scratch_dir_lives_under_one_per_process_root() {
+    let a = tempdir();
+    let b = tempdir();
+    assert_ne!(a, b, "deux appels doivent donner deux répertoires distincts");
+
+    let racine = std::env::temp_dir().join(format!("lll-test-{}", std::process::id()));
+    for d in [&a, &b] {
+        assert!(d.starts_with(&racine), "{d:?} doit vivre sous {racine:?}");
+        assert!(d.is_dir(), "{d:?} doit exister");
+    }
+}
+
+/// LE test qui donne son sens au correctif : le balayage réclame la racine d'un run MORT
+/// et épargne celle d'un run VIVANT. C'est ce qui rend le nettoyage insensible au chemin
+/// d'échec — un run tué n'a exécuté aucun bloc de fin, mais le run suivant le ramasse.
+#[test]
+fn the_sweep_reclaims_a_dead_run_and_spares_a_live_one() {
+    let base = std::env::temp_dir();
+    // Un PID hors de portée de `pid_max` : `/proc/<lui>` ne peut pas exister.
+    let mort = base.join("lll-test-999999999");
+    let vivant = base.join(format!("lll-test-{}-sonde235", std::process::id()));
+    std::fs::create_dir_all(&mort).unwrap();
+    std::fs::create_dir_all(&vivant).unwrap();
+
+    sweep_dead_roots();
+
+    assert!(!mort.exists(), "la racine d'un run mort doit être réclamée: {mort:?}");
+    assert!(
+        vivant.exists(),
+        "la racine d'un run VIVANT ne doit JAMAIS être supprimée — deux gates concurrents \
+         s'entre-détruiraient: {vivant:?}"
+    );
+    std::fs::remove_dir_all(&vivant).unwrap();
+}

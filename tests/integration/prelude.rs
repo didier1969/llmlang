@@ -19,18 +19,55 @@ pub fn verify_src(src: &str) -> vc::VerifyReport {
 }
 
 
+/// REQ-LLL-235 — reclaim the scratch roots of test runs that are no longer alive.
+///
+/// Runs ONCE, at the first `tempdir()` call, never as a trailing block: the residue is born on the
+/// FAILURE path (a panicking test, a killed run, an OOM), and a trailing block is exactly what a
+/// failure skips. Sweeping at the START is the only placement a crash cannot defeat.
+///
+/// A root is reclaimed only when its owning PID is gone (`/proc/<pid>` absent), so two concurrent
+/// runs never delete each other's directories. A root we cannot parse or remove is LEFT ALONE —
+/// the sweep is best-effort by construction and must never take a test down with it.
+pub fn sweep_dead_roots() {
+    let base = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&base) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(pid) = name.strip_prefix("lll-test-") else { continue };
+        // Both the current `lll-test-<pid>` roots and the legacy flat `lll-test-<pid>-<n>` dirs.
+        let pid = pid.split('-').next().unwrap_or("");
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            continue; // that run is still alive — not ours to remove
+        }
+        let _ = std::fs::remove_dir_all(e.path());
+    }
+}
+
+/// A scratch directory for one test.
+///
+/// Every call gets a distinct path under ONE per-process root (`<TMPDIR>/lll-test-<pid>/<n>`).
+/// The per-call counter is load-bearing: all tests in this binary run as THREADS of a single
+/// process, so `process::id()` alone handed two tests the same directory — harmless until two of
+/// them chose the same filename (e.g. both writing "trace.jsonl"), which raced under parallel
+/// execution.
+///
+/// REQ-LLL-235 — the grouping into one root is what makes the residue reclaimable. Before it, a
+/// single run left ~800 sibling directories in `/tmp`, which is a TMPFS: 1 548 of them had
+/// accumulated at 757/day, holding gigabytes of RAM hostage for the whole machine and pushing
+/// `MemAvailable` below the admission threshold — the test harness was starving the machine it
+/// ran on. One root per run is one thing to reclaim instead of eight hundred.
 pub fn tempdir() -> std::path::PathBuf {
-    // Root-cause fix: `std::process::id()` alone is the SAME for every test in
-    // this binary (all tests run as threads within one process, not separate
-    // processes) — two tests calling `tempdir()` got the SAME shared directory.
-    // Harmless as long as every test used distinct filenames inside it, but
-    // two tests using the same filename (e.g. both naming their trace file
-    // "trace.jsonl") raced and cross-contaminated each other's file under
-    // parallel execution. A monotonic per-call counter guarantees a genuinely
-    // unique directory every call, regardless of filename choices downstream.
+    static SWEEP: std::sync::Once = std::sync::Once::new();
+    SWEEP.call_once(sweep_dead_roots);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let d = std::env::temp_dir().join(format!("lll-test-{}-{n}", std::process::id()));
+    let d = std::env::temp_dir()
+        .join(format!("lll-test-{}", std::process::id()))
+        .join(n.to_string());
     std::fs::create_dir_all(&d).unwrap();
     d
 }
