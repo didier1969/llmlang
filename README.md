@@ -274,10 +274,10 @@ that says exactly what it does and does not claim (ASCII-scoped, and it says so)
 It closes a gap `std/str.lll` documented in its own source: `str_to_int` "assumes
 ASCII digits". With `char`, a caller can validate first.
 
-## Verified corpus — 10 348 examples a compiler certified
+## Verified corpus — 10,348 examples a compiler certified
 
 [`corpus/llmlang_sft.jsonl`](corpus/llmlang_sft.jsonl) is an Alpaca-format
-(instruction / input / output) dataset of **10 348 llmlang programs, every one of
+(instruction / input / output) dataset of **10,348 llmlang programs, every one of
 them proved by `lll check` before it was admitted**. Nothing in it is a plausible
 sample someone eyeballed: the compiler is the judge, and a program that fails to
 verify never reaches the file.
@@ -298,7 +298,7 @@ balance, monotone accumulators and euclidean division on one side; list counting
 comprehension map/filter, records, ADTs, tuples and text processing on the other.
 
 Useful whether you are fine-tuning a model, testing a code-generation harness, or
-just reading 10 000 short programs to learn the syntax.
+just reading 10,000 short programs to learn the syntax.
 
 ## License
 

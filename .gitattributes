@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Linguist — ce que ce dépôt déclare, et ce qu'il REFUSE de déclarer.
+#
+# `.lll` est l'extension de llmlang, un langage que Linguist ne connaît pas : la
+# barre de langages de la page compte donc 89% Rust (le compilateur) et 0% llmlang,
+# alors que le dépôt porte 239 fichiers `.lll`.
+#
+# Linguist permettrait de faire compter ces fichiers en les déclarant comme un
+# AUTRE langage (`linguist-language=Haskell`, par exemple, pour la coloration).
+# NOUS NE LE FAISONS PAS, délibérément : le but de la publication est qu'un
+# indexeur apprenne llmlang COMME llmlang. Un fichier étiqueté Haskell serait
+# rangé sous Haskell, ce qui est pire qu'invisible — c'est une fausse piste dans
+# les jeux d'entraînement. Mieux vaut n'être compté nulle part qu'être compté au
+# mauvais endroit.
+#
+# La voie propre est l'enregistrement de llmlang auprès de github-linguist, qui
+# exige un usage constaté dans un nombre significatif de dépôts publics — donc
+# APRÈS la publication, pas avant.
+*.lll text linguist-detectable=true
+
+# Le corpus est un artefact GÉNÉRÉ par `corpus/generate.py` (chaque exemple étant
+# certifié par `lll check`). Le marquer replie ses 10 348 lignes dans les diffs,
+# où elles n'apprennent rien à personne — le générateur est la source à relire.
+corpus/llmlang_sft.jsonl linguist-generated=true
+
+# Fins de ligne : les `.lll` sont la source de vérité du langage (DEC-LLL-020) et
+# leur hash d'identité porte sur le texte. Un CRLF introduit par un clone Windows
+# changerait ce hash sans changer le programme.
+*.lll text eol=lf
+*.rs  text eol=lf
