@@ -34,14 +34,25 @@ pub fn sweep_dead_roots() {
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(pid) = name.strip_prefix("lll-test-") else { continue };
-        // Both the current `lll-test-<pid>` roots and the legacy flat `lll-test-<pid>-<n>` dirs.
-        let pid = pid.split('-').next().unwrap_or("");
-        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        if !name.starts_with("lll-") {
             continue;
         }
-        if std::path::Path::new(&format!("/proc/{pid}")).exists() {
-            continue; // that run is still alive — not ours to remove
+        // The harness stamps the PID into SEVEN different shapes — `lll-test-<pid>`,
+        // `lll-incr-<pid>`, `lll-move-<pid>`, `lll-prop-<pid>`, `lll-xclass-<pid>`,
+        // `lll-xrename-<pid>` and `lll-r149-<tag>-<pid>`, where the PID sits LAST rather than
+        // first. Enumerating prefixes would go stale the day someone adds an eighth, so we look
+        // at every numeric segment instead of guessing which one is the PID.
+        //
+        // The bias is deliberately CONSERVATIVE: a directory is reclaimed only when NONE of its
+        // numeric segments belongs to a live process. A false keep costs one stale directory
+        // until the next run; a false delete would pull the ground out from under a concurrent
+        // gate. Between those two, only one is recoverable.
+        let vivant = name
+            .split('-')
+            .filter(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
+            .any(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+        if vivant {
+            continue;
         }
         let _ = std::fs::remove_dir_all(e.path());
     }

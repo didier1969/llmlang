@@ -619,19 +619,38 @@ fn every_scratch_dir_lives_under_one_per_process_root() {
 #[test]
 fn the_sweep_reclaims_a_dead_run_and_spares_a_live_one() {
     let base = std::env::temp_dir();
+    let moi = std::process::id();
     // Un PID hors de portée de `pid_max` : `/proc/<lui>` ne peut pas exister.
-    let mort = base.join("lll-test-999999999");
-    let vivant = base.join(format!("lll-test-{}-sonde235", std::process::id()));
-    std::fs::create_dir_all(&mort).unwrap();
-    std::fs::create_dir_all(&vivant).unwrap();
+    // Les SEPT formes que le harnais produit, pas seulement `lll-test-` : `lll-r149-<tag>-<pid>`
+    // porte son PID en DERNIER, et un balayage qui suppose la première position la raterait
+    // silencieusement — c'est précisément ce qu'a fait la première version de ce correctif, qui
+    // laissait 15 répertoires derrière elle en annonçant zéro.
+    let morts = [
+        base.join("lll-test-999999999"),
+        base.join("lll-incr-999999999"),
+        base.join("lll-prop-999999999"),
+        base.join("lll-r149-badtoml-999999999"),
+        base.join("lll-xrename-999999999"),
+    ];
+    let vivants = [
+        base.join(format!("lll-test-{moi}-sonde235")),
+        base.join(format!("lll-r149-sonde235-{moi}")),
+    ];
+    for d in morts.iter().chain(vivants.iter()) {
+        std::fs::create_dir_all(d).unwrap();
+    }
 
     sweep_dead_roots();
 
-    assert!(!mort.exists(), "la racine d'un run mort doit être réclamée: {mort:?}");
-    assert!(
-        vivant.exists(),
-        "la racine d'un run VIVANT ne doit JAMAIS être supprimée — deux gates concurrents \
-         s'entre-détruiraient: {vivant:?}"
-    );
-    std::fs::remove_dir_all(&vivant).unwrap();
+    for d in &morts {
+        assert!(!d.exists(), "la racine d'un run mort doit être réclamée: {d:?}");
+    }
+    for d in &vivants {
+        assert!(
+            d.exists(),
+            "la racine d'un run VIVANT ne doit JAMAIS être supprimée — deux gates concurrents \
+             s'entre-détruiraient: {d:?}"
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
 }

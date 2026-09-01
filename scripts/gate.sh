@@ -32,12 +32,22 @@ fi
 # The trap is installed BEFORE any work, never as a trailing block: the residue is born on the
 # FAILURE path (a red test, a clippy error, a Ctrl-C), and a trailing block is exactly what those
 # skip. It reclaims only roots whose owning PID is gone, so a concurrent run is never touched.
+# Le harnais estampille le PID dans SEPT formes différentes (`lll-test-`, `lll-incr-`, `lll-move-`,
+# `lll-prop-`, `lll-xclass-`, `lll-xrename-` et `lll-r149-<tag>-<pid>` où le PID est en DERNIER).
+# Énumérer les préfixes vieillirait le jour où quelqu'un en ajoute un huitième : on regarde donc
+# CHAQUE segment numérique. Biais délibérément CONSERVATEUR — on ne réclame que si AUCUN segment
+# ne correspond à un processus vivant. Une conservation à tort coûte un répertoire jusqu'au run
+# suivant ; une suppression à tort tire le sol sous un gate concurrent.
 reclaim_dead_scratch() {
-  for racine in "${TMPDIR:-/tmp}"/lll-test-* /tmp/lll-test-*; do
+  for racine in "${TMPDIR:-/tmp}"/lll-* /tmp/lll-*; do
     [ -e "$racine" ] || continue
-    pid=${racine##*/lll-test-}; pid=${pid%%-*}
-    case $pid in ''|*[!0-9]*) continue ;; esac
-    [ -d "/proc/$pid" ] && continue
+    base=${racine##*/}; vivant=0
+    IFS='-' read -r -a segments <<<"$base"
+    for seg in "${segments[@]}"; do
+      case $seg in ''|*[!0-9]*) continue ;; esac
+      [ -d "/proc/$seg" ] && { vivant=1; break; }
+    done
+    [ "$vivant" = 1 ] && continue
     rm -rf "$racine"
   done
 }
