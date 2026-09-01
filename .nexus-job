@@ -1,0 +1,17 @@
+# Resource declaration for the nexus-admission broker (memory in MiB-equivalent units).
+# Without this file the broker classifies `cargo` as heavy from the COMMAND SHAPE and
+# reserves 6144M for every invocation — 7x what `cargo clippy` actually peaks at.
+#
+# The rule the broker applies, and the one that matters here: MemoryMax equals the
+# declaration exactly, so under-declaring does not slow a job down, it KILLS it.
+# Hence twice the WORST observed peak, never the mean.
+#
+# Measured by VPC over 16 jobs of this repo (2026-09-01):
+#   cargo clippy   peak  431M
+#   cargo build    peak  687M
+#   cargo test     peak 1941M
+#
+# This file is the fallback for the heaviest of the three; scripts/gate.sh narrows it
+# per step with NEXUS_JOB_MEMORY, which takes precedence.
+memory = 3882M
+cpus = 6

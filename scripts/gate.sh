@@ -59,13 +59,18 @@ if [ -z "${LLL_Z3:-}" ] && [ -x "vendor/z3/bin/z3" ]; then
   export LLL_Z3="$PWD/vendor/z3/bin/z3"
 fi
 
+# The broker sets MemoryMax to EXACTLY what is declared: under-declaring kills the job
+# rather than slowing it, so each step asks for twice its own worst measured peak
+# (VPC, 16 jobs, 2026-09-01: clippy 431M, build 687M, test 1941M). A single number for
+# all three would make clippy reserve seven times what it uses, and a busy queue then
+# stalls on a shortage nobody's workload created. .nexus-job carries the fallback.
 echo "== gate 1/3: cargo build =="
-cargo build
+NEXUS_JOB_MEMORY=1374M cargo build
 
 echo "== gate 2/3: cargo test (integration + lib) =="
-cargo test
+NEXUS_JOB_MEMORY=3882M cargo test
 
 echo "== gate 3/3: cargo clippy --all-targets -- -D warnings =="
-cargo clippy --all-targets -- -D warnings
+NEXUS_JOB_MEMORY=862M cargo clippy --all-targets -- -D warnings
 
 echo "GATE GREEN"
