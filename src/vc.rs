@@ -982,42 +982,64 @@ fn match_as_term(
     env: &HashMap<String, String>,
 ) -> Option<String> {
     if arms.iter().any(|a| a.guard.is_some()) {
-        return None; // a guarded arm is a condition this slice does not read
+        return None; // a guarded arm is a condition this path does not read
     }
     let s_t = em.tr(scrut, env, None).ok()?;
+    let (scrut_sort, list_elem, user_adt_sort, tuple_sorts) = em.scrutinee_sorts(&s_t);
 
-    // condition per arm, and the environment its body sees; `None` = matches unconditionally.
-    let mut cases: Vec<(Option<String>, String)> = Vec::new();
+    let mut cases: Vec<(String, String)> = Vec::new();
     for arm in arms {
-        let (cond, benv) = match &arm.pattern {
-            Pattern::BoolLit(b) => (Some(format!("(= {s_t} {b})")), env.clone()),
-            // SMT-LIB has no negative literal: `-3` is the application `(- 3)`.
-            Pattern::IntLit(n) => {
-                let lit = if *n < 0 { format!("(- {})", n.unsigned_abs()) } else { n.to_string() };
-                (Some(format!("(= {s_t} {lit})")), env.clone())
+        // The SAME `pattern_cond` the proof path uses. Writing a second one here would be the
+        // real hazard: two conditions that agree today and drift later mean an `example`
+        // checked against something other than what proves the body.
+        let (cond, bindings) =
+            pattern_cond(&arm.pattern, &s_t, list_elem.as_deref(), user_adt_sort.as_deref());
+
+        // Sub-term sorts, mirroring `walk_body`: without them a NESTED match loses the sort of
+        // what it destructures and falls back to Z3 4.16's flaky parametric recognizer.
+        if let Some(e) = &list_elem {
+            for (_, term) in &bindings {
+                if term.starts_with("(head ") {
+                    em.sorts.insert(term.clone(), e.clone());
+                } else if term.starts_with("(tail ") {
+                    em.sorts.insert(term.clone(), format!("(Lst {e})"));
+                }
             }
-            Pattern::Wildcard => (None, env.clone()),
-            Pattern::Var(name) => {
-                let mut e2 = env.clone();
-                e2.insert(name.clone(), s_t.clone());
-                (None, e2)
+        }
+        if let (Some(cs), Pattern::Tuple(_)) = (&tuple_sorts, &arm.pattern) {
+            for (i, (_, term)) in bindings.iter().enumerate() {
+                if let Some(sort) = cs.get(i) {
+                    em.sorts.insert(term.clone(), sort.clone());
+                }
             }
-            _ => return None,
-        };
+        }
+        if let (Some(srt), Pattern::Ctor(cn, _)) = (&scrut_sort, &arm.pattern) {
+            if let Some(fsorts) = ctor_field_sorts(&em.cm.module.types, srt, cn) {
+                for ((_, term), sort) in bindings.iter().zip(&fsorts) {
+                    em.sorts.insert(term.clone(), sort.clone());
+                }
+            }
+        }
+
+        let mut benv = env.clone();
+        for (n, t) in bindings {
+            benv.insert(n, t);
+        }
         cases.push((cond, body_as_term(em, &arm.body, benv)?));
     }
 
-    // The last arm is the fallback. Everything before it must carry a condition, or it would
-    // shadow the arms after it — which the checker allows (a binder arm can sit anywhere) but
-    // this construction cannot express.
-    let (last_cond, last_val) = cases.pop()?;
-    if cases.iter().any(|(c, _)| c.is_none()) {
+    // The LAST arm becomes the `else`. Sound because the checker already proved the match
+    // exhaustive: if no earlier condition holds, that arm is the one that matches. Every arm
+    // before it must carry a real condition — `pattern_cond` renders an unconditional pattern
+    // as the literal `true`, and one of those in the middle would shadow everything after it,
+    // which this construction cannot express.
+    let (_, last_val) = cases.pop()?;
+    if cases.iter().any(|(c, _)| c == "true") {
         return None;
     }
-    let _ = last_cond;
     let mut term = last_val;
     for (cond, val) in cases.into_iter().rev() {
-        term = format!("(ite {} {val} {term})", cond?);
+        term = format!("(ite {cond} {val} {term})");
     }
     Some(term)
 }
@@ -2566,6 +2588,41 @@ impl<'a> Emit<'a> {
         })
     }
 
+    /// What a `match` needs to know about its scrutinee's SORT to build pattern conditions:
+    /// the element sort of a list, the sort of a PARAMETRIC user datatype, and the component
+    /// sorts of a tuple. Pure — it only reads `self.sorts` and the module's type declarations.
+    ///
+    /// Extracted so the body-discharge path (REQ-LLL-234) computes it EXACTLY as the proof path
+    /// does. Two copies could drift, and a drift here would mean an `example` is checked against
+    /// a different condition than the one that proves the body — invisible until it accepts
+    /// something it should not.
+    fn scrutinee_sorts(
+        &self,
+        s_t: &str,
+    ) -> (Option<String>, Option<String>, Option<String>, Option<Vec<String>>) {
+        let scrut_sort: Option<String> = self.sorts.get(s_t).cloned();
+        // element sort of a list scrutinee (to disambiguate `nil`)
+        let list_elem = scrut_sort
+            .as_deref()
+            .and_then(|srt| srt.strip_prefix("(Lst ").and_then(|r| r.strip_suffix(')')))
+            .map(|e| e.to_string());
+        // the scrutinee sort iff it is a PARAMETRIC user datatype `(Name …)` whose head is a
+        // declared type with type parameters (REQ-LLL-068): its ctor patterns must use the
+        // robust reconstruction tester, not Z3 4.16's unreliable parametric recognizer.
+        let user_adt_sort = scrut_sort.as_deref().and_then(|srt| {
+            let head = srt.strip_prefix('(')?.split_whitespace().next()?;
+            self.cm
+                .module
+                .types
+                .iter()
+                .any(|td| td.name == head && !td.type_params.is_empty())
+                .then(|| srt.to_string())
+        });
+        // component sorts of a tuple scrutinee, to type the projections bound by a tuple pattern
+        let tuple_sorts = scrut_sort.as_deref().and_then(tuple_component_sorts);
+        (scrut_sort, list_elem, user_adt_sort, tuple_sorts)
+    }
+
     fn walk_body(&mut self, body: &[Stmt], mut env: HashMap<String, String>) -> Result<(), String> {
         for s in body {
             match s {
@@ -2664,29 +2721,8 @@ impl<'a> Emit<'a> {
                 }
                 Stmt::Match(scrut, arms) => {
                     let s_t = self.tr(scrut, &env, None)?;
-                    // element sort of a list scrutinee (to disambiguate `nil`)
-                    let scrut_sort: Option<String> = self.sorts.get(&s_t).cloned();
-                    let list_elem: Option<String> = scrut_sort
-                        .as_deref()
-                        .and_then(|srt| srt.strip_prefix("(Lst ").and_then(|r| r.strip_suffix(')')))
-                        .map(|e| e.to_string());
-                    // the scrutinee sort iff it is a PARAMETRIC user datatype `(Name …)`
-                    // whose head is a declared type with type parameters (REQ-LLL-068):
-                    // its ctor patterns must use the robust reconstruction tester, not
-                    // Z3 4.16's unreliable parametric recognizer.
-                    let user_adt_sort: Option<String> = scrut_sort.as_deref().and_then(|srt| {
-                        let head = srt.strip_prefix('(')?.split_whitespace().next()?;
-                        self.cm
-                            .module
-                            .types
-                            .iter()
-                            .any(|td| td.name == head && !td.type_params.is_empty())
-                            .then(|| srt.to_string())
-                    });
-                    // component sorts of a tuple scrutinee, to type the projections
-                    // bound by a tuple pattern (nested list/tuple matches).
-                    let tuple_sorts: Option<Vec<String>> =
-                        scrut_sort.as_deref().and_then(tuple_component_sorts);
+                    let (scrut_sort, list_elem, user_adt_sort, tuple_sorts) =
+                        self.scrutinee_sorts(&s_t);
                     let mut arm_conds: Vec<String> = Vec::new();
                     for arm in arms {
                         let (cond, bindings) = pattern_cond(

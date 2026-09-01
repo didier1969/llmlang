@@ -215,3 +215,34 @@ fn a_correct_example_verifies_from_a_match_body() {
     let (code, out, err) = run_lll_cmd("ex_m_true", src, &["check"]);
     assert_eq!(code, Some(0), "both examples are true of the body:\nstdout={out}\nstderr={err}");
 }
+
+/// REQ-LLL-234 option B, tranche 3 — FALSIFICATION on constructor and list patterns.
+#[test]
+fn a_wrong_example_on_a_constructor_match_is_rejected() {
+    let src = "module M:\n\n  type Shape = Square(Int) | Rect(Int, Int)\n\n  part area(s: Shape) -> Int:\n    example area(Square(3)) == 99\n    match s:\n      Square(a) -> yield a * a\n      Rect(w, h) -> yield w * h\n";
+    let (code, out, err) = run_lll_cmd("ex_c_false", src, &["check"]);
+    assert_ne!(code, Some(0), "`area(Square(3))` is 9, not 99:\nstdout={out}\nstderr={err}");
+}
+
+/// The capability slice 3 adds for a non-parametric ADT.
+#[test]
+fn a_correct_example_verifies_from_a_constructor_match() {
+    let src = "module M:\n\n  type Shape = Square(Int) | Rect(Int, Int)\n\n  part area(s: Shape) -> Int:\n    example area(Square(3)) == 9\n    example area(Rect(2, 5)) == 10\n    match s:\n      Square(a) -> yield a * a\n      Rect(w, h) -> yield w * h\n";
+    let (code, out, err) = run_lll_cmd("ex_c_true", src, &["check"]);
+    assert_eq!(code, Some(0), "both areas are right:\nstdout={out}\nstderr={err}");
+}
+
+/// And for a list, whose `[]` / `h :: t` split is the shape ordinary list code takes.
+#[test]
+fn a_correct_example_verifies_from_a_list_match() {
+    let src = "module M:\n\n  part head_or(xs: List[Int], d: Int) -> Int:\n    example head_or([7, 8], 0) == 7\n    example head_or([], 0 - 1) == 0 - 1\n    match xs:\n      []     -> yield d\n      h :: t -> yield h\n";
+    let (code, out, err) = run_lll_cmd("ex_l_true", src, &["check"]);
+    assert_eq!(code, Some(0), "the head of [7, 8] is 7 and [] falls back:\nstdout={out}\nstderr={err}");
+}
+
+#[test]
+fn a_wrong_example_on_a_list_match_is_rejected() {
+    let src = "module M:\n\n  part head_or(xs: List[Int], d: Int) -> Int:\n    example head_or([7, 8], 0) == 8\n    match xs:\n      []     -> yield d\n      h :: t -> yield h\n";
+    let (code, out, err) = run_lll_cmd("ex_l_false", src, &["check"]);
+    assert_ne!(code, Some(0), "the head of [7, 8] is 7, not 8:\nstdout={out}\nstderr={err}");
+}
