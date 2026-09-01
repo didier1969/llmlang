@@ -1,17 +1,17 @@
 module SelfHost.Codegen:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : le BACK-END du mini-langage
-  # `Expr` — un codegen vers le bytecode d'une machine à PILE, plus la VM qui l'exécute,
-  # écrits EN llmlang et vérifiés par le vrai pipeline Z3. Contrepartie back-end du
-  # front-end lexer/parseur (self_host_lexer/parser.lll). Tout est STRUCTURAL
-  # (récursion sur les sous-arbres / la queue du programme) → terminaison prouvée gratis.
-  # La préservation sémantique (run(compile(e)) == eval(e)) n'est pas exprimable en
-  # contrat (DEC-LLL-017) → DÉMONTRÉE à l'exécution.
+  # The back end of the small `Expr` language: a code generator targeting a stack machine, plus
+  # the VM that runs the bytecode, both written in llmlang.
+  #
+  # Semantic preservation — running the compiled form gives what evaluating the tree gives —
+  # cannot be stated as a contract, since a contract may not call a part, so it is demonstrated
+  # at runtime instead.
+
 
   type Expr  = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
   type Instr = Push(Int) | INeg | IAdd | ISub | IMul
 
-  # ---- évaluateur de référence (structural sur l'AST) ----
+  # ---- reference evaluator ----
   part eval(e: Expr) -> Int:
     match e:
       Lit(n)    -> yield n
@@ -20,13 +20,13 @@ module SelfHost.Codegen:
       Sub(a, b) -> yield eval(a) - eval(b)
       Mul(a, b) -> yield eval(a) * eval(b)
 
-  # ---- codegen : Expr → programme bytecode (post-ordre) ----
+  # ---- code generation: an expression to a bytecode program, in post-order ----
   part iappend(xs: List[Instr], ys: List[Instr]) -> List[Instr]:
     match xs:
       []     -> yield ys
       h :: t -> yield h :: iappend(t, ys)
 
-  # post-ordre : compiler les sous-arbres, puis l'opération. Structural sur `e`.
+  # compile the subtrees first, then the operation.
   part compile(e: Expr) -> List[Instr]:
     match e:
       Lit(n)    -> yield Push(n) :: []
@@ -35,15 +35,15 @@ module SelfHost.Codegen:
       Sub(a, b) -> yield iappend(compile(a), iappend(compile(b), ISub :: []))
       Mul(a, b) -> yield iappend(compile(a), iappend(compile(b), IMul :: []))
 
-  # ---- VM à pile : exécute le bytecode. Structural sur le programme `prog`.
-  # La pile est une List[Int] (sommet = tête). Pour un binaire, `b` (poussé en
-  # dernier, opérande droite) est au sommet, `a` (opérande gauche) juste en dessous.
+  # ---- the stack VM ----
+  # The stack is a `List[Int]` with the top at the head. For a binary operation the right
+  # operand was pushed last, so it sits on top and the left operand is directly beneath it.
   part run(prog: List[Instr], st: List[Int]) -> Int:
     match prog:
       []        ->
         match st:
           []        -> yield 0
-          v :: srest -> yield v                 # sommet de pile = résultat
+          v :: srest -> yield v                 # the top of the stack is the result
       i :: rest ->
         match i:
           Push(n) -> yield run(rest, n :: st)
@@ -73,9 +73,9 @@ module SelfHost.Codegen:
                   _       -> yield 0
               _ -> yield 0
 
-  # ---- différentiel runtime : le back-end préserve la sémantique de `eval`.
+  # ---- runtime check: the back end preserves what the evaluator computes ----
   part main() -> Int via IO:
-    let e = Add(Mul(Lit(3), Lit(4)), Neg(Lit(5)))   # (3*4) + (-5) = 7
-    let delta = run(compile(e), []) - eval(e)       # 0 = codegen correct
+    let e = Add(Mul(Lit(3), Lit(4)), Neg(Lit(5)))   # (3*4) + (-5) is 7
+    let delta = run(compile(e), []) - eval(e)       # 0 means the back end agrees
     let d = IO.print(delta)                          # 0
     yield IO.print(run(compile(e), []))              # 7

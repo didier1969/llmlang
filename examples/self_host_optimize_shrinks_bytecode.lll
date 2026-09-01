@@ -1,11 +1,11 @@
 module SelfHost.Optimize:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : démontre la VALEUR d'un
-  # optimiseur — le constant folding RÉDUIT le bytecode émis — en composant l'optimiseur
-  # (fold, cf. self_host_constfold.lll) et le back-end (compile, cf. self_host_codegen.lll),
-  # tous deux en llmlang vérifié. Un sous-arbre entièrement constant se replie en un seul
-  # `Lit`, donc son codegen passe de N instructions à UNE. Structural → terminaison prouvée.
-  # Point DISTINCT de constfold (préservation sémantique) : ici on mesure la RÉDUCTION.
+  # What an optimiser is FOR: constant folding shrinks the emitted bytecode.
+  #
+  # A wholly constant subtree folds to a single literal, so its code generation collapses from
+  # several instructions to one. Where `self_host_constfold.lll` shows that folding preserves
+  # meaning, this measures what it saves.
+
 
   type Expr  = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
   type Instr = Push(Int) | INeg | IAdd | ISub | IMul
@@ -18,7 +18,7 @@ module SelfHost.Optimize:
       Sub(a, b) -> yield eval(a) - eval(b)
       Mul(a, b) -> yield eval(a) * eval(b)
 
-  # ---- optimiseur : constant folding bottom-up (helpers par cas, v1 single-scrutinee) ----
+  # ---- the optimiser: constant folding, one helper per case ----
   part foldNeg(a: Expr) -> Expr:
     match a:
       Lit(x) -> yield Lit(0 - x)
@@ -62,7 +62,7 @@ module SelfHost.Optimize:
       Sub(a, b) -> yield foldSub(fold(a), fold(b))
       Mul(a, b) -> yield foldMul(fold(a), fold(b))
 
-  # ---- back-end : codegen post-ordre + compteur d'instructions ----
+  # ---- back end: post-order code generation, plus an instruction count ----
   part iappend(xs: List[Instr], ys: List[Instr]) -> List[Instr]:
     match xs:
       []     -> yield ys
@@ -81,10 +81,10 @@ module SelfHost.Optimize:
       []     -> yield 0
       h :: t -> yield 1 + ilen(t)
 
-  # ---- différentiel : sémantique préservée ET bytecode réduit ----
+  # ---- the check: meaning preserved AND bytecode shorter ----
   part main() -> Int via IO:
-    let e = Add(Mul(Lit(3), Lit(4)), Lit(5))       # (3*4)+5 = 17, entièrement constant
-    let delta = eval(fold(e)) - eval(e)            # 0 : fold préserve la sémantique
+    let e = Add(Mul(Lit(3), Lit(4)), Lit(5))       # (3*4)+5, wholly constant
+    let delta = eval(fold(e)) - eval(e)            # 0: folding preserved the meaning
     let d = IO.print(delta)                         # 0
-    let raw = IO.print(ilen(compile(e)))            # 5 : push3,push4,IMul,push5,IAdd
-    yield IO.print(ilen(compile(fold(e))))          # 1 : fold(e)=Lit(17) → push17 seul
+    let raw = IO.print(ilen(compile(e)))            # 5: push, push, mul, push, add
+    yield IO.print(ilen(compile(fold(e))))          # 1: a single push of 17

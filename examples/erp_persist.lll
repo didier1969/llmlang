@@ -7,7 +7,7 @@ depends rusqlite "0.39.0" features "bundled"
 module Erp.Persist:
 
   # Wave-3 slice-2 E2E (REQ-LLL-066): an accounts ledger written to SQLite, RELOADED by a
-  # fresh query, and its ERP invariant (débit == crédit) proven on the reloaded rows — the
+  # fresh query, and its ERP invariant (debit == credit) proven on the reloaded rows — the
   # value-objects survive a real disk round-trip. Every printed `1` is a runtime-verified
   # ERP fact; all-ones = persistence + reconstruction + ACID all hold.
   #

@@ -1,26 +1,25 @@
 module SelfHost.LetEnv:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : un interpréteur self-hosté
-  # d'un mini-langage AVEC LIAISON DE VARIABLES (`let`) — une vraie machinerie
-  # d'interpréteur (environnement, binding, lookup), au-delà de l'arithmétique. Écrit
-  # EN llmlang, vérifié par Z3. Les variables sont indexées par Int (rang de De
-  # Bruijn) et l'environnement est une `List[Int]` (le rang 0 = liaison la plus
-  # récente). `eval` file l'environnement ; `Let(b, body)` évalue `b`, l'empile, puis
-  # évalue `body` dans l'env étendu ; `Var(i)` cherche le rang `i`. Tout STRUCTURAL
-  # (sous-arbres / queue de l'env) → terminaison prouvée gratis.
+  # An interpreter for a small language WITH VARIABLE BINDING, written in llmlang.
+  #
+  # Variables are indexed by de Bruijn rank and the environment is a `List[Int]`, so rank 0 is
+  # the most recent binding. `Let(b, body)` evaluates `b`, pushes it, and evaluates `body` in
+  # the extended environment; `Var(i)` looks up rank `i`. Everything recurses structurally, on
+  # subtrees or on the tail of the environment, so termination needs no measure.
+
 
   type Expr = Lit(Int) | Var(Int) | Add(Expr, Expr) | Mul(Expr, Expr) | Let(Expr, Expr)
 
-  # lookup du rang `i` dans l'environnement. Structural sur l'env ; `i` décroît.
+  # look up rank `i`.
   part nth(env: List[Int], i: Int) -> Int:
     match env:
-      []     -> yield 0                        # hors portée → défaut 0
+      []     -> yield 0                        # out of scope, defaults to 0
       h :: t ->
         match i == 0:
           true  -> yield h
           false -> yield nth(t, i - 1)
 
-  # évaluateur à environnement. Structural sur l'AST `e`.
+  # the evaluator.
   part eval(e: Expr, env: List[Int]) -> Int:
     match e:
       Lit(n)    -> yield n
@@ -28,14 +27,14 @@ module SelfHost.LetEnv:
       Add(a, b) -> yield eval(a, env) + eval(b, env)
       Mul(a, b) -> yield eval(a, env) * eval(b, env)
       Let(b, body) ->
-        let vb = eval(b, env)                  # évalue la liaison
-        yield eval(body, vb :: env)            # corps dans l'env étendu (rang 0 = vb)
+        let vb = eval(b, env)                  # evaluate the bound expression
+        yield eval(body, vb :: env)            # body in the extended environment
 
-  # ---- différentiel runtime : liaison + lookup + portée imbriquée.
+  # ---- runtime check: binding, lookup, and nested scope ----
   part main() -> Int via IO:
-    # let x = 10 in x + x  = 20
+    # let x = 10 in x + x
     let e1 = Let(Lit(10), Add(Var(0), Var(0)))
     let a = IO.print(eval(e1, []))             # 20
-    # let x = 6 in (let y = 7 in x * y)  = 42  (Var(1)=x sous le y interne, Var(0)=y)
+    # let x = 6 in (let y = 7 in x * y) — under the inner binding, rank 1 is x and rank 0 is y
     let e2 = Let(Lit(6), Let(Lit(7), Mul(Var(1), Var(0))))
     yield IO.print(eval(e2, []))               # 42

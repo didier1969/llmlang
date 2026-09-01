@@ -1,20 +1,17 @@
 module VerifiedSanitize:
 
-  # ── BRIQUE VÉRIFIÉE : assainissement de données à garantie PROPAGÉE (CPT-LLL-018) ──
+  # A guarantee established once by a producer, and consumed downstream for free.
   #
-  # Le pendant PROVE-side de REQ-LLL-201/204 : une fonction PROUVE qu'elle PRODUIT une liste dont
-  # chaque élément satisfait une propriété, et cette garantie se PROPAGE à un consommateur en aval
-  # — sans re-vérification à l'exécution. C'est l'invariant de flux de données d'un pipeline ERP :
-  # « après filtrage, chaque montant est valide », établi une fois, consommé partout.
+  # `keep_positive` proves that every element of its RESULT is positive. `safe_total` then
+  # discharges `sum_positive`'s `requires` from that fact alone — no re-test at the boundary,
+  # no runtime check, and no consumer that forgets to look.
   #
-  # AVANT (le réflexe) : filtrer, puis re-tester `if amount > 0` chez chaque consommateur (ou
-  # oublier de le faire). APRÈS (ici) : `keep_positive` prouve `∀ y ∈ result: y > 0`, et
-  # `safe_total` DÉCHARGE le `requires ∀ y > 0` de `sum_positive` GRATUITEMENT — le type porte la
-  # garantie de bout en bout.
+  # The usual shape is to filter and then re-test `amount > 0` in every consumer, or to forget
+  # to. Here the guarantee travels with the value across the function boundary.
 
-  # PRODUIT une liste dont TOUS les éléments sont > 0 (prove-side : le prédicat récursif est
-  # déchargé sur la structure cons du résultat — `h > 0` sur le bras retenu + la garantie de
-  # l'appel récursif).
+
+  # Produces a list whose elements are all positive: on the branch that keeps `h` the guard
+  # gives `h > 0`, and the recursive call carries the same guarantee for the rest.
   part keep_positive(xs: List[Int]) -> List[Int]:
     ensures forall y in result: y > 0
     measure length(xs)
@@ -22,7 +19,7 @@ module VerifiedSanitize:
       [] -> yield []
       h :: t -> yield if h > 0 then h :: keep_positive(t) else keep_positive(t)
 
-  # CONSOMME la garantie : exige que chaque élément soit > 0, prouve alors que le total est ≥ 0.
+  # Consumes the guarantee: given all-positive elements, the total is non-negative.
   part sum_positive(ys: List[Int]) -> Int:
     requires forall y in ys: y > 0
     ensures result >= 0
@@ -31,13 +28,13 @@ module VerifiedSanitize:
       [] -> yield 0
       h :: t -> yield h + sum_positive(t)
 
-  # LE PONT : `keep_positive(xs)` établit `∀ y > 0`, ce qui décharge le `requires` de
-  # `sum_positive` — la garantie traverse la frontière de fonction sans test runtime.
+  # The bridge: the producer's `ensures` is exactly the consumer's `requires`, so composing
+  # them costs nothing at runtime.
   part safe_total(xs: List[Int]) -> Int:
     ensures result >= 0
     let clean = keep_positive(xs)
     yield sum_positive(clean)
 
   part main() -> Int via IO:
-    # [5, -3, 10, -1, 8] → filtré [5, 10, 8] → total 23 (les négatifs écartés, total prouvé ≥ 0).
+    # [5, -3, 10, -1, 8] filters to [5, 10, 8], totalling 23.
     yield IO.print(safe_total([5, -3, 10, -1, 8]))

@@ -1,11 +1,11 @@
 module ImageKernels:
 
-  # ── CATALOGUE de noyaux image CERTIFIÉS (domaine array, REQ-LLL-037) ──
-  # Le flux d'un sticker : masque IA brut → raffiné → binarisé (dur) → inversé. CHAQUE noyau
-  # prouve, à taille QUELCONQUE : sortie ∈ [0,255], index en bornes, longueur préservée. Trois
-  # garanties qu'un noyau pixel C/Kotlin ne donne pas. Les noyaux se COMPOSENT sans casser l'invariant.
+  # A catalogue of certified image kernels over an array.
+  # A cutout pipeline: a raw mask, refined, then hard-binarized, then inverted. EACH kernel
+  # proves, at ANY size: output in [0, 255], indices in bounds, length preserved — three
+  # guarantees a hand-written pixel loop does not give. The kernels COMPOSE without breaking it.
 
-  # ── noyau 1 : SEUILLAGE DOUX (rampe alpha) ──
+  # ---- kernel 1: soft threshold, an alpha ramp ----
   part refine_px(a: Int, low: Int, high: Int) -> Int:
     requires 0 <= a, a <= 255
     requires 0 <= low, low < high, high <= 255
@@ -17,7 +17,7 @@ module ImageKernels:
           true  -> yield 255
           false -> yield ((a - low) * 255) div (high - low)
 
-  # ── noyau 2 : BINARISATION (masque dur : < t → 0, sinon → 255) ──
+  # ---- kernel 2: binarize, a hard mask — below t becomes 0, otherwise 255 ----
   part binarize_px(a: Int, t: Int) -> Int:
     requires 0 <= a, a <= 255
     requires 0 <= t, t <= 255
@@ -26,14 +26,14 @@ module ImageKernels:
       true  -> yield 0
       false -> yield 255
 
-  # ── noyau 3 : INVERSION (255 - alpha) ──
+  # ---- kernel 3: invert ----
   part invert_px(a: Int) -> Int:
     requires 0 <= a, a <= 255
     ensures 0 <= result, result <= 255
     yield 255 - a
 
-  # balayeur générique : applique refine puis binarize puis invert, pixel par pixel. Chaque
-  # composition PRÉSERVE [0,255] (les ensures se chaînent) et la longueur.
+  # the generic sweep: refine, then binarize, then invert, pixel by pixel. Each
+  # composition PRESERVES both the range and the length, because the contracts chain.
   part pipeline(src: Array[Int], dst: Array[Int], i: Int, low: Int, high: Int, t: Int) -> Array[Int]:
     requires length(src) == length(dst)
     requires 0 <= i, i <= length(src)

@@ -1,21 +1,20 @@
 module SelfHost.LetText:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) — le CAPSTONE du track :
-  # un pipeline COMPLET `texte source → tokens → AST → résultat` pour un mini-langage
-  # AVEC VARIABLES, écrit EN llmlang, vérifié par Z3. Contrairement aux slices
-  # précédents (qui lexaient seulement chiffres+opérateurs, ou construisaient l'AST à
-  # la main), ici on LEXE un IDENTIFIANT et des MOTS-CLÉS (`let`/`in`) depuis du texte
-  # brut, puis on RÉSOUT les noms via une table de symboles (`eqStr` sur `List[Int]`).
-  # C'est le vrai stress de capacité : String = List[Int] de codepoints (DEC-LLL-030),
-  # récursion STRUCTURALE partout (queue de la chaîne / de l'env) → terminaison prouvée
-  # gratis, SANS `measure`.
+  # A complete pipeline for a small language WITH VARIABLES: source text to tokens to AST to a
+  # result, written in llmlang.
+  #
+  # What makes this harder than lexing digits and operators is that identifiers and keywords
+  # come out of raw text, and names then have to be RESOLVED through a symbol table. A string
+  # is a `List[Int]` of codepoints, and the recursion is structural throughout — on the tail of
+  # the string, or of the environment — so termination comes for free, with no `measure`.
+
 
   type Tok  = TNum(Int) | TId(List[Int]) | TLet | TIn | TEq | TPlus
   type Pend = NoPend | PNum(Int) | PId(List[Int])
   type Expr = Lit(Int) | Var(List[Int]) | Add(Expr, Expr) | Let(List[Int], Expr, Expr)
   type Env  = ENil | ECons(List[Int], Int, Env)
 
-  # ---- égalité structurale de deux chaînes (codepoints). Structural sur `a`. ----
+  # ---- structural equality of two strings ----
   part eqStr(a: List[Int], b: List[Int]) -> Bool:
     match a:
       []       ->
@@ -30,7 +29,7 @@ module SelfHost.LetText:
               true  -> yield eqStr(ta, tb)
               false -> yield false
 
-  # ---- lexer : accumulateur 3-états (nombre / identifiant / rien). Structural sur `s`. ----
+  # ---- lexer: a three-state accumulator over number, identifier, or nothing ----
   part isDigit(c: Int) -> Bool:
     yield c >= 48 and c <= 57
 
@@ -42,7 +41,7 @@ module SelfHost.LetText:
       []     -> yield c :: []
       h :: t -> yield h :: snoc(t, c)
 
-  # un run d'identifiant → mot-clé (`let`/`in`) ou TId. "let"=[108,101,116], "in"=[105,110].
+  # an identifier run becomes `let`, `in`, or a TId
   part classify(chars: List[Int]) -> Tok:
     match eqStr(chars, 108 :: 101 :: 116 :: []):
       true  -> yield TLet
@@ -51,16 +50,16 @@ module SelfHost.LetText:
           true  -> yield TIn
           false -> yield TId(chars)
 
-  # émet l'opérateur/délimiteur `c` devant `rest` (espace/autre = sauté).
+  # emit the delimiter for `c` ahead of `rest`; spaces and anything else are skipped.
   part emitOp(c: Int, rest: List[Tok]) -> List[Tok]:
     match c == 61:                        # '='
       true  -> yield TEq :: rest
       false ->
         match c == 43:                    # '+'
           true  -> yield TPlus :: rest
-          false -> yield rest             # espace (32) ou autre → sauté
+          false -> yield rest             # space (32) or anything else, skipped
 
-  # vide l'accumulateur en fin de chaîne.
+  # flush the accumulator at end of input.
   part flushEnd(p: Pend) -> List[Tok]:
     match p:
       NoPend  -> yield []
@@ -72,19 +71,19 @@ module SelfHost.LetText:
       []     -> yield flushEnd(p)
       c :: t ->
         match isDigit(c):
-          true  ->                        # chiffre : étend/démarre un nombre
+          true  ->                        # digit: extend or start a number
             match p:
               NoPend  -> yield lexA(t, PNum(c - 48))
               PNum(n) -> yield lexA(t, PNum(n * 10 + (c - 48)))
               PId(cs) -> yield classify(cs) :: lexA(t, PNum(c - 48))
           false ->
             match isLower(c):
-              true  ->                    # lettre : étend/démarre un identifiant
+              true  ->                    # letter: extend or start an identifier
                 match p:
                   NoPend  -> yield lexA(t, PId(c :: []))
                   PId(cs) -> yield lexA(t, PId(snoc(cs, c)))
                   PNum(n) -> yield TNum(n) :: lexA(t, PId(c :: []))
-              false ->                    # délimiteur : vide le pending, émet l'op
+              false ->                    # delimiter: flush, then emit
                 match p:
                   NoPend  -> yield emitOp(c, lexA(t, NoPend))
                   PNum(n) -> yield TNum(n) :: emitOp(c, lexA(t, NoPend))
@@ -93,14 +92,14 @@ module SelfHost.LetText:
   part lex(s: List[Int]) -> List[Tok]:
     yield lexA(s, NoPend)
 
-  # ---- parseur : `let ID = NUM in BODY`, BODY = somme `+` d'atomes. ----
+  # ---- parser: `let ID = NUM in BODY`, where BODY is a `+` sum of atoms ----
   part atom(t: Tok) -> Expr:
     match t:
       TNum(n) -> yield Lit(n)
       TId(nm) -> yield Var(nm)
-      _       -> yield Lit(0)             # token inattendu → sentinelle totale
+      _       -> yield Lit(0)             # unexpected token, total fallback
 
-  # plie la somme `+` gauche-associative. Structural sur `toks` (tête matchée séparément).
+  # fold the left-associative `+` sum.
   part foldSum(acc: Expr, toks: List[Tok]) -> Expr:
     match toks:
       []        -> yield acc
@@ -109,21 +108,22 @@ module SelfHost.LetText:
           TPlus ->
             match rest:
               a :: more -> yield foldSum(Add(acc, atom(a)), more)
-              []        -> yield acc       # `+` final → ignoré
-          _ -> yield foldSum(acc, rest)    # token parasite → sauté
+              []        -> yield acc       # a trailing `+` is ignored
+          _ -> yield foldSum(acc, rest)    # stray token, skipped
 
   part parseBody(toks: List[Tok]) -> Expr:
     match toks:
       []     -> yield Lit(0)
       h :: t -> yield foldSum(atom(h), t)
 
-  # peèle le préfixe fixe `let ID = NUM in` — une chaîne de helpers, chacun matchant
-  # la TÊTE à part. NB(gap REQ-LLL-110) : une tête de cons ne peut être un motif
-  # constructeur (ni `TId(nm) :: r` ni `TLet :: r` — ce dernier bind un binder `TLet`
-  # qui *shadow* le constructeur) ; seuls un binder ou `[]` sont admis en tête. D'où le
-  # `h :: rest` + `match h` systématique. Tous non récursifs → terminaison triviale.
+  # Peel the fixed prefix `let ID = NUM in`, one helper per token.
+  #
+  # The repeated `h :: rest` followed by `match h` is not a stylistic choice: a cons head
+  # cannot be a constructor pattern here. Writing `TLet :: r` binds a fresh variable named
+  # `TLet` that shadows the constructor, which silently matches anything — only a binder or
+  # `[]` is admitted in head position, so the head has to be matched separately.
   part parseAfterNum(nm: List[Int], v: Int, toks: List[Tok]) -> Expr:
-    match toks:                            # attend : `in` BODY
+    match toks:                            # expecting: `in` BODY
       []        -> yield Lit(0)
       h :: body ->
         match h:
@@ -131,7 +131,7 @@ module SelfHost.LetText:
           _   -> yield Lit(0)
 
   part parseAfterEq(nm: List[Int], toks: List[Tok]) -> Expr:
-    match toks:                            # attend : NUM `in` BODY
+    match toks:                            # expecting: NUM `in` BODY
       []        -> yield Lit(0)
       h :: rest ->
         match h:
@@ -139,7 +139,7 @@ module SelfHost.LetText:
           _       -> yield Lit(0)
 
   part parseAfterId(nm: List[Int], toks: List[Tok]) -> Expr:
-    match toks:                            # attend : `=` NUM `in` BODY
+    match toks:                            # expecting: `=` NUM `in` BODY
       []        -> yield Lit(0)
       h :: rest ->
         match h:
@@ -147,7 +147,7 @@ module SelfHost.LetText:
           _   -> yield Lit(0)
 
   part parseAfterLet(toks: List[Tok]) -> Expr:
-    match toks:                            # attend : ID `=` NUM `in` BODY
+    match toks:                            # expecting: ID `=` NUM `in` BODY
       []        -> yield Lit(0)
       h :: rest ->
         match h:
@@ -160,12 +160,12 @@ module SelfHost.LetText:
       h :: rest ->
         match h:
           TLet -> yield parseAfterLet(rest)
-          _    -> yield parseBody(toks)    # pas de `let` → simple somme
+          _    -> yield parseBody(toks)    # no `let`, just a sum
 
-  # ---- évaluateur à environnement nommé (table de symboles = assoc-list). ----
+  # ---- evaluator with a named environment, held as an association list ----
   part lookup(env: Env, nm: List[Int]) -> Int:
     match env:
-      ENil -> yield 0                      # non lié → défaut 0
+      ENil -> yield 0                      # unbound name, defaults to 0
       ECons(k, v, rest) ->
         match eqStr(k, nm):
           true  -> yield v
@@ -178,12 +178,12 @@ module SelfHost.LetText:
       Add(a, b)        -> yield eval(a, env) + eval(b, env)
       Let(nm, b, body) -> yield eval(body, ECons(nm, eval(b, env), env))
 
-  # ---- différentiel : du TEXTE SOURCE jusqu'au résultat, variables résolues par nom. ----
+  # ---- runtime check: source text through to a result, names resolved ----
   part run(s: List[Int]) -> Int:
     yield eval(parse(lex(s)), ENil)
 
   part main() -> Int via IO:
-    # "let x = 10 in x + x + 5" : x lexé (TId), tokenisé, parsé (Var), résolu à 10 → 25
+    # `x` is lexed as an identifier, parsed as a variable, and resolved to 10.
     let a = IO.print(run("let x = 10 in x + x + 5"))   # 25
-    # "let y = 7 in y + 3" : autre nom, même machinerie → 10
+    # A different name through the same machinery.
     yield IO.print(run("let y = 7 in y + 3"))          # 10

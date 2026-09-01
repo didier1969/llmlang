@@ -1,15 +1,14 @@
 module SelfHost.ConstFold:
 
-  # Auto-hébergement étape 2 (REQ-LLL-019, DEC-LLL-024, PIL-LLL-007) : une VRAIE
-  # passe de compilateur — le constant folding — écrite EN llmlang et vérifiée par
-  # le vrai pipeline Z3. Dogfood : l'AST arithmétique du cœur (Neg + Bin euclidien,
-  # mêmes sémantiques que opsem.rs / DEC-LLL-026) modélisé en ADT récursif, la passe
-  # en fonctions pures totales. Stress-test d'expressivité pour un projet compilateur.
+  # Constant folding: a real compiler pass, written in llmlang and verified by Z3.
+  #
+  # The arithmetic AST mirrors the compiler's own — negation plus euclidean binary operators,
+  # with the same semantics — and the pass is a total pure function over it.
+
 
   type Expr = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
 
-  # Interpréteur de référence. Récursion structurale (sous-arbres plus petits) →
-  # terminaison PROUVÉE ; le match sur les 5 constructeurs est prouvé exhaustif.
+  # Reference interpreter. Structural recursion on subtrees, so termination needs no measure.
   part eval(e: Expr) -> Int:
     match e:
       Lit(n)    -> yield n
@@ -18,9 +17,9 @@ module SelfHost.ConstFold:
       Sub(a, b) -> yield eval(a) - eval(b)
       Mul(a, b) -> yield eval(a) * eval(b)
 
-  # Replieurs par opération. Chaque binaire est décomposé en deux parts (match a,
-  # puis match b via un helper) car v1 n'a pas de motif imbriqué dans un tuple —
-  # on reste donc à un match single-scrutinee, arms inline.
+  # One folder per operation. Each binary case is split across two parts — match on `a`, then
+  # on `b` through a helper — because a match scrutinises one value at a time, so there is no
+  # nested tuple pattern to match both at once.
   part foldNeg(a: Expr) -> Expr:
     match a:
       Lit(x) -> yield Lit(0 - x)
@@ -56,9 +55,7 @@ module SelfHost.ConstFold:
       Lit(x) -> yield foldMulL(x, b)
       _      -> yield Mul(a, b)
 
-  # La passe : constant folding bottom-up. Récursion structurale sur les sous-arbres
-  # (fold(a)/fold(b)) → terminaison PROUVÉE ; exhaustivité PROUVÉE. Renvoie un Expr
-  # (les params Expr sont empruntés par le modèle voie B — DEC-LLL-031).
+  # The pass itself, folding bottom-up.
   part fold(e: Expr) -> Expr:
     match e:
       Lit(n)    -> yield Lit(n)
@@ -67,12 +64,11 @@ module SelfHost.ConstFold:
       Sub(a, b) -> yield foldSub(fold(a), fold(b))
       Mul(a, b) -> yield foldMul(fold(a), fold(b))
 
-  # Différentiel (philosophie du projet) : la préservation sémantique n'est pas
-  # exprimable en contrat (pas d'appels dans requires/ensures, DEC-LLL-017), donc on
-  # la DÉMONTRE à l'exécution — eval(fold(e)) doit égaler eval(e). Z3 a déjà prouvé
-  # que la passe termine et couvre chaque nœud.
+  # Semantic preservation cannot be stated as a contract here, since a contract may not call a
+  # part. So it is demonstrated at runtime instead: folding must not change what the tree
+  # evaluates to. What IS proved statically is that the pass terminates and covers every node.
   part main() -> Int via IO:
-    let e = Add(Mul(Lit(3), Lit(4)), Neg(Lit(5)))   # (3*4) + (-5) = 7
-    let delta = eval(fold(e)) - eval(e)             # 0 = sémantique préservée
+    let e = Add(Mul(Lit(3), Lit(4)), Neg(Lit(5)))   # (3*4) + (-5) is 7
+    let delta = eval(fold(e)) - eval(e)             # 0 means the meaning was preserved
     let d = IO.print(delta)                         # 0
-    yield IO.print(eval(fold(e)))                   # 7 (arbre replié en Lit(7))
+    yield IO.print(eval(fold(e)))                   # 7, the tree folded to a literal

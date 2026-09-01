@@ -3,30 +3,31 @@ import "aps3d_maintenance_kernel.lll"
 
 module Aps3d.Persist:
 
-  # Étape 1 du vertical APS3D (DEC-LLL-066) : les règles de maintenance PERSISTÉES
-  # en SQLite, RELUES par une requête, reconstruites en `Rule` TYPÉES, puis
-  # évaluées par le noyau VÉRIFIÉ (Aps3d.Kernel, importé). La plomberie DB reste à
-  # la frontière d'effet (l'effet `Db`, std/db.lll) ; le domaine est pur et prouvé.
-  # Chaque `1` imprimé = un fait vérifié au runtime sur les données rechargées.
+  # Maintenance rules persisted in SQLite, read back through a query, rebuilt as TYPED rules,
+  # then evaluated by the verified kernel.
   #
-  # Schéma : rules(kind, threshold, horizon). kind 0 = WearAbove, 1 = DaysBelow.
+  # The database plumbing stays at the effect boundary; the domain is pure and proved. Each `1`
+  # printed is a fact checked at runtime against the reloaded data.
+  #
+  # Schema: rules(kind, threshold, horizon), where kind 0 is WearAbove and 1 is DaysBelow.
+
 
   part flag(b: Bool) -> Int:
     match b:
       true  -> yield 1
       false -> yield 0
 
-  # kind 0 → WearAbove(t) ; sinon DaysBelow(t).
+  # kind 0 is WearAbove, anything else DaysBelow.
   part mk_cond(kind: Int, t: Int) -> Condition:
     match kind == 0:
       true  -> yield WearAbove(t)
       false -> yield DaysBelow(t)
 
-  # une ligne (kind, threshold, horizon) → une règle mono-condition typée.
+  # one row becomes one typed single-condition rule.
   part row_to_rule(row: Json) -> Rule:
     yield Rule(mk_cond(cell_int(row, 0), cell_int(row, 1)) :: [], Schedule(cell_int(row, 2)))
 
-  # reconstruit la liste de règles typées depuis les lignes. Récursion structurale.
+  # rebuild the typed rules from the rows.
   part rows_to_rules(rows: List[Json]) -> List[Rule]:
     match rows:
       []     -> yield []
@@ -42,9 +43,9 @@ module Aps3d.Persist:
     let rows = unarr(Db.query(db, "SELECT kind, threshold, horizon FROM rules ORDER BY threshold"))
     let rules = rows_to_rules(rows)
     let facts = Facts(95, 20)
-    # 1. deux règles matchent sur l'équipement rechargé (95>90 et 95>75 ; 20 pas <7).
+    # Two rules match the reloaded equipment: 95 exceeds both 90 and 75, while 20 is not below 7.
     let a = IO.print(flag(len(evaluate(rules, facts)) == 2))
-    # 2. exactement les 3 règles insérées sont revenues.
+    # Exactly the three inserted rules came back.
     let b = IO.print(flag(count(rows) == 3))
-    # 3. la sévérité prouvée-bornée [0,3] vaut 3 (usure > 90).
+    # Severity, proved to lie in [0, 3], is 3 here.
     yield IO.print(flag(severity(facts) == 3))

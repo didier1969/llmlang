@@ -1,33 +1,29 @@
 module SelfHost.Lexer:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : le LEXER du mini-langage
-  # `Expr` (apparié à self_host_constfold.lll), écrit EN llmlang et vérifié par le
-  # vrai pipeline Z3. Une string = List[Int] de codepoints Unicode (DEC-LLL-030) —
-  # un littéral "12*34" désucre en cette liste.
+  # The lexer for the small `Expr` language, written in llmlang. A string is a `List[Int]` of
+  # codepoints, so the literal "12*34" desugars into that list.
   #
-  # Nombres MULTI-chiffres via un ACCUMULATEUR : le chiffre en cours est porté dans
-  # un paramètre `Pend`, émis (`flush`) au prochain non-chiffre. Chaque cas recurse
-  # sur la queue DIRECTE `t` (comme rev_acc) → récursion STRUCTURALE → terminaison
-  # PROUVÉE gratis, SANS `measure` sur liste (le gap REQ-LLL-101 ne bloque donc PAS
-  # le lexer ; il reste ouvert pour un scan non-restructurable, p.ex. le parseur).
-  # Matches prouvés exhaustifs.
+  # Multi-digit numbers are handled with an ACCUMULATOR: the number being read is carried in a
+  # `Pend` parameter and flushed at the next non-digit. Every case recurses on the direct tail,
+  # so the recursion is structural and termination needs no `measure` on the list.
+
 
   type Tok  = TNum(Int) | TPlus | TMinus | TStar
   type Pend = NoPend | Pend(Int)
 
-  # accumule un chiffre dans le nombre en cours.
+  # accumulate one digit into the number being read.
   part push_digit(p: Pend, d: Int) -> Pend:
     match p:
       NoPend  -> yield Pend(d)
       Pend(v) -> yield Pend(v * 10 + d)
 
-  # émet le nombre en cours (s'il y en a un) DEVANT le reste des tokens.
+  # emit the pending number, if any, ahead of the remaining tokens.
   part flush(p: Pend, rest: List[Tok]) -> List[Tok]:
     match p:
       NoPend  -> yield rest
       Pend(v) -> yield TNum(v) :: rest
 
-  # 43='+', 45='-', 42='*', 32=' ', 48..57='0'..'9'. Récursion structurale sur `t`.
+  # 43 is '+', 45 '-', 42 '*', 32 space, 48..57 the digits.
   part lexA(s: List[Int], p: Pend) -> List[Tok]:
     match s:
       []     -> yield flush(p, [])
@@ -37,20 +33,19 @@ module SelfHost.Lexer:
           45 -> yield flush(p, TMinus :: lexA(t, NoPend))
           42 -> yield flush(p, TStar :: lexA(t, NoPend))
           d when d >= 48 and d <= 57 -> yield lexA(t, push_digit(p, d - 48))
-          _  -> yield flush(p, lexA(t, NoPend))    # espace / inconnu : flush + skip
+          _  -> yield flush(p, lexA(t, NoPend))    # space or unknown: flush, then skip
 
   part lex(s: List[Int]) -> List[Tok]:
     yield lexA(s, NoPend)
 
-  # ---- différentiel runtime (la préservation n'est pas exprimable en contrat,
-  # DEC-LLL-017) : on lexe une chaîne connue et on PROUVE le résultat à l'exécution.
+  # ---- runtime check: lex a known string and pin the result ----
 
   part tok_count(ts: List[Tok]) -> Int:
     match ts:
       []     -> yield 0
       h :: t -> yield 1 + tok_count(t)
 
-  # un code par KIND (le nombre pour TNum) : la signature encode toute la séquence.
+  # One code per kind, the value itself for TNum, so the signature encodes the whole sequence.
   part tok_val(x: Tok) -> Int:
     match x:
       TNum(n) -> yield n
@@ -65,5 +60,5 @@ module SelfHost.Lexer:
 
   part main() -> Int via IO:
     let toks = lex("12*34+5")            # [TNum(12), TStar, TNum(34), TPlus, TNum(5)]
-    let c = IO.print(tok_count(toks))    # 5 tokens (multi-chiffres regroupés)
+    let c = IO.print(tok_count(toks))    # 5 tokens: the digits were grouped
     yield IO.print(tok_sig(toks))        # 12 + 300 + 34 + 100 + 5 = 451

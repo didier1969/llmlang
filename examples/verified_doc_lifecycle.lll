@@ -1,22 +1,20 @@
 module VerifiedDocLifecycle:
 
-  # ── BRIQUE VÉRIFIÉE : cycle de vie d'un document ERP (catalogue CPT-LLL-018) ──
+  # The lifecycle of an accounting document: Draft, Approved, Posted.
   #
-  # Un axe DIFFÉRENT des briques arithmétiques : la correction d'un WORKFLOW. Le cycle de vie
-  # d'un document comptable (facture, commande) — Draft → Approved → Posted — est régi par des
-  # transitions légales et un invariant métier : « ce qu'on approuve est exactement ce qu'on
-  # poste » (aucune altération du montant entre l'approbation et la comptabilisation).
+  # This is workflow correctness rather than arithmetic. The status is a SUM TYPE, so the set
+  # of states is closed, and each transition requires its legal starting state. Posting a draft
+  # is therefore a compile error — the illegal transition cannot be written, rather than being
+  # caught by a guard someone might forget.
   #
-  # AVANT (le réflexe) : un `status: String` + des `if status == "approved"` éparpillés ; rien
-  # n'empêche de poster un brouillon, et rien ne garantit que le montant n'a pas bougé.
-  # APRÈS (ici) : le statut est un type SOMME (états clos), chaque transition exige l'état de
-  # départ légal via `requires` — poster un `Draft` est une ERREUR DE COMPILATION, pas un bug
-  # runtime — et la préservation du montant est PROUVÉE par Z3.
+  # The invariant that matters to an auditor is that what was approved is exactly what gets
+  # posted: the amount is proved to cross the whole cycle unchanged.
+
 
   type Status = Draft | Approved | Posted | Cancelled
   type Doc = {status: Status, amount: Int}
 
-  # APPROUVER : seul un `Draft` peut l'être (`requires`) ; le montant est PRÉSERVÉ et reste ≥ 0.
+  # Only a draft can be approved. The amount is preserved.
   part approve(d: Doc) -> Doc:
     requires d.status == Draft
     requires d.amount >= 0
@@ -24,18 +22,17 @@ module VerifiedDocLifecycle:
     ensures result.amount == d.amount
     yield Doc(Approved, d.amount)
 
-  # POSTER (comptabiliser) : seul un `Approved` peut l'être (`requires`) ; le montant posté est
-  # EXACTEMENT le montant approuvé. Un appelant qui tente `post` sur un `Draft` ne décharge pas
-  # ce `requires` → rejet à la compilation : la transition illégale est INEXPRIMABLE.
+  # Only an approved document can be posted, and it posts exactly the approved amount. A
+  # caller reaching here from a draft cannot discharge the precondition, so the illegal
+  # transition does not compile.
   part post(d: Doc) -> Doc:
     requires d.status == Approved
     ensures result.status == Posted
     ensures result.amount == d.amount
     yield Doc(Posted, d.amount)
 
-  # Le chemin légal complet, composé : Draft → approve → post. Le type prouve que la séquence
-  # est valide (chaque `requires` déchargé par l'`ensures` de l'étape précédente) et que le
-  # montant traverse tout le cycle INCHANGÉ.
+  # The whole legal path composed: each step's precondition is discharged by the previous
+  # step's `ensures`, and the amount is unchanged end to end.
   part process(amt: Int) -> Doc:
     requires amt >= 0
     ensures result.status == Posted
@@ -43,6 +40,6 @@ module VerifiedDocLifecycle:
     yield post(approve(Doc(Draft, amt)))
 
   part main() -> Int via IO:
-    # Un document de 15,00 € (1500 c) traverse Draft → Approved → Posted ; montant final = 1500.
+    # A document of 1500 cents goes Draft, Approved, Posted and still holds 1500.
     let d = process(1500)
     yield IO.print(d.amount)

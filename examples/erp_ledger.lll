@@ -37,7 +37,7 @@ module Erp.Ledger:
     # 1. EXACT money: ten 0.10 postings sum to EXACTLY 1.00 (a binary float drifts).
     let dimes = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
     let a = IO.print(flag(exact_sum(dimes, 0.0) == 1.0))
-    # 2. débit = crédit: a balanced entry nets to EXACTLY zero.
+    # 2. debit = credit: a balanced entry nets to EXACTLY zero.
     let b = IO.print(flag(settle(1000.0, 1000.0) == 0.0))
     # 3. currency-safe add (same currency) yields 5.00 + 2.50 = 7.50 (750 minor units).
     let usd = 840

@@ -2,12 +2,12 @@ import "aps3d_maintenance_kernel.lll"
 
 module Aps3d.Maintenance:
 
-  # Démo PUR du noyau de règles de maintenance d'APS3D (Aps3d.Kernel) : sans
-  # persistance, entrées littérales. Le noyau est importé — zéro duplication.
+  # The maintenance rule kernel with literal inputs and no persistence. The kernel itself is
+  # imported rather than duplicated.
   #
-  # E2E : équipement usé à 95 %, 20 jours avant panne. Les règles critical_wear
-  # (usure>90) ET preventive (usure>75 ∧ jours<30) matchent → 2 actions ;
-  # + severity({95,5}) = 3. Total attendu = 5.
+  # Equipment worn to 95% with 20 days to failure matches both the critical-wear rule and the
+  # preventive one, giving two actions; severity adds 3, for a total of 5.
+
   part main() -> Int:
     let rules = Rule(WearAbove(90) :: [], Alert(3)) :: Rule(WearAbove(75) :: DaysBelow(30) :: [], Schedule(14)) :: []
     yield len(evaluate(rules, Facts(95, 20))) + severity(Facts(95, 5))

@@ -44,8 +44,8 @@ module Std.Money:
       true  -> yield MoneyOk(Money(minor_units(a) - minor_units(b), currency(a)))
       false -> yield MoneyErr("currency mismatch")
 
-  # PROVEN-EXACT settlement over scalar Rationals: `débit - crédit`, discharged by
-  # Z3's native Real theory (LRA, exact). When débit == crédit the balance is
+  # PROVEN-EXACT settlement over scalar Rationals: `debit - credit`, discharged by
+  # Z3's native Real theory (LRA, exact). When debit == credit the balance is
   # EXACTLY 0.0; `0.1 - 0.0` is EXACTLY 1/10 (no binary-float 0.1 drift). The
   # `example`s pin proof and binary to the SAME canonical value (DEC-LLL-020).
   part settle(debit: Rational, credit: Rational) -> Rational:

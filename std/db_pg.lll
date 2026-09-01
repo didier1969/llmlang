@@ -4,23 +4,18 @@ depends postgres "0.19.10"
 
 module Std.DbPg:
 
-  # DEC-LLL-066 étape 2/3 : le backend Postgres, JUMEAU de std/db.lll. Le compilateur émet
-  # un `lll_pg_runtime` built-in (src/codegen.rs `emit_pg_runtime`) — registre process-global
-  # `handle -> postgres::Client` — et chaque op ci-dessous y bind à travers la frontière FFI,
-  # avec le MÊME marshalling serde_json. Le CONTRAT est identique à std/db.lll : mêmes noms
-  # d'ops, mêmes signatures, même `Json` ADT (importé de db_json.lll), mêmes destructeurs.
+  # Verified PostgreSQL persistence — the twin of `std/db.lll`, deliberately identical in
+  # contract: same operation names, same signatures, same `Json` ADT from `db_json.lll`,
+  # same destructors.
   #
-  # C'est le point de swap (directive 3) : un module qui persiste via SQLite passe à Postgres
-  # en remplaçant `import "../std/db.lll"` par `import "../std/db_pg.lll"` — le domaine (pur,
-  # prouvé) ne change pas d'UNE ligne ; seul l'argument de `open` (config backend-spécifique :
-  # une conn-string libpq au lieu d'un chemin de fichier) diffère. Les deux effets s'appellent
-  # `Db`, donc importer les DEUX est une erreur de compilation (`duplicate effect`) — le
-  # compilateur force l'exclusivité mutuelle du swap.
+  # That is what makes the swap one line. A module persisting through SQLite moves to
+  # PostgreSQL by importing this file instead, and the proved domain code does not change;
+  # only the argument to `open` differs, being backend-specific configuration. Both effects
+  # are named `Db`, so importing both is a compile error — the compiler makes the swap
+  # mutually exclusive rather than trusting the programmer to pick one.
   #
-  # `open` prend une conn-string EXPLICITE `host=… port=… user=… dbname=…` (auth `trust` en
-  # local → pas de password ; cf. devenv.nix : port 5442, rôle applicatif `aps3d`). DB faults
-  # fail-stop (DEC-LLL-026). `postgres` est USER-déclaré (`depends postgres "…"`) et EXIGÉ au
-  # check (types.rs), exactement comme `depends tokio` pour l'actor runtime.
+  # `open` takes an explicit libpq connection string (`host=… port=… user=… dbname=…`),
+  # where SQLite took a file path. A database fault aborts rather than returning a value.
 
   effect Db:
     open(List[Int]) -> Int = extern "lll_pg_runtime::open" as (str) -> i64

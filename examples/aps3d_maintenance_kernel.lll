@@ -1,39 +1,34 @@
 module Aps3d.Kernel:
 
-  # Noyau PUR d'évaluation des règles de maintenance d'APS3D, porté en llmlang
-  # vérifié (vertical APS3D — DEC-LLL-066). Réplique la logique de
-  # lib/aps3d/rules/engine.ex (condition_matches? / rule_matches? / evaluate_rules).
-  # Aucun `main` : module-bibliothèque, importé par le démo pur ET le démo
-  # persistant (une seule source de vérité — la thèse DRY, DEC-LLL-020).
+  # The pure rule-evaluation kernel for equipment maintenance. A library module with no `main`,
+  # imported by both the in-memory demo and the persisted ones, so there is one source of truth.
   #
-  # Gain démontré vs l'Elixir : le fallback `condition_matches?(_, _) -> false`
-  # (engine.ex:225) rend SILENCIEUSEMENT inerte une condition mal orthographiée ;
-  # ici le match sur `Condition` est EXHAUSTIF → erreur de compile (DEC-LLL-015).
+  # The match on `Condition` is EXHAUSTIVE. In the engine this was ported from, a catch-all
+  # `condition_matches?(_, _) -> false` made a misspelled condition silently inert — it simply
+  # never fired, and nothing said so. Here the same mistake fails to compile.
 
-  # Faits agrégés d'un équipement (comparaisons ENTIÈRES — zéro flottant).
+
+  # Aggregated facts about one piece of equipment, compared as integers.
   type Facts = {max_wear: Int, min_days: Int}
 
-  # Les conditions réellement testées par le moteur (engine.ex:207-219).
-  # DEC-LLL-066 étape 4 (mesure changement de règle) : ajouter une condition qui RÉUTILISE
-  # un fait existant = 2 lignes (la variante ici + l'arm `cond_holds`). Retirer l'arm =
-  # ERREUR DE COMPILE (match non exhaustif) — impossible d'ajouter une condition à moitié
-  # câblée, là où engine.ex retomberait silencieusement sur `false` (ligne 225).
+  # Adding a condition over an existing fact costs two lines: a variant here, and an arm in
+  # `cond_holds`. Forgetting the arm does not compile, so a half-wired condition cannot exist.
   type Condition = WearAbove(Int) | DaysBelow(Int) | WearBelow(Int)
 
-  # Les actions émises : Alert(niveau) | Schedule(horizon_jours).
+  # The actions a rule can emit.
   type Action = Alert(Int) | Schedule(Int)
 
-  # Une règle = conjonction de conditions → une action.
+  # A rule is a conjunction of conditions leading to one action.
   type Rule = {conds: List[Condition], act: Action}
 
-  # Évaluation d'UNE condition. Match EXHAUSTIF : aucun fallback silencieux.
+  # Evaluate one condition. No catch-all, so no silent fallback.
   part cond_holds(c: Condition, f: Facts) -> Bool:
     match c:
       WearAbove(t) -> yield f.max_wear > t
       DaysBelow(t) -> yield f.min_days < t
       WearBelow(t) -> yield f.max_wear < t
 
-  # Conjonction : toutes les conditions tiennent. Récursion structurale (termine).
+  # All conditions hold.
   part all_hold(cs: List[Condition], f: Facts) -> Bool:
     match cs:
       []     -> yield true
@@ -42,11 +37,11 @@ module Aps3d.Kernel:
           true  -> yield all_hold(r, f)
           false -> yield false
 
-  # Une règle matche ssi toutes ses conditions tiennent.
+  # A rule matches when all of its conditions do.
   part matches(rl: Rule, f: Facts) -> Bool:
     yield all_hold(rl.conds, f)
 
-  # Le NOYAU : les actions des règles qui matchent, dans l'ordre de priorité.
+  # The kernel: the actions of every matching rule, in priority order.
   part evaluate(rules: List[Rule], f: Facts) -> List[Action]:
     match rules:
       []      -> yield []
@@ -55,15 +50,14 @@ module Aps3d.Kernel:
           true  -> yield rl.act :: evaluate(r, f)
           false -> yield evaluate(r, f)
 
-  # Longueur d'une liste d'actions (récursion structurale).
+  # How many actions were emitted.
   part len(xs: List[Action]) -> Int:
     match xs:
       []     -> yield 0
       h :: t -> yield 1 + len(t)
 
-  # Classification de sévérité : un contrat MÉTIER prouvé — la sévérité est
-  # TOUJOURS dans [0,3] quelle que soit l'entrée (classe de bug « hors bornes »
-  # éliminée PAR PREUVE, pas par test).
+  # Severity is proved to land in [0, 3] for ANY input, which removes the out-of-range class
+  # of bug rather than testing for it.
   part severity(f: Facts) -> Int:
     ensures result >= 0
     ensures result <= 3

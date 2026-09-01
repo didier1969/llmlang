@@ -1,11 +1,14 @@
 module FoldMillion:
 
-  # REQ-LLL-163 — tripwire de prod permanent : le fold-par-accumulateur en GRAND.
-  # `sum` n'est PAS un appel terminal (`h + sum(t)` attend le retour) : sans la
-  # transformation fold→boucle, un million d'éléments déborde la pile — calcul,
-  # ET teardown (le drop de la liste doit être itératif lui aussi). Ce programme
-  # passe par le chemin `lll run` COMPLET (verify → optimize → codegen → run) et
-  # échoue au moindre abort, là où un oracle stdout ne voit rien.
+  # A permanent tripwire for the fold-to-loop transformation, at scale.
+  #
+  # `sum` is not a tail call — `h + sum(t)` still has work to do when the call returns — so
+  # without that transformation a million elements overflow the stack. Both halves matter: the
+  # computation AND the teardown, since dropping the list must be iterative too.
+  #
+  # This runs the full path, verify through optimise, code generation and execution, and fails
+  # on any abort. A test that only inspected stdout would see nothing wrong.
+
 
   part build(n: Int) -> List[Int]:
     requires n >= 0

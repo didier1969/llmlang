@@ -1,40 +1,40 @@
 module SelfHost.RdParser:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) — un parseur RECURSIVE-DESCENT réel, écrit
-  # EN llmlang et vérifié par Z3, gérant la PRÉCÉDENCE **et les PARENTHÈSES** (nesting arbitraire) :
+  # A real recursive-descent parser written in llmlang, handling precedence AND parentheses:
+  #
   #   expr   := term (('+' | '-') term)*
   #   term   := factor ('*' factor)*
   #   factor := NUMBER | '(' expr ')'
-  # Le parseur-jouet précédent (self_host_parser.lll) contournait ceci par une passe STRUCTURALE à
-  # deux listes parallèles — impossible avec des parenthèses (elles créent un arbre). Ici les cinq
-  # fonctions de parse sont MUTUELLEMENT RÉCURSIVES et enfilent le reste des tokens via un record
-  # `PR{ast, rem}`. Trois techniques, chacune vérifiée par Z3 sur ce fichier :
   #
-  #   (1) RÉCURSION MUTUELLE sous mesure : expr→term→factor→(parenthèse)→expr forme un cycle.
-  #   (2) MESURE LEXICOGRAPHIQUE NATIVE `measure length(toks), rang` (REQ-LLL-012 / DEC-LLL-016 —
-  #       tuple comparé lexicographiquement, exactement comme Ackermann `measure m, n`). Rang
-  #       expr=4 > term=3 > exprRest=2 > termRest=1 > factor=0. La délégation expr→term sur les
-  #       MÊMES tokens ne décroît PAS en longueur — length est ÉGALE, c'est le RANG (2ᵉ composante)
-  #       qui décroît ; une arête consommante (parenthèse/opérateur pelé) fait décroître length
-  #       (1ʳᵉ composante), et l'ordre lexicographique ignore alors le rang (le cas dur
-  #       parseFactor→parseExpr, rang 0→4, tient PARCE QUE `(` est consommé). Aucun encodage
-  #       arithmétique à la main : l'auteur écrit le tuple évident, la VC fait la comparaison
-  #       bien-fondée. Usage RÉEL de REQ-LLL-101 (length en mesure) dans sa forme la plus dure.
-  #   (3) CONTRAT SUR LE RESTE : `ensures length(result.rem) <= length(toks)` — `result.rem` est un
-  #       SÉLECTEUR de record natif (REQ-LLL-070), donc ADMIS dans le fragment de contrat v1 (un
-  #       appel de PART y serait interdit, DEC-LLL-017). C'est ce contrat, importé par la VC de
-  #       mesure de l'appelant, qui prouve que le reste rendu par un sous-parse décroît — sans lui,
-  #       aucune boucle `(op factor)*` ne terminerait.
+  # Parentheses are what make this hard. A toy parser can walk two parallel lists structurally;
+  # nesting cannot, because it builds a tree. So the five parse functions are MUTUALLY
+  # RECURSIVE and thread the remaining tokens through a `PR{ast, rem}` record — and the
+  # termination argument has to work across that cycle.
   #
-  # Correction démontrée à l'exécution (DEC-LLL-017) via la chaîne lex→parse→eval : la précédence ET
-  # l'override par parenthèses sont PROUVÉS par les valeurs (14 vs 20, 13).
+  # It rests on three things:
+  #
+  #   A LEXICOGRAPHIC MEASURE, `measure length(toks), rank`, compared as a tuple. Ranks run
+  #   expr 4 > term 3 > exprRest 2 > termRest 1 > factor 0. Delegating expr to term consumes no
+  #   token, so the length is EQUAL and it is the rank that decreases; an edge that does consume
+  #   a token decreases the length, and lexicographic order then ignores the rank entirely.
+  #   That is what lets the hard edge work — factor calling expr jumps rank 0 to 4, and is
+  #   well-founded only because `(` was consumed first.
+  #
+  #   A CONTRACT ON THE REMAINDER, `ensures length(result.rem) <= length(toks)`. `result.rem`
+  #   is a record selector, which the contract fragment admits; a call to a part would not be.
+  #   The caller's measure obligation imports this contract, and without it no `(op factor)*`
+  #   loop would terminate.
+  #
+  # Precedence and the parenthesis override are demonstrated at runtime by the values: 14 rather
+  # than 20, and 13.
+
 
   type Tok  = TNum(Int) | TPlus | TMinus | TStar | TLParen | TRParen
   type Pend = NoPend | Pend(Int)
   type Expr = Lit(Int) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
   type PR   = {ast: Expr, rem: List[Tok]}
 
-  # ---- lexer (accumulateur multi-chiffres, structural sur la queue) ----
+  # ---- lexer: multi-digit accumulator, structural on the tail ----
   part push_digit(p: Pend, d: Int) -> Pend:
     match p:
       NoPend  -> yield Pend(d)
@@ -61,9 +61,9 @@ module SelfHost.RdParser:
   part lex(s: List[Int]) -> List[Tok]:
     yield lexA(s, NoPend)
 
-  # ---- parseur recursive-descent (SCC mutuel, mesure lexicographique native `length(toks), rang`) ----
+  # ---- the parser: one mutually recursive group under the lexicographic measure ----
 
-  # factor := NUMBER | '(' expr ')'          rang 0
+  # factor := NUMBER | '(' expr ')'          rank 0
   part parseFactor(toks: List[Tok]) -> PR:
     measure length(toks), 0
     ensures length(result.rem) <= length(toks)
@@ -76,12 +76,12 @@ module SelfHost.RdParser:
             match parseExpr(t):
               PR(e, r2) ->
                 match r2:
-                  []            -> yield PR(e, [])     # ')' manquant → récupération
-                  TRParen :: r3 -> yield PR(e, r3)     # sucre REQ-LLL-110 : tête-constructeur cons
-                  hd :: r3      -> yield PR(e, r2)     # défaut (autre tête) → récupération
-          _       -> yield PR(Lit(0), toks)           # token inattendu → récupération
+                  []            -> yield PR(e, [])     # missing ')', recover
+                  TRParen :: r3 -> yield PR(e, r3)     # constructor pattern in a cons head
+                  hd :: r3      -> yield PR(e, r2)     # any other head, recover
+          _       -> yield PR(Lit(0), toks)           # unexpected token, recover
 
-  # boucle ('*' factor)*                     rang 1
+  # the ('*' factor)* loop            rank 1
   part parseTermRest(left: Expr, toks: List[Tok]) -> PR:
     measure length(toks), 1
     ensures length(result.rem) <= length(toks)
@@ -94,7 +94,7 @@ module SelfHost.RdParser:
               PR(r, rem) -> yield parseTermRest(Mul(left, r), rem)
           _     -> yield PR(left, toks)
 
-  # exprRest : boucle (('+'|'-') term)*      rang 2
+  # the (('+'|'-') term)* loop        rank 2
   part parseExprRest(left: Expr, toks: List[Tok]) -> PR:
     measure length(toks), 2
     ensures length(result.rem) <= length(toks)
@@ -110,25 +110,25 @@ module SelfHost.RdParser:
               PR(r, rem) -> yield parseExprRest(Sub(left, r), rem)
           _     -> yield PR(left, toks)
 
-  # term := factor ('*' factor)*             rang 3
+  # term := factor ('*' factor)*      rank 3
   part parseTerm(toks: List[Tok]) -> PR:
     measure length(toks), 3
     ensures length(result.rem) <= length(toks)
-    let PR(a, r) = parseFactor(toks)   # sucre REQ-LLL-123 : let-destructuration
+    let PR(a, r) = parseFactor(toks)   # let-destructuring
     yield parseTermRest(a, r)
 
-  # expr := term (('+'|'-') term)*           rang 4
+  # expr := term (('+'|'-') term)*    rank 4
   part parseExpr(toks: List[Tok]) -> PR:
     measure length(toks), 4
     ensures length(result.rem) <= length(toks)
-    let PR(a, r) = parseTerm(toks)     # sucre REQ-LLL-123
+    let PR(a, r) = parseTerm(toks)
     yield parseExprRest(a, r)
 
   part parse(toks: List[Tok]) -> Expr:
-    let PR(e, r) = parseExpr(toks)     # sucre REQ-LLL-123
+    let PR(e, r) = parseExpr(toks)
     yield e
 
-  # ---- évaluateur de référence (structural sur l'AST) ----
+  # ---- reference evaluator, structural on the AST ----
   part eval(e: Expr) -> Int:
     match e:
       Lit(n)    -> yield n
@@ -136,8 +136,8 @@ module SelfHost.RdParser:
       Sub(a, b) -> yield eval(a) - eval(b)
       Mul(a, b) -> yield eval(a) * eval(b)
 
-  # ---- différentiel runtime : lex → parse → eval ; précédence + parenthèses PROUVÉES ----
+  # ---- runtime check of the whole chain: lex, parse, evaluate ----
   part main() -> Int via IO:
-    let a = IO.print(eval(parse(lex("2+3*4"))))        # 2 + (3*4) = 14 (et pas 20 → précédence)
-    let b = IO.print(eval(parse(lex("(2+3)*4"))))      # (2+3) * 4 = 20 (parenthèse override)
-    yield IO.print(eval(parse(lex("2*(3+4)-1"))))      # 2*(3+4) - 1 = 13 (nesting)
+    let a = IO.print(eval(parse(lex("2+3*4"))))        # 14, not 20: precedence holds
+    let b = IO.print(eval(parse(lex("(2+3)*4"))))      # 20: parentheses override it
+    yield IO.print(eval(parse(lex("2*(3+4)-1"))))      # 13: nesting

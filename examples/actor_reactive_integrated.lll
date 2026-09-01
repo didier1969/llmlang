@@ -4,17 +4,14 @@ depends tokio "1.52.3" features "rt-multi-thread, sync"
 
 module ActorReactiveIntegrated:
 
-  # DoD umbrella REQ-LLL-036 : plusieurs acteurs (comportements vérifiés) + vue
-  # réactive delta, exécutés par le runtime, rejoués à l'identique (--replay).
-  # Combine ce qui existait déjà séparément : W0 (step prouvé), W1 (view/diff),
-  # W2-t2/t2b/W3 (runtime Tokio réel, isolé, anti-tempête), W4 (trace/replay
-  # process-global). Zéro nouvelle machinerie de compilateur ici — juste le
-  # câblage : après chaque message, `main()` recalcule la vue et le delta
-  # depuis l'état réel de l'acteur (lu via l'effet `Actor.state`, havoc'd).
+  # Several verified actors plus a reactive delta view, driven by the real runtime and replayable
+  # exactly. There is no new machinery here — only the wiring: after each message, `main`
+  # recomputes the view and the delta from the actor's real state, read across the effect
+  # boundary.
   #
-  # DEC-LLL-080 (REQ-LLL-183) : `state` rend `Option[Int]` — un acteur mort
-  # (anti-tempête) ou un Pid inconnu est un `None` que chaque lecture DOIT
-  # traiter, jamais un 0 fabriqué en silence.
+  # `state` returns `Option[Int]`, so a stopped actor or an unknown identifier is a `None` that
+  # every read must handle, never a fabricated 0.
+
 
   type Delta = NoChange | Changed(Int)
 
@@ -24,18 +21,17 @@ module ActorReactiveIntegrated:
       true  -> yield x
       false -> yield 0
 
-  # Comportement d'acteur (W0/W2) : totalement prouvé, aucun effet.
+  # The actor behaviour: total, proved, and effect-free.
   part step(state: Int, msg: Int) -> Int:
     requires state >= 0
     ensures result >= 0
     yield max0(state + msg)
 
-  # Dérivation de vue (W1) : pure, réutilisable indépendamment du runtime.
+  # The view: a pure derivation, usable without any runtime.
   part view(state: Int) -> Int:
     yield state * 2
 
-  # Delta minimal (W1) : prouvé sur l'axe décidable "changé ?", ground-vérifié
-  # sur deux cas via `example` (REQ-LLL-049).
+  # The minimal delta, proved on the decidable question of WHETHER it changed.
   part diff(old_view: Int, new_view: Int) -> Delta:
     ensures (old_view == new_view) == (result == NoChange)
     example diff(0, 0) == NoChange
@@ -49,11 +45,9 @@ module ActorReactiveIntegrated:
     send(Int, Int) -> Unit     = extern "lll_actor_runtime::send"
     state(Int) -> Option[Int]  = extern "lll_actor_runtime::state"
 
-  # Le driver : après CHAQUE message envoyé au VRAI runtime d'acteur (Tokio,
-  # isolé, anti-tempête), on relit l'état (frontière d'effet, havoc'd), on
-  # calcule la vue et le delta — exactement le pattern "compute view, diff
-  # against previous, push only if changed" de LiveView, câblé au runtime réel.
-  # Chaque lecture traite l'absence (`None`) explicitement (DEC-LLL-080).
+  # The driver: after each message reaches the real runtime, read the state back, compute the
+  # view, and diff it against the previous one — pushing only when it changed. Every read
+  # handles absence explicitly.
   part main() -> Int via Actor, IO:
     let pid = Actor.spawn(0)
     match Actor.state(pid):
@@ -73,5 +67,5 @@ module ActorReactiveIntegrated:
                 let v2 = view(s2)
                 let d2 = diff(v1, v2)
                 match d1:
-                  Changed(x) -> yield IO.print(x)   # view(0)=0 -> view(5)=10, Changed(10)
+                  Changed(x) -> yield IO.print(x)   # the view moved from 0 to 10
                   NoChange   -> yield IO.print(0 - 1)

@@ -1,42 +1,40 @@
 module SelfHost.Reduce:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : une passe de compilateur qui a
-  # GENUINEMENT besoin de REQ-LLL-101 (longueur de liste en `measure`). `reduce` replie les
-  # triplets adjacents `TNum a, TPlus, TNum b` en `TNum (a+b)` sur un flux de tokens. Le pli
-  # CONSOMME 3 tokens et en REPRODUIT 1, puis RE-RÉDUIT le reste : la récursion n'est donc
-  # PAS structurale (elle reconstruit la liste), et la terminaison ne tient QUE parce que la
-  # LONGUEUR décroît strictement à chaque appel — `measure length(toks)`. C'était impossible
-  # tant que `length(liste)` n'était pas admis en contrat (DEC-LLL-017, amendé REQ-LLL-101).
-  # `List[Tok]` = liste d'ADT : exerce le chemin `len_<ADT>` (REQ-LLL-114) en conditions
-  # réelles, pas seulement `List[Int]`.
+  # A compiler pass whose termination genuinely needs a list-length measure.
+  #
+  # `reduce` folds adjacent triples `TNum a, TPlus, TNum b` into `TNum (a+b)` over a token
+  # stream. The fold CONSUMES three tokens and PRODUCES one, then re-reduces the result — so
+  # the recursion is not structural, since it rebuilds the list. Termination holds only because
+  # the LENGTH strictly decreases, which is exactly what `measure length(toks)` states.
+
 
   type Tok = TNum(Int) | TPlus
 
-  # Un motif en tête de cons ne peut pas être un motif constructeur (`TNum(a) :: rest` est
-  # un écart connu, REQ-LLL-110) : on lie la tête à un binder puis on la `match`. D'où la
-  # chaîne de `match` imbriqués ci-dessous.
+  # A cons head cannot be a constructor pattern, so `TNum(a) :: rest` will not do what it
+  # looks like. The head is bound to a variable and matched separately, which is why the
+  # matches below are nested rather than flat.
   part reduce(toks: List[Tok]) -> List[Tok]:
     measure length(toks)
     match toks:
       [] -> yield []
       h :: rest1 ->
         match h:
-          TPlus  -> yield h :: reduce(rest1)          # tête non pliable → structural sur rest1
+          TPlus  -> yield h :: reduce(rest1)          # head not foldable, recurse on the tail
           TNum(a) ->
             match rest1:
               [] -> yield h :: []
               h2 :: rest2 ->
                 match h2:
-                  TNum(x) -> yield h :: reduce(rest1)  # deux nombres sans `+` → structural
+                  TNum(x) -> yield h :: reduce(rest1)  # two numbers, no `+` between them
                   TPlus ->
                     match rest2:
                       [] -> yield h :: h2 :: []
                       h3 :: rest3 ->
                         match h3:
-                          TPlus   -> yield h :: reduce(rest1)          # `+ +` → structural
-                          TNum(b) -> yield reduce(TNum(a + b) :: rest3) # PLI : 3 tokens → 1, longueur ↓ 2
+                          TPlus   -> yield h :: reduce(rest1)          # `+ +`, nothing to fold
+                          TNum(b) -> yield reduce(TNum(a + b) :: rest3) # fold: three tokens become one
 
-  # extrait la valeur du premier `TNum` (structural, terminaison gratis) — sonde du différentiel.
+  # the value of the first `TNum`, used by the runtime check below.
   part firstNum(toks: List[Tok]) -> Int:
     match toks:
       [] -> yield 0
@@ -45,11 +43,11 @@ module SelfHost.Reduce:
           TNum(a) -> yield a
           TPlus   -> yield firstNum(t)
 
-  # ---- différentiel runtime : réduit un flux connu et imprime la valeur repliée.
+  # ---- runtime check: reduce a known stream and print what it folded to ----
   part main() -> Int via IO:
-    # [3, +, 4, +, 5] → pli 3+4=7 → [7, +, 5] → pli 7+5=12 → [12]
+    # [3, +, 4, +, 5] folds to [7, +, 5], then to [12]
     let toks = TNum(3) :: TPlus :: TNum(4) :: TPlus :: TNum(5) :: []
     let a = IO.print(firstNum(reduce(toks)))        # 12
-    # [8, +, 9] → [17]
+    # [8, +, 9] folds to [17]
     let toks2 = TNum(8) :: TPlus :: TNum(9) :: []
     yield IO.print(firstNum(reduce(toks2)))         # 17

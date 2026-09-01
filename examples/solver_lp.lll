@@ -1,45 +1,43 @@
 module SolverLp:
 
-  # REQ-LLL-193 (CPT-LLL-017, « l'oracle au bord ») — la SURFACE DE MODÉLISATION.
+  # The modelling surface for an external solver.
   #
-  # Généralise le tracer REQ-LLL-191 (figé à 2 variables + tuple `(Int,Int)`) : `solve`
-  # rend désormais une solution de longueur VARIABLE `List[Int]` (N variables), et le
-  # modèle est une FORME NEUTRE, agnostique du solveur : N variables entières + M
-  # contraintes linéaires `sum(c_i*x_i) <=/>=/== b` groupées en FAMILLES + UN objectif
-  # linéaire — encodée à plat dans un `List[Int]`. z3-opt et un futur CP-SAT ne sont que
-  # deux ADAPTATEURS de cette même forme (src/codegen.rs `emit_solver_runtime`, déjà N-aire).
+  # `solve` returns a solution of variable length for N variables, and the model is a NEUTRAL
+  # form the solver does not dictate: N integer variables, M linear constraints of the shape
+  # `sum(c_i * x_i)` against a bound, and one linear objective, all flattened into a `List[Int]`.
+  # Different solvers are adapters over that same form.
   #
-  # LA THÈSE (inchangée). Le résultat de `solve` est HAVOCÉ (DEC-LLL-017) : le cœur vérifié
-  # ne peut RIEN en prouver. Pour décharger le `requires` de `use_solution` (la faisabilité),
-  # le programme DOIT appeler un WITNESS-CHECK vérifié — la discipline de vérification FORCE
-  # la re-vérification. Une solution qui viole une contrainte est REJETÉE fail-stop.
+  # The result of `solve` is HAVOCKED, so the verified core can prove nothing about it. To
+  # discharge `use_solution`'s precondition the program MUST call a verified witness check —
+  # the verification discipline forces the re-check rather than trusting the oracle, and a
+  # solution violating any constraint is rejected.
+
 
   effect Solver:
     solve(List[Int]) -> List[Int] = extern "lll_solver_runtime::solve"
 
-  # La solution havocée arrive en `List[Int]` ; on la reifie en `Array[Int]` (accès indexé
-  # O(1), `get`/`length` — le support de `forall`/contrat, REQ-LLL-037/158). L'array reste
-  # OPAQUE au prouveur (aucun `ensures` de faisabilité), donc le mur de havoc tient.
+  # Reify the havocked solution as an array so contracts can index it. The array stays opaque
+  # to the prover, so the conversion does not weaken the havoc wall.
   part to_array(xs: List[Int], acc: Array[Int]) -> Array[Int]:
     match xs:
       []     -> yield acc
       h :: t -> yield to_array(t, push(acc, h))
 
-  # WITNESS-CHECK vérifié, N=3 : teste CHAQUE contrainte du modèle par accès indexé `get`
-  # (borne prouvée par `requires length == 3`). Deux familles + un agrégat :
-  #   • famille non-négativité  : get(sol,i) >= 0            (i = 0,1,2)
-  #   • famille plafond         : get(sol,i) <= 6            (i = 0,1,2)
-  #   • agrégat de capacité     : get(sol,0)+get(sol,1)+get(sol,2) <= 10
-  # Son `ensures result == <conjonction>` est un RÉSUMÉ EXÉCUTABLE : sur le bras `true` du
-  # match, le pare-feu de contrat l'ASSUME, et la conjonction décharge le `requires` de
-  # `use_solution` — même pont que REQ-LLL-191, désormais sur un array de N variables.
+  # The witness check, at N = 3. Two families and one aggregate:
+  # Indices are in bounds by the `requires length == 3`.
+  #   non-negativity   get(sol, i) >= 0 for each i
+  #   ceiling          get(sol, i) <= 6 for each i
+  #   capacity         the three together are at most 10
+  #
+  # On the `true` branch below, the contract firewall assumes this `ensures`, and that
+  # conjunction is what discharges `use_solution`'s precondition.
   part feasible(sol: Array[Int]) -> Bool:
     requires length(sol) == 3
     ensures result == (get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 6 and get(sol, 1) <= 6 and get(sol, 2) <= 6 and get(sol, 0) + get(sol, 1) + get(sol, 2) <= 10)
     yield get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0 and get(sol, 0) <= 6 and get(sol, 1) <= 6 and get(sol, 2) <= 6 and get(sol, 0) + get(sol, 1) + get(sol, 2) <= 10
 
-  # Consomme le plan PROUVÉ-FAISABLE. Son `requires` ne peut être déchargé que via le
-  # witness : `sol` vient de l'oracle havocé, donc rien n'est prouvable sans re-vérification.
+  # Consumes the checked solution. Its precondition can only be discharged through the witness,
+  # since `sol` came from the oracle.
   part use_solution(sol: Array[Int]) -> Int:
     requires length(sol) == 3
     requires get(sol, 0) >= 0 and get(sol, 1) >= 0 and get(sol, 2) >= 0
@@ -49,16 +47,16 @@ module SolverLp:
     yield get(sol, 0) * 3 + get(sol, 1) * 2 + get(sol, 2)
 
   part main() -> Int via Solver, IO:
-    # max 3x+2y+z  s.c.  x,y,z >= 0,  x,y,z <= 6,  x+y+z <= 10   ->  (6,4,0), objectif 26.
-    # forme neutre à plat : [nvars, ncons, sens, obj.., puis par contrainte: rel, rhs, coeffs..]
-    #   sens: 1=max ; rel: 0=`<=` 1=`>=` 2=`==`
+    # Maximise 3x + 2y + z subject to 0 <= each <= 6 and x + y + z <= 10, giving (6, 4, 0).
+    # Flat encoding: [nvars, ncons, sense, objective.., then per constraint: rel, rhs, coeffs..]
+    #   sense: 0 = minimise, 1 = maximise      rel: 0 = `<=`, 1 = `>=`, 2 = `==`
     let model = [3, 7, 1, 3, 2, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 6, 1, 0, 0, 0, 6, 0, 1, 0, 0, 6, 0, 0, 1, 0, 10, 1, 1, 1]
     let sol = to_array(Solver.solve(model), array())
-    # la longueur = nombre de variables est re-vérifiée à l'exécution (un oracle qui rend
-    # le mauvais N — ou vide sur échec z3 — prend le bras `false`, jamais `use_solution`).
+    # Length is re-checked at runtime: an oracle returning the wrong number of variables, or
+    # nothing when it fails, takes the `false` branch.
     match length(sol) == 3:
       true ->
         match feasible(sol):
           true  -> yield IO.print(use_solution(sol))   # 3*6 + 2*4 + 0 = 26
-          false -> yield IO.print(0 - 1)                # solution rejetée — jamais utilisée
-      false -> yield IO.print(0 - 2)                    # mauvais N — rejeté
+          false -> yield IO.print(0 - 1)                # infeasible solution, rejected
+      false -> yield IO.print(0 - 2)                    # wrong number of variables, rejected

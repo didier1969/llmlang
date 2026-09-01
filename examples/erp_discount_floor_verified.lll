@@ -1,15 +1,13 @@
 module ErpDiscountFloorVerified:
 
-  # ── AGENT CRITIQUE ERP VÉRIFIÉ : PLANCHER DE MARGE — ne jamais vendre À PERTE (CPT-LLL-018) ──
+  # A discount can never push the net price below cost.
   #
-  # Invariant COMMERCIAL, distinct de la capacité (inventaire) et de l'équilibre (partie double) :
-  # un PLANCHER sur une valeur DÉRIVÉE sous une garde. Une remise ne doit JAMAIS pousser le prix
-  # net (price − discount) sous le COÛT. Formalisé : `requires discount ≤ price − cost` (la remise
-  # ne mord pas dans le coût) ⟹ `ensures net ≥ cost` (marge protégée) — prouvé, pas testé. Vendre
-  # à perte est IMPOSSIBLE dans un programme prouvé.
+  # The shape is a FLOOR on a derived value under a guard: given `discount <= price - cost`,
+  # the net is proved to stay at or above cost. Selling at a loss is not caught here, it is
+  # unrepresentable.
 
-  # Le prix net = prix − remise, prouvé ≥ coût quand la remise respecte le plancher. C'est la
-  # garantie « pas de vente à perte », comme théorème, sur une ligne.
+
+  # Net price, proved at or above cost whenever the discount respects the floor.
   part net_price(price: Int, cost: Int, discount: Int) -> Int:
     requires 0 <= cost
     requires cost <= price
@@ -19,7 +17,7 @@ module ErpDiscountFloorVerified:
     ensures result >= cost
     yield price - discount
 
-  # La marge d'une ligne = net − coût, prouvée ≥ 0 (jamais négative) sous le plancher de remise.
+  # A line's margin, proved non-negative under the same guard.
   part margin(price: Int, cost: Int, discount: Int) -> Int:
     requires 0 <= cost
     requires cost <= price
@@ -29,8 +27,7 @@ module ErpDiscountFloorVerified:
     ensures result == price - discount - cost
     yield net_price(price, cost, discount) - cost
 
-  # Somme des marges d'un lot de lignes, toutes ≥ 0 → total ≥ 0 (forall-sur-liste + sum, REQ-201) :
-  # si CHAQUE ligne respecte son plancher, la marge TOTALE du lot est prouvée ≥ 0, à N lignes.
+  # If every line respects its floor, the batch's total margin is non-negative, for any N.
   part total_margin(margins: List[Int]) -> Int:
     requires forall m in margins: m >= 0
     ensures result == sum(margins)
@@ -41,6 +38,6 @@ module ErpDiscountFloorVerified:
       m :: rest -> yield m + total_margin(rest)
 
   part main() -> Int via IO:
-    # Prix 100, coût 60, remise 30 (≤ 100−60=40) → net 70 ≥ coût 60, marge ligne 10.
-    # Lot de marges [10, 5, 25] toutes ≥ 0 → marge totale 40, prouvée ≥ 0 (aucune vente à perte).
+    # Price 100, cost 60, discount 30 (the floor allows 40): net 70, margin 10.
+    # A batch of margins [10, 5, 25] totals 40, proved non-negative.
     yield IO.print(total_margin([margin(100, 60, 30), 5, 25]))

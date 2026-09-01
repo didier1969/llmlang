@@ -1,38 +1,31 @@
 module VerifiedRegistry:
 
-  # ── BRIQUE VÉRIFIÉE : registre de données maîtres à intégrité référentielle (CPT-LLL-018) ──
+  # Referential integrity over a master-data registry.
   #
-  # Encore un axe DIFFÉRENT : les données associatives (catalogue articles→prix, clients→…, toute
-  # table de données maîtres d'un ERP). L'intégrité référentielle — « une clé enregistrée reste
-  # présente et se relit exactement » — est prouvée par la théorie des tableaux de Z3, pas testée.
-  #
-  # AVANT (le réflexe) : une `HashMap` où un `insert` maladroit écrase une autre clé, où un
-  # `lookup` d'une clé absente rend `null`/une valeur par défaut silencieuse.
-  # APRÈS (ici) : « après enregistrement, la clé EST présente », « deux enregistrements distincts
-  # coexistent », et « relire une clé qu'on vient d'écrire rend EXACTEMENT sa valeur » sont des
-  # THÉORÈMES.
+  # Three properties are proved rather than tested: a key that was written is present; two
+  # writes to distinct keys coexist, which is the one a naive implementation most often breaks;
+  # and reading back a key just written returns exactly its value, with no silent default.
 
-  # Enregistrer un article : après, la clé est PRÉSENTE — aucun enregistrement silencieusement perdu.
+
+  # After a write the key is present — nothing is silently lost.
   part register(catalog: Map[Int, Int], item: Int, price: Int) -> Map[Int, Int]:
     ensures haskey(result, item)
     yield insert(catalog, item, price)
 
-  # Deux enregistrements de clés DISTINCTES coexistent : un `insert` ne fait pas disparaître
-  # l'autre clé (la propriété qu'une implémentation naïve casse le plus souvent).
+  # Writes to distinct keys coexist: inserting one does not evict the other.
   part register2(catalog: Map[Int, Int], a: Int, b: Int, pa: Int, pb: Int) -> Map[Int, Int]:
     requires a != b
     ensures haskey(result, a)
     ensures haskey(result, b)
     yield insert(insert(catalog, a, pa), b, pb)
 
-  # Relire un article qu'on vient d'enregistrer rend EXACTEMENT le prix enregistré (lecture sûre :
-  # la valeur lue est celle écrite, sans défaut silencieux).
+  # Reading back a key just written returns exactly what was written.
   part price_after_register(catalog: Map[Int, Int], item: Int, price: Int) -> Int:
     ensures result == price
     let m = insert(catalog, item, price)
     yield lookup(m, item)
 
   part main() -> Int via IO:
-    # Enregistrer l'article 42 à 1500, puis relire l'article 7 qu'on enregistre à 999 → 999.
+    # Write item 42 at 1500, then write item 7 at 999 and read it back.
     let cat = register(map(), 42, 1500)
     yield IO.print(price_after_register(cat, 7, 999))

@@ -3,63 +3,64 @@ import "aps3d_maintenance_kernel.lll"
 
 module Aps3d.Multi:
 
-  # REQ-LLL-094 (Voie C) : la PREUVE de « deux backends vivants dans un MÊME programme ».
-  # Le module-swap (db.lll ↔ db_pg.lll) ne peut PAS faire ça — importer les deux `effect Db`
-  # est une erreur `duplicate effect`. Ici, un SEUL `effect Db` (std/db_multi.lll) porte les
-  # deux backends, choisis au RUNTIME par le schéma de la conn-string : on ouvre un handle
-  # SQLite ET un handle Postgres DANS LE MÊME programme, on écrit dans chacun, on relit de
-  # chacun — et les données restent ISOLÉES (chaque backend rend SES propres lignes). Le
-  # domaine pur/prouvé (noyau Aps3d.Kernel importé) et la reconstruction typée ne changent
-  # pas : le même contrat (`Db`, `Json`, destructeurs) pilote l'un ou l'autre backend selon
-  # le handle passé.
+  # Two database backends alive in the SAME program.
   #
-  # Schéma (identique aux deux backends) : rules(kind, threshold, horizon). kind 0 = WearAbove.
+  # Swapping backends by import cannot do this: importing both `Db` effects is a compile error.
+  # Here one effect carries both, and the backend is chosen at RUNTIME by the connection
+  # string's scheme. A SQLite handle and a PostgreSQL handle are opened together, written to,
+  # and read back — and the data stays isolated, each backend returning only its own rows.
+  #
+  # The proved domain kernel and the typed reconstruction are unchanged: the same contract
+  # drives either backend, depending only on which handle it is given.
+  #
+  # Schema, identical on both: rules(kind, threshold, horizon), where kind 0 is WearAbove.
+
 
   part flag(b: Bool) -> Int:
     match b:
       true  -> yield 1
       false -> yield 0
 
-  # kind 0 → WearAbove(t) ; sinon DaysBelow(t).
+  # kind 0 is WearAbove, anything else DaysBelow.
   part mk_cond(kind: Int, t: Int) -> Condition:
     match kind == 0:
       true  -> yield WearAbove(t)
       false -> yield DaysBelow(t)
 
-  # une ligne (kind, threshold, horizon) → une règle mono-condition typée.
+  # one row becomes one typed single-condition rule.
   part row_to_rule(row: Json) -> Rule:
     yield Rule(mk_cond(cell_int(row, 0), cell_int(row, 1)) :: [], Schedule(cell_int(row, 2)))
 
-  # reconstruit la liste de règles typées depuis les lignes. Récursion structurale.
+  # rebuild the typed rules from the rows.
   part rows_to_rules(rows: List[Json]) -> List[Rule]:
     match rows:
       []     -> yield []
       h :: t -> yield row_to_rule(h) :: rows_to_rules(t)
 
   part main() -> Int via IO, Db:
-    # DEUX handles ouverts dans le MÊME programme — dispatch par schéma : `sqlite:` → SQLite,
-    # une conn-string libpq → Postgres. `sq` et `pg` sont deux backends VIVANTS simultanément.
+    # Two handles open at once, dispatched by scheme: `sqlite:` for one, a libpq connection
+    # string for the other.
     let sq = Db.open("sqlite::memory:")
     let pg = Db.open("host=127.0.0.1 port=5442 user=aps3d dbname=aps3d_rules_multi")
-    # backend SQLite : une règle seuil 90.
+    # into SQLite: one rule at threshold 90.
     let d0 = Db.exec(sq, "DROP TABLE IF EXISTS rules")
     let c0 = Db.exec(sq, "CREATE TABLE rules (kind INTEGER, threshold INTEGER, horizon INTEGER)")
     let i0 = Db.exec(sq, "INSERT INTO rules VALUES (0, 90, 3)")
-    # backend Postgres : une règle seuil 75 (données DISTINCTES, même schéma, autre backend).
+    # into PostgreSQL: a different rule, at threshold 75.
     let d1 = Db.exec(pg, "DROP TABLE IF EXISTS rules")
     let c1 = Db.exec(pg, "CREATE TABLE rules (kind INTEGER, threshold INTEGER, horizon INTEGER)")
     let i1 = Db.exec(pg, "INSERT INTO rules VALUES (0, 75, 14)")
-    # relire de CHACUN (les deux backends interrogés dans le même programme).
+    # read back from each.
     let rows_s = unarr(Db.query(sq, "SELECT kind, threshold, horizon FROM rules ORDER BY threshold"))
     let rows_p = unarr(Db.query(pg, "SELECT kind, threshold, horizon FROM rules ORDER BY threshold"))
     let rules_s = rows_to_rules(rows_s)
     let rules_p = rows_to_rules(rows_p)
     let facts = Facts(95, 20)
-    # 1. le backend SQLite est vivant : sa règle (usure>90) matche l'équipement (95).
+    # SQLite is live: its rule, wear above 90, matches equipment at 95.
     let a = IO.print(flag(len(evaluate(rules_s, facts)) == 1))
-    # 2. le backend Postgres est vivant EN MÊME TEMPS : sa règle (usure>75) matche aussi.
+    # PostgreSQL is live at the same time: its rule, wear above 75, matches too.
     let b = IO.print(flag(len(evaluate(rules_p, facts)) == 1))
-    # 3. isolation : SQLite a rendu SON seuil (90) — pas celui de Postgres.
+    # Isolation: SQLite returned its own threshold, not the other one.
     let c = IO.print(flag(cell_int(nth(rows_s, 0), 1) == 90))
-    # 4. isolation : Postgres a rendu SON seuil (75) — les deux backends coexistent, distincts.
+    # Isolation the other way: the two coexist without mixing.
     yield IO.print(flag(cell_int(nth(rows_p, 0), 1) == 75))

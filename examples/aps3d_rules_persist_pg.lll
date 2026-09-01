@@ -3,32 +3,32 @@ import "aps3d_maintenance_kernel.lll"
 
 module Aps3d.Persist:
 
-  # DEC-LLL-066 étape 2 : le JUMEAU Postgres de aps3d_rules_persist.lll. Une SEULE ligne
-  # diffère (l'import du backend : `db.lll` → `db_pg.lll`) + l'argument de `Db.open` (config
-  # backend-spécifique : conn-string libpq vs `:memory:`). Aucune ligne `depends` : elles
-  # suivent transitivement l'import du backend. C'est la démonstration du swap — le domaine
-  # pur/prouvé
-  # (noyau Aps3d.Kernel importé) et toute la logique de reconstruction typée ne changent pas.
-  # Le contrat (effet `Db`, `Json`, destructeurs) est le même ; seul le backend diffère.
+  # The PostgreSQL twin of `aps3d_rules_persist.lll`.
   #
-  # Schéma : rules(kind, threshold, horizon). kind 0 = WearAbove, 1 = DaysBelow.
+  # Exactly one line differs — the backend import — plus the argument to `Db.open`, which is
+  # backend-specific configuration. There is no `depends` line at all: the dependency follows
+  # the import transitively. The proved domain kernel and the whole typed reconstruction are
+  # identical, because the contract is.
+  #
+  # Schema: rules(kind, threshold, horizon), where kind 0 is WearAbove and 1 is DaysBelow.
+
 
   part flag(b: Bool) -> Int:
     match b:
       true  -> yield 1
       false -> yield 0
 
-  # kind 0 → WearAbove(t) ; sinon DaysBelow(t).
+  # kind 0 is WearAbove, anything else DaysBelow.
   part mk_cond(kind: Int, t: Int) -> Condition:
     match kind == 0:
       true  -> yield WearAbove(t)
       false -> yield DaysBelow(t)
 
-  # une ligne (kind, threshold, horizon) → une règle mono-condition typée.
+  # one row becomes one typed single-condition rule.
   part row_to_rule(row: Json) -> Rule:
     yield Rule(mk_cond(cell_int(row, 0), cell_int(row, 1)) :: [], Schedule(cell_int(row, 2)))
 
-  # reconstruit la liste de règles typées depuis les lignes. Récursion structurale.
+  # rebuild the typed rules from the rows.
   part rows_to_rules(rows: List[Json]) -> List[Rule]:
     match rows:
       []     -> yield []
@@ -44,9 +44,9 @@ module Aps3d.Persist:
     let rows = unarr(Db.query(db, "SELECT kind, threshold, horizon FROM rules ORDER BY threshold"))
     let rules = rows_to_rules(rows)
     let facts = Facts(95, 20)
-    # 1. deux règles matchent sur l'équipement rechargé (95>90 et 95>75 ; 20 pas <7).
+    # Two rules match the reloaded equipment: 95 exceeds both 90 and 75, while 20 is not below 7.
     let a = IO.print(flag(len(evaluate(rules, facts)) == 2))
-    # 2. exactement les 3 règles insérées sont revenues.
+    # Exactly the three inserted rules came back.
     let b = IO.print(flag(count(rows) == 3))
-    # 3. la sévérité prouvée-bornée [0,3] vaut 3 (usure > 90).
+    # Severity, proved to lie in [0, 3], is 3 here.
     yield IO.print(flag(severity(facts) == 3))

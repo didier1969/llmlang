@@ -1,33 +1,27 @@
 module Reactive:
 
-  # Preuve du modèle "réactif delta" (REQ-LLL-036 W1, voie 2a, CPT-LLL-014) AVEC
-  # LE LANGAGE ACTUEL — comme W0 (examples/actor_reactive.lll), zéro feature
-  # nouvelle n'est requise : `view` et `diff` sont des parts pures ordinaires.
+  # A reactive view over actor state, using nothing but ordinary pure parts.
   #
-  # `view(state) -> V` est une DÉRIVATION pure de l'état (comme un `render` de
-  # LiveView, mais total et vérifié). `diff(old, new)` calcule le delta MINIMAL
-  # entre deux vues successives : soit rien n'a changé, soit la nouvelle valeur
-  # doit être poussée. C'est délibérément le delta le plus simple possible
-  # (remplacement de la valeur entière, pas un diff structurel) — le
-  # séquencement W1 demande le minimal prouvé d'abord, pas un moteur de patch.
+  # `view(state)` is a pure derivation of the state, the way a render function is, but total and
+  # verified. `diff(old, new)` computes the minimal delta between two successive views: either
+  # nothing changed, or the new value has to be pushed. The delta is deliberately the simplest
+  # possible — replace the whole value — rather than a structural patch.
+
 
   type Delta = NoChange | Changed(Int)
 
-  # La "vue" : une dérivation pure de l'état de l'acteur W0 (examples/
-  # actor_reactive.lll: Msg/step). Ici une projection simple (doublement),
-  # représentative de tout calcul dérivé pur de l'état.
+  # The view: a pure derivation of the actor's state. Doubling stands in for any such
+  # projection.
   part view(state: Int) -> Int:
     yield state * 2
 
-  # Le delta est PROUVÉ fidèle sur l'axe décidable "a-t-il changé ?" : `result ==
-  # NoChange` ssi la vue est identique — un `iff` sur des comparaisons Int/ADT
-  # nu (`NoChange`, référence de constructeur SANS arguments, n'est PAS un appel)
-  # reste dans le fragment de contrat restreint (DEC-LLL-017 interdit la
-  # CONSTRUCTION d'ADT — `Changed(v)` — dans `ensures`, pas la référence à un
-  # constructeur nullaire). La valeur PORTÉE par `Changed` n'est donc pas prouvée
-  # ici (hors du fragment v1) — elle est correcte PAR LECTURE du corps d'une
-  # ligne (`yield Changed(new_view)`), et exercée par les tests natifs générés
-  # par `example` (REQ-LLL-049) plutôt que par une preuve Z3 sur sa charge utile.
+  # The contract proves the decidable half — WHETHER the view changed: `result == NoChange`
+  # exactly when the two views are equal.
+  #
+  # It does not prove the value CARRIED by `Changed`. The contract fragment admits a reference
+  # to a nullary constructor such as `NoChange`, but not the CONSTRUCTION of `Changed(v)`, so
+  # the payload is outside what can be stated here. It is correct by reading the one-line body,
+  # and exercised by the `example` clauses rather than by a proof.
   part diff(old_view: Int, new_view: Int) -> Delta:
     ensures (old_view == new_view) == (result == NoChange)
     example diff(0, 0) == NoChange
@@ -36,11 +30,9 @@ module Reactive:
       true  -> yield NoChange
       false -> yield Changed(new_view)
 
-  # Le DRIVER : le runtime (en W2) appellerait `view` après chaque `step` et
-  # enverrait `diff(last_view, view(state'))` au client seulement si Changed.
-  # Un delta par PAIRE d'états consécutifs (fenêtre glissante) — total par
-  # récursion structurale sur `states`. Borné et pur ; la boucle non-bornée
-  # reste un concern runtime (W1 ne requiert aucun scheduler, CPT-LLL-014).
+  # The driver a runtime would use: view after each step, and push the diff only when it says
+  # something changed. One delta per consecutive PAIR of states, over a sliding window. This is
+  # bounded and pure; the unbounded loop belongs to the runtime, not here.
   part drive(states: List[Int]) -> List[Delta]:
     match states:
       []     -> yield []

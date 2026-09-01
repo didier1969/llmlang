@@ -1,29 +1,25 @@
 module IfExpression:
 
-  # Le cas CANONIQUE du CONDITIONNEL EN POSITION EXPRESSION `if c then a else b` (REQ-LLL-124).
-  # C'est l'idiome que tout LLM écrit spontanément pour un choix de valeur inline. Mesuré au
-  # pilote banc-réparation (REQ-119) : 5/10 réparations l'ont tenté (`yield f(if …)`) et heurté
-  # « expected expression, found If » — la friction de syntaxe #1. Ce REQ en fait une expression
-  # de plein droit : elle niche partout où une valeur est attendue (argument, `yield`, `::`).
+  # `if c then a else b` as an EXPRESSION, usable anywhere a value is expected — an argument, a
+  # `yield`, the element of a cons.
   #
-  # Deux propriétés clés :
-  #   • IMBRICATION dans le `else` → `elif` GRATUIT (`if a then x else if b then y else z`).
-  #   • VC PATH-SENSITIVE : dans le `then` la condition est assumée, dans le `else` sa négation.
-  #     Donc `n div d` sous le `else` d'une garde `d == 0` est prouvé SÛR (le compilateur sait
-  #     `d != 0`) sans garde manuelle — l'obligation div hérite de la condition de branche.
+  # Two things follow from that. Nesting in the `else` gives `elif` for nothing. And the
+  # verification is PATH-SENSITIVE: inside `then` the condition is assumed, inside `else` its
+  # negation is. So `n div d` under the `else` of a `d == 0` guard is proved safe without any
+  # separate check — the division obligation inherits the branch condition.
 
-  # Division sûre : le `else` prouve `d != 0` → `n div d` déchargé par path-sensitivity.
+
+  # Safe division: the `else` branch carries `d != 0`, which discharges the obligation.
   part safeDiv(n: Int, d: Int) -> Int:
     yield if d == 0 then 0 else n div d
 
-  # Chaîne elif (imbrication dans le `else`) : classe un entier en -1 / 0 / 1. Le `ensures`
-  # est prouvé — chaque branche produit une valeur dans [-1, 1].
+  # An elif chain, nested in the `else`: every branch produces a value in [-1, 1].
   part sign(x: Int) -> Int:
     ensures result >= -1 and result <= 1
     yield if x < 0 then -1 else if x == 0 then 0 else 1
 
   part main() -> Int via IO:
-    let a = IO.print(safeDiv(10, 0))    # 0  : garde d == 0
-    let b = IO.print(safeDiv(20, 4))    # 5  : 20 div 4
+    let a = IO.print(safeDiv(10, 0))    # 0, caught by the guard
+    let b = IO.print(safeDiv(20, 4))    # 5
     let c = IO.print(sign(-7))          # -1
     yield IO.print(sign(3))             # 1

@@ -1,14 +1,13 @@
 module SelfHost.EvalDiv:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) — le point le PLUS aligné sur
-  # la thèse : un évaluateur self-hosté d'un mini-langage AVEC division. Comme la
-  # division euclidienne exige un diviseur prouvé non-nul (DEC-LLL-026), le méta-
-  # évaluateur écrit EN llmlang doit LUI-MÊME décharger l'obligation div-par-zéro de
-  # l'objet-langage — une vérification MÉTA-CIRCULAIRE. La garde `eval(b) == 0` fournit
-  # l'hypothèse `eval(b) != 0` dans la branche `false`, ce qui discharge la preuve Z3.
-  # SANS cette garde, `eval(a) div eval(b)` serait REJETÉ à la compilation (le diviseur
-  # pourrait valoir 0) : le langage vérifié ne se laisse pas auto-héberger « à la
-  # légère » — il impose sa propre discipline à son propre interpréteur.
+  # An interpreter, written in llmlang, for a small language that has division.
+  #
+  # Euclidean division requires a divisor proved non-zero. So the meta-interpreter must itself
+  # discharge the object language's division-by-zero obligation — the check is meta-circular.
+  # The guard `eval(b) == 0` supplies `eval(b) != 0` on the `false` branch, which is exactly
+  # what the proof needs. Remove the guard and this does not compile, because the divisor could
+  # be zero: the language imposes its own discipline on its own interpreter.
+
 
   type Expr = Lit(Int) | Add(Expr, Expr) | Mul(Expr, Expr) | Div(Expr, Expr)
 
@@ -18,13 +17,13 @@ module SelfHost.EvalDiv:
       Add(a, b) -> yield eval(a) + eval(b)
       Mul(a, b) -> yield eval(a) * eval(b)
       Div(a, b) ->
-        let vb = eval(b)                        # lier le diviseur UNE fois (sinon deux
-        match vb == 0:                          # sites d'appel non reconnus identiques)
-          true  -> yield 0                      # garde : diviseur nul → sentinelle 0
-          false -> yield eval(a) div vb         # sûr : `vb != 0` prouvé par la garde
+        let vb = eval(b)                        # bind the divisor once, so the guard and the
+        match vb == 0:                          # division speak about the same term
+          true  -> yield 0                      # zero divisor, return a sentinel
+          false -> yield eval(a) div vb         # safe: the guard proves `vb != 0`
 
   part main() -> Int via IO:
-    let ok = Div(Mul(Lit(2), Lit(5)), Add(Lit(1), Lit(1)))   # (2*5) / (1+1) = 5
-    let dz = Div(Lit(10), Add(Lit(1), Lit(0 - 1)))           # 10 / 0 → garde → 0
+    let ok = Div(Mul(Lit(2), Lit(5)), Add(Lit(1), Lit(1)))   # (2*5) / (1+1) is 5
+    let dz = Div(Lit(10), Add(Lit(1), Lit(0 - 1)))           # 10 / 0, caught by the guard
     let a = IO.print(eval(ok))                                # 5
-    yield IO.print(eval(dz))                                  # 0 (division par zéro gardée)
+    yield IO.print(eval(dz))                                  # 0

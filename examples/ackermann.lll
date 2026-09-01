@@ -1,20 +1,20 @@
 module Ackermann:
 
-  # Le cas CANONIQUE de la terminaison par MESURE LEXICOGRAPHIQUE NATIVE (REQ-LLL-012 / DEC-LLL-016).
-  # La fonction d'Ackermann ne décroît sur AUCUN argument seul : `ack(m-1, ack(m, n-1))` garde `m`
-  # égal dans l'appel interne. Ce qui décroît est le TUPLE `(m, n)` comparé lexicographiquement —
-  # exactement ce que `measure m, n` exprime : l'auteur écrit le tuple évident, la VC prouve l'ordre
-  # bien-fondé sur ℕ² (chaque composant ≥ 0 + décroissance lexicographique stricte). AUCUN encodage
-  # arithmétique à la main (pas de `measure m*K + n`) — c'est la forme first-class du langage.
+  # The canonical case for a LEXICOGRAPHIC measure.
   #
-  #   • appel externe `ack(m - 1, …)`     : m DÉCROÎT (1ʳᵉ composante) → l'ordre ignore n
-  #   • appel interne `ack(m, n - 1)`      : m ÉGAL, n DÉCROÎT (2ᵉ composante)
-  #   • appel `ack(m - 1, 1)`              : m DÉCROÎT (1ʳᵉ composante)
+  # Ackermann's function decreases on no single argument: in `ack(m-1, ack(m, n-1))` the inner
+  # call leaves `m` unchanged. What decreases is the TUPLE `(m, n)` compared lexicographically,
+  # which is what `measure m, n` says — no hand-rolled arithmetic encoding such as `m*K + n`.
   #
-  # `ensures result >= 0` est REQUIS et suffisant : l'argument interne `ack(m, n - 1)` est havocé au
-  # site de l'appel externe (DEC-LLL-017) ; sans son ensures, ni le `requires n >= 0` ni la borne
-  # `>= 0` du tuple de l'appelant ne tiendraient. La vérification modulaire (DEC-LLL-021) importe
-  # ce contrat du callee pour décharger l'obligation — c'est vrai (ack renvoie toujours ≥ 1).
+  #   ack(m - 1, …)   m decreases, so the order ignores n
+  #   ack(m, n - 1)   m is equal, n decreases
+  #   ack(m - 1, 1)   m decreases
+  #
+  # `ensures result >= 0` is required rather than decorative. The inner call's result is
+  # havocked at the outer call site, so without that contract neither the precondition nor the
+  # measure's own non-negativity would hold. Modular verification imports the callee's contract
+  # to discharge the obligation, and the contract is true — `ack` always returns at least 1.
+
 
   part ack(m: Int, n: Int) -> Int:
     requires m >= 0 and n >= 0
@@ -27,8 +27,8 @@ module Ackermann:
           0 -> yield ack(m - 1, 1)
           _ -> yield ack(m - 1, ack(m, n - 1))
 
-  # Différentiel runtime (DEC-LLL-017) : ack(2, n) = 2n + 3 → ack(2, 2) = 7 ;
-  # ack(3, n) = 2^(n+3) - 3 → ack(3, 3) = 61.
+  # Runtime check against the closed forms: ack(2, n) is 2n + 3, so ack(2, 2) is 7;
+  # ack(3, n) is 2^(n+3) - 3, so ack(3, 3) is 61.
   part main() -> Int via IO:
     let a = IO.print(ack(2, 2))
     yield IO.print(ack(3, 3))

@@ -1,12 +1,12 @@
 module ImageKernelScale:
 
-  # ── NOYAU IMAGE VÉRIFIÉ À L'ÉCHELLE, sur Array contigu (REQ-LLL-226) ──
-  # Le domaine array RAPIDE : un masque de 262 144 px (512×512) construit puis raffiné via un
-  # balayage `set`/`get` O(1) sur un `Array` (Vec contigu, cache-friendly) — PAS une liste chaînée.
-  # Prouve à N symbolique : sortie ∈ [0,255], longueur préservée. Mesuré : ~20 ms natif pour
-  # build+sweep de 262k px, soit ~19× le Python interprété équivalent — l'avantage vitesse RÉEL de
-  # llmlang (natif compilé) se matérialise ICI, là où le substrat est CONTIGU (une List cons-cell
-  # est ~18× plus lente : alloc par élément). La correction (pixel borné) est prouvée, pas testée.
+  # A verified image kernel AT SCALE, over a contiguous array.
+  # A mask of 262 144 pixels (512 by 512), built and then refined.
+  # Sweeping an `Array` with O(1) `set`/`get` over contiguous memory, not a linked list.
+  # Proved at symbolic N: output in [0, 255], length preserved. The performance claim only
+  # for a build and sweep of 262k pixels, roughly 19 times the equivalent interpreted Python. The
+  # holds where the substrate is contiguous: a cons-cell list is roughly 18 times slower here,
+  # because it allocates per element.
 
   part refine_px(a: Int) -> Int:
     ensures 0 <= result, result <= 255
@@ -17,8 +17,8 @@ module ImageKernelScale:
           true  -> yield 255
           false -> yield ((a - 50) * 255) div 150
 
-  # construit un masque de n px (valeurs variées k mod 256 — pas un array constant, évite le biais
-  # de branches parfaitement prédites, cf. discipline de mesure perf).
+  # Build a mask of n pixels with varied values, rather than a constant array, which would let the
+  # branch predictor do the work, which would flatter the measurement.
   part build(i: Int, n: Int, acc: Array[Int]) -> Array[Int]:
     requires 0 <= i, i <= n
     requires length(acc) == i
@@ -28,7 +28,7 @@ module ImageKernelScale:
       true  -> yield acc
       false -> yield build(i + 1, n, push(acc, i mod 256))
 
-  # balaie l'Array EN PLACE (set copy-on-write O(1) quand unique) — longueur préservée, prouvée.
+  # Sweep the array in place: `set` is O(1) copy-on-write while the reference is unique.
   part sweep(src: Array[Int], i: Int) -> Array[Int]:
     requires 0 <= i, i <= length(src)
     ensures length(result) == length(src)

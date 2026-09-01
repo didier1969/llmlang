@@ -2,21 +2,17 @@ depends serde_json "1.0.150"
 
 module Std.DbJson:
 
-  # DEC-LLL-066 étape 3 : le CONTRAT normalisé, PARTAGÉ, backend-agnostique de la
-  # persistance vérifiée. Le `Json` ADT (résultat marshallé d'un `query`) + ses
-  # destructeurs PURS vivent ici, dans UN seul fichier canonique, importé à l'identique
-  # par CHAQUE backend (std/db.lll = SQLite, std/db_pg.lll = Postgres). C'est le cœur de
-  # l'interchangeabilité (directive 3) : les deux backends produisent EXACTEMENT la même
-  # forme (un Array de lignes-Array de cellules scalaires), donc ces destructeurs — et le
-  # domaine qui les appelle — ne changent pas d'une ligne quand on swappe de backend.
+  # The backend-neutral contract for verified persistence: the `Json` ADT that a `query`
+  # marshals into, plus the pure destructors that read it. Every backend imports this one
+  # file, so the domain code above them does not change when the backend does.
   #
-  # Un résultat de query est un ARRAY de LIGNES ; chaque ligne un ARRAY de CELLULES scalaires
-  # en ordre de colonne (lignes-en-arrays-positionnels — le marshalling Object nommé est
-  # différé, DEC-LLL-061).
+  # A query result is an ARRAY OF ROWS; each row an ARRAY OF SCALAR CELLS in column order.
+  # Rows are positional, not named — there is no marshalling from a JSON object, so a cell
+  # is reached by index, never by column name.
+
   type Json = JNull | JBool(Bool) | JStr(List[Int]) | JNum(Int) | JArr(List[Json])
 
-  # les éléments d'un JSON Array (une liste de lignes, ou la liste de cellules d'une ligne) ;
-  # [] pour un non-array.
+  # Total: any shape that is not an array reads as the empty list rather than failing.
   part unarr(j: Json) -> List[Json]:
     match j:
       JArr(xs) -> yield xs
@@ -25,8 +21,12 @@ module Std.DbJson:
       JStr(s)  -> yield []
       JNum(n)  -> yield []
 
-  # l'Int porté par un JNum ; une sentinelle pour les autres formes (un décalage de schéma
-  # sort comme cette valeur hors-bande, pas comme un 0 silencieux).
+  # A non-numeric cell yields a distinct negative sentinel per shape, so a schema that
+  # drifted under the query is visible instead of reading as a silent 0.
+  #
+  # The sentinels are NOT disjoint from real data: a column genuinely holding -1 is
+  # indistinguishable from a NULL one. Where a negative value is legitimate, match on the
+  # `Json` shape yourself rather than going through this.
   part unnum(j: Json) -> Int:
     match j:
       JNum(n)  -> yield n
@@ -35,8 +35,7 @@ module Std.DbJson:
       JStr(s)  -> yield 0 - 3
       JArr(xs) -> yield 0 - 4
 
-  # le i-ème élément d'une liste cellule/ligne (0-based) ; JNull au-delà de la fin.
-  # La récursion structurale sur la liste termine.
+  # 0-based; an index past the end yields JNull rather than failing.
   part nth(xs: List[Json], i: Int) -> Json:
     match xs:
       []     -> yield JNull
@@ -45,12 +44,10 @@ module Std.DbJson:
           true  -> yield h
           false -> yield nth(t, i - 1)
 
-  # nombre de lignes d'un résultat de query.
   part count(rows: List[Json]) -> Int:
     match rows:
       []     -> yield 0
       h :: t -> yield 1 + count(t)
 
-  # l'Int dans la colonne `col` d'une ligne (un JArr de cellules).
   part cell_int(row: Json, col: Int) -> Int:
     yield unnum(nth(unarr(row), col))

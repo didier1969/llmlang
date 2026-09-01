@@ -4,24 +4,18 @@ depends tokio "1.52.3" features "rt-multi-thread, sync"
 
 module ActorRuntime:
 
-  # REQ-LLL-036 W2-t2 (voie 2a CPT-LLL-014, design CPT-LLL-015) : le
-  # comportement d'acteur (step, prouvé en W0 — examples/actor_reactive.lll)
-  # vit DERRIÈRE une frontière d'effet, avec un VRAI parallélisme maintenant :
-  # chaque acteur est sa propre tâche Tokio, possédant SON état (plus de mutex
-  # global partagé, src/codegen.rs `emit_actor_runtime`) — jamais vu par le
-  # cœur vérifié (havoc à la frontière, DEC-LLL-017 : Z3 ne voit jamais ce que
-  # `spawn`/`send`/`state` font réellement, seulement leur signature).
+  # A verified actor behaviour running behind an effect boundary, with real parallelism: each
+  # actor is its own task owning its own state, never a shared global. None of that is visible
+  # to the verified core, which sees only the signatures of `spawn`, `send` and `state`.
   #
-  # DEC-LLL-080 (REQ-LLL-183) : `state` rend `Option[Int]`, jamais un 0
-  # fabriqué. Un acteur MORT (stoppé par l'anti-tempête W3) ou un Pid inconnu
-  # est une ABSENCE de première classe (`None`) que le programme DOIT traiter
-  # par un `match` — survie du process ET jamais-faux-en-silence.
+  # `state` returns `Option[Int]`, never a fabricated 0. An actor that was stopped, or an
+  # unknown identifier, is a first-class ABSENCE the program must handle with a `match` — the
+  # process survives, and nothing is silently wrong.
   #
-  # v1 délibérément restreint (inchangé depuis la tranche 1, CPT-LLL-015 §9) :
-  # UN SEUL comportement fixe par module (une part nommée `step`, signature
-  # imposée `(Int, Int) -> Int`) — passer un comportement EN VALEUR à `spawn`
-  # nécessiterait de marshaller une fonction à la frontière FFI, ce qui
-  # n'existe pas encore. Messages `Int` seulement, même raison.
+  # Deliberately restricted for now: one fixed behaviour per module, a part named `step` with an
+  # imposed signature, and `Int` messages. Passing a behaviour as a VALUE would mean marshalling
+  # a function across the foreign frontier, which does not exist yet.
+
 
   part max0(x: Int) -> Int:
     ensures result >= 0
@@ -45,9 +39,9 @@ module ActorRuntime:
     let _ = Actor.send(pid1, 5)
     let _ = Actor.send(pid1, 3)
     let _ = Actor.send(pid2, 0 - 50)
-    match Actor.state(pid1):         # 0 -> +5=5 -> +3=8
-      None -> yield IO.print(0 - 1)  # acteur mort/inconnu : traité, jamais silencieux
+    match Actor.state(pid1):         # 0, then +5, then +3
+      None -> yield IO.print(0 - 1)  # dead or unknown actor: handled, never silent
       Some(s1) ->
-        match Actor.state(pid2):     # 100 -> +(-50)=50
+        match Actor.state(pid2):     # 100, then -50
           None -> yield IO.print(0 - 1)
-          Some(s2) -> yield IO.print(s1 + s2)   # 8 + 50 = 58
+          Some(s2) -> yield IO.print(s1 + s2)   # 8 + 50

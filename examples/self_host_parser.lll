@@ -1,20 +1,20 @@
 module SelfHost.Parser:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : la chaîne front-end
-  # COMPLÈTE lex → parse → eval du mini-langage `Expr`, écrite EN llmlang et vérifiée
-  # par le vrai pipeline Z3. Auto-contenue (les modules llmlang partagent un espace
-  # de noms plat, DEC-LLL-019 ; un fichier ⇒ un seul `main`). Le parseur respecte la
-  # PRÉCÉDENCE (`*` plus fort que `+`/`-`, associativité gauche) tout en restant
-  # STRUCTURAL (aucun `measure` sur liste — cf. REQ-LLL-101) : deux passes sur des
-  # listes parallèles opérandes/opérateurs, chacune récursive sur la queue directe.
+  # The complete front end of the small `Expr` language — lex, parse, evaluate — in llmlang.
+  #
+  # The parser respects precedence, with `*` binding tighter than `+` and `-`, while staying
+  # STRUCTURAL: no measure on a list is needed. It does that with two passes over parallel lists
+  # of operands and operators, each recursing on the direct tail. The recursive-descent parser
+  # in `self_host_rdparser.lll` takes the harder route, which parentheses force.
+
 
   type Tok  = TNum(Int) | TPlus | TMinus | TStar
   type Pend = NoPend | Pend(Int)
   type Expr = Lit(Int) | Neg(Expr) | Add(Expr, Expr) | Sub(Expr, Expr) | Mul(Expr, Expr)
-  # opérandes (Expr) + opérateurs (codes 1='+', 2='-', 3='*') appariés.
+  # operands paired with operators, coded 1 for '+', 2 for '-', 3 for '*'.
   type OO   = OO(List[Expr], List[Int])
 
-  # ---- lexer (accumulateur, multi-chiffres, structural) ----
+  # ---- lexer ----
 
   part push_digit(p: Pend, d: Int) -> Pend:
     match p:
@@ -40,9 +40,9 @@ module SelfHost.Parser:
   part lex(s: List[Int]) -> List[Tok]:
     yield lexA(s, NoPend)
 
-  # ---- parseur (précédence, structural) ----
+  # ---- parser ----
 
-  # tokens → (opérandes, opérateurs). Structural sur les tokens.
+  # split the token stream into operands and operators.
   part collect(toks: List[Tok]) -> OO:
     match toks:
       []     -> yield OO([], [])
@@ -61,7 +61,7 @@ module SelfHost.Parser:
             match collect(t):
               OO(es, os) -> yield OO(es, 3 :: os)
 
-  # replie tous les `*` (opérande gauche · opérande droite). Structural sur `os`.
+  # first pass: fold every `*`.
   part reduceMul(es: List[Expr], os: List[Int]) -> OO:
     match os:
       []       -> yield OO(es, [])
@@ -78,7 +78,7 @@ module SelfHost.Parser:
                     match reduceMul(b :: e2, ots):
                       OO(res, ros) -> yield OO(a :: res, o :: ros)
 
-  # replie `+`/`-` à gauche sur des opérandes déjà démultipliées. Structural sur `os`.
+  # second pass: fold `+` and `-` left-associatively over what the first pass left.
   part foldAdd(es: List[Expr], os: List[Int]) -> Expr:
     match os:
       []       ->
@@ -102,7 +102,7 @@ module SelfHost.Parser:
         match reduceMul(es, os):
           OO(es2, os2) -> yield foldAdd(es2, os2)
 
-  # ---- évaluateur de référence (structural sur l'AST) ----
+  # ---- reference evaluator ----
 
   part eval(e: Expr) -> Int:
     match e:
@@ -112,8 +112,8 @@ module SelfHost.Parser:
       Sub(a, b) -> yield eval(a) - eval(b)
       Mul(a, b) -> yield eval(a) * eval(b)
 
-  # ---- différentiel runtime : la chaîne lex→parse→eval, précédence PROUVÉE à l'exécution.
+  # ---- runtime check of the whole chain ----
 
   part main() -> Int via IO:
-    let a = IO.print(eval(parse(lex("2+3*4"))))   # 2 + (3*4) = 14 (et pas 20)
-    yield IO.print(eval(parse(lex("2*3+4"))))     # (2*3) + 4 = 10
+    let a = IO.print(eval(parse(lex("2+3*4"))))   # 14, not 20
+    yield IO.print(eval(parse(lex("2*3+4"))))     # (2*3) + 4 is 10

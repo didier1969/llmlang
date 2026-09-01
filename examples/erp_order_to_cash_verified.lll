@@ -1,21 +1,21 @@
 module ErpOrderToCashVerified:
 
-  # ── CAPSTONE COMPOSÉ : commande → facture, TROIS invariants prouvés ENSEMBLE (CPT-LLL-018) ──
+  # Order to cash: three invariants proved to hold TOGETHER on one result.
   #
-  # Les briques ERP ne valent que si elles S'ASSEMBLENT sans qu'une garantie n'en casse une autre.
-  # Ce capstone exécute un mini flux « order-to-cash » qui compose les trois formes de preuve du
-  # terrain ERP — CAPACITÉ (inventaire), ORDERING (numérotation), PLANCHER (marge) — et prouve que
-  # les trois invariants tiennent SIMULTANÉMENT sur le résultat d'une commande honorée :
-  #   1. le stock n'est pas survendu (engagé ≤ en-main),
-  #   2. le numéro de facture est contigu (successeur immédiat),
-  #   3. le prix net facturé n'est jamais sous le coût.
-  # Chaque `requires` d'une brique est déchargé par les `requires` du flux ; les trois `ensures` se
-  # composent dans le contrat de `fulfill`. (Composition inline — les modules-agents portent un
-  # `main` ; la forme-bibliothèque importable est une tranche distincte 2a.)
+  # Separate guarantees are only worth something if they compose without one breaking another.
+  # Fulfilling an order here has to satisfy all three at once:
+  #
+  #   capacity   the stock is not oversold
+  #   ordering   the invoice number is the immediate successor, leaving no gap
+  #   floor      the net price never falls below cost
+  #
+  # Each part's precondition is discharged by the flow's own preconditions, and the three
+  # `ensures` compose into `fulfill`'s contract.
+
 
   type Order = {committed: Int, invoice: Int, net: Int}
 
-  # Brique CAPACITÉ : réserver sans survendre (engagé ≤ en-main).
+  # Capacity: reserve without overselling.
   part reserve(on_hand: Int, committed: Int, qty: Int) -> Int:
     requires 0 <= committed
     requires committed <= on_hand
@@ -25,13 +25,13 @@ module ErpOrderToCashVerified:
     ensures result <= on_hand
     yield committed + qty
 
-  # Brique ORDERING : le prochain numéro de facture, contigu (successeur immédiat).
+  # Ordering: the next invoice number, with no gap.
   part next_invoice(last: Int) -> Int:
     requires last >= 0
     ensures result == last + 1
     yield last + 1
 
-  # Brique PLANCHER : prix net protégé par la marge (jamais sous le coût).
+  # Floor: a discount can never take the net price below cost.
   part net_price(price: Int, cost: Int, discount: Int) -> Int:
     requires 0 <= cost
     requires cost <= price
@@ -41,8 +41,7 @@ module ErpOrderToCashVerified:
     ensures result >= cost
     yield price - discount
 
-  # LE COMPOSITE : honorer une commande = réserver le stock + numéroter la facture + tarifer, et
-  # PROUVER les trois invariants métier sur le même résultat. Aucune garantie n'en casse une autre.
+  # The composite: reserve, number, price — and prove all three invariants of the result.
   part fulfill(on_hand: Int, committed: Int, qty: Int, last: Int, price: Int, cost: Int, discount: Int) -> Order:
     requires 0 <= committed
     requires committed <= on_hand
@@ -53,14 +52,14 @@ module ErpOrderToCashVerified:
     requires cost <= price
     requires 0 <= discount
     requires discount <= price - cost
-    ensures result.committed <= on_hand      # 1. STOCK : pas de survente
-    ensures result.invoice == last + 1        # 2. NUMÉRO : contigu (audit)
-    ensures result.net >= cost                # 3. MARGE : jamais sous le coût
+    ensures result.committed <= on_hand      # stock is not oversold
+    ensures result.invoice == last + 1        # invoice numbering leaves no gap
+    ensures result.net >= cost                # never sold below cost
     yield Order(reserve(on_hand, committed, qty), next_invoice(last), net_price(price, cost, discount))
 
   part main() -> Int via IO:
-    # Stock 100, engagé 30 (dispo 70), commander 40 ; dernier n° 5000 ; prix 200, coût 120, remise 50.
-    # → engagé 70 (≤100), facture 5001 (contiguë), net 150 (≥120). Les 3 garanties composées, prouvées.
+    # 100 on hand, 30 committed, ordering 40; last invoice 5000; price 200, cost 120, discount 50.
+    # Gives committed 70, invoice 5001, net 150 — all three guarantees at once.
     let o = fulfill(100, 30, 40, 5000, 200, 120, 50)
     let a = IO.print(o.committed)
     let b = IO.print(o.invoice)

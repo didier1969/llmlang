@@ -1,31 +1,26 @@
 module ErpJournalBalancedVerified:
 
-  # ── CAPSTONE INDUCTIF : les livres restent équilibrés sur TOUTE l'histoire (CPT-LLL-018) ──
+  # The books stay balanced over the WHOLE history, not one transaction at a time.
   #
-  # Les briques précédentes prouvent UNE transaction (brique 11 : un posting équilibre) ou le total
-  # d'une liste (brique 2). Celle-ci monte d'un cran — un invariant SYSTÈME sur un JOURNAL de longueur
-  # QUELCONQUE : « si chaque écriture est équilibrée (débit == crédit), la balance de vérification du
-  # journal entier est nulle », prouvé par RÉCURRENCE structurelle. C'est le socle de la comptabilité
-  # en partie double : la balance de vérification est zéro non parce qu'on l'a testée sur quelques
-  # jeux, mais parce que c'est un THÉORÈME sur n'importe quelle séquence de transactions équilibrées.
+  # The invariant is a system-level one over a journal of arbitrary length: if every entry is
+  # balanced, meaning debit equals credit, then the trial balance of the entire journal is
+  # zero. It is proved by structural recursion, so it holds for any sequence of transactions
+  # rather than for the ones a test happened to try.
   #
-  # AVANT (le réflexe) : poster les transactions, puis assert(trial_balance == 0) en test/prod.
-  # APRÈS (ici) : `requires (∀ écriture équilibrée)` + `ensures balance == 0` est prouvé une fois pour
-  # toutes les histoires — un livre qui déséquilibre est IMPOSSIBLE à construire (le contrat le rejette).
+  # That is the foundation of double-entry bookkeeping stated as a theorem: a ledger that
+  # drifts out of balance cannot be constructed, because the contract rejects it.
 
   type Entry = {debit: Int, credit: Int}
 
-  # L'effet net d'une écriture sur la balance de vérification = débit − crédit. Équilibrée ⇒ 0.
+  # An entry's effect on the trial balance is debit minus credit, hence zero when balanced.
   part entry_net(e: Entry) -> Int:
     requires e.debit == e.credit
     ensures result == 0
     yield e.debit - e.credit
 
-  # LA CLÉ INDUCTIVE : la balance de vérification d'un journal de transactions TOUTES équilibrées est
-  # nulle, pour un nombre de lignes quelconque. Z3 le prouve par récurrence structurelle : à `h :: t`,
-  # le prédicat de tête donne `h.debit == h.credit` (donc entry_net(h) == 0), le `requires` de l'appel
-  # récursif sur `t` (les écritures de la queue restent équilibrées, propagation du forall), et l'IH
-  # donne trial_balance(t) == 0. Donc 0 + 0 == 0.
+  # The inductive step, at `h :: t`: the head predicate gives `entry_net(h) == 0`, the `forall`
+  # propagates to the tail so the recursive precondition holds, and the hypothesis gives
+  # `trial_balance(t) == 0`. Zero plus zero.
   part trial_balance(js: List[Entry]) -> Int:
     requires forall e in js: e.debit == e.credit
     ensures result == 0
@@ -34,16 +29,16 @@ module ErpJournalBalancedVerified:
       [] -> yield 0
       h :: t -> yield entry_net(h) + trial_balance(t)
 
-  # ── SECOND ANGLE : PRÉSERVATION par fold-avec-accumulateur ──
-  # Appliquer une écriture équilibrée à une balance courante la laisse INCHANGÉE (net 0).
+  # ---- the same fact from the other side: preservation under a fold ----
+  # Applying a balanced entry to a running balance leaves it unchanged.
   part post(balance: Int, e: Entry) -> Int:
     requires e.debit == e.credit
     ensures result == balance
     yield balance + entry_net(e)
 
-  # Rejouer un journal ENTIER sur une balance d'ouverture : la clôture ÉGALE l'ouverture — aucune
-  # dérive, pour toute séquence équilibrée. L'invariant de PRÉSERVATION (et non juste l'agrégat nul),
-  # prouvé par récurrence : à `h :: t`, post ne change pas la balance, et l'IH sur `t` la reconduit.
+  # Replaying a whole journal onto an opening balance closes at exactly that opening balance.
+  # This is stronger than the aggregate being zero: it says no drift accumulates, for any
+  # balanced sequence.
   part replay(opening: Int, js: List[Entry]) -> Int:
     requires forall e in js: e.debit == e.credit
     ensures result == opening
@@ -53,9 +48,9 @@ module ErpJournalBalancedVerified:
       h :: t -> yield replay(post(opening, h), t)
 
   part main() -> Int via IO:
-    # Un journal de 3 transactions équilibrées (achat, vente, encaissement).
+    # Three balanced transactions: a purchase, a sale, a cash receipt.
     let journal = [Entry(1000, 1000), Entry(500, 500), Entry(750, 750)]
-    # Balance de vérification 0, prouvée pour la SÉQUENCE entière (pas ligne à ligne).
+    # Trial balance zero, proved for the whole sequence rather than line by line.
     let tb = IO.print(trial_balance(journal))
-    # Rejoué sur une balance d'ouverture de 4200 → clôture 4200 (préservation prouvée).
+    # Replayed onto an opening balance of 4200, it closes at 4200.
     yield IO.print(replay(4200, journal))

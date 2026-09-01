@@ -1,9 +1,11 @@
 module MatteRefine:
 
-  # ── BRIQUE CERTIFIÉE : raffinage de masque alpha (post-détourage IA) ──
-  # Seuillage doux d'un canal alpha. INVARIANT PROUVÉ : tout pixel de sortie ∈ [0,255],
-  # index jamais hors bornes, longueur du masque préservée — pour un masque de taille
-  # QUELCONQUE. Un noyau C/Kotlin ne garantit AUCUN des trois ; ici ce sont des théorèmes.
+  # Soft thresholding of an alpha channel.
+  #
+  # Three things are proved for a mask of ANY size: every output pixel lands in [0, 255], no
+  # index goes out of bounds, and the mask's length is preserved. A pixel loop written in C
+  # guarantees none of the three.
+
 
   part refine_px(a: Int, low: Int, high: Int) -> Int:
     requires 0 <= a, a <= 255
@@ -16,9 +18,9 @@ module MatteRefine:
           true  -> yield 255
           false -> yield ((a - low) * 255) div (high - low)
 
-  # balaye src (masque brut) → dst (masque raffiné), pixel par pixel. Bornes prouvées,
-  # length préservée. (L'invariant [0,255] tient par pixel via refine_px ; le threader
-  # sur TOUT dst à N symbolique = une tranche de plus, non requise pour la sûreté mémoire.)
+  # Sweep the source mask into the refined one, pixel by pixel. The [0, 255] invariant holds per
+  # pixel through `refine_px`; threading it over the whole destination at symbolic N is a
+  # further step, and is not what memory safety rests on here.
   part sweep(src: Array[Int], dst: Array[Int], i: Int, low: Int, high: Int) -> Array[Int]:
     requires length(src) == length(dst)
     requires 0 <= i, i <= length(src)
@@ -36,4 +38,4 @@ module MatteRefine:
     let dst = array(0, 0, 0, 0, 0, 0, 0)
     let out = sweep(raw, dst, 0, 50, 200)
     let a = IO.print(get(out, 2))    # 128 → (128-50)*255/150 = 132
-    yield IO.print(length(out))      # 7 (préservée)
+    yield IO.print(length(out))      # 7, the length is preserved

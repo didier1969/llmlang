@@ -1,27 +1,26 @@
 module SelfHost.LexReal:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) — OUVERTURE de la phase
-  # « grammaire llmlang RÉELLE » : un lexer, écrit EN llmlang et vérifié par Z3, qui
-  # tokenise la SYNTAXE CONCRÈTE DE llmlang LUI-MÊME (pas un langage-jouet). Il gère les
-  # mots-clés réels (`part`/`requires`/…), les identifiants (maj+min+`_`), les entiers, et
-  # surtout les OPÉRATEURS MULTI-CARACTÈRES `->` `::` `>=` `<=` `==` `!=` — le vrai stress
-  # vs les slices précédents. String = List[Int] de codepoints (DEC-LLL-030).
+  # A lexer for llmlang's own concrete syntax, written in llmlang.
   #
-  # `lexA` reste AUTO-récursif (lookahead 1-car délégué à des helpers NON-récursifs
-  # `isTwo`/`two`/`delim1cons`, jamais à un pair mutuel qui rouvrirait la mesure). La
-  # terminaison tient par `measure length(s)` : les appels récursifs portent sur `t` (queue)
-  # ou `t2` (queue-de-queue, cas op 2-car) — c'est un usage RÉEL de REQ-LLL-101, la longueur
-  # de liste en mesure débloquant une récursion non purement structurale.
+  # Not a toy language: it handles the real keywords, identifiers over letters and `_`,
+  # integers, and above all the MULTI-CHARACTER operators `->` `::` `>=` `<=` `==` `!=`, which
+  # is where a one-character-at-a-time lexer breaks. A string is a `List[Int]` of codepoints.
+  #
+  # `lexA` stays SELF-recursive. Its one-character lookahead is delegated to non-recursive
+  # helpers rather than to a mutually recursive partner, which would reopen the measure over
+  # the whole group. Termination is `measure length(s)`: the recursive calls are on the tail,
+  # or the tail of the tail for a two-character operator.
+
 
   type LTok = KPart | KRequires | KEnsures | KMeasure | KYield | TId(List[Int]) | TInt(Int) | TLParen | TRParen | TComma | TColon | TArrow | TColonColon | TGe | TLe | TEqEq | TNe | TLt | TGt | TAssign | TPlus | TMinus | TStar | TSlash
 
   type Pend = NoPend | PNum(Int) | PId(List[Int])
 
-  # ---- classes de caractères ----
+  # ---- character classes ----
   part isDigit(c: Int) -> Bool:
     yield c >= 48 and c <= 57
 
-  # identifiant llmlang : lettre (min/maj) ou `_`
+  # an identifier character: a letter or `_`
   part isAlpha(c: Int) -> Bool:
     yield (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
 
@@ -44,7 +43,7 @@ module SelfHost.LexReal:
               true  -> yield eqStr(ta, tb)
               false -> yield false
 
-  # un run d'identifiant → mot-clé réel ou TId (littéraux chaîne = List[Int]).
+  # an identifier run becomes a keyword token or a TId.
   part classify(chars: List[Int]) -> LTok:
     match eqStr(chars, "part"):
       true  -> yield KPart
@@ -62,9 +61,9 @@ module SelfHost.LexReal:
                       true  -> yield KYield
                       false -> yield TId(chars)
 
-  # ---- délimiteurs : lookahead 1-car, tout NON-récursif ----
-  # op 2-caractères formé par (c, d) ?  `::` `->` `>=` `<=` `==` `!=`
-  # op 2-car (c,d) : `::`(58,58) `->`(45,62) `>=`(62,61) `<=`(60,61) `==`(61,61) `!=`(33,61)
+  # ---- delimiters: one-character lookahead, all non-recursive ----
+  # does the pair (c, d) form a two-character operator?
+  # `::`(58,58) `->`(45,62) `>=`(62,61) `<=`(60,61) `==`(61,61) `!=`(33,61)
   part isTwo(c: Int, d: Int) -> Bool:
     yield (c == 58 and d == 58) or (c == 45 and d == 62) or (c == 62 and d == 61) or (c == 60 and d == 61) or (c == 61 and d == 61) or (c == 33 and d == 61)
 
@@ -83,9 +82,9 @@ module SelfHost.LexReal:
                   false ->
                     match c == 61:
                       true  -> yield TEqEq
-                      false -> yield TNe                 # (33,61) = !=
+                      false -> yield TNe                 # (33,61) is !=
 
-  # préfixe le token 1-caractère de `c` devant `rest` (espace/inconnu = sauté).
+  # prefix the one-character token for `c`; spaces and unknown characters are skipped.
   part delim1cons(c: Int, rest: List[LTok]) -> List[LTok]:
     match c == 40:
       true  -> yield TLParen :: rest
@@ -119,9 +118,9 @@ module SelfHost.LexReal:
                                           false ->
                                             match c == 47:
                                               true  -> yield TSlash :: rest
-                                              false -> yield rest      # espace (32) / inconnu
+                                              false -> yield rest      # space (32) or unknown
 
-  # vide l'accumulateur devant `rest` (pending = 0 ou 1 token).
+  # flush the accumulator ahead of `rest`; it holds zero or one pending token.
   part consPend(p: Pend, rest: List[LTok]) -> List[LTok]:
     match p:
       NoPend  -> yield rest
@@ -134,26 +133,26 @@ module SelfHost.LexReal:
       PNum(n) -> yield TInt(n) :: []
       PId(cs) -> yield classify(cs) :: []
 
-  # ---- le lexer : accumulateur 3-états, AUTO-récursif, measure length(s). ----
+  # ---- the lexer: a three-state accumulator, self-recursive ----
   part lexA(s: List[Int], p: Pend) -> List[LTok]:
     measure length(s)
     match s:
       []     -> yield flushEnd(p)
       c :: t ->
         match isDigit(c):
-          true  ->                          # chiffre : étend/démarre un nombre
+          true  ->                          # digit: extend or start a number
             match p:
               NoPend  -> yield lexA(t, PNum(c - 48))
               PNum(n) -> yield lexA(t, PNum(n * 10 + (c - 48)))
               PId(cs) -> yield classify(cs) :: lexA(t, PNum(c - 48))
           false ->
             match isAlpha(c):
-              true  ->                      # lettre/'_' : étend/démarre un identifiant
+              true  ->                      # letter or '_': extend or start an identifier
                 match p:
                   NoPend  -> yield lexA(t, PId(c :: []))
                   PId(cs) -> yield lexA(t, PId(snoc(cs, c)))
                   PNum(n) -> yield TInt(n) :: lexA(t, PId(c :: []))
-              false ->                      # délimiteur : vide le pending puis dispatch
+              false ->                      # delimiter: flush, then dispatch
                 match t:
                   [] -> yield consPend(p, delim1cons(c, []))
                   d :: t2 ->
@@ -164,9 +163,9 @@ module SelfHost.LexReal:
   part lex(s: List[Int]) -> List[LTok]:
     yield lexA(s, NoPend)
 
-  # ---- différentiel : compte les tokens + signature pondérée par KIND. Une mauvaise
-  # tokenisation (`->` scindé, `part` non reconnu comme mot-clé, `>=` scindé) change la
-  # signature — c'est la démonstration de correction à l'exécution (DEC-LLL-017).
+  # ---- runtime check: a per-kind weighted signature over the token stream ----
+  # Splitting `->`, splitting `>=`, or lexing `part` as an identifier each change a count, and
+  # therefore the signature.
   part w(t: LTok) -> Int:
     match t:
       KPart       -> yield 1
@@ -200,10 +199,9 @@ module SelfHost.LexReal:
       h :: t -> yield w(h) + sig(t)
 
   part main() -> Int via IO:
-    # une signature `part` réelle : `part gcd(a: Int, b: Int) -> Int` → sig 98
-    # (13 tokens ; `->` = UN TArrow(12), `part` = KPart(1) et non TId)
+    # A real part signature: 13 tokens, with `->` as one TArrow and `part` as a keyword.
     let a = IO.print(sig(lex("part gcd(a: Int, b: Int) -> Int")))   # 98
-    # couvre TOUS les op multi-car (`::` `==` `!=` `<=`) + 1-car (`+ * / < >`) → sig 226
+    # Every multi-character operator, plus the single-character ones.
     let b = IO.print(sig(lex("x :: y == z != w <= v + a * b / c < d > e")))  # 226
-    # une clause de contrat réelle : `requires a >= 0` → sig 29 (`>=` = UN TGe(14))
+    # A real contract clause, with `>=` as one token.
     yield IO.print(sig(lex("requires a >= 0")))                     # 29

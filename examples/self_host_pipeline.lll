@@ -1,13 +1,11 @@
 module SelfHost.Pipeline:
 
-  # Auto-hébergement étape 2 (DEC-LLL-024, PIL-LLL-007) : la pipeline COMPLÈTE
-  # source → tokens → AST → bytecode → exécution du mini-langage `Expr`, écrite EN
-  # llmlang et vérifiée par le vrai pipeline Z3. Compose le front-end (lexer +
-  # parseur à précédence, self_host_lexer/parser.lll) et le back-end (codegen machine
-  # à pile + VM, self_host_codegen.lll) en UN module (les modules llmlang partagent
-  # un espace de noms plat, DEC-LLL-019 ⇒ un seul `main`). Tout STRUCTURAL →
-  # terminaison prouvée gratis. La correction end-to-end (une string compilée puis
-  # exécutée = sa valeur, précédence comprise) est DÉMONTRÉE à l'exécution.
+  # The whole pipeline in one module: source text, tokens, AST, bytecode, execution.
+  #
+  # It composes the front end — lexer and precedence parser — with the back end — stack-machine
+  # code generation and its VM. Modules share a flat namespace, so a single file carries a
+  # single `main`, which is why they are assembled here rather than imported.
+
 
   type Tok   = TNum(Int) | TPlus | TMinus | TStar
   type Pend  = NoPend | Pend(Int)
@@ -15,7 +13,7 @@ module SelfHost.Pipeline:
   type OO    = OO(List[Expr], List[Int])
   type Instr = Push(Int) | INeg | IAdd | ISub | IMul
 
-  # ---- front-end : lexer (accumulateur, structural) ----
+  # ---- front end: lexer ----
   part push_digit(p: Pend, d: Int) -> Pend:
     match p:
       NoPend  -> yield Pend(d)
@@ -40,7 +38,7 @@ module SelfHost.Pipeline:
   part lex(s: List[Int]) -> List[Tok]:
     yield lexA(s, NoPend)
 
-  # ---- front-end : parseur à précédence (structural, 2 passes) ----
+  # ---- front end: precedence parser, in two passes ----
   part collect(toks: List[Tok]) -> OO:
     match toks:
       []     -> yield OO([], [])
@@ -98,7 +96,7 @@ module SelfHost.Pipeline:
         match reduceMul(es, os):
           OO(es2, os2) -> yield foldAdd(es2, os2)
 
-  # ---- back-end : codegen machine à pile + VM (structural) ----
+  # ---- back end: stack-machine code generation and VM ----
   part iappend(xs: List[Instr], ys: List[Instr]) -> List[Instr]:
     match xs:
       []     -> yield ys
@@ -147,7 +145,7 @@ module SelfHost.Pipeline:
                   _       -> yield 0
               _ -> yield 0
 
-  # ---- référence + différentiel end-to-end ----
+  # ---- reference evaluator and the end-to-end check ----
   part eval(e: Expr) -> Int:
     match e:
       Lit(n)    -> yield n
@@ -157,7 +155,7 @@ module SelfHost.Pipeline:
       Mul(a, b) -> yield eval(a) * eval(b)
 
   part main() -> Int via IO:
-    let ast = parse(lex("2+3*4"))              # front-end : source → AST (précédence)
-    let result = run(compile(ast), [])         # back-end : AST → bytecode → exécution
-    let chk = IO.print(result - eval(ast))     # 0 : la pipeline préserve la sémantique
-    yield IO.print(result)                     # 14 : "2+3*4" compilé+exécuté (pas 20)
+    let ast = parse(lex("2+3*4"))              # front end: text to AST
+    let result = run(compile(ast), [])         # back end: AST to bytecode to a value
+    let chk = IO.print(result - eval(ast))     # 0: the pipeline preserved the meaning
+    yield IO.print(result)                     # 14, not 20

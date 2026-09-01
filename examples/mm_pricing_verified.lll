@@ -1,18 +1,14 @@
 module MmPricing:
 
-  # Migration VÉRIFIÉE du cœur monétaire de l'ERP (SAP condition-technique VK11/VK12,
-  # cf. erp_elixir mm/pricing_agent.ex : base PR00 + remises K004/K005 + taxe).
+  # Pricing a line: base price, discount, tax — in exact integers.
   #
-  # AVANT (Elixir, GenServer non vérifié) : `base_price * cond.amount / 100.0` — de l'argent
-  # calculé en FLOTTANTS => arrondi silencieux (0.1 + 0.2 != 0.3), et AUCUNE garantie que le
-  # prix net reste positif. C'est la classe de bug que la finance interdit.
-  #
-  # APRÈS (llmlang) : ENTIERS EXACTS (montants en centimes, taux en points de base — 10000 bps
-  # = 100%), zéro flottant, et l'invariant « prix net jamais négatif » est PROUVÉ par Z3 pour
-  # TOUTES les entrées valides, pas testé sur quelques cas.
+  # Amounts are in cents and rates in basis points, where 10000 bps is 100%. The usual shape,
+  # `base_price * rate / 100.0`, computes money in floating point and rounds silently; nothing
+  # there keeps the net price positive either. Both are settled here: the arithmetic is exact,
+  # and non-negativity is proved for every valid input rather than for the cases someone tried.
 
-  # Prix net = (base - remise) + taxe, remise et taxe en points de base (bps).
-  # Prouvé : sous des taux valides, le résultat est toujours >= 0 (exact, pas d'arrondi).
+
+  # Net price: base less discount, plus tax, both as basis points.
   part net_price(base: Int, disc_bps: Int, tax_bps: Int) -> Int:
     requires base >= 0
     requires disc_bps >= 0
@@ -24,7 +20,7 @@ module MmPricing:
     let tax = taxable * tax_bps div 10000
     yield taxable + tax
 
-  # Un devis complet est monotone : appliquer une remise ne peut pas augmenter le taxable.
+  # A quote is monotone: applying a discount cannot raise the taxable amount.
   part taxable_after_discount(base: Int, disc_bps: Int) -> Int:
     requires base >= 0
     requires disc_bps >= 0
@@ -34,5 +30,5 @@ module MmPricing:
     yield base - (base * disc_bps div 10000)
 
   part main() -> Int via IO:
-    # base 100.00€ (10000 centimes), remise 15% (1500 bps), taxe 20% (2000 bps) -> 102.00€ exact.
+    # 10000 cents, 15% off (1500 bps), 20% tax (2000 bps), giving exactly 10200.
     yield IO.print(net_price(10000, 1500, 2000))

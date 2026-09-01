@@ -1,30 +1,19 @@
 module ErpOrderPipeline:
 
-  # ── SLICE ERP TERRAIN-DE-PREUVE : le chemin-argent d'une commande, MULTI-AGENTS VÉRIFIÉ ──
+  # An order's money path, proved end to end.
   #
-  # CONTEXTE (décision opérateur). On GARDE le maillage OTP Elixir existant (erp_elixir :
-  # supervision, persistance, messagerie) et on MIGRE vers llmlang vérifié SEULEMENT les
-  # agents-cœur où « silencieusement faux » coûte cher : le calcul de l'argent. erp_elixir /
-  # aps3d sont des exemples BRUTS (inspiration du domaine, PAS spec) — ici on DÉRIVE la logique
-  # correcte et on la PROUVE, on ne recopie pas leurs bugs (flottants, prix net non borné).
+  # Everything is exact integers: amounts in cents, rates in basis points where 10000 bps is
+  # 100%. No floating point means no silent rounding, and the invariants below hold for every
+  # valid input rather than for the cases someone thought to test.
   #
-  # CE QUE CE SLICE DÉMONTRE (au-delà d'une brique isolée) : un VRAI graphe d'appel entre
-  # `part` — `invoice` appelle `order_subtotal` qui appelle `line_net` ; `invoice` appelle
-  # aussi `with_tax` ; `installments` appelle `share`. Chaque niveau PROUVE son invariant métier
-  # et la preuve d'un niveau COMPOSE les contrats (ensures) des niveaux appelés — c'est la
-  # preuve modulaire de DEC-LLL-017 à l'échelle d'un petit codebase. Ce graphe d'appel donne un
-  # blast-radius réel (changer le contrat de `line_net` impacte `order_subtotal` et `invoice`) :
-  # c'est le substrat MULTI-DÉFINITIONS que la mesure du delta Axon-live/dark exige (REQ-192).
-  #
-  # DISCIPLINE MONÉTAIRE : tout en ENTIERS EXACTS — montants en centimes, taux en points de base
-  # (bps ; 10000 bps = 100%). Zéro flottant → zéro arrondi silencieux (0.1 + 0.2 != 0.3). Les
-  # invariants (« l'argent ne devient jamais négatif », « une remise n'augmente jamais le
-  # montant », « la taxe ne le diminue jamais », « le plan de paiement ne perd pas un centime »)
-  # sont PROUVÉS par Z3 pour TOUTES les entrées valides, pas testés sur quelques cas.
+  # What the file demonstrates beyond any single function is the CALL GRAPH: `invoice` calls
+  # `with_tax` and `order_subtotal`, which calls `line_net`; `installments` calls `share`.
+  # Each level proves its own invariant using only the CONTRACTS of the level below, never its
+  # body. That is what makes the proofs modular: changing how `line_net` computes a discount
+  # cannot break `invoice`, while changing its contract will.
 
-  # ── AGENT 1 : ligne de commande ─────────────────────────────────────────────────────────
-  # Net d'une ligne = brut (qty × prix unitaire) moins la remise. PROUVÉ dans [0, brut] : jamais
-  # négatif (l'argent reste positif) et jamais au-dessus du brut (une remise ne peut qu'abaisser).
+  # A line's net: gross (quantity times unit price) less the discount. The contract pins it
+  # inside [0, gross] — money never goes negative, and a discount can only ever lower it.
   part line_net(qty: Int, unit_price: Int, disc_bps: Int) -> Int:
     requires qty >= 0
     requires unit_price >= 0
@@ -35,10 +24,8 @@ module ErpOrderPipeline:
     let gross = qty * unit_price
     yield gross - (gross * disc_bps div 10000)
 
-  # ── AGENT 2 : sous-total d'une commande (2 lignes) ──────────────────────────────────────
-  # APPELLE `line_net` deux fois (arêtes d'appel réelles). PROUVÉ >= 0 : la preuve COMPOSE
-  # l'ensures `line_net >= 0` des deux appelés (preuve modulaire — le corps de `line_net` n'est
-  # pas rouvert, seul son contrat est assumé, DEC-LLL-017).
+  # Non-negativity here is proved from `line_net`'s own `ensures`, twice over. The prover
+  # never looks inside `line_net`.
   part order_subtotal(q1: Int, p1: Int, d1: Int, q2: Int, p2: Int, d2: Int) -> Int:
     requires q1 >= 0
     requires p1 >= 0
@@ -51,20 +38,16 @@ module ErpOrderPipeline:
     ensures result >= 0
     yield line_net(q1, p1, d1) + line_net(q2, p2, d2)
 
-  # ── AGENT 3 : taxe ──────────────────────────────────────────────────────────────────────
-  # Ajoute la taxe (bps) au sous-total. PROUVÉ `result >= subtotal` : la taxe ne DIMINUE jamais
-  # le montant (invariant de sens — un bug de signe serait rejeté à la compilation).
+  # Tax never decreases the amount. A sign error here is a compile error, not a discrepancy
+  # someone notices at year end.
   part with_tax(subtotal: Int, tax_bps: Int) -> Int:
     requires subtotal >= 0
     requires tax_bps >= 0
     ensures result >= subtotal
     yield subtotal + (subtotal * tax_bps div 10000)
 
-  # ── AGENT 4 : facture = taxe(sous-total) ────────────────────────────────────────────────
-  # Chaîne d'appels MULTI-HOP : `invoice` → `with_tax` → et → `order_subtotal` → `line_net`.
-  # PROUVÉ `result >= 0` en COMPOSANT les deux contrats : `with_tax` donne `result >= subtotal`,
-  # `order_subtotal` donne `subtotal >= 0`, donc `result >= 0`. Aucun corps rouvert : la preuve
-  # de la facture ne voit que les ENSURES de ses appelés.
+  # Two hops of composition: `with_tax` gives `result >= subtotal`, `order_subtotal` gives
+  # `subtotal >= 0`, so the invoice is non-negative. Neither body is reopened.
   part invoice(q1: Int, p1: Int, d1: Int, q2: Int, p2: Int, d2: Int, tax_bps: Int) -> Int:
     requires q1 >= 0
     requires p1 >= 0
@@ -78,9 +61,8 @@ module ErpOrderPipeline:
     ensures result >= 0
     yield with_tax(order_subtotal(q1, p1, d1, q2, p2, d2), tax_bps)
 
-  # ── AGENT 5 : plan de paiement (conservation, N SYMBOLIQUE) ─────────────────────────────
-  # Une échéance : le montant dû ce mois-ci. PROUVÉ dans [0, remaining] — l'ensures `<= remaining`
-  # décharge le `requires` de l'appel récursif d'`installments` (`total - share >= 0`).
+  # One instalment. The upper bound is not decoration: it is what discharges the recursive
+  # call's precondition in `installments` below.
   part share(remaining: Int, parts_left: Int) -> Int:
     requires parts_left >= 1
     requires remaining >= 0
@@ -88,13 +70,12 @@ module ErpOrderPipeline:
     ensures result <= remaining
     yield remaining div parts_left
 
-  # Ventile la facture sur `n` échéances SANS perdre ni créer un centime : chaque échéance vaut
-  # `reste div échéances_restantes` (absorbe le reliquat au fil de l'eau). CONSERVATION
-  # `somme des échéances == total` PROUVÉE à `n` SYMBOLIQUE (pas testée) : la preuve compose
-  # l'ensures `share <= remaining` (décharge la récursion) et l'IH `installments(reste, n-1) ==
-  # reste` portée hors de la branche `else` par l'if-expression récursive (REQ-LLL-198). Même
-  # invariant financier que la brique de répartition du catalogue (CPT-LLL-018), appliqué au
-  # plan de paiement d'une facture.
+  # Spread an invoice over `n` instalments without losing or inventing a cent. Each takes
+  # `remaining div instalments_left`, which absorbs the remainder as it goes.
+  #
+  # Conservation — the instalments sum to exactly the total — is proved for SYMBOLIC `n`,
+  # not checked at a few values of it. The proof needs both `share <= remaining` to justify
+  # the recursion and the induction hypothesis on the shorter plan.
   part installments(total: Int, n: Int) -> Int:
     requires n >= 1
     requires total >= 0
@@ -103,9 +84,8 @@ module ErpOrderPipeline:
     yield if n == 1 then total else share(total, n) + installments(total - share(total, n), n - 1)
 
   part main() -> Int via IO:
-    # Commande 2 lignes : 3 × 12,00 € remise 10% + 1 × 50,00 € remise 0%, taxe 20%.
-    # ligne 1 net = 3600 − 360 = 3240 ; ligne 2 net = 5000 ; sous-total = 8240 ;
-    # facture avec taxe 20% = 8240 + 1648 = 9888 centimes = 98,88 €.
+    # Two lines: 3 at 12.00 with 10% off, 1 at 50.00 with none, then 20% tax.
+    # 3600 - 360 = 3240, plus 5000, is a subtotal of 8240; with tax, 9888 cents.
     let inv = IO.print(invoice(3, 1200, 1000, 1, 5000, 0, 2000))   # 9888
-    # Plan de paiement : 9888 centimes sur 3 échéances = 3296 + 3296 + 3296, somme = 9888 exact.
-    yield IO.print(installments(9888, 3))                           # 9888 (conservation prouvée)
+    # Paid over 3 instalments: 3296 each, summing back to 9888 exactly.
+    yield IO.print(installments(9888, 3))                           # 9888, conserved exactly

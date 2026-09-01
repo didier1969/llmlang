@@ -1,24 +1,18 @@
 module VerifiedAllocation:
 
-  # ── BRIQUE VÉRIFIÉE RÉUTILISABLE : répartition exacte d'un montant (CPT-LLL-018) ──
+  # Split an amount across N parts without losing or inventing a unit.
   #
-  # LE PROBLÈME (universel en ERP/finance). Répartir un montant total sur N lignes, centres
-  # de coûts ou échéances — une remise ventilée sur les lignes d'une facture, des frais
-  # généraux sur des centres, un plan de paiement — SANS perdre ni créer d'unité par
-  # arrondi. Fait en FLOTTANTS (le réflexe), `total / n` par ligne fait que la somme des
-  # parts != total : des centimes disparaissent ou apparaissent. C'est la classe de bug que
-  # l'audit financier interdit.
+  # Distributing a total over invoice lines, cost centres or instalments is where floating
+  # point quietly fails: `total / n` per line makes the parts sum to something other than the
+  # total, so cents appear or vanish. In exact integers, each part takes
+  # `remaining div parts_left`, which absorbs the remainder as it goes, and no two parts ever
+  # differ by more than one unit.
   #
-  # LA BRIQUE. Distribution « au plus juste » en ENTIERS EXACTS : chaque tranche vaut
-  # `reste div tranches_restantes`, ce qui absorbe le reliquat au fil de l'eau (les tranches
-  # ne diffèrent que d'une unité). L'invariant de CONSERVATION « la somme des tranches ==
-  # total » est PROUVÉ par Z3 pour un nombre de tranches N SYMBOLIQUE — pas testé sur
-  # quelques cas — via l'hypothèse d'induction portée par l'if-expression récursive
-  # (REQ-LLL-198). Réutilisable telle quelle dans n'importe quel projet : une brique
-  # conçue-prouvée-validée du catalogue (CPT-LLL-018).
+  # Conservation — the parts sum to exactly the total — is proved for SYMBOLIC N rather than
+  # checked at a few sizes.
 
-  # Une tranche : le montant attribué à la ligne courante. Prouvé dans [0, remaining] — donc
-  # jamais négatif, jamais plus que ce qui reste (l'ensures qui décharge la récursion).
+
+  # One part. The upper bound is what discharges the recursive call's precondition below.
   part share(remaining: Int, parts_left: Int) -> Int:
     requires parts_left >= 1
     requires remaining >= 0
@@ -26,11 +20,8 @@ module VerifiedAllocation:
     ensures result <= remaining
     yield remaining div parts_left
 
-  # CONSERVATION (le cœur de la brique) : la somme des `parts` tranches successives vaut
-  # EXACTEMENT `total`. Prouvé à `parts` symbolique — rien n'est perdu ni créé. La preuve
-  # compose deux parts vérifiées : l'ensures `share <= remaining` décharge `total - share >= 0`
-  # (le requires de l'appel récursif), et l'IH `distribute_sum(reste, parts-1) == reste`
-  # (portée hors de la branche `else` par REQ-LLL-198) donne `share + reste == total`.
+  # The proof composes two facts: `share <= remaining` justifies the recursive call, and the
+  # induction hypothesis gives the tail's sum, so `share + rest == total`.
   part distribute_sum(total: Int, parts: Int) -> Int:
     requires parts >= 1
     requires total >= 0
@@ -39,8 +30,6 @@ module VerifiedAllocation:
     yield if parts == 1 then total else share(total, parts) + distribute_sum(total - share(total, parts), parts - 1)
 
   part main() -> Int via IO:
-    # Répartir 100,00 € (10000 centimes) sur 7 lignes : chaque part vaut 1428 ou 1429
-    # centimes, et la SOMME rendue est exactement 10000 — conservation prouvée, zéro
-    # centime perdu, pour un découpage de taille quelconque.
-    let s = IO.print(share(10000, 7))          # 1428 (première tranche)
-    yield IO.print(distribute_sum(10000, 7))   # 10000 (somme exacte des 7 tranches)
+    # 10000 cents over 7 lines: each part is 1428 or 1429, and they sum back to 10000.
+    let s = IO.print(share(10000, 7))          # 1428, the first part
+    yield IO.print(distribute_sum(10000, 7))   # 10000, the exact sum of all seven

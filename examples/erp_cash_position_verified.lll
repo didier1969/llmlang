@@ -1,28 +1,25 @@
 module ErpCashPositionVerified:
 
-  # ── Invariant MONOTONE sur un état threadé (CPT-LLL-018) ──
+  # A cash position fed only by receipts never falls below its opening balance.
   #
-  # Une position de trésorerie alimentée UNIQUEMENT par des encaissements ne descend JAMAIS sous son
-  # solde d'ouverture — pour toute séquence d'encaissements, à N symbolique, par récurrence.
-  #
-  # Distinct de la brique 18 (journal équilibré) : là l'accumulateur est CONSTANT (préservation d'une
-  # ÉGALITÉ, result == opening) ; ICI l'accumulateur CHANGE — il croît — mais reste BORNÉ EN DESSOUS
-  # (préservation d'une INÉGALITÉ, result >= opening, sous un fold à état). C'est la forme « un solde
-  # qui ne bouge que dans un sens reste du bon côté d'un plancher, quoi qu'il arrive » — l'invariant
-  # d'un compte qu'on ne fait qu'alimenter (trésorerie encaissements-seuls, compteur d'audit, cumul).
+  # The accumulator here CHANGES as the fold proceeds — it grows — but stays bounded from
+  # below. That is a different shape from preserving an equality: it is the invariant of any
+  # account that only ever moves one way, such as a receipts-only balance or an audit counter,
+  # and it is proved for a sequence of any length.
+
 
   type Receipt = {amount: Int}
 
-  # Appliquer un encaissement (montant ≥ 0) fait CROÎTRE le solde — jamais décroître.
+  # A receipt can only raise the balance.
   part apply_receipt(balance: Int, r: Receipt) -> Int:
     requires 0 <= r.amount
     ensures result >= balance
     ensures result == balance + r.amount
     yield balance + r.amount
 
-  # Rejouer une SUITE d'encaissements sur un solde d'ouverture : le solde final est >= l'ouverture,
-  # jamais en dessous — pour toute séquence. Z3 le prouve par récurrence : à `h :: t`, apply_receipt
-  # ne fait que monter le solde (>= opening), et l'IH reconduit le plancher sur la queue.
+  # Replaying a sequence of receipts closes at or above the opening balance, for any sequence.
+  # At `h :: t` the head can only raise the balance, and the hypothesis carries the floor
+  # through the tail.
   part cash_position(opening: Int, receipts: List[Receipt]) -> Int:
     requires forall r in receipts: 0 <= r.amount
     ensures result >= opening
@@ -32,6 +29,6 @@ module ErpCashPositionVerified:
       h :: t -> yield cash_position(apply_receipt(opening, h), t)
 
   part main() -> Int via IO:
-    # Ouverture 5000, trois encaissements → 10000, prouvé >= 5000 (jamais sous l'ouverture).
+    # Opening 5000, three receipts, closing 10000 — proved never below the opening.
     let day = [Receipt(1200), Receipt(800), Receipt(3000)]
     yield IO.print(cash_position(5000, day))

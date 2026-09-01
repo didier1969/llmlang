@@ -1,16 +1,15 @@
 module ErpInventoryVerified:
 
-  # ── AGENT CRITIQUE ERP VÉRIFIÉ : l'INVENTAIRE — jamais de SURVENTE (CPT-LLL-018) ──
+  # Stock that can never be oversold.
   #
-  # Concern DISTINCT des agents argent (facturation/sourcing/planning/ledger) : une quantité
-  # PHYSIQUE conservée sous une contrainte de CAPACITÉ. L'invariant dont « silencieusement faux »
-  # coûte le plus cher en gestion de stock : ne JAMAIS promettre plus qu'on a. Formalisé : le stock
-  # ENGAGÉ (committed) ne dépasse jamais le stock EN MAIN (on_hand) → le DISPONIBLE
-  # (available = on_hand − committed) reste ≥ 0. Chaque opération PRÉSERVE l'invariant (elle porte
-  # un `requires` que l'appelant doit décharger + un `ensures` qui le reconduit) → stock négatif
-  # IMPOSSIBLE, prouvé par Z3, pas testé sur quelques cas.
+  # This is a PHYSICAL quantity under a capacity constraint, not money. The invariant is that
+  # committed stock never exceeds stock on hand, so what is available stays non-negative. Every
+  # operation carries a `requires` the caller must discharge and an `ensures` that re-establishes
+  # the invariant for the next one, which is what makes negative stock unconstructible rather
+  # than merely unlikely.
 
-  # Le disponible = en-main − engagé, PROUVÉ non-négatif (aucune survente déjà présente).
+
+  # Available is on-hand less committed, proved non-negative.
   part available(on_hand: Int, committed: Int) -> Int:
     requires 0 <= committed
     requires committed <= on_hand
@@ -18,8 +17,8 @@ module ErpInventoryVerified:
     ensures result == on_hand - committed
     yield on_hand - committed
 
-  # Réserver `qty` unités : LÉGAL seulement si qty ≤ disponible. L'ensures RECONDUIT l'invariant
-  # (nouvel engagé ≤ en-main) → l'opération suivante peut à son tour le décharger. Zéro survente.
+  # Reserving is legal only up to what is available. The `ensures` re-establishes the invariant
+  # so the next operation can discharge its own precondition from it.
   part reserve(on_hand: Int, committed: Int, qty: Int) -> Int:
     requires 0 <= committed
     requires committed <= on_hand
@@ -29,8 +28,7 @@ module ErpInventoryVerified:
     ensures result <= on_hand
     yield committed + qty
 
-  # Le total ENGAGÉ sur N réservations = la somme EXACTE, et s'il tient dans le stock le disponible
-  # reste ≥ 0 pour un nombre QUELCONQUE de réservations (forall-sur-liste + sum, REQ-201/194).
+  # The total committed over N reservations is their exact sum, for any N.
   part total_committed(reservations: List[Int]) -> Int:
     requires forall r in reservations: r >= 0
     ensures result == sum(reservations)
@@ -40,8 +38,7 @@ module ErpInventoryVerified:
       [] -> yield 0
       r :: rest -> yield r + total_committed(rest)
 
-  # Disponible après une VAGUE de réservations : en-main − total engagé, prouvé ≥ 0 quand la vague
-  # tient dans le stock. C'est l'invariant no-oversell à l'échelle d'un carnet de commandes entier.
+  # The same no-oversell invariant lifted from one reservation to a whole order book.
   part available_after(on_hand: Int, reservations: List[Int]) -> Int:
     requires forall r in reservations: r >= 0
     requires sum(reservations) <= on_hand
@@ -50,6 +47,6 @@ module ErpInventoryVerified:
     yield on_hand - total_committed(reservations)
 
   part main() -> Int via IO:
-    # En-main 100, déjà engagé 30 → dispo 70 ; réserver 40 (≤ 70) → engagé 70 ≤ 100 (invariant tenu).
-    # Carnet [40, 20, 30] = 90 ≤ 100 → dispo après la vague = 10, prouvé ≥ 0 (aucune survente).
+    # 100 on hand with 30 committed leaves 70 available; reserving 40 brings committed to 70.
+    # An order book of [40, 20, 30] totals 90 against 100, leaving 10 available.
     yield IO.print(available_after(100, [40, 20, 30]))

@@ -4,26 +4,24 @@ depends rusqlite "0.39.0" features "bundled"
 
 module Std.Db:
 
-  # Verified SQLite persistence, wave-3 slice-2 (REQ-LLL-066, DEC-LLL-064). The compiler
-  # emits a built-in `lll_db_runtime` (src/codegen.rs `emit_db_runtime`) — a process-global
-  # `handle -> rusqlite::Connection` registry — and each op below binds to it across the FFI
-  # frontier, marshalling with the SAME machinery as the serde_json bridge (REQ-LLL-056/061):
-  #   - a SQL string is a `List[Int]` of codepoints (DEC-LLL-030), crossed to Rust `&str`;
-  #   - `query` returns a `serde_json::Value` mapped BY NAME into the shared `Json` ADT.
+  # Verified SQLite persistence.
   #
-  # DEC-LLL-066 étape 3 : le `Json` ADT + les destructeurs purs (unarr/unnum/nth/count/
-  # cell_int) sont le CONTRAT NORMALISÉ, extrait dans std/db_json.lll et importé ci-dessus —
-  # PARTAGÉ à l'identique avec le backend Postgres (std/db_pg.lll). Ce fichier ne garde que la
-  # PARTIE backend-spécifique : l'effet `Db` bindé aux chemins `lll_db_runtime::…`. Swapper
-  # vers Postgres = remplacer l'import de CE fichier par `std/db_pg.lll` (même effet `Db`,
-  # même contrat `Json`, mêmes destructeurs) — l'interchangeabilité au niveau module.
+  # Crossing the foreign frontier: a SQL string is a `List[Int]` of codepoints and reaches
+  # Rust as `&str`; `query` returns a `serde_json::Value` mapped by name into the `Json` ADT
+  # that `db_json.lll` defines. That ADT and its pure destructors are the backend-neutral
+  # contract; this file holds only what is specific to SQLite — the `Db` effect bound to the
+  # compiler's built-in `lll_db_runtime`, a process-global registry of open connections.
   #
-  # DB faults are fail-stop (DEC-LLL-026: abort loudly, never silently corrupt the books);
-  # errors-as-values and bound query parameters are logged follow-ups. `rusqlite` (+ le
-  # `serde_json` du contrat) est déclaré ICI : le backend PORTE sa dépendance, et les
-  # `depends` se propagent transitivement via l'import — donc un programme n'a qu'à importer
-  # ce fichier, sans redéclarer aucune crate. Swapper vers Postgres = importer std/db_pg.lll
-  # à la place ; la dépendance `postgres` suit automatiquement (le swap tient en 1 ligne).
+  # Swapping to PostgreSQL is one import line: `std/db_pg.lll` declares the same `Db` effect
+  # over the same `Json` contract, and carries its own `postgres` dependency, which
+  # propagates through the import — a program never names a crate. Importing both backends
+  # is a compile error, because the effect name collides, so the swap is exclusive by
+  # construction rather than by convention.
+  #
+  # Two limits worth knowing before you use this. A database fault aborts the program rather
+  # than returning a value: books are never silently corrupted, but there is no recovery
+  # path. And query parameters are not bound — SQL is assembled as text, so this is safe for
+  # trusted input only.
 
   effect Db:
     open(List[Int]) -> Int = extern "lll_db_runtime::open" as (str) -> i64
