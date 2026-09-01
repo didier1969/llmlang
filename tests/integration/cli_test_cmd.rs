@@ -349,3 +349,25 @@ fn an_example_needing_a_neighbour_part_verifies_once_it_has_a_contract() {
     let (code, out, err) = run_lll_cmd("ex_r_neighbour_ok", src, &["check"]);
     assert_eq!(code, Some(0), "2 + 4 is 6:\nstdout={out}\nstderr={err}");
 }
+
+/// The budget is per EXAMPLE but `unfolded` is shared, so an example that runs out must not
+/// leave the next one starved. What actually saves it is the breadth-first lockstep of the
+/// unfolding loop, not the reload — pinned here because it is a property of the traversal
+/// order, and traversal order is the kind of thing a later refactor changes without noticing.
+#[test]
+fn an_example_past_the_budget_does_not_starve_the_next_one() {
+    let long = (1..=40).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+    let src = format!(
+        "module M:\n\n  part count(xs: List[Int]) -> Int:\n    example count([{long}]) == 40\n    example count([1, 2]) == 2\n    match xs:\n      []     -> yield 0\n      h :: t -> yield 1 + count(t)\n"
+    );
+    let (code, out, err) = run_lll_cmd("ex_r_mix", &src, &["check"]);
+    // The module is red overall — example #1 is past the budget — so the discriminating fact is
+    // WHICH example is reported. `lll check` reports every failing obligation, not just the
+    // first (pinned by the pair of wrong examples above), so #2 absent means #2 proved.
+    assert_ne!(code, Some(0), "example #1 is past the budget:\nstdout={out}\nstderr={err}");
+    assert!(out.contains("example #1"), "the deep one must be the one refused:\nstdout={out}");
+    assert!(
+        !out.contains("example #2"),
+        "the shallow example must still prove despite #1 exhausting its own budget:\nstdout={out}"
+    );
+}
