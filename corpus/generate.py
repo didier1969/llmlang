@@ -484,6 +484,158 @@ def fam_compose_charge(rng):
     return instr, code
 
 
+
+# ─────────────────────────────────── code ORDINAIRE (REQ-LLL-233) ──
+# Les 22 familles ci-dessus partagent une forme : un INVARIANT métier à prouver. Un modèle entraîné
+# sur elles seules apprend que llmlang sert à démontrer — et cale sur le programme banal, qui est
+# l'écrasante majorité du code réel. Les familles ci-dessous n'ont AUCUN invariant : ce qu'elles
+# enseignent est ce qu'elles ne CONTIENNENT pas. La terminaison reste prouvée (récursion structurelle,
+# aucun `measure` requis) et le `match` reste exhaustif — le langage donne ça sans qu'on le demande.
+
+def fam_ord_count(rng):
+    """Compter les éléments égaux à une valeur. Récursion structurelle : pas de `measure`."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a llmlang `part count_{n}(xs: List[Int], v: Int) -> Int` that counts how many elements of `xs` equal `v`.",
+        f"In llmlang, count occurrences: `part count_{n}(xs: List[Int], v: Int) -> Int` returning how many items in `xs` are equal to `v`.",
+        f"How many elements of `xs` equal `v`? Write it as a llmlang `part count_{n}(xs: List[Int], v: Int) -> Int`.")
+    code = (f"module M:\n\n"
+            f"  part count_{n}(xs: List[Int], v: Int) -> Int:\n"
+            f"    match xs:\n"
+            f"      [] -> yield 0\n"
+            f"      h :: t -> yield (if h == v then 1 else 0) + count_{n}(t, v)\n")
+    return instr, code
+
+
+def fam_ord_map(rng):
+    """Comprehension qui transforme chaque élément. Le seul contrat est la longueur — celui qu'on
+    écrirait de toute façon, pas un invariant métier."""
+    n = rng.choice(NAMES)
+    k = rng.randint(2, 12)
+    instr = _pick(rng,
+        f"Write a llmlang `part scale_{n}(xs: List[Int]) -> List[Int]` that multiplies every element by {k}.",
+        f"In llmlang, map a list: `part scale_{n}(xs: List[Int]) -> List[Int]` returning each element times {k}.",
+        f"Multiply every integer in `xs` by {k}, as a llmlang `part scale_{n}(xs: List[Int]) -> List[Int]`.")
+    code = (f"module M:\n\n"
+            f"  part scale_{n}(xs: List[Int]) -> List[Int]:\n"
+            f"    ensures length(result) == length(xs)\n"
+            f"    yield [x * {k} for x in xs]\n")
+    return instr, code
+
+
+def fam_ord_filter(rng):
+    """Comprehension filtrante — zéro contrat. Le programme le plus banal qui soit."""
+    n = rng.choice(NAMES)
+    b = rng.randint(0, 50)
+    op, word = rng.choice([(">", "greater than"), (">=", "at least"), ("<", "less than")])
+    instr = _pick(rng,
+        f"Write a llmlang `part keep_{n}(xs: List[Int]) -> List[Int]` keeping only the elements {word} {b}.",
+        f"In llmlang, filter a list: `part keep_{n}(xs: List[Int]) -> List[Int]` returning the items {word} {b}.",
+        f"Keep the elements of `xs` that are {word} {b}: a llmlang `part keep_{n}(xs: List[Int]) -> List[Int]`.")
+    code = (f"module M:\n\n"
+            f"  part keep_{n}(xs: List[Int]) -> List[Int]:\n"
+            f"    yield [x for x in xs if x {op} {b}]\n")
+    return instr, code
+
+
+def fam_ord_search(rng):
+    """Recherche booléenne. Enseigne le `or` court-circuité sur une récursion de liste."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a llmlang `part has_{n}(xs: List[Int], v: Int) -> Bool` that is true when `xs` contains `v`.",
+        f"In llmlang, membership test: `part has_{n}(xs: List[Int], v: Int) -> Bool` returning whether `v` occurs in `xs`.",
+        f"Does `xs` contain `v`? Write a llmlang `part has_{n}(xs: List[Int], v: Int) -> Bool`.")
+    code = (f"module M:\n\n"
+            f"  part has_{n}(xs: List[Int], v: Int) -> Bool:\n"
+            f"    match xs:\n"
+            f"      [] -> yield false\n"
+            f"      h :: t -> yield h == v or has_{n}(t, v)\n")
+    return instr, code
+
+
+def fam_ord_last(rng):
+    """Dernier élément, avec un défaut sur la liste vide. Enseigne le `match` IMBRIQUÉ sur une liste —
+    la forme qui distingue « un seul élément » de « au moins deux »."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a llmlang `part last_{n}(xs: List[Int], d: Int) -> Int` returning the last element of `xs`, or `d` when `xs` is empty.",
+        f"In llmlang, get the final item: `part last_{n}(xs: List[Int], d: Int) -> Int` = the last element, falling back to `d` on an empty list.",
+        f"Return the last element of `xs`, or the default `d` if there is none: a llmlang `part last_{n}(xs: List[Int], d: Int) -> Int`.")
+    code = (f"module M:\n\n"
+            f"  part last_{n}(xs: List[Int], d: Int) -> Int:\n"
+            f"    match xs:\n"
+            f"      [] -> yield d\n"
+            f"      h :: t ->\n"
+            f"        match t:\n"
+            f"          [] -> yield h\n"
+            f"          a :: b -> yield last_{n}(t, d)\n")
+    return instr, code
+
+
+def fam_ord_record(rng):
+    """Record + projection de champ. Aucune récursion, aucun contrat : la ligne de code la plus
+    ordinaire d'une application de gestion."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"In llmlang, declare a record `Line = {{qty: Int, price: Int}}` and a `part total_{n}(l: Line) -> Int` returning qty times price.",
+        f"Write a llmlang record `Line` with `qty` and `price` (both Int) and a `part total_{n}(l: Line) -> Int` computing their product.",
+        f"Model an order line in llmlang (`qty`, `price`) and write `part total_{n}(l: Line) -> Int` returning the line total.")
+    code = (f"module M:\n\n"
+            f"  type Line = {{qty: Int, price: Int}}\n\n"
+            f"  part total_{n}(l: Line) -> Int:\n"
+            f"    yield l.qty * l.price\n")
+    return instr, code
+
+
+def fam_ord_adt(rng):
+    """ADT à deux constructeurs + `match` exhaustif. La forme que tout langage fonctionnel enseigne
+    en premier, et qui manquait au corpus."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"In llmlang, declare `type Shape = Square(Int) | Rect(Int, Int)` and write `part area_{n}(s: Shape) -> Int` returning the area.",
+        f"Write a llmlang sum type for a square (side) or a rectangle (width, height), plus `part area_{n}(s: Shape) -> Int` computing the area.",
+        f"Model a shape in llmlang — a square or a rectangle — and write `part area_{n}(s: Shape) -> Int`.")
+    code = (f"module M:\n\n"
+            f"  type Shape = Square(Int) | Rect(Int, Int)\n\n"
+            f"  part area_{n}(s: Shape) -> Int:\n"
+            f"    match s:\n"
+            f"      Square(a) -> yield a * a\n"
+            f"      Rect(w, h) -> yield w * h\n")
+    return instr, code
+
+
+def fam_ord_char(rng):
+    """Prédicat sur un caractère (codepoint). Traitement de texte ordinaire — un `Char` est un `Int`
+    (DEC-LLL-030), donc une chaîne se parcourt directement."""
+    kind, cond, desc = rng.choice([
+        ("digit", "48 <= c and c <= 57", "an ASCII digit"),
+        ("upper", "65 <= c and c <= 90", "an ASCII uppercase letter"),
+        ("lower", "97 <= c and c <= 122", "an ASCII lowercase letter"),
+        ("space", "c == 32 or (9 <= c and c <= 13)", "an ASCII whitespace character"),
+    ])
+    instr = _pick(rng,
+        f"Write a llmlang `part is_{kind}(c: Int) -> Bool` that is true when the codepoint `c` is {desc}.",
+        f"In llmlang a character is its codepoint (`Int`). Write `part is_{kind}(c: Int) -> Bool` returning whether `c` is {desc}.",
+        f"Classify a character in llmlang: `part is_{kind}(c: Int) -> Bool`, true for {desc}.")
+    code = (f"module M:\n\n"
+            f"  part is_{kind}(c: Int) -> Bool:\n"
+            f"    yield {cond}\n")
+    return instr, code
+
+
+def fam_ord_tuple(rng):
+    """Tuple + projection positionnelle. Enseigne `.0` / `.1`, absents des familles à invariant."""
+    n = rng.choice(NAMES)
+    instr = _pick(rng,
+        f"Write a llmlang `part swap_{n}(p: (Int, Int)) -> (Int, Int)` that swaps the two components.",
+        f"In llmlang, swap a pair: `part swap_{n}(p: (Int, Int)) -> (Int, Int)` returning the components in the other order.",
+        f"Exchange the two halves of a pair in llmlang: `part swap_{n}(p: (Int, Int)) -> (Int, Int)`.")
+    code = (f"module M:\n\n"
+            f"  part swap_{n}(p: (Int, Int)) -> (Int, Int):\n"
+            f"    yield (p.1, p.0)\n")
+    return instr, code
+
+
 FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor, fam_monotone,
             fam_limit, fam_successor, fam_scale_nonneg, fam_balanced, fam_list_min_bound,
             fam_compose_pricing, fam_compose_fold, fam_compose_pipe,
@@ -491,7 +643,10 @@ FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor,
             fam_plain_sum, fam_ceil_div, fam_midpoint, fam_minmax, fam_pairwise_balance,
             fam_bounded_reserve,
             # v3 — les 3 trous résiduels (mod-vs-%, .length, chaîne de préconditions) :
-            fam_wrap_index, fam_compose_charge]
+            fam_wrap_index, fam_compose_charge,
+            # REQ-LLL-233 — code ORDINAIRE : ce que le corpus n'enseignait pas.
+            fam_ord_count, fam_ord_map, fam_ord_filter, fam_ord_search, fam_ord_last,
+            fam_ord_record, fam_ord_adt, fam_ord_char, fam_ord_tuple]
 
 
 def to_record(instr, code):
