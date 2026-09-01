@@ -604,22 +604,101 @@ def fam_ord_adt(rng):
     return instr, code
 
 
+# Les classes de caractères ASCII, partagées par les trois familles texte ci-dessous.
+_CHAR_CLASSES = [
+    ("digit", "48 <= {c} and {c} <= 57", "an ASCII digit"),
+    ("upper", "65 <= {c} and {c} <= 90", "an ASCII uppercase letter"),
+    ("lower", "97 <= {c} and {c} <= 122", "an ASCII lowercase letter"),
+    ("space", "{c} == 32 or (9 <= {c} and {c} <= 13)", "an ASCII whitespace character"),
+    ("alpha", "(65 <= {c} and {c} <= 90) or (97 <= {c} and {c} <= 122)", "an ASCII letter"),
+    ("alnum", "(48 <= {c} and {c} <= 57) or (65 <= {c} and {c} <= 90) or (97 <= {c} and {c} <= 122)",
+     "an ASCII letter or digit"),
+]
+_CHAR_PARAMS = ["c", "ch", "cp", "code"]
+
+
 def fam_ord_char(rng):
-    """Prédicat sur un caractère (codepoint). Traitement de texte ordinaire — un `Char` est un `Int`
-    (DEC-LLL-030), donc une chaîne se parcourt directement."""
-    kind, cond, desc = rng.choice([
-        ("digit", "48 <= c and c <= 57", "an ASCII digit"),
-        ("upper", "65 <= c and c <= 90", "an ASCII uppercase letter"),
-        ("lower", "97 <= c and c <= 122", "an ASCII lowercase letter"),
-        ("space", "c == 32 or (9 <= c and c <= 13)", "an ASCII whitespace character"),
+    """Opération sur UN caractère (codepoint) : classification, changement de casse, valeur d'un
+    chiffre. Un `Char` est un `Int` (DEC-LLL-030), donc une chaîne se parcourt directement.
+
+    NOTE de dimensionnement : la première version n'offrait que 4 classes × 3 phrasés = 12 variantes
+    distinctes, et le dédup — qui a raison de refuser de remplir avec des doublons — l'a plafonnée à
+    12 exemples sur 320 demandés. La classe seule est un espace trop petit ; il faut faire varier
+    AUSSI la forme et le nom du paramètre."""
+    v = rng.choice(_CHAR_PARAMS)
+    shape = rng.choice(["classify", "to_lower", "to_upper", "digit_value"])
+    if shape == "classify":
+        kind, cond, desc = rng.choice(_CHAR_CLASSES)
+        instr = _pick(rng,
+            f"Write a llmlang `part is_{kind}({v}: Int) -> Bool` that is true when the codepoint `{v}` is {desc}.",
+            f"In llmlang a character is its codepoint (`Int`). Write `part is_{kind}({v}: Int) -> Bool` returning whether `{v}` is {desc}.",
+            f"Classify a character in llmlang: `part is_{kind}({v}: Int) -> Bool`, true for {desc}.")
+        body = cond.format(c=v)
+        code = (f"module M:\n\n"
+                f"  part is_{kind}({v}: Int) -> Bool:\n"
+                f"    yield {body}\n")
+    elif shape == "to_lower":
+        instr = _pick(rng,
+            f"Write a llmlang `part to_lower({v}: Int) -> Int` mapping an ASCII uppercase codepoint to lowercase and leaving anything else unchanged.",
+            f"In llmlang, lowercase one character: `part to_lower({v}: Int) -> Int` — shift A-Z by 32, return everything else as is.",
+            f"Convert an ASCII codepoint to lowercase in llmlang: `part to_lower({v}: Int) -> Int`, other codepoints untouched.")
+        code = (f"module M:\n\n"
+                f"  part to_lower({v}: Int) -> Int:\n"
+                f"    yield if 65 <= {v} and {v} <= 90 then {v} + 32 else {v}\n")
+    elif shape == "to_upper":
+        instr = _pick(rng,
+            f"Write a llmlang `part to_upper({v}: Int) -> Int` mapping an ASCII lowercase codepoint to uppercase and leaving anything else unchanged.",
+            f"In llmlang, uppercase one character: `part to_upper({v}: Int) -> Int` — shift a-z by -32, return everything else as is.",
+            f"Convert an ASCII codepoint to uppercase in llmlang: `part to_upper({v}: Int) -> Int`, other codepoints untouched.")
+        code = (f"module M:\n\n"
+                f"  part to_upper({v}: Int) -> Int:\n"
+                f"    yield if 97 <= {v} and {v} <= 122 then {v} - 32 else {v}\n")
+    else:
+        instr = _pick(rng,
+            f"Write a llmlang `part digit_value({v}: Int) -> Int` returning the numeric value of an ASCII digit codepoint, or -1 when `{v}` is not a digit.",
+            f"In llmlang, decode one digit: `part digit_value({v}: Int) -> Int` = 0..9 for an ASCII digit codepoint, -1 otherwise (errors are values).",
+            f"Turn an ASCII digit codepoint into its value in llmlang: `part digit_value({v}: Int) -> Int`, -1 for anything else.")
+        code = (f"module M:\n\n"
+                f"  part digit_value({v}: Int) -> Int:\n"
+                f"    yield if 48 <= {v} and {v} <= 57 then {v} - 48 else 0 - 1\n")
+    return instr, code
+
+
+def fam_ord_charcount(rng):
+    """Compter les caractères d'une classe dans une chaîne. COMPOSE le prédicat de caractère avec la
+    récursion de liste — plus représentatif du code texte réel qu'un prédicat isolé, et de cardinalité
+    pleine grâce à NAMES."""
+    n = rng.choice(NAMES)
+    kind, cond, desc = rng.choice(_CHAR_CLASSES)
+    c = cond.format(c="h")
+    instr = _pick(rng,
+        f"In llmlang a string is a `List[Int]` of codepoints. Write `part count_{kind}_{n}(s: List[Int]) -> Int` counting how many characters of `s` are {desc}.",
+        f"Write a llmlang `part count_{kind}_{n}(s: List[Int]) -> Int` that counts the characters of the string `s` which are {desc}.",
+        f"How many characters of `s` are {desc}? Write a llmlang `part count_{kind}_{n}(s: List[Int]) -> Int` (a string is a List[Int] of codepoints).")
+    code = (f"module M:\n\n"
+            f"  part count_{kind}_{n}(s: List[Int]) -> Int:\n"
+            f"    match s:\n"
+            f"      [] -> yield 0\n"
+            f"      h :: t -> yield (if {c} then 1 else 0) + count_{kind}_{n}(t)\n")
+    return instr, code
+
+
+def fam_ord_textmap(rng):
+    """Changer la casse d'une CHAÎNE entière par comprehension. Le seul contrat est la longueur —
+    celui qu'on écrirait de toute façon."""
+    n = rng.choice(NAMES)
+    way, lo, hi, delta, desc = rng.choice([
+        ("lower", 65, 90, "+ 32", "lowercase"),
+        ("upper", 97, 122, "- 32", "uppercase"),
     ])
     instr = _pick(rng,
-        f"Write a llmlang `part is_{kind}(c: Int) -> Bool` that is true when the codepoint `c` is {desc}.",
-        f"In llmlang a character is its codepoint (`Int`). Write `part is_{kind}(c: Int) -> Bool` returning whether `c` is {desc}.",
-        f"Classify a character in llmlang: `part is_{kind}(c: Int) -> Bool`, true for {desc}.")
+        f"In llmlang a string is a `List[Int]` of codepoints. Write `part {way}_{n}(s: List[Int]) -> List[Int]` returning `s` in {desc}.",
+        f"Write a llmlang `part {way}_{n}(s: List[Int]) -> List[Int]` that converts the whole string `s` to {desc}, leaving non-letters alone.",
+        f"Convert a string to {desc} in llmlang: `part {way}_{n}(s: List[Int]) -> List[Int]` (a string is a List[Int] of codepoints).")
     code = (f"module M:\n\n"
-            f"  part is_{kind}(c: Int) -> Bool:\n"
-            f"    yield {cond}\n")
+            f"  part {way}_{n}(s: List[Int]) -> List[Int]:\n"
+            f"    ensures length(result) == length(s)\n"
+            f"    yield [if {lo} <= c and c <= {hi} then c {delta} else c for c in s]\n")
     return instr, code
 
 
@@ -646,7 +725,8 @@ FAMILIES = [fam_clamp, fam_bounded_agg, fam_euclid, fam_array_kernel, fam_floor,
             fam_wrap_index, fam_compose_charge,
             # REQ-LLL-233 — code ORDINAIRE : ce que le corpus n'enseignait pas.
             fam_ord_count, fam_ord_map, fam_ord_filter, fam_ord_search, fam_ord_last,
-            fam_ord_record, fam_ord_adt, fam_ord_char, fam_ord_tuple]
+            fam_ord_record, fam_ord_adt, fam_ord_char, fam_ord_tuple,
+            fam_ord_charcount, fam_ord_textmap]
 
 
 def to_record(instr, code):
